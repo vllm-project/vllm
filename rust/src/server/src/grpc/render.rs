@@ -5,24 +5,31 @@
 //! counterpart of the HTTP render API.
 
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::http::HeaderMap;
+use futures::{Stream, StreamExt as _, stream};
 use itertools::Itertools as _;
 use llm_multimodal::ImageDetail;
 use thiserror_ext::AsReport as _;
-use tonic::{Request, Response, Status};
+use tokio::sync::oneshot;
+use tonic::{Request, Response, Status, Streaming};
 use tracing::{info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_chat::{
-    AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
-    SamplingParams,
+    AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatEvent, ChatMessage,
+    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, DetokenizeChunk, GenerationPromptMode,
+    ResolvedToolContext, SamplingParams,
 };
+use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_text::{PromptTruncation, PromptTruncationLimit, TextDecodeOptions, TruncationSide};
+use vllm_text::{
+    FinishReason, PromptTruncation, PromptTruncationLimit, TextDecodeOptions, TruncationSide,
+};
 
 use super::convert::{self, json_to_proto_struct};
 use super::inference::text_error_to_status;
@@ -32,7 +39,12 @@ use super::pb::render_server::{Render, RenderServer};
 use crate::error::ApiError;
 use crate::render::RenderContext;
 use crate::routes::openai::ChatCompletionRequest;
+use crate::routes::openai::chat_completions::convert::PreparedRequest;
+use crate::routes::openai::chat_completions::{
+    ChatOutputContext, chat_completion_chunk_json, collect_chat_completion_json,
+};
 use crate::routes::render::{LoweredChatRender, lower_chat_render_request};
+use crate::utils::{SSE_DONE_FRAME, sse_data_frame, unix_timestamp};
 
 pub(crate) type RenderGrpcService<S> = RenderServer<RenderServiceImpl<S>>;
 
@@ -79,6 +91,24 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         log_failure(&span, &result);
         result.map(Response::new)
     }
+
+    type DerenderStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::DerenderStreamResponse, Status>> + Send>>;
+
+    async fn derender_stream(
+        &self,
+        request: Request<Streaming<pb::DerenderStreamRequest>>,
+    ) -> Result<Response<Self::DerenderStreamStream>, Status> {
+        let span = info_span!("grpc_render", rpc = "DerenderStream");
+        let result = derender_stream(self.state.as_ref(), request.into_inner())
+            .instrument(span.clone())
+            .await;
+        log_failure(&span, &result);
+        let responses = result?.instrument(span.clone()).inspect(move |response| {
+            log_failure(&span, response);
+        });
+        Ok(Response::new(Box::pin(responses)))
+    }
 }
 
 fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
@@ -96,17 +126,7 @@ async fn render(
     state: &impl RenderContext,
     request: pb::RenderRequest,
 ) -> Result<pb::RenderResponse, Status> {
-    let api = enum_from_proto::<pb::Api>(request.api, "api")?;
-    match api {
-        pb::Api::Chat => {}
-        pb::Api::Unspecified => return Err(Status::invalid_argument("api is required")),
-        other => {
-            return Err(Status::unimplemented(format!(
-                "api `{}` is not supported",
-                other.as_str_name()
-            )));
-        }
-    }
+    check_chat_api(request.api)?;
 
     let omit_media_kwargs =
         match enum_from_proto::<pb::MmPayload>(request.mm_payload, "mm_payload")? {
@@ -114,22 +134,14 @@ async fn render(
             pb::MmPayload::None => true,
         };
 
-    // Parse exactly as the HTTP extractor does, so a body gets the same result
-    // and error on both protocols.
-    let Json(body) = Json::<ChatCompletionRequest>::from_bytes(&request.body)
-        .map_err(|rejection| api_error_to_status(rejection.into()))?;
-
-    let LoweredChatRender { chat_request, .. } =
-        lower_chat_render_request(state, body, &HeaderMap::new())
-            .await
-            .map_err(api_error_to_status)?;
+    let RawChat { prepared, .. } = prepare_raw_chat(state, &request.body).await?;
 
     let RenderedChat {
         prompt_token_ids,
         structured_output,
         engine_reasoning_gate,
         media,
-    } = prepare_and_render_chat(state, chat_request, None, omit_media_kwargs).await?;
+    } = prepare_and_render_chat(state, prepared.chat_request, None, omit_media_kwargs).await?;
 
     Ok(pb::RenderResponse {
         prompt_token_ids,
@@ -137,6 +149,42 @@ async fn render(
         engine_reasoning_gate,
         media,
     })
+}
+
+/// Only Chat Completions bodies are supported.
+fn check_chat_api(api: i32) -> Result<(), Status> {
+    match enum_from_proto::<pb::Api>(api, "api")? {
+        pb::Api::Chat => Ok(()),
+        pb::Api::Unspecified => Err(Status::invalid_argument("api is required")),
+        other => Err(Status::unimplemented(format!(
+            "api `{}` is not supported",
+            other.as_str_name()
+        ))),
+    }
+}
+
+/// A raw chat completion body lowered the way the HTTP route lowers it.
+struct RawChat {
+    prepared: PreparedRequest,
+    /// The body's `stream`.
+    stream: bool,
+}
+
+/// Parse, validate and lower a raw Chat Completions body, shared by `Render`
+/// and `DerenderStream` so both lower the same body the same way.
+async fn prepare_raw_chat(state: &impl RenderContext, body: &[u8]) -> Result<RawChat, Status> {
+    // Parse exactly as the HTTP extractor does, so a body gets the same result
+    // and error on both protocols.
+    let Json(body) = Json::<ChatCompletionRequest>::from_bytes(body)
+        .map_err(|rejection| api_error_to_status(rejection.into()))?;
+    let stream = body.stream;
+
+    let LoweredChatRender { prepared, .. } =
+        lower_chat_render_request(state, body, &HeaderMap::new())
+            .await
+            .map_err(api_error_to_status)?;
+
+    Ok(RawChat { prepared, stream })
 }
 
 async fn render_chat(
@@ -239,6 +287,403 @@ async fn prepare_and_render_chat(
         structured_output,
         engine_reasoning_gate,
         media,
+    })
+}
+
+// ========================================================================================
+// Derender
+// ========================================================================================
+
+/// Start a DerenderStream from its first message. The returned response stream
+/// owns `inbound`.
+async fn derender_stream(
+    state: &impl RenderContext,
+    mut inbound: Streaming<pb::DerenderStreamRequest>,
+) -> Result<
+    Pin<Box<dyn Stream<Item = Result<pb::DerenderStreamResponse, Status>> + Send + 'static>>,
+    Status,
+> {
+    use pb::derender_stream_request::Request as StreamRequest;
+
+    let Some(pb::DerenderStreamRequest {
+        request: Some(StreamRequest::Start(start)),
+    }) = inbound.message().await?
+    else {
+        return Err(Status::invalid_argument(
+            "the first DerenderStream message must be `start`",
+        ));
+    };
+    let pb::DerenderStart {
+        context,
+        prompt_token_ids,
+    } = *start;
+    let Some(pb::derender_start::Context::Request(request)) = context else {
+        return Err(Status::invalid_argument("`start.request` is required"));
+    };
+    check_chat_api(request.api)?;
+    let RawChat { prepared, stream } = prepare_raw_chat(state, &request.body).await?;
+    if prepared.n.get() > 1 {
+        return Err(Status::invalid_argument(
+            "DerenderStream does not support `n` greater than 1",
+        ));
+    }
+    if prepared.options.include_prompt_logprobs {
+        return Err(Status::invalid_argument(
+            "DerenderStream does not support prompt logprobs",
+        ));
+    }
+
+    let context = ChatOutputContext {
+        request_id: prepared.request_id.clone(),
+        response_model: prepared.response_model.clone(),
+        options: prepared.options.clone(),
+        created: unix_timestamp(),
+        system_fingerprint: state.system_fingerprint(),
+        api_server_options: state.api_server_options(),
+        count_reasoning_tokens: state.counts_reasoning_tokens(),
+    };
+    let (end_tx, end_rx) = oneshot::channel();
+    let inbound = DerenderInbound {
+        messages: inbound,
+        stop_strings: prepared.chat_request.decode_options.stop_strings.clone().unwrap_or_default(),
+        end_tx: Some(end_tx),
+    };
+    let chunks = stream::unfold(Some(inbound), |inbound| async move {
+        let mut inbound = inbound?;
+        match inbound.next_chunk().await {
+            Ok(chunk) => {
+                let inbound = chunk.finish_reason.is_none().then_some(inbound);
+                Some((chunk, inbound))
+            }
+            Err(status) => {
+                inbound.end(Err(status));
+                None
+            }
+        }
+    })
+    .boxed();
+
+    let (done_tx, done_rx) = oneshot::channel();
+    let mut done_tx = Some(done_tx);
+    let mut last_token_id = None;
+    let events = state
+        .chat_processor()
+        .detokenize_stream(
+            prepared.chat_request.clone(),
+            state.text_processor(),
+            prompt_token_ids,
+            chunks,
+        )
+        .map_err(chat_error_to_status)?
+        .inspect(move |event| match event {
+            Ok(ChatEvent::LogprobsDelta { token_ids, .. }) => {
+                last_token_id = token_ids.last().copied().or(last_token_id);
+            }
+            Ok(ChatEvent::Done {
+                usage,
+                finish_reason,
+                ..
+            }) => {
+                if let Some(tx) = done_tx.take() {
+                    let _ = tx.send(DecodedFinish {
+                        finish_reason: finish_reason.clone(),
+                        num_output_tokens: usage.output_token_count as u32,
+                        last_token_id,
+                    });
+                }
+            }
+            _ => {}
+        });
+    let mut end = DerenderEnd::new(end_rx, done_rx);
+
+    if stream {
+        let chunks = chat_completion_chunk_json(events, context);
+        Ok(derender_sse_responses(Box::pin(chunks), end).boxed())
+    } else {
+        Ok(stream::once(async move {
+            let body = collect_chat_completion_json(events, context)
+                .await
+                .map_err(|error| end.input_error().unwrap_or_else(|| api_error_to_status(error)))?;
+            Ok(pb::DerenderStreamResponse {
+                output: Some(pb::derender_stream_response::Output::Body(body)),
+                finished: end.finished()?,
+            })
+        })
+        .boxed())
+    }
+}
+
+/// How the decoded output finished.
+struct DecodedFinish {
+    finish_reason: FinishReason,
+    num_output_tokens: u32,
+    last_token_id: Option<u32>,
+}
+
+/// The request stream of a DerenderStream after its start message.
+struct DerenderInbound {
+    messages: Streaming<pb::DerenderStreamRequest>,
+    /// The `stop` of the rendered request.
+    stop_strings: Vec<String>,
+    /// Reports how the chunks ended to the response stream: the finish info of
+    /// GenerateStream, or the input error that ended them early in place of the
+    /// resulting unfinished-output error.
+    end_tx: Option<oneshot::Sender<Result<pb::FinishInfo, Status>>>,
+}
+
+impl DerenderInbound {
+    /// Read the next output chunk. A stop string reported in the final chunk
+    /// must be one of the request's, as text before it may have been sent
+    /// already. A finished chunk reports its finish info through `end_tx`.
+    async fn next_chunk(&mut self) -> Result<DetokenizeChunk, Status> {
+        use pb::derender_stream_request::Request as StreamRequest;
+
+        // The first GenerateStream response carries only `prompt_info`.
+        let output = loop {
+            match self.messages.message().await? {
+                Some(pb::DerenderStreamRequest {
+                    request: Some(StreamRequest::Output(response)),
+                }) => {
+                    if let Some(output) = response.outputs {
+                        break output;
+                    }
+                }
+                Some(_) => {
+                    return Err(Status::invalid_argument(
+                        "only the first DerenderStream message may be `start`",
+                    ));
+                }
+                None => {
+                    return Err(Status::invalid_argument(
+                        "the DerenderStream request stream closed before a finished output",
+                    ));
+                }
+            }
+        };
+        if output.index != 0 {
+            return Err(Status::invalid_argument(format!(
+                "output index {} is out of range for a single sequence",
+                output.index
+            )));
+        }
+        if let Some(stop) = reported_stop_string(&output)
+            && !self.stop_strings.contains(stop)
+        {
+            return Err(Status::invalid_argument(format!(
+                "output stopped on stop string {stop:?}, which is not in the request's `stop`"
+            )));
+        }
+        let finish_info = output.finish_info.clone();
+        let chunk = chunk_from_proto(output)?;
+        if chunk.finish_reason.is_some()
+            && let Some(finish_info) = finish_info
+        {
+            self.end(Ok(finish_info));
+        }
+        Ok(chunk)
+    }
+
+    fn end(&mut self, end: Result<pb::FinishInfo, Status>) {
+        if let Some(tx) = self.end_tx.take() {
+            let _ = tx.send(end);
+        }
+    }
+}
+
+/// What the response side learns about how the output ended.
+struct DerenderEnd {
+    end_rx: oneshot::Receiver<Result<pb::FinishInfo, Status>>,
+    /// The value received from `end_rx`, kept until it is used.
+    end: Option<Result<pb::FinishInfo, Status>>,
+    done_rx: oneshot::Receiver<DecodedFinish>,
+}
+
+impl DerenderEnd {
+    fn new(
+        end_rx: oneshot::Receiver<Result<pb::FinishInfo, Status>>,
+        done_rx: oneshot::Receiver<DecodedFinish>,
+    ) -> Self {
+        Self {
+            end_rx,
+            end: None,
+            done_rx,
+        }
+    }
+
+    fn poll_end(&mut self) {
+        if self.end.is_none() {
+            self.end = self.end_rx.try_recv().ok();
+        }
+    }
+
+    /// The input error that ended the chunks, if any. Leaves a reported finish
+    /// info for [`Self::finished`].
+    fn input_error(&mut self) -> Option<Status> {
+        self.poll_end();
+        match self.end.take()? {
+            Err(status) => Some(status),
+            reported => {
+                self.end = Some(reported);
+                None
+            }
+        }
+    }
+
+    /// The finished sequence: GenerateStream's finish info with the decoded
+    /// output's finish reason, stop reason and token count. Empty when the
+    /// output did not finish.
+    fn finished(&mut self) -> Result<Vec<pb::SequenceFinish>, Status> {
+        let Ok(decoded) = self.done_rx.try_recv() else {
+            return Ok(Vec::new());
+        };
+        // Unset when the output ended before a finished chunk, such as at a
+        // stop string.
+        self.poll_end();
+        let reported = self.end.take().and_then(Result::ok);
+        Ok(vec![pb::SequenceFinish {
+            index: 0,
+            finish_info: Some(detokenized_finish_info(reported, decoded)?),
+        }])
+    }
+}
+
+/// Coalesce the chunks available at once into one response of SSE events. The
+/// last response ends the stream with `data: [DONE]` and the finished sequence.
+/// A failure after events went out is sent in-band, as the HTTP route does;
+/// errors of the request stream end the RPC with a status.
+#[try_stream]
+async fn derender_sse_responses(
+    chunks: Pin<Box<dyn Stream<Item = Result<Vec<u8>, ApiError>> + Send>>,
+    mut end: DerenderEnd,
+    mut y: TryYielder<pb::DerenderStreamResponse, Status>,
+) -> Result<(), Status> {
+    // The cap only bounds the size of one response.
+    let mut chunks = chunks.ready_chunks(64);
+    while let Some(batch) = chunks.next().await {
+        let mut events = Vec::new();
+        for chunk in batch {
+            match chunk {
+                Ok(json) => events.extend(sse_data_frame(&json)),
+                Err(error) => {
+                    if let Some(status) = end.input_error() {
+                        return Err(status);
+                    }
+                    let response = serde_json::to_vec(&error.to_error_response())
+                        .map_err(|error| Status::internal(error.to_report_string()))?;
+                    events.extend(sse_data_frame(&response));
+                    events.extend(SSE_DONE_FRAME);
+                    y.yield_ok(events_response(events, Vec::new())).await;
+                    return Ok(());
+                }
+            }
+        }
+        if !events.is_empty() {
+            y.yield_ok(events_response(events, Vec::new())).await;
+        }
+    }
+    if let Some(status) = end.input_error() {
+        return Err(status);
+    }
+    y.yield_ok(events_response(SSE_DONE_FRAME.to_vec(), end.finished()?)).await;
+    Ok(())
+}
+
+fn events_response(
+    events: Vec<u8>,
+    finished: Vec<pb::SequenceFinish>,
+) -> pb::DerenderStreamResponse {
+    pb::DerenderStreamResponse {
+        output: Some(pb::derender_stream_response::Output::Events(events)),
+        finished,
+    }
+}
+
+/// GenerateStream's finish info with the decoded output's finish reason, stop
+/// reason and token count.
+fn detokenized_finish_info(
+    reported: Option<pb::FinishInfo>,
+    decoded: DecodedFinish,
+) -> Result<pb::FinishInfo, Status> {
+    use pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
+
+    let reported = reported.unwrap_or_default();
+    let (finish_reason, stop_reason) = match (&decoded.finish_reason, &reported.stop_reason) {
+        (FinishReason::Stop(None), Some(stop @ PbStopReason::EosTokenId(_))) => {
+            (PbFinishReason::Stop as i32, Some(stop.clone()))
+        }
+        (FinishReason::Length, Some(PbStopReason::StopString(stop))) => {
+            return Err(Status::invalid_argument(format!(
+                "output stopped on stop string {stop:?}, which the decoded output does not \
+                 contain past `min_tokens`"
+            )));
+        }
+        (
+            FinishReason::Stop(Some(StopReason::Text(matched))),
+            Some(PbStopReason::StopString(stop)),
+        ) if matched != stop => {
+            return Err(Status::invalid_argument(format!(
+                "output stopped on stop string {stop:?}, but the decoded output stops on \
+                 {matched:?} first"
+            )));
+        }
+        (finish_reason, _) => {
+            convert::finish_reason_to_proto(finish_reason, decoded.last_token_id.as_slice())?
+        }
+    };
+    Ok(pb::FinishInfo {
+        num_output_tokens: decoded.num_output_tokens,
+        finish_reason,
+        stop_reason,
+        ..reported
+    })
+}
+
+fn chunk_from_proto(output: pb::SequenceOutput) -> Result<DetokenizeChunk, Status> {
+    let finish_info = output.finish_info.as_ref();
+    Ok(DetokenizeChunk {
+        logprobs: convert::output_logprobs_from_proto(&output)?,
+        finish_reason: finish_info.and_then(finish_reason_from_proto),
+        num_cached_tokens: finish_info.and_then(|info| info.num_cached_tokens).unwrap_or_default()
+            as usize,
+        kv_transfer_params: finish_info
+            .and_then(|info| info.kv_transfer_params.as_ref())
+            .map(|params| Box::new(convert::proto_struct_to_json(params))),
+        ec_transfer_params: finish_info
+            .and_then(|info| info.ec_transfer_params.as_ref())
+            .map(|params| Box::new(convert::proto_struct_to_json(params))),
+        token_ids: output.token_ids,
+    })
+}
+
+fn reported_stop_string(output: &pb::SequenceOutput) -> Option<&String> {
+    match &output.finish_info {
+        Some(pb::FinishInfo {
+            stop_reason: Some(pb::finish_info::StopReason::StopString(stop)),
+            ..
+        }) => Some(stop),
+        _ => None,
+    }
+}
+
+/// Map GenerateStream finish info to the finish reason that drives decoding, or
+/// `None` while the output is not finished.
+///
+/// Only token stops end the output with a token that is hidden from the text.
+/// A stop string is not a token stop: the decoder cuts the text at it instead.
+fn finish_reason_from_proto(info: &pb::FinishInfo) -> Option<FinishReason> {
+    use pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
+
+    Some(match info.finish_reason() {
+        PbFinishReason::Stop => match &info.stop_reason {
+            Some(PbStopReason::StopTokenId(id)) => {
+                FinishReason::Stop(Some(StopReason::TokenId(*id)))
+            }
+            Some(PbStopReason::EosTokenId(_)) | None => FinishReason::stop_eos(),
+            Some(PbStopReason::StopString(_)) => FinishReason::Length,
+        },
+        PbFinishReason::Aborted => FinishReason::Abort,
+        PbFinishReason::Length => FinishReason::Length,
+        PbFinishReason::NotFinished => return None,
     })
 }
 

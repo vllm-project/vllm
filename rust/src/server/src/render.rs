@@ -21,6 +21,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
+use crate::config::ApiServerOptions;
 use crate::lora::{LoraModelResolution, check_lora_module};
 use crate::model_names::ServedModelNames;
 use crate::state::AppState;
@@ -114,6 +115,9 @@ pub(crate) struct RenderState {
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
     pub(crate) lora_modules: Vec<LoraModulePath>,
+    /// TODO: expose these through the `render` CLI.
+    pub(crate) api_server_options: ApiServerOptions,
+    pub(crate) system_fingerprint: Option<String>,
 }
 
 impl RenderState {
@@ -133,6 +137,13 @@ pub(crate) trait RenderContext: Send + Sync + 'static {
         &self,
         model: Option<&str>,
     ) -> impl Future<Output = LoraModelResolution> + Send;
+    /// Switches that shape the OpenAI-style response bodies.
+    fn api_server_options(&self) -> ApiServerOptions;
+    /// `system_fingerprint` of chat and completion responses.
+    fn system_fingerprint(&self) -> Option<String>;
+    /// Whether usage reports reasoning tokens, as when a reasoning parser is
+    /// configured.
+    fn counts_reasoning_tokens(&self) -> bool;
 }
 
 impl RenderContext for AppState {
@@ -146,6 +157,18 @@ impl RenderContext for AppState {
 
     async fn resolve_model(&self, model: Option<&str>) -> LoraModelResolution {
         self.resolve_model_with_loras(model).await
+    }
+
+    fn api_server_options(&self) -> ApiServerOptions {
+        self.api_server_options
+    }
+
+    fn system_fingerprint(&self) -> Option<String> {
+        self.system_fingerprint.clone()
+    }
+
+    fn counts_reasoning_tokens(&self) -> bool {
+        self.chat.reasoning_parser_name().is_some()
     }
 }
 
@@ -166,6 +189,18 @@ impl RenderContext for RenderState {
             model_names: self.model_names(),
             lora_request: None,
         }
+    }
+
+    fn api_server_options(&self) -> ApiServerOptions {
+        self.api_server_options
+    }
+
+    fn system_fingerprint(&self) -> Option<String> {
+        self.system_fingerprint.clone()
+    }
+
+    fn counts_reasoning_tokens(&self) -> bool {
+        self.chat.reasoning_parser_name(&self.model).is_some()
     }
 }
 
@@ -248,6 +283,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         text,
         chat,
         lora_modules: config.lora_modules.clone(),
+        api_server_options: ApiServerOptions::default(),
+        system_fingerprint: None,
     }))
 }
 

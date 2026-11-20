@@ -14,14 +14,14 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use futures::{StreamExt as _, future};
+use futures::{Stream, StreamExt as _, future};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
-    ChatRequest, CollectedAssistantMessage, FinishReason,
+    CollectedAssistantMessage, FinishReason,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
@@ -31,7 +31,6 @@ use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::{ApiServerOptions, OutputLogConfig};
 use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
-use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
@@ -53,18 +52,7 @@ use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit}
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
 use crate::utils::npy_base64;
-use crate::utils::{
-    ResolvedRequestContext, openai_sse_stream, resolve_request_context, sse_response,
-    unix_timestamp,
-};
-
-pub(crate) fn lower_chat_request(
-    request: ChatCompletionRequest,
-    lora_resolution: &LoraModelResolution,
-    ctx: ResolvedRequestContext,
-) -> Result<ChatRequest, ApiError> {
-    prepare_chat_request(request, lora_resolution, ctx).map(|prepared| prepared.chat_request)
-}
+use crate::utils::{openai_sse_stream, resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one chat completion request and proxy it into the shared
 /// `vllm-chat` stack.
@@ -150,6 +138,64 @@ pub async fn chat_completions(
         .await?;
         Ok(Json(merge_choice_responses(responses)).into_response())
     }
+}
+
+/// Per-response settings of the render server's chat output.
+pub(crate) struct ChatOutputContext {
+    pub request_id: String,
+    pub response_model: String,
+    pub options: ResponseOptions,
+    pub created: u64,
+    pub system_fingerprint: Option<String>,
+    pub api_server_options: ApiServerOptions,
+    /// Whether usage reports reasoning tokens, as when a reasoning parser is
+    /// configured.
+    pub count_reasoning_tokens: bool,
+}
+
+/// Serialize the chat-completion chunks of one event stream, in the order of
+/// the `chat_completions` SSE stream.
+pub(crate) fn chat_completion_chunk_json(
+    stream: impl ChatEventStreamTrait + Unpin,
+    context: ChatOutputContext,
+) -> impl Stream<Item = Result<Vec<u8>, ApiError>> + Send {
+    chat_completion_chunk_stream(
+        stream,
+        None,
+        context.request_id,
+        context.response_model,
+        context.created,
+        context.system_fingerprint,
+        context.api_server_options,
+        context.count_reasoning_tokens,
+        context.options,
+    )
+    .map(|chunk| chunk.and_then(|chunk| serialize_json(&chunk)))
+}
+
+/// Collect one event stream into the serialized `chat.completion` body.
+pub(crate) async fn collect_chat_completion_json(
+    stream: ChatEventStream,
+    context: ChatOutputContext,
+) -> Result<Vec<u8>, ApiError> {
+    let response = collect_chat_completion(
+        stream,
+        context.request_id,
+        context.response_model,
+        context.created,
+        context.system_fingerprint,
+        context.api_server_options,
+        context.count_reasoning_tokens,
+        context.options,
+    )
+    .await?;
+    serialize_json(&response)
+}
+
+fn serialize_json(value: &impl serde::Serialize) -> Result<Vec<u8>, ApiError> {
+    serde_json::to_vec(value).map_err(|error| {
+        server_error!("failed to serialize response: {}", error.to_report_string())
+    })
 }
 
 impl ChoiceResponse for ChatCompletionResponse {

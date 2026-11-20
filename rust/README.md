@@ -218,6 +218,11 @@ output: unspecified and `MM_PAYLOAD_TENSORS` include inline tensors;
 
 The response includes prompt token IDs, the structured-output constraint,
 reasoning gate, and preprocessed media.
+
+`Render.DerenderStream` turns the `Inference.GenerateStream` output of a
+request rendered with `Render.Render` back into the client response (SSE events
+or the JSON body). It supports `API_CHAT` with `n = 1`.
+
 See [the renderer documentation](../docs/serving/online_serving/renderer.md#rust-raw-json-grpc-rendering)
 and [`render.proto`](proto/render.proto) for the contract.
 
