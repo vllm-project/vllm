@@ -734,6 +734,43 @@ mod tests {
     }
 
     #[test]
+    fn mistral_reasoning_keeps_special_tokens() {
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            "mistralai/Mistral-Large-4-1T-A52B",
+            Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("[THINK]", 256)
+                    .with_special_token("[/THINK]", 257),
+            ),
+            &Err(HfTemplateError::Missing),
+            &ParserSelection::Auto,
+            &ParserSelection::Explicit("mistral".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(request.decode_options.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn auto_selects_no_reasoning_parser_for_mistral_models() {
+        // Most Mistral tokenizers have no `[THINK]` token, so `mistral` stays
+        // opt-in rather than failing every request under `auto`.
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            "mistralai/Mistral-7B-Instruct-v0.3",
+            Arc::new(TestTokenizer::new()),
+            &Err(HfTemplateError::Missing),
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn hf_requires_matching_parser_selections() {
         let error = keeps_special_tokens(
             "other-model",

@@ -28,6 +28,7 @@ from vllm.distributed.aux_output_connector.connector import (
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -120,7 +121,7 @@ def test_mamba_decode_checkpoint_publication(
         block_size=block_size,
         kv_cache_layer_config=MambaManager.layer_config(
             MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
             num_speculative_blocks=int(num_speculative_tokens > 0),
         ),
     )
@@ -1052,8 +1053,12 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
         enable_chunked_prefill=False,
         async_scheduling=True,
         long_prefill_token_threshold=long_prefill_token_threshold,
+        encoder_cache_size=700,
     )
-    mm_positions = [[PlaceholderRange(offset=100, length=600)] for _ in range(2)]
+    mm_positions = [
+        [PlaceholderRange(offset=100, length=300)],
+        [PlaceholderRange(offset=100, length=450)],
+    ]
     mm_hashes = [["busy"], ["new"]]
     cache = scheduler.encoder_cache_manager
     if cached_first_image:
@@ -1071,22 +1076,26 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
         mm_hashes[1].insert(0, "cached")
         assert cache.freeable["cached"] == 100
 
-    requests = create_requests(
-        num_requests=2,
-        num_tokens=800,
-        max_tokens=1,
-        mm_positions=mm_positions,
-        mm_hashes_list=mm_hashes,
+    first, second = (
+        create_requests(
+            num_requests=1,
+            num_tokens=num_tokens,
+            max_tokens=1,
+            req_ids=[req_id],
+            mm_positions=[positions],
+            mm_hashes_list=[hashes],
+        )[0]
+        for req_id, num_tokens, positions, hashes in zip(
+            ["first", "second"], [400, 600], mm_positions, mm_hashes
+        )
     )
-    for request in requests:
-        scheduler.add_request(request)
+    scheduler.add_request(first)
+    scheduler.add_request(second)
 
-    first, second = requests
+    # The first image leaves too little encoder cache for the second, which
+    # must not be split before its image.
     output = scheduler.schedule()
-    assert output.num_scheduled_tokens == {first.request_id: 800}
-
-    # The first image is still in flight and occupies the encoder cache.
-    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert output.num_scheduled_tokens == {first.request_id: 400}
     assert second.status == RequestStatus.WAITING
     assert second.num_computed_tokens == 0
     assert not cache.get_cached_input_ids(second)
@@ -1101,7 +1110,73 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
             sampled_token_ids=[[EOS_TOKEN_ID]],
         ),
     )
-    assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 800}
+    assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 600}
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False], ids=["async", "sync"])
+@pytest.mark.parametrize(
+    "big_images",
+    [
+        [(10, 250), (260, 250), (510, 250), (760, 250)],
+        # The only image starts at token 0, so the request is cut to 0 tokens.
+        [(0, 800)],
+    ],
+    ids=["four-images", "cut-to-zero"],
+)
+def test_encoder_deferred_request_is_not_overtaken(async_scheduling, big_images):
+    """With chunked prefill off, a request deferred for encoder cache space is
+    scheduled at the next step while one-image requests keep arriving, also
+    when steps overlap (#67292)."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=False,
+        async_scheduling=async_scheduling,
+    )
+    num_small = 0
+
+    def add_small():
+        nonlocal num_small
+        num_small += 1
+        (request,) = create_requests(
+            num_requests=1,
+            num_tokens=300,
+            max_tokens=1,
+            req_ids=[f"small{num_small}"],
+            mm_positions=[[PlaceholderRange(offset=10, length=250)]],
+            mm_hashes_list=[[f"small{num_small}"]],
+        )
+        scheduler.add_request(request)
+
+    def finish(output):
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[[EOS_TOKEN_ID] for _ in req_ids],
+            ),
+        )
+
+    for _ in range(3):
+        add_small()
+    in_flight = [scheduler.schedule()]
+    (big,) = create_requests(
+        num_requests=1,
+        num_tokens=1020,
+        max_tokens=1,
+        req_ids=["big"],
+        mm_positions=[[PlaceholderRange(offset=o, length=n) for o, n in big_images]],
+        mm_hashes_list=[[f"big{i}" for i in range(len(big_images))]],
+    )
+    scheduler.add_request(big)
+    add_small()
+    add_small()
+    if not async_scheduling:
+        finish(in_flight.pop())
+    # With async scheduling, step 1 is scheduled before step 0's output is
+    # processed.
+    assert scheduler.schedule().num_scheduled_tokens.get("big") == 1020
 
 
 def test_schedule_partial_requests():
@@ -1428,7 +1503,7 @@ def test_cache_aware_admission_is_safe_on_a_mamba_spec():
         cache_aware_admission_threshold=0.0,
         kv_cache_layer_config=MambaManager.layer_config(
             MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
     )
     assert scheduler.cache_aware_window == 4
@@ -5687,8 +5762,7 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
         enable_prefix_caching=True,
     )
     scheduler.need_mamba_block_aligned_split = True
-    scheduler.use_eagle = True
-    scheduler.use_eagle_block_drop = True
+    scheduler.num_hash_lookahead_tokens = 1
     scheduler.num_prefill_lookahead = 1
     scheduler.max_num_encoder_input_tokens = 2048
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
@@ -5799,6 +5873,83 @@ def test_ec_connector_cache_hit_external_load(use_kv_connector):
 
     # Scheduled encoder input should be empty; no mm to compute
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_cache_miss_fails_metadata_only_item(use_kv_connector):
+    """An item with only placeholder metadata cannot be encoded locally.
+
+    On an EC miss the request must finish with an error rather than hand the
+    vision encoder an item with no pixels.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        mm_positions=[[PlaceholderRange(offset=0, length=100)]],
+    )[0]
+    grid = MultiModalFieldElem(
+        data=torch.tensor([1, 10, 10]), field=MultiModalBatchedField()
+    )
+    request.mm_features[0].data = MultiModalKwargsItem({"image_grid_thw": grid})
+    resolver = PlaceholderMetadataResolver(scheduler.vllm_config.model_config)
+    resolver._cache["image"] = {"image_grid_thw"}
+    scheduler._ec_metadata_resolver = resolver
+    scheduler.ec_connector.has_cache_item = Mock(return_value=False)
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.request_id not in output.num_scheduled_tokens
+    assert not output.scheduled_encoder_inputs
+
+    engine_core_outputs = scheduler.update_from_output(
+        output, make_empty_encoder_model_runner_output(output)
+    )
+    assert request.status == RequestStatus.FINISHED_ERROR
+    (error,) = engine_core_outputs[0].outputs
+    assert error.request_id == request.request_id
+    assert error.finish_reason == FinishReason.ERROR
+    assert request.request_id not in scheduler.requests
+
+
+def test_kv_consumer_without_kv_fails_metadata_only_item():
+    """A KV consumer accepts metadata-only items because P's KV covers them.
+
+    Without an EC connector, a prompt the KV does not cover (here, no KV at
+    all, as after a recomputed load) must fail rather than reach the encoder.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_kv_connector=True,
+        kv_role="kv_consumer",
+    )
+    assert scheduler.ec_connector is None
+    request = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        mm_positions=[[PlaceholderRange(offset=0, length=100)]],
+    )[0]
+    grid = MultiModalFieldElem(
+        data=torch.tensor([1, 10, 10]), field=MultiModalBatchedField()
+    )
+    request.mm_features[0].data = MultiModalKwargsItem({"image_grid_thw": grid})
+    resolver = PlaceholderMetadataResolver(scheduler.vllm_config.model_config)
+    resolver._cache["image"] = {"image_grid_thw"}
+    scheduler._ec_metadata_resolver = resolver
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.request_id not in output.num_scheduled_tokens
+    assert not output.scheduled_encoder_inputs
+
+    scheduler.update_from_output(output, make_empty_encoder_model_runner_output(output))
+    assert request.status == RequestStatus.FINISHED_ERROR
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
@@ -8363,7 +8514,6 @@ def _create_hybrid_mamba_connector_scheduler(
         cache_config=CacheConfig(
             block_size=block_size,
             enable_prefix_caching=True,
-            mamba_cache_mode="align",
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="MockKVConnector",
@@ -8396,7 +8546,7 @@ def _create_hybrid_mamba_connector_scheduler(
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
