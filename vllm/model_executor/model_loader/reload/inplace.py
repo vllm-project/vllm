@@ -41,7 +41,8 @@ def reload_weights(
     """Reload a model's weights in place from a weights iterator or from disk.
 
     Callers are responsible for invalidating any state derived from the old
-    weights (e.g. LoRA, encoder and multimodal caches).
+    weights (e.g. LoRA, encoder and multimodal caches). A module can declare
+    a `weight_reload_error` to reject reload before either format writes.
 
     Args:
         vllm_config: config of the model being reloaded. If `weights_path` is
@@ -54,22 +55,11 @@ def reload_weights(
             processed into kernel format (repacking, renaming, etc.)
 
     """
-    engram_config = vllm_config.engram_config
-    model_config = vllm_config.model_config
-    if (
-        engram_config is not None
-        and engram_config.peer_group_size
-        and model_config is not None
-        and model_config.architecture
-        in (
-            "Qwen4ExpForCausalLM",
-            "Qwen4ExpForConditionalGeneration",
-        )
-    ):
-        raise RuntimeError(
-            "Qwen4Exp Engram pool tables cannot reload weights; restart the group"
-        )
+    for module in model.modules():
+        if error := getattr(module, "weight_reload_error", None):
+            raise RuntimeError(error)
 
+    model_config = vllm_config.model_config
     # TODO(@kylesayrs): generalize to all runners and loaders
     # argument validation
     if weights_iterator is None and not is_checkpoint_format:

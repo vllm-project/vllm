@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from itertools import accumulate
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -54,6 +55,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -392,6 +394,36 @@ def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
         with pytest.raises(RuntimeError, match=error):
             embedding.process_weights_after_loading()
         assert not ready
+
+
+@pytest.mark.parametrize("is_checkpoint_format", [True, False])
+@torch.no_grad()
+def test_ple_pool_blocks_weight_reload_before_mutation(is_checkpoint_format):
+    pooled = Qwen4ExpPLEPoolEmbedding.__new__(Qwen4ExpPLEPoolEmbedding)
+    nn.Module.__init__(pooled)
+    layer = nn.Linear(2, 2, bias=False)
+    model = nn.Sequential(layer, pooled)
+    original = layer.weight.detach().clone()
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            engram_config=None,
+            model_config=SimpleNamespace(architecture="TestModel"),
+            load_config=SimpleNamespace(device="cpu"),
+            lora_config=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="cannot reload weights; restart the group"):
+        reload_weights(
+            config,
+            model,
+            [("0.weight", original + 1)],
+            weights_path=None,
+            is_checkpoint_format=is_checkpoint_format,
+        )
+
+    torch.testing.assert_close(layer.weight, original)
 
 
 def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:

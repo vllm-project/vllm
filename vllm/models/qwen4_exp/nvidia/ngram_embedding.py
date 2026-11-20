@@ -267,6 +267,9 @@ class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding):
     """Serve FP8 PLE rows from shards split over an NVLink or RDMA peer group."""
 
     validate_fp8_scale_collectively = True
+    weight_reload_error = (
+        "Qwen4Exp Engram pool tables cannot reload weights; restart the group"
+    )
 
     def __init__(
         self,
