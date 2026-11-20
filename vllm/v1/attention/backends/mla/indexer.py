@@ -220,6 +220,14 @@ class PrepareUniformDecodeKernel(
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Only the SM100 DSA path has BI-gated selection; subclasses opt in.
+        return (
+            cls is DeepseekV32IndexerBackend
+            and current_platform.is_device_capability_family(100)
+        )
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         return True
 

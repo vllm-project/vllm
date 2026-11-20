@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import itertools
 import os
 import random
 
@@ -13,6 +14,7 @@ from utils import (
     _extract_step_logprobs,
     _prompt_with_tokens,
     _random_prompt,
+    skip_if_not_cuda,
     skip_if_not_cuda_alike,
     skip_unsupported,
 )
@@ -1067,6 +1069,50 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
             f"Prompt {i}: logprobs differ alone vs batched; "
             f"max abs diff {(lp1 - lpN).abs().max():.3e}"
         )
+
+
+def _assert_logprobs_with_long_prefill(llm):
+    sp = SamplingParams(temperature=0, max_tokens=16, logprobs=5)
+    # Sparse MLA (GLM-5.3 via VLLM_TEST_MODEL, not the CI model) runs "short" as
+    # decode rows and "medium" as a prefill below index_topk (2048); only "long"
+    # has more candidates than index_topk.
+    prompts = {
+        "short": "The capital of France is a city that",
+        "medium": "token " * 600,
+        "long": "word " * 2500,
+    }
+
+    def generate(*names):
+        llm.sleep(level=0)
+        llm.enqueue([prompts[name] for name in names], sp, use_tqdm=False)
+        llm.wake_up(tags=["scheduling"])
+        outputs = [o.outputs[0] for o in llm.wait_for_completion(use_tqdm=False)]
+        return {n: (o.token_ids, o.logprobs) for n, o in zip(names, outputs)}
+
+    alone = {name: generate(name)[name] for name in prompts}
+    for names in itertools.permutations(prompts, 2):
+        assert generate(*names) == {name: alone[name] for name in names}, names
+
+
+@skip_if_not_cuda
+@pytest.mark.timeout(1000)
+def test_logprobs_bitwise_batch_invariance_with_long_prefill():
+    """Queue both requests before scheduling to exercise a real mixed prefill."""
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "1")),
+        enforce_eager=True,
+        max_num_seqs=2,
+        max_model_len=8192,
+        max_num_batched_tokens=8192,
+        gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9")),
+        kv_cache_dtype="bfloat16",
+        enable_prefix_caching=False,
+    )
+    try:
+        _assert_logprobs_with_long_prefill(llm)
+    finally:
+        llm.llm_engine.engine_core.shutdown()
 
 
 def LLM_with_max_seqs(

@@ -178,6 +178,27 @@ def grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+def _grouped_topk_block_chunks(
+    *,
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    is_padding: torch.Tensor | None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Route at most 1024 tokens per call, outside the compiled `grouped_topk`."""
+    chunks = [
+        grouped_topk(
+            hidden_states=hidden_states[start : start + 1024],
+            gating_output=gating_output[start : start + 1024],
+            is_padding=None if is_padding is None else is_padding[start : start + 1024],
+            **kwargs,
+        )
+        for start in range(0, gating_output.shape[0], 1024)
+    ]
+    weights, ids = zip(*chunks)
+    return torch.cat(weights), torch.cat(ids)
+
+
 # --8<-- [start:grouped_topk]
 @CustomOp.register("grouped_topk")
 class GroupedTopk(CustomOp):
@@ -359,6 +380,20 @@ class GroupedTopKRouter(BaseRouter):
             )
         else:
             grouped_topk_impl = partial(grouped_topk, is_padding=is_padding)
+            # launch() in csrc/moe/grouped_topk_kernels.cu moves single-group
+            # routing from the block to the warp kernel above 1024 tokens, which
+            # changes the weights. BI stays on the block kernel.
+            if (
+                envs.VLLM_BATCH_INVARIANT
+                and current_platform.is_cuda()
+                and self.num_expert_group == 1
+                and self.topk_group == 1
+                and 256 <= router_logits.shape[1] < 1024
+                and router_logits.shape[0] > 1024
+            ):
+                grouped_topk_impl = partial(
+                    _grouped_topk_block_chunks, is_padding=is_padding
+                )
 
         topk_weights, topk_ids = grouped_topk_impl(
             hidden_states=hidden_states,

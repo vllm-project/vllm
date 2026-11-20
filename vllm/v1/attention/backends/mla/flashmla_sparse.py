@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -211,6 +212,14 @@ class FlashMLASparseBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # SM90 selects a bf16 kernel variant by batch size; subclasses opt in.
+        return (
+            cls is FlashMLASparseBackend
+            and current_platform.is_device_capability_family(100)
+        )
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 
@@ -227,6 +236,15 @@ class FlashMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+        ):
+            return (
+                "batch invariance requires an unquantized KV cache (the "
+                "fp8/nvfp4 sparse decode split plan depends on the batch); "
+                "rerun with --kv-cache-dtype bfloat16"
+            )
         if head_size == 512:
             # GLM5Next NoPE (qk_rope_head_dim == 0, kv_lora_rank == 512) has
             # head_size 512 and is served here on SM90, either by the direct
@@ -1513,6 +1531,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     q[..., self.kv_lora_rank :].zero_()
             else:
                 ops.concat_mla_q(ql_nope, q_pe, q)
+            if envs.VLLM_BATCH_INVARIANT and q.shape[1] > actual_num_heads:
+                # Padded heads hold workspace leftovers, and their values can
+                # change the bf16 kernel's output for the real heads.
+                q[:, actual_num_heads:].zero_()
         else:
             actual_num_heads = q.shape[1]
             if q.shape[-1] < self.q_head_size:
