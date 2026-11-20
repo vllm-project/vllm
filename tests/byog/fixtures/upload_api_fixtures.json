@@ -1,0 +1,66 @@
+{
+  "upload_success": {
+    "request_meta": {
+      "schema_version": 1,
+      "job_id": "default",
+      "attempt_id": "att-20261120-abc123",
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "size_bytes": 4096,
+      "ci_run_id": null
+    },
+    "http_status": 201,
+    "response": {
+      "status": "created",
+      "job_id": "default",
+      "attempt_id": "att-20261120-abc123",
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "result_url": "https://byog.vllm.ai/runs/att-20261120-abc123",
+      "uploaded_by": "github:khluu",
+      "derived_source_tier": "community",
+      "uploaded_at": "2026-11-20T18:00:00Z"
+    }
+  },
+  "upload_idempotent_retry": {
+    "request_meta": {
+      "schema_version": 1,
+      "job_id": "default",
+      "attempt_id": "att-20261120-abc123",
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "size_bytes": 4096,
+      "ci_run_id": null
+    },
+    "http_status": 200,
+    "response": {
+      "status": "duplicate_identical",
+      "job_id": "default",
+      "attempt_id": "att-20261120-abc123",
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "result_url": "https://byog.vllm.ai/runs/att-20261120-abc123",
+      "uploaded_by": "github:khluu",
+      "derived_source_tier": "community",
+      "uploaded_at": "2026-11-20T18:00:00Z"
+    }
+  },
+  "upload_attempt_conflict": {
+    "request_meta": {
+      "schema_version": 1,
+      "job_id": "default",
+      "attempt_id": "att-20261120-abc123",
+      "bundle_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size_bytes": 4200,
+      "ci_run_id": "bk-998877"
+    },
+    "http_status": 409,
+    "response": {
+      "error": "attempt_conflict",
+      "job_id": "default",
+      "attempt_id": "att-20261120-abc123",
+      "existing_bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "submitted_bundle_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "message": "attempt_id already exists with a different bundle_sha256"
+    }
+  }
+}
