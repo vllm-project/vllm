@@ -111,21 +111,21 @@ Secondary tiers are not supported yet on engines whose workers span several node
 
 ## Shared Memory (`/dev/shm`)
 
-`/dev/shm` is a Linux filesystem whose files are kept in RAM. vLLM puts the CPU
-tier there when you use `CPUOffloadingSpec` (the default, and what
-`--kv-offloading-size` sets up) on NVIDIA (CUDA) or Intel (XPU) GPUs, or
-`TieringOffloadingSpec` on any GPU. `/dev/shm` must then be big enough to hold
-the whole tier. If it isn't, vLLM stops during startup, after loading the model,
-with an `Insufficient space in /dev/shm` error. On AMD (ROCm) GPUs,
-`CPUOffloadingSpec` keeps the tier in vLLM's own process memory instead, so this
-section doesn't apply.
+`/dev/shm` is a Linux filesystem whose files are kept in RAM. On NVIDIA (CUDA)
+and Intel (XPU) GPUs, vLLM keeps the CPU tier, which holds the offloaded KV
+cache, in `/dev/shm`, so `/dev/shm` must be big enough for it. If it isn't, vLLM
+stops during startup, after loading the model, with an
+`Insufficient space in /dev/shm` error. On AMD (ROCm) GPUs, the CPU tier is in
+vLLM's own process memory instead, unless you use `TieringOffloadingSpec`, which
+keeps it in `/dev/shm` on every GPU.
 
 Give `/dev/shm` room for:
 
 - the CPU tier: `--kv-offloading-size` GiB, or `cpu_bytes_to_use` bytes;
-- a few GiB more for vLLM's other uses of `/dev/shm`, such as communication
-  between its processes;
-- one tier per engine, if several data-parallel engines share the machine.
+- with data parallelism, one CPU tier per data-parallel rank that shares this
+  `/dev/shm`: `--data-parallel-size 2` needs two in all;
+- what vLLM uses there without offloading, such as for communication between
+  its processes (the Kubernetes examples allow 2 to 8 GiB for this).
 
 For example, one engine with `--kv-offloading-size 64` needs about 70 GiB.
 
@@ -136,10 +136,11 @@ to use the host's `/dev/shm`. On Kubernetes, mount an `emptyDir` with
 [Kubernetes examples](../deployment/k8s.md#deployment-with-gpus), and set its
 `sizeLimit` (for example `70Gi`).
 
-Files in `/dev/shm` use RAM that counts toward the container's memory limit, so
-raise that limit by the size of the tier as well. vLLM fills the whole tier up
-front, not as the cache is used, and logs a warning at startup if the memory
-limit leaves too little room.
+The CPU tier also counts toward the container's memory limit, wherever it is
+kept, so raise that limit by the tier's size (64 GiB in the example above). vLLM
+fills the whole tier as it starts, not as the cache is used, so if the limit is
+too low, the container can run out of memory during startup. With `/dev/shm`,
+vLLM logs a warning first.
 
 ## `kv_connector_extra_config` Reference
 
