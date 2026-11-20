@@ -54,6 +54,8 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
     # ShardQ computes every head for each rank's token slice.
     supports_shardq: ClassVar[bool] = True
+    # The sink path is not validated with ShardQ under PCP.
+    supports_shardq_with_pcp: ClassVar[bool] = False
 
     def __init__(
         self,
