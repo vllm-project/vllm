@@ -254,7 +254,7 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-_MAMBA_ALIGN = MambaManager.config(mamba_cache_mode="align")
+_MAMBA_ALIGN = MambaManager.config(enable_prefix_caching=True)
 
 
 def _mamba_spec() -> MambaSpec:
@@ -605,6 +605,34 @@ def test_hisparse_indexer_tier_is_single_copy_under_tp():
     assert _replicated_layout(kv_cache_config)
 
 
+def test_hisparse_partial_group_size_survives_scheduler_flattening():
+    """Worker and scheduler representations must produce identical mmap rows."""
+    layer_specs = {name: _full_attention_spec() for name in ("indexer.0", "indexer.1")}
+    source = make_kv_cache_group(
+        ["source"],
+        _full_attention_spec(),
+        host_resident=True,
+    )
+    indexer = make_kv_cache_group_from_specs(
+        layer_specs, role=KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=4,
+    )
+
+    config = _make_vllm_config()
+    worker = build_offloading_config(config, kv_cache_config)
+    scheduler = build_offloading_config(
+        config, generate_scheduler_kv_cache_config([kv_cache_config])
+    )
+
+    assert worker.worker_kv_bytes_per_block == scheduler.worker_kv_bytes_per_block
+    assert worker.worker_kv_bytes_per_block == indexer.page_size_bytes
+
+
 def test_zero_blocks_skips_tensor_layout_validation():
     kv_cache_config = _make_sizing_kv_cache_config(packed=False)
     kv_cache_config.num_blocks = 0
@@ -653,7 +681,6 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
         alignment_tokens=scheduler_config.alignment_tokens,
         block_size=mamba_group.block_size,
         manager_config=mamba_group.manager_config,
-        use_eagle=mamba_group.is_eagle_group,
     )
     assert block_mask is None or [i for i in range(4) if block_mask[i]] == [1, 3]
 

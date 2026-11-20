@@ -20,7 +20,6 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     WeightsSeedPayload,
-    build_manifest,
     validate_weights_payload,
 )
 
@@ -56,7 +55,11 @@ class WeightShardSeed(Seedable):
     def _mover(self, backend: SeedBackend) -> WeightMover:
         mover = self._movers.get(backend)
         if mover is None:
-            mover = get_mover(backend, device_index=self._daemon.device_index)
+            mover = get_mover(
+                backend,
+                device_index=self._daemon.device_index,
+                ipc_backend=self._daemon.backend,
+            )
             self._movers[backend] = mover
         return mover
 
@@ -99,8 +102,8 @@ class WeightShardSeed(Seedable):
         backend = parse_seed_backend(request.get("seed_backend", PEER_IPC_BACKEND))
         if backend == PEER_IPC_BACKEND:
             raise ValueError(
-                f"Seed backend {backend!r} copies through CUDA IPC, which "
-                "cannot cross hosts; mirror it over this daemon's Unix socket"
+                f"Seed backend {backend!r} requires node-local weight sharing; "
+                "mirror it over this daemon's Unix socket"
             )
 
     def resolve(self, request: dict[str, Any]) -> WeightsSeedPayload | dict[str, bool]:
@@ -113,18 +116,18 @@ class WeightShardSeed(Seedable):
             if self._release_pending:
                 raise ValueError("Weights are being released")
             mover = self._mover(backend)
-            tensors, kinds, aliases, attrs = daemon._seed_state()
-            manifest, storages = build_manifest(tensors, kinds)
-            seed = mover.prepare_seed(storages)
+            state = daemon.state
+            assert state is not None
+            seed = mover.prepare_seed(state.storages)
             self._active_copies += 1
             return {
                 "cache_config": asdict(daemon.cache_key),
                 # Matched instead of the checkpoint fingerprint by a mirror
                 # without the safetensors to hash (see seed_mismatches).
                 "model": daemon.model_config.model,
-                "manifest": manifest,
-                "aliases": aliases,
-                "attrs": attrs,
+                "manifest": state.manifest,
+                "aliases": state.aliases,
+                "attrs": state.attrs,
                 "seed": seed,
             }
 
