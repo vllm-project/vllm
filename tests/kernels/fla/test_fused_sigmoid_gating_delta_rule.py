@@ -206,8 +206,8 @@ def test_state_index_table_stride_does_not_change_results(kernel: str):
     """Equal index values must select the same states whatever the table's strides.
     The kernels must step through a 2D table with stride_indices_tok (#68416).
     A column-major copy of the table makes that stride differ from one.
-    The second sequence accepts its second token, so the selected slot is not
-    the first one in its row."""
+    The second sequence accepts its second token.
+    So its selected slot is not the first one in its row."""
     set_random_seed(0)
     q, k = (torch.randn(1, 6, 1, 64, device=DEVICE).half() for _ in range(2))
     v = torch.randn(1, 6, 2, 64, device=DEVICE).half()
