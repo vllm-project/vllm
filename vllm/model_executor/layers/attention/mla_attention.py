@@ -583,6 +583,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 or self.attn_backend.get_name() == "FLASHINFER"
             )
         ):
+            model_config = get_current_vllm_config().model_config
+            if model_config is not None and model_config.is_hybrid:
+                raise ValueError(
+                    "Prefix caching with batch invariance is not supported for "
+                    "TRITON_MLA / FLASHINFER in hybrid Mamba models; pass "
+                    "--no-enable-prefix-caching."
+                )
             logger.warning_once(
                 "Disabling prefix caching for TRITON_MLA / FLASHINFER "
                 "with batch invariance, as it is not yet supported.",
@@ -796,6 +803,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
+        self.is_aiter_triton_bf16_bmm_enabled = rocm_aiter_ops.is_mla_enabled()
         # Replaces the bf16 W_UK bmm, the q concat + fp8 quant and the head
         # padding, so only the torch.bmm path qualifies.
         self.is_aiter_fused_decode_query_enabled = (
@@ -1697,6 +1705,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+        elif (
+            self.is_aiter_triton_bf16_bmm_enabled
+            and rocm_aiter_ops.is_triton_bf16_bmm_tuned(
+                x.shape[0], x.shape[1], self.v_head_dim, self.kv_lora_rank
+            )
+        ):
+            # Same product as the torch.bmm fallback; the kernel takes W as (N, V, L).
+            rocm_aiter_ops.triton_bf16_bmm(
+                x, self.W_UV.transpose(1, 2), out.transpose(0, 1)
             )
         elif self.is_amx_bmm_enabled:
             # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
