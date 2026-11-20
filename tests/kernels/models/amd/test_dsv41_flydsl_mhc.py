@@ -3,14 +3,26 @@
 """DeepSeek-V4.1's mHC seams and step-end tail on AITER's FlyDSL kernels
 (VLLM_ROCM_USE_AITER_FLYDSL_MHC).
 
-The routing tests run anywhere, without the kernels: which seams go to the
-FlyDSL kernel and which keep the default seam. The numerics tests need the
-kernels (gfx950 and an AITER that ships `flydsl_mhc_post_pre_rmsnorm`) and
-check the call sites against the torch reference of the path they replace.
+The first routing tests run anywhere, without the kernels (CI images do not
+ship them yet): `mhc_pre_delayed_flydsl` hands the seams outside AITER's rule
+to the seam it replaces with the same arguments. `_RuleOnlyOps` stands in for
+AITER there, with AITER's documented rule and no kernel.
+
+The other tests need the kernels (gfx950 and an AITER that ships
+`flydsl_mhc_post_pre_rmsnorm`): the call sites against the torch reference of
+the path they replace, and a real `DeepseekV4DecoderLayer` and
+`DeepseekV4Model` with the flag on against the same ones with it off. The layer
+is built as in `tests/kernels/mhc/test_mhc_kernels.py` (its attention and FFN
+are plain callables) and the model as in
+`tests/models/test_deepseek_v41_amd_replay_forward.py`; both then run their
+real `forward`.
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.kernels.mhc.torch import (
@@ -147,34 +159,29 @@ def test_seam_keeps_layer0_and_unfused_norm():
     assert not ops.calls
 
 
-def test_flydsl_mhc_needs_flag_and_shape(monkeypatch):
-    """Without the flag, or for another hidden size, nothing changes."""
-    monkeypatch.delenv("VLLM_ROCM_USE_AITER_FLYDSL_MHC", raising=False)
-    rocm_aiter_ops.refresh_env_variables()
-    assert mhc.flydsl_mhc(HIDDEN, HC) is None
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_MHC", "1")
-    rocm_aiter_ops.refresh_env_variables()
-    try:
-        assert mhc.flydsl_mhc(7168, HC) is None
-        assert mhc.flydsl_mhc(HIDDEN, 8) is None
-    finally:
-        monkeypatch.delenv("VLLM_ROCM_USE_AITER_FLYDSL_MHC")
-        rocm_aiter_ops.refresh_env_variables()
-
-
 @pytest.fixture
 def flydsl_ops(monkeypatch):
     """The real kernels, or skip."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_MHC", "1")
     rocm_aiter_ops.refresh_env_variables()
-    ops = mhc.flydsl_mhc(HIDDEN, HC)
+    ops = mhc.get_flydsl_mhc_ops(HIDDEN, HC)
     if ops is None:
         rocm_aiter_ops.refresh_env_variables()
         pytest.skip("AITER's FlyDSL mHC kernels need gfx950 and a newer AITER")
     yield ops
     monkeypatch.undo()
     rocm_aiter_ops.refresh_env_variables()
+
+
+def test_flydsl_mhc_ops_needs_flag_and_shape(flydsl_ops, monkeypatch):
+    """Only the flag and this model's shape turn the kernels on."""
+    assert mhc.get_flydsl_mhc_ops(HIDDEN, HC) is flydsl_ops
+    assert mhc.get_flydsl_mhc_ops(7168, HC) is None
+    assert mhc.get_flydsl_mhc_ops(HIDDEN, 8) is None
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_MHC", "0")
+    rocm_aiter_ops.refresh_env_variables()
+    assert mhc.get_flydsl_mhc_ops(HIDDEN, HC) is None
 
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -197,15 +204,26 @@ def _assert_mxfp8_of(layer_input: torch.Tensor):
 
 
 @pytest.mark.parametrize(
-    ("num_tokens", "aux", "mxfp8"),
-    [(160, False, False), (256, False, True), (48, True, True), (1024, True, False)],
+    ("num_tokens", "aux", "mxfp8", "entry"),
+    [
+        (160, False, False, "post"),
+        (256, False, True, "post"),
+        (48, True, True, "post"),
+        (1024, True, False, "post"),
+        # An Engram layer's or a pipeline entry's attention seam.
+        (192, False, True, "no_post"),
+        # The first DSpark layer's attention seam (identity pre-mix).
+        (192, False, False, "identity_pre"),
+    ],
 )
-def test_seam_matches_reference(flydsl_ops, num_tokens, aux, mxfp8):
+def test_seam_matches_reference(flydsl_ops, num_tokens, aux, mxfp8, entry):
     """The FlyDSL seam against the reference of the post-mix + delayed pre +
     norm it replaces; its MXFP8 copy is the quantized bf16 layer input and the
     aux mean is the mean of its own new residual."""
     set_random_seed(0)
-    args, kwargs = _seam_inputs(num_tokens, "cuda")
+    args, kwargs = _seam_inputs(num_tokens, "cuda", post=entry == "post")
+    if entry == "identity_pre":
+        kwargs["pre_mix"] = None
     residual, fn = args[:2]
     aux_out: list[torch.Tensor] | None = [] if aux else None
     out = mhc.mhc_pre_delayed_flydsl(
@@ -219,11 +237,15 @@ def test_seam_matches_reference(flydsl_ops, num_tokens, aux, mxfp8):
     )
     new_residual, post_mix, comb_mix, layer_input, next_pre = out
 
-    ref_residual = mhc_post_torch(
-        kwargs["sublayer_out"],
-        residual,
-        kwargs["post_layer_mix"],
-        kwargs["comb_res_mix"],
+    ref_residual = (
+        mhc_post_torch(
+            kwargs["sublayer_out"],
+            residual,
+            kwargs["post_layer_mix"],
+            kwargs["comb_res_mix"],
+        )
+        if entry == "post"
+        else residual
     )
     ref_post, ref_comb, ref_input, ref_pre = mhc_pre_delayed_torch(
         ref_residual, fn, args[2], args[3], *GATES, pre_mix=kwargs["pre_mix"]
@@ -315,76 +337,280 @@ def test_seam_cuda_graph_replay(flydsl_ops):
         assert torch.equal(got, ref)
 
 
-class _CountingPost(torch.nn.Module):
+class _FakeEngram(nn.Module):
+    """An Engram injection that only shifts the residual."""
+
+    layer_hash_index = 0
+
+    def forward(self, residual, hashes, mask):
+        return residual + 0.125
+
+
+class _Attention(nn.Module):
+    """Attention that scales its input. Its first GEMM does not read the
+    seam's MXFP8 layer input."""
+
     def __init__(self):
         super().__init__()
-        self.calls = 0
+        self.fused_wqa_wkv = nn.Identity()
 
-    def forward(self, *args):
-        self.calls += 1
-        return mhc_post_torch(*args)
-
-
-class _StandInLayer(torch.nn.Module):
-    """A decoder layer with fixed outputs whose attention seam applies the
-    carried post-mix (and, with `aux_out`, appends the stream mean), as
-    `DeepseekV4DecoderLayer` does."""
-
-    def __init__(self, num_tokens: int, aux_in_seam: bool):
-        super().__init__()
-        self.aux_in_seam = aux_in_seam
-        self.got_aux_out: list[bool] = []
-        self.out = (
-            torch.randn(num_tokens, HIDDEN, device="cuda").to(torch.bfloat16),
-            torch.rand(num_tokens, HC, 1, device="cuda"),
-            torch.rand(num_tokens, HC, HC, device="cuda") / HC,
-            torch.softmax(torch.randn(num_tokens, HC, device="cuda"), -1),
-        )
-
-    def takes_aux_mean(self, num_tokens: int) -> bool:
-        return self.aux_in_seam
-
-    def forward(self, x, positions, input_ids, pre_mix, post_mix, res_mix, residual,
-                engram_hashes, engram_mask, aux_out=None):  # fmt: skip
-        residual = (
-            x if residual is None else mhc_post_torch(x, residual, post_mix, res_mix)
-        )
-        self.got_aux_out.append(aux_out is not None)
-        if aux_out is not None:
-            aux_out.append(residual.float().mean(dim=1).to(torch.bfloat16))
-        x, post_mix, res_mix, pre_mix = self.out
-        return x, residual, post_mix, res_mix, pre_mix
+    def forward(self, positions, x, _):
+        return x * 0.5
 
 
-@pytest.mark.parametrize("aux_layers", [(2, 3), (2, 4)])
-def test_model_aux_in_seam_and_tail(flydsl_ops, monkeypatch, aux_layers):
-    """`DeepseekV4Model.forward` leaves an auxiliary hidden state to the next
-    layer's seam where that layer takes it, keeps the order of the aux list,
-    and ends the step with the FlyDSL tail: the last post-mix (or the final
-    aux residual), collapse and final norm, with the residual in the MTP
-    buffer."""
-    from types import SimpleNamespace
+class _FFN(nn.Module):
+    """An FFN that scales its input, without MegaMoE or a shared expert."""
 
+    use_mega_moe = False
+    shared_experts = None
+
+    def forward(self, x, input_ids):
+        return x * 0.25
+
+
+def _decoder_layer(seed: int, engram: bool = False):
+    """A real `DeepseekV4DecoderLayer` on the Mega-MHC path with plain
+    attention and FFN callables, loaded with seeded weights. It takes the
+    FlyDSL seams when the flag is on when it is built."""
+    from vllm.model_executor.layers.layernorm import RMSNorm
+    from vllm.model_executor.layers.mhc import MHCPostOp, MHCPreDelayedOp
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
+
+    layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
+    nn.Module.__init__(layer)
+    layer.mono = None
+    layer.engram = _FakeEngram() if engram else None
+    layer.mhc_overlap = None
+    layer.mhc_seam = None
+    layer.use_sequence_parallel = False
+    layer.fuse_seam_norm = layer.use_mega_mhc = True
+    layer.hidden_size, layer.hc_mult = HIDDEN, HC
+    layer.hc_sinkhorn_iters, layer.hc_eps, layer.hc_post_alpha = 20, 1e-6, 2.0
+    layer.rms_norm_eps = 1e-6
+    layer.mhc_pre_delayed = MHCPreDelayedOp()
+    layer.mhc_post = MHCPostOp()
+    layer.flydsl_mhc_ops = mhc.get_flydsl_mhc_ops(HIDDEN, HC)
+    layer.hc_attn_fn_packed = layer.hc_ffn_fn_packed = None
+    layer.hc_attn_fn_flydsl = layer.hc_ffn_fn_flydsl = None
+
+    layer.attn, layer.ffn = _Attention(), _FFN()
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    with torch.device("cuda"):
+        for name in ("attn", "ffn"):
+            fn = torch.randn(MIX, HC * HIDDEN, generator=g, device="cuda") * 0.01
+            setattr(layer, f"hc_{name}_fn", nn.Parameter(fn, requires_grad=False))
+            setattr(
+                layer, f"hc_{name}_scale", torch.rand(3, generator=g, device="cuda")
+            )
+            setattr(
+                layer,
+                f"hc_{name}_base",
+                torch.randn(MIX, generator=g, device="cuda") * 0.1,
+            )
+            norm = RMSNorm(HIDDEN, 1e-6).to(torch.bfloat16)
+            norm.weight.data.copy_(torch.rand(HIDDEN, generator=g, device="cuda") + 0.5)
+            setattr(layer, f"{name}_norm", norm)
+    layer.process_weights_after_loading()
+    return layer
+
+
+def _record_seams(monkeypatch, ops, layers) -> list[tuple]:
+    """Record each seam `layers` run: (layer index, sublayer, kernel,
+    aux_mean, out_dtype, has_post), passing the calls through. Seams of other
+    layers are not recorded."""
+    seams: list[tuple] = []
+
+    def which(fn_packed, attn, ffn):
+        for i, layer in enumerate(layers):
+            if fn_packed is getattr(layer, attn):
+                return i, "attn"
+            if fn_packed is getattr(layer, ffn):
+                return i, "ffn"
+        return None
+
+    flydsl = ops.flydsl_mhc_post_pre_rmsnorm
+
+    # Both kernels take (residual, fn_packed, hc_scale, hc_base, 4 gate
+    # constants, sinkhorn_repeat, pre_mix, sublayer_out, ...).
+    def flydsl_seam(residual, fn_packed, *args, **kwargs):
+        seam = which(fn_packed, "hc_attn_fn_flydsl", "hc_ffn_fn_flydsl")
+        if seam is not None:
+            seams.append(
+                (
+                    *seam,
+                    "flydsl",
+                    kwargs["aux_mean"],
+                    kwargs["out_dtype"],
+                    args[8] is not None,
+                )
+            )
+        return flydsl(residual, fn_packed, *args, **kwargs)
+
+    monkeypatch.setattr(ops, "flydsl_mhc_post_pre_rmsnorm", flydsl_seam)
+
+    def mega(name: str, out_dtype: str):
+        kernel = getattr(rocm_aiter_ops, name)
+
+        def mega_seam(residual, fn_packed, *args):
+            seam = which(fn_packed, "hc_attn_fn_packed", "hc_ffn_fn_packed")
+            if seam is not None:
+                seams.append((*seam, "mega", False, out_dtype, args[8] is not None))
+            return kernel(residual, fn_packed, *args)
+
+        monkeypatch.setattr(rocm_aiter_ops, name, mega_seam)
+
+    mega("mhc_mega_post_pre_delayed_rms_norm", "bf16")
+    mega("mhc_mega_post_pre_delayed_rms_norm_mxfp8", "mxfp8")
+    return seams
+
+
+def _flag_off(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_MHC", "0")
+    rocm_aiter_ops.refresh_env_variables()
+
+
+def _layer_inputs(num_tokens: int, seed: int):
+    g = torch.Generator(device="cuda").manual_seed(seed)
+
+    def randn(*shape):
+        return torch.randn(*shape, generator=g, device="cuda")
+
+    return dict(
+        x=randn(num_tokens, HIDDEN).to(torch.bfloat16),
+        positions=torch.arange(num_tokens, device="cuda"),
+        input_ids=None,
+        pre_mix=torch.softmax(randn(num_tokens, HC), -1),
+        post_mix=torch.rand(num_tokens, HC, 1, generator=g, device="cuda"),
+        res_mix=torch.rand(num_tokens, HC, HC, generator=g, device="cuda") / HC,
+        residual=randn(num_tokens, HC, HIDDEN).to(torch.bfloat16),
+    )
+
+
+def _assert_layer_outputs_close(got, ref):
+    x, residual, post_mix, res_mix, pre = got
+    ref_x, ref_residual, ref_post, ref_res, ref_pre = ref
+    torch.testing.assert_close(residual, ref_residual, atol=1e-2, rtol=1e-2)
+    for a, b in ((post_mix, ref_post), (res_mix, ref_res), (pre, ref_pre)):
+        torch.testing.assert_close(a, b, atol=1e-4, rtol=1e-3)
+    torch.testing.assert_close(x, ref_x, atol=1e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [128, 192, 288])
+@pytest.mark.parametrize("aux", [False, True])
+@pytest.mark.parametrize("mxfp8", [False, True], ids=["bf16", "attn_mxfp8"])
+def test_decoder_layer_seams(
+    flydsl_ops, monkeypatch, default_vllm_config, num_tokens, aux, mxfp8
+):
+    """`DeepseekV4DecoderLayer.forward` takes the FlyDSL seam with the
+    attention pack for its attention seam and the FFN pack for its FFN seam
+    where AITER's rule takes them (129-256 rows), and Mega-MHC elsewhere; with
+    `aux_out`, the attention seam alone takes the aux-mean variant at any of
+    these sizes. Each seam keeps its layer input format. The outputs match the
+    same layer with the flag off, and the aux mean is the stock `mhc_post` +
+    mean."""
+    on = _decoder_layer(seed=1)
+    on.attn_seam_mxfp8 = mxfp8
+    assert on.takes_aux_mean(num_tokens)
+    seams = _record_seams(monkeypatch, flydsl_ops, [on])
+    inputs = _layer_inputs(num_tokens, seed=2)
+    aux_out: list[torch.Tensor] | None = [] if aux else None
+    got = on(**inputs, aux_out=aux_out)
+    torch.accelerator.synchronize()
+
+    in_window = 129 <= num_tokens <= 256
+    attn_dtype = "mxfp8" if mxfp8 else "bf16"
+    assert seams == [
+        (0, "attn", "flydsl" if aux or in_window else "mega", aux, attn_dtype, True),
+        (0, "ffn", "flydsl" if in_window else "mega", False, "bf16", True),
+    ]
+
+    _flag_off(monkeypatch)
+    off = _decoder_layer(seed=1)
+    off.attn_seam_mxfp8 = mxfp8
+    assert off.hc_attn_fn_flydsl is None and not off.takes_aux_mean(num_tokens)
+    ref = off(**inputs)
+    _assert_layer_outputs_close(got, ref)
+    if aux_out is not None:
+        ref_mean = off.mhc_post(
+            inputs["x"], inputs["residual"], inputs["post_mix"], inputs["res_mix"]
+        ).mean(dim=1)
+        (mean,) = aux_out
+        torch.testing.assert_close(mean, ref_mean, atol=1e-2, rtol=1e-2)
+
+
+def test_decoder_layer_engram_seam(flydsl_ops, monkeypatch, default_vllm_config):
+    """An Engram layer's attention seam runs after the injection, without a
+    post-mix, on the FlyDSL seam; the layer never takes the aux mean."""
+    num_tokens = 192
+    on = _decoder_layer(seed=1, engram=True)
+    assert not on.takes_aux_mean(num_tokens)
+    seams = _record_seams(monkeypatch, flydsl_ops, [on])
+    inputs = _layer_inputs(num_tokens, seed=2)
+    hashes = torch.zeros(num_tokens, 1, 1, dtype=torch.int32, device="cuda")
+    got = on(**inputs, engram_hashes=hashes)
+    torch.accelerator.synchronize()
+    assert seams == [
+        (0, "attn", "flydsl", False, "bf16", False),
+        (0, "ffn", "flydsl", False, "bf16", True),
+    ]
+    _flag_off(monkeypatch)
+    ref = _decoder_layer(seed=1, engram=True)(**inputs, engram_hashes=hashes)
+    _assert_layer_outputs_close(got, ref)
+
+
+def test_takes_aux_mean_yields_to_gate_overlap(
+    flydsl_ops, monkeypatch, default_vllm_config
+):
+    """Inside a FULL graph capture of at most 128 rows the layer runs the mHC
+    gate overlap, so it does not take the aux mean there; it does above."""
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import set_forward_context
+
+    layer = _decoder_layer(seed=1)
+    layer.mhc_overlap = mhc.MHCOverlapStream()
+    stream = torch.cuda.Stream()
+    with (
+        set_forward_context(
+            None, default_vllm_config, cudagraph_runtime_mode=CUDAGraphMode.FULL
+        ),
+        torch.cuda.stream(stream),
+    ):
+        scratch = torch.zeros(1, device="cuda")
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            scratch.add_(1)
+            eligible = {t: layer.takes_aux_mean(t) for t in (128, 129, 192)}
+    assert eligible == {128: False, 129: True, 192: True}
+    assert layer.takes_aux_mean(128)
+
+
+def _model(monkeypatch, layers, num_tokens):
+    """`DeepseekV4Model` on the last pipeline rank over `layers`, with an MTP
+    hidden buffer."""
     import vllm.models.deepseek_v41.amd.model as amd
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.sequence import IntermediateTensors
 
-    set_random_seed(0)
-    num_tokens, num_layers = 192, 4
-    layers = [_StandInLayer(num_tokens, aux_in_seam=i == 2) for i in range(num_layers)]
     monkeypatch.setattr(
         amd,
         "get_pp_group",
         lambda: SimpleNamespace(is_first_rank=False, is_last_rank=True),
     )
     monkeypatch.setattr(amd.EngramLayout, "from_config", lambda config: None)
-    monkeypatch.setattr(amd, "make_layers", lambda n, factory, prefix: (0, n, layers))
+    monkeypatch.setattr(
+        amd, "make_layers", lambda n, factory, prefix: (0, n, list(layers))
+    )
     config = SimpleNamespace(
         vocab_size=32, hc_eps=1e-6, hc_mult=HC, hidden_size=HIDDEN, rms_norm_eps=1e-6,
-        index_topk=4, kv_source_layer_ids=[1], num_hidden_layers=num_layers,
+        index_topk=4, kv_source_layer_ids=[1], num_hidden_layers=len(layers),
         sliding_window=128, engram_layer_ids=(), candidate_source_layer_id=-1,
         candidate_topk_blocks=0,
     )  # fmt: skip
+    # An EAGLE drafter reads the pre-collapse residual (the MTP hidden buffer).
+    eagle = SimpleNamespace(
+        use_eagle=lambda: True,
+        uses_draft_model=lambda: False,
+        use_dspark=lambda: False,
+    )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=config, dtype=torch.bfloat16),
         quant_config=None,
@@ -394,44 +620,76 @@ def test_model_aux_in_seam_and_tail(flydsl_ops, monkeypatch, aux_layers):
             prefill_context_parallel_size=1, use_ubatching=False,
             enable_expert_parallel=False,
         ),
-        speculative_config=None,
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=num_tokens),
+        speculative_config=eagle,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=num_tokens + 5),
     )  # fmt: skip
-    with set_current_vllm_config(VllmConfig()):
-        model = amd.DeepseekV4Model(vllm_config=vllm_config).cuda()
-    assert model.flydsl_mhc_tail is flydsl_ops
-    model.aux_hidden_state_layers = aux_layers
-    model.norm.to(torch.bfloat16).weight.data.copy_(torch.rand(HIDDEN) + 0.5)
-    mtp = torch.zeros(num_tokens + 5, HC * HIDDEN, device="cuda").to(torch.bfloat16)
-    model._mtp_hidden_buffer = mtp
-    model.mhc_post = _CountingPost()
+    # The model runner builds the model on its device.
+    with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
+        model = amd.DeepseekV4Model(vllm_config=vllm_config)
+    model.norm.to(torch.bfloat16).weight.data.copy_(
+        torch.linspace(0.5, 1.5, HIDDEN, device="cuda")
+    )
+    model.process_weights_after_loading()
+    return model
 
-    hidden = torch.randn(num_tokens, HC, HIDDEN, device="cuda").to(torch.bfloat16)
-    pre_mix = torch.softmax(torch.randn(num_tokens, HC, device="cuda"), -1)
+
+@pytest.mark.parametrize("num_tokens", [192, 288])
+@pytest.mark.parametrize("aux_layers", [(2, 3), (2, 4)])
+def test_model_aux_in_seam_and_tail(
+    flydsl_ops, monkeypatch, default_vllm_config, num_tokens, aux_layers
+):
+    """`DeepseekV4Model.forward` over real decoder layers: each auxiliary
+    hidden state taken before a layer is left to that layer's attention seam
+    (aux-mean variant), the one after the last layer (aux id 4) keeps the stock
+    `mhc_post` + mean, and the step ends with the FlyDSL tail. The aux list,
+    the normed output and the MTP hidden buffer match the same model with the
+    flag off."""
+    from vllm.sequence import IntermediateTensors
+
+    num_layers = 4
+    g = torch.Generator(device="cuda").manual_seed(3)
+    hidden = torch.randn(num_tokens, HC, HIDDEN, generator=g, device="cuda").to(
+        torch.bfloat16
+    )
+    pre_mix = torch.softmax(torch.randn(num_tokens, HC, generator=g, device="cuda"), -1)
     positions = torch.arange(num_tokens, device="cuda")
-    out, aux = model(
-        input_ids=positions.to(torch.int32),
-        positions=positions,
-        intermediate_tensors=IntermediateTensors(
-            {"hidden_states": hidden, "pre_mix": pre_mix}
-        ),
-    )
 
-    residuals = [hidden]
-    for layer in layers:
-        residuals.append(mhc_post_torch(layer.out[0], residuals[-1], *layer.out[1:3]))
-    final = residuals[-1]
-    # Layer 2's seam takes its aux; the other one is the stock post + mean.
-    assert [layer.got_aux_out for layer in layers] == [[i == 2] for i in range(4)]
-    assert model.mhc_post.calls == 1
-    assert len(aux) == 2
-    for got, i in zip(aux, aux_layers):
-        ref = residuals[i].float().mean(dim=1).to(torch.bfloat16)
-        torch.testing.assert_close(got, ref, atol=1e-2, rtol=1e-2)
-    collapsed = (layers[-1].out[3].unsqueeze(-1) * final.float()).sum(dim=1)
-    ref_out = _rms_norm(collapsed.to(torch.bfloat16), model.norm.weight, 1e-6)
-    torch.testing.assert_close(out, ref_out, atol=3e-2, rtol=2e-2)
-    torch.testing.assert_close(
-        mtp[:num_tokens].view(final.shape), final, atol=1e-2, rtol=1e-2
+    def run(model):
+        model.aux_hidden_state_layers = aux_layers
+        out, aux = model(
+            input_ids=positions.to(torch.int32),
+            positions=positions,
+            intermediate_tensors=IntermediateTensors(
+                {"hidden_states": hidden, "pre_mix": pre_mix}
+            ),
+        )
+        torch.accelerator.synchronize()
+        mtp = model._mtp_hidden_buffer[:num_tokens].clone()
+        return out, aux, mtp
+
+    on_layers = [_decoder_layer(seed=10 + i) for i in range(num_layers)]
+    seams = _record_seams(monkeypatch, flydsl_ops, on_layers)
+    on = _model(monkeypatch, on_layers, num_tokens)
+    assert on.flydsl_mhc_tail_ops is flydsl_ops
+    out, aux, mtp = run(on)
+
+    # Aux id 2 is the state before layer 2, taken by layer 2's attention seam.
+    deferred = [i for i in aux_layers if i < num_layers]
+    assert [s[0] for s in seams if s[3]] == deferred
+    assert all(s[1] == "attn" for s in seams if s[3])
+
+    _flag_off(monkeypatch)
+    off = _model(
+        monkeypatch,
+        [_decoder_layer(seed=10 + i) for i in range(num_layers)],
+        num_tokens,
     )
-    assert mtp[num_tokens:].eq(0).all()
+    assert off.flydsl_mhc_tail_ops is None
+    ref_out, ref_aux, ref_mtp = run(off)
+    # The residual streams pass up to eight bf16 post-mixes, which the two
+    # paths round in a different order: a few elements differ by a few ulp.
+    assert len(aux) == len(ref_aux) == len(aux_layers)
+    for got, ref in zip(aux, ref_aux):
+        torch.testing.assert_close(got, ref, atol=1e-2, rtol=2e-2)
+    torch.testing.assert_close(out, ref_out, atol=3e-2, rtol=2e-2)
+    torch.testing.assert_close(mtp, ref_mtp, atol=1e-2, rtol=2e-2)

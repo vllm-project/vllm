@@ -271,11 +271,11 @@ def mhc_pre_delayed_mxfp8(
     )
 
 
-def flydsl_mhc(hidden_size: int, hc_mult: int) -> Any | None:
+def get_flydsl_mhc_ops(hidden_size: int, hc_mult: int) -> Any | None:
     """AITER's FlyDSL mHC kernels (`aiter.ops.flydsl`) if
     VLLM_ROCM_USE_AITER_FLYDSL_MHC is on and they take this model's shape,
     else None."""
-    ops = rocm_aiter_ops.flydsl_mhc()
+    ops = rocm_aiter_ops.flydsl_mhc_ops()
     if ops is None or not ops.flydsl_mhc_post_pre_rmsnorm_supported(
         0, hidden_size, hc_mult
     ):
@@ -295,6 +295,71 @@ def flydsl_seam_takes(
     return bool(
         ops.flydsl_mhc_post_pre_rmsnorm_supported(num_tokens, hidden_size, hc_mult)
         and ops.flydsl_mhc_post_pre_rmsnorm_preferred(num_tokens, aux_mean=aux_mean)
+    )
+
+
+@functools.cache
+def _flydsl_seam_max_tokens(
+    ops: Any, hidden_size: int, hc_mult: int, aux_mean: bool
+) -> int:
+    """The most rows at which `flydsl_seam_takes` holds (AITER's rule)."""
+    num_tokens = most = 0
+    while ops.flydsl_mhc_post_pre_rmsnorm_supported(
+        num_tokens + 1, hidden_size, hc_mult
+    ):
+        num_tokens += 1
+        if ops.flydsl_mhc_post_pre_rmsnorm_preferred(num_tokens, aux_mean=aux_mean):
+            most = num_tokens
+    return most
+
+
+@functools.cache
+def warmup_flydsl_seam(
+    ops: Any,
+    device: torch.device,
+    hidden_size: int,
+    hc_mult: int,
+    sinkhorn_repeat: int,
+    *,
+    mxfp8: bool,
+    aux_mean: bool,
+    has_post: bool,
+    identity_pre: bool,
+) -> None:
+    """Compile one FlyDSL seam variant for every split configuration AITER's
+    rule can pick, once per process, so no seam compiles while serving: each
+    (split configuration, variant) pair is a separate kernel that otherwise
+    compiles on its first call, which under DP/EP would stall the other ranks
+    in the next collective. Runs on the current stream, outside capture."""
+    ops.warmup_flydsl_mhc_post_pre_rmsnorm(
+        _flydsl_seam_max_tokens(ops, hidden_size, hc_mult, aux_mean),
+        out_dtype="mxfp8" if mxfp8 else "bf16",
+        aux_mean=aux_mean,
+        has_post=has_post,
+        identity_pre=identity_pre,
+        sinkhorn_repeat=sinkhorn_repeat,
+        device=device,
+    )
+
+
+@functools.cache
+def warmup_flydsl_tail(
+    ops: Any, device: torch.device, hidden_size: int, hc_mult: int, keep_residual: bool
+) -> None:
+    """Compile the FlyDSL tail variants the model can launch (with the
+    post-mix, keeping the residual or not, and collapse + norm only), once per
+    process, so none compiles while serving."""
+    residual = torch.zeros(1, hc_mult, hidden_size, dtype=torch.bfloat16, device=device)
+    pre_mix = torch.zeros(1, hc_mult, device=device)
+    weight = torch.zeros(hidden_size, dtype=torch.bfloat16, device=device)
+    post = (
+        torch.zeros(1, hidden_size, dtype=torch.bfloat16, device=device),
+        torch.zeros(1, hc_mult, 1, device=device),
+        torch.zeros(1, hc_mult, hc_mult, device=device),
+    )
+    ops.flydsl_mhc_post_collapse_rmsnorm(residual, pre_mix, weight, 1e-6)
+    ops.flydsl_mhc_post_collapse_rmsnorm(
+        residual, pre_mix, weight, 1e-6, *post, keep_residual=keep_residual
     )
 
 
@@ -332,8 +397,12 @@ def mhc_pre_delayed_flydsl(
     post-mix seam `flydsl_seam_takes` with `aux_mean`, the mean of the
     post-mixed streams is appended to it.
 
-    The kernel's split-K scratch is per stream, so its seams on one stream
-    run serially; the eager warm-up before graph capture allocates it.
+    The kernel's split-K scratch is keyed by the stream a seam is launched or
+    captured on, so all seams captured on one stream share it: replays of
+    graphs captured on the same stream must not overlap. The model runner
+    replays the target's and the DSpark drafter's graphs one after the other on
+    one stream, and DBO (separate ubatch streams) keeps Mega-MHC. The eager
+    warm-up before capture, on the capture stream, allocates the scratch.
     """
     if aux_out is None and (
         x is not None

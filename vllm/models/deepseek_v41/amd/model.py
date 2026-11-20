@@ -75,8 +75,8 @@ from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     MHC_SEAM_MIN_TOKENS,
     MHCOverlapStream,
-    flydsl_mhc,
     flydsl_seam_takes,
+    get_flydsl_mhc_ops,
     mhc_pre_delayed_flydsl,
     mhc_pre_delayed_mxfp8,
     mhc_pre_delayed_overlap,
@@ -84,6 +84,8 @@ from vllm.models.deepseek_v41.amd.mhc import (
     mhc_tail_flydsl,
     supports_mhc_overlap,
     supports_mhc_seam,
+    warmup_flydsl_seam,
+    warmup_flydsl_tail,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import (
     MonoDecodeLayer,
@@ -348,8 +350,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_ffn_fn_packed: torch.Tensor | None = None
         # With VLLM_ROCM_USE_AITER_FLYDSL_MHC, the Mega-MHC seams AITER's
         # FlyDSL kernel is faster at run on it, from its own packing of fn.
-        self.flydsl_mhc = (
-            flydsl_mhc(self.hidden_size, self.hc_mult) if self.use_mega_mhc else None
+        self.flydsl_mhc_ops = (
+            get_flydsl_mhc_ops(self.hidden_size, self.hc_mult)
+            if self.use_mega_mhc
+            else None
         )
         self.hc_attn_fn_flydsl: torch.Tensor | None = None
         self.hc_ffn_fn_flydsl: torch.Tensor | None = None
@@ -390,11 +394,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                 f"{name}_packed",
                 rocm_aiter_ops.mega_mhc_pack_fn(getattr(self, name)),
             )
-            if self.flydsl_mhc is not None:
+            if self.flydsl_mhc_ops is not None:
                 refill_derived(
                     self,
                     f"{name}_flydsl",
-                    self.flydsl_mhc.flydsl_mhc_pack_fn(getattr(self, name)),
+                    self.flydsl_mhc_ops.flydsl_mhc_pack_fn(getattr(self, name)),
                 )
         # Quantizing inside Mega-MHC is cheaper than a separate quant launch,
         # but only where the GEMM reads row-major MXFP8 as is. Sequence
@@ -409,6 +413,34 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
         if self.mhc_overlap is not None:
             self.mhc_overlap.prepare_mega_mhc(self.hidden_size, self.hc_ffn_fn.device)
+        if self.flydsl_mhc_ops is not None:
+            self._warmup_flydsl_seams()
+
+    def _warmup_flydsl_seams(self) -> None:
+        """Compile every FlyDSL seam variant this layer can take, at every
+        row count AITER's rule gives it (the attention seam: with a post-mix,
+        without one for an Engram layer, a pipeline entry or the first DSpark
+        layer, and with the aux mean; the FFN seam: with a post-mix)."""
+        warmup = partial(
+            warmup_flydsl_seam,
+            self.flydsl_mhc_ops,
+            self.hc_attn_fn.device,
+            self.hidden_size,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+        )
+        attn = partial(warmup, mxfp8=self.attn_seam_mxfp8)
+        attn(aux_mean=False, has_post=True, identity_pre=False)
+        attn(aux_mean=False, has_post=False, identity_pre=False)
+        attn(aux_mean=False, has_post=False, identity_pre=True)
+        if self.engram is None and self.mono is None and not self.use_sequence_parallel:
+            attn(aux_mean=True, has_post=True, identity_pre=False)
+        warmup(
+            mxfp8=self.ffn_seam_mxfp8,
+            aux_mean=False,
+            has_post=True,
+            identity_pre=False,
+        )
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -439,7 +471,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             and self.attn_norm.weight.dtype == torch.bfloat16
             and self._mhc_overlap_for(num_tokens) is None
             and flydsl_seam_takes(
-                self.flydsl_mhc,
+                self.flydsl_mhc_ops,
                 (num_tokens, self.hc_mult, self.hidden_size),
                 aux_mean=True,
             )
@@ -493,7 +525,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             mxfp8_pre if mhc_overlap is None and self.ffn_seam_mxfp8 else mhc_pre
         )
         if mhc_overlap is None and self.hc_attn_fn_flydsl is not None:
-            flydsl_pre = partial(mhc_pre_delayed_flydsl, ops=self.flydsl_mhc)
+            flydsl_pre = partial(mhc_pre_delayed_flydsl, ops=self.flydsl_mhc_ops)
             attn_pre_fn = partial(
                 flydsl_pre,
                 attn_pre_fn,
@@ -855,8 +887,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.mhc_post = MHCPostOp()
         # The step-end post-mix, collapse and final norm in one launch
         # (VLLM_ROCM_USE_AITER_FLYDSL_MHC).
-        self.flydsl_mhc_tail = (
-            flydsl_mhc(config.hidden_size, self.hc_mult)
+        self.flydsl_mhc_tail_ops = (
+            get_flydsl_mhc_ops(config.hidden_size, self.hc_mult)
             if get_pp_group().is_last_rank
             and not self.use_sequence_parallel
             and vllm_config.model_config.dtype == torch.bfloat16
@@ -875,6 +907,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def process_weights_after_loading(self) -> None:
+        if self.flydsl_mhc_tail_ops is not None and self.norm.weight.is_cuda:
+            warmup_flydsl_tail(
+                self.flydsl_mhc_tail_ops,
+                self.norm.weight.device,
+                self.config.hidden_size,
+                self.hc_mult,
+                keep_residual=self._mtp_hidden_buffer is not None,
+            )
 
     def _link_mono(self) -> None:
         key = tuple(self.aux_hidden_state_layers)
@@ -1046,7 +1088,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             final_aux_recon = None
             collapsed = True
         mono_flush()
-        tail = self.flydsl_mhc_tail
+        tail = self.flydsl_mhc_tail_ops
         if tail is not None and not tail.flydsl_mhc_post_collapse_rmsnorm_supported(
             hidden_states.shape[0], self.config.hidden_size, self.hc_mult
         ):
@@ -1155,8 +1197,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 and idx + 1 == self.decoder_replay_start
             ):
                 mono_flush()
+                # On positions' rows, as the layer's forward decides its seams.
                 if idx + 1 in layer_ids and self.layers[idx + 1].takes_aux_mean(
-                    hidden_states.shape[0]
+                    positions.shape[0]
                 ):
                     # The next layer's attention seam post-mixes these streams
                     # and appends their mean.

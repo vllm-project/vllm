@@ -5776,6 +5776,7 @@ class rocm_aiter_ops:
                 "flydsl_mhc_post_pre_rmsnorm_preferred",
                 "flydsl_mhc_post_collapse_rmsnorm",
                 "flydsl_mhc_post_collapse_rmsnorm_supported",
+                "warmup_flydsl_mhc_post_pre_rmsnorm",
             ):
                 getattr(flydsl, name)
             return flydsl
@@ -5789,7 +5790,7 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def flydsl_mhc(cls) -> Any | None:
+    def flydsl_mhc_ops(cls) -> Any | None:
         """`aiter.ops.flydsl` with its mHC seam and tail kernels if
         VLLM_ROCM_USE_AITER_FLYDSL_MHC is on, this is gfx950 and they import,
         else None."""
