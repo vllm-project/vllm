@@ -15,6 +15,8 @@ from dataclasses import dataclass
 import regex as re
 import torch
 
+from . import use_sm100_kernels
+
 _SOURCE = os.path.join(os.path.dirname(__file__), "trtllm_bmm.cu")
 
 
@@ -122,6 +124,9 @@ def expert_plan(
     # Tiles if the local rows fill as many experts as possible, then pile up.
     rows = tokens * topk
     max_ctas = min(num_experts, rows) + (rows - min(num_experts, rows)) // tile
+    if not use_sm100_kernels():
+        # No TRT-LLM-gen kernels (Hopper): only `route`'s layout.
+        return ExpertPlan(tile, max_ctas, (0, 0))
     names = configs(nvfp4, tile)
     kernels = []
     for key, (n, k) in zip(_KERNELS[(nvfp4, tile)], shapes):

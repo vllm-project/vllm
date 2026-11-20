@@ -23,6 +23,7 @@ import regex as re
 import torch
 import zmq
 
+from vllm.config import get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -74,6 +75,7 @@ from vllm.distributed.nixl_utils import (
     NixlWrapper,
     check_nixl_version,
     nixl_agent_config,
+    nixl_thread_sync_t,
     nixlRemoteDisconnectError,
 )
 from vllm.distributed.parallel_state import (
@@ -82,6 +84,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -97,6 +100,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
 )
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -186,6 +190,9 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+
+    # Default UCX `num_threads` (kv_connector_extra_config can override it).
+    _DEFAULT_NUM_THREADS: int = 4
 
     # Push additionally supports MLA HMA and packed PP; attention-only HMA
     # pull uses the shared layer pairing without these paths.
@@ -453,6 +460,33 @@ class NixlBaseConnectorWorker:
             )
             regions.add(i)
         return regions
+
+    def _compat_backend_name(self) -> str:
+        """Attention backend name folded into the compatibility hash.
+
+        Backends of indexer caches do not count: a model may build indexers on
+        some layers only, so a PP stage may start on, or hold only, layers
+        without one.
+        """
+        indexer_layers = [
+            name
+            for group in self.kv_cache_config.kv_cache_groups
+            for name, spec in group.kv_cache_specs.items()
+            if isinstance(spec, AttentionSpec)
+            and spec.cache_role is SparseCacheRole.INDEXER
+        ]
+        layer_type = cast(type[Any], AttentionLayerBase)
+        indexer_backends = {
+            layer.get_attn_backend()
+            for layer in get_layers_from_vllm_config(
+                self.vllm_config, layer_type, indexer_layers
+            ).values()
+        }
+        backends = [b for b in self.attn_backends if b not in indexer_backends]
+        if self._supports_pp_hma and self._has_packed_cache:
+            # PP can reorder the same backends across stages of a packed model.
+            return ",".join(sorted({backend.get_name() for backend in backends}))
+        return backends[0].get_name()
 
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         self.region_members: list[list[str]] = region_layers
@@ -827,7 +861,7 @@ class NixlBaseConnectorWorker:
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", 4
+            "num_threads", self._DEFAULT_NUM_THREADS
         )
         if nixl_agent_config is None:
             config = None
@@ -849,6 +883,10 @@ class NixlBaseConnectorWorker:
         )
         if sleep_mode or explicit_backends:
             config = nixl_agent_config(backends=[], capture_telemetry=True)
+        if config is not None and nixl_thread_sync_t is not None:
+            # Handshake threads load remote agents while others post, and NIXL
+            # only locks the agent given a sync mode. RW keeps posting concurrent.
+            config.sync_mode = nixl_thread_sync_t.NIXL_THREAD_SYNC_RW
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
             # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
@@ -1641,15 +1679,9 @@ class NixlBaseConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
-        backend_name = self.backend_name
-        if self._supports_pp_hma and self._has_packed_cache:
-            # PP can reorder the same backends across stages of a packed model.
-            backend_name = ",".join(
-                sorted({backend.get_name() for backend in self.attn_backends})
-            )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
-            backend_name,
+            self._compat_backend_name(),
             transfer_mode=self._TRANSFER_MODE,
         )
 
@@ -3587,8 +3619,11 @@ class NixlBaseConnectorWorker:
         if not self._reqs_to_send:
             return
         now = time.perf_counter()
+        # Blocks still being sent stay leased until their transfer ends.
         expired = [
-            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+            req_id
+            for req_id, expires in self._reqs_to_send.items()
+            if now >= expires and not self._has_inflight_send(req_id)
         ]
         for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
@@ -3603,6 +3638,10 @@ class NixlBaseConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+    def _has_inflight_send(self, req_id: str) -> bool:
+        """Whether this worker is still sending the request's KV blocks."""
+        return False
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -4217,9 +4256,16 @@ class NixlBaseConnectorWorker:
             return
 
         now = time.perf_counter()
+        stale = [
+            eid
+            for eid, last_active in list(self._engine_last_active.items())
+            if now - last_active > self._engine_ttl
+        ]
+        if not stale:
+            return
         busy = self._engines_with_inflight_transfers()
-        for eid, last_active in list(self._engine_last_active.items()):
-            if now - last_active > self._engine_ttl and eid not in busy:
+        for eid in stale:
+            if eid not in busy:
                 self._cleanup_remote_engine(eid)
 
     def _engines_with_inflight_transfers(self) -> set[EngineId]:
@@ -4231,7 +4277,8 @@ class NixlBaseConnectorWorker:
         """
         return {
             meta.remote.engine_id
-            for req_id in self._recving_transfers
+            # Snapshot: push evicts from its writer thread too.
+            for req_id in list(self._recving_transfers)
             if (meta := self._recving_metadata.get(req_id)) is not None
             and meta.remote is not None
         }
@@ -4269,11 +4316,13 @@ class NixlBaseConnectorWorker:
         now = time.perf_counter()
         for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
             if engine_id in self._disconnected_remote_engines:
-                # The metadata may still be loaded; the connection is not.
-                logger.warning(
-                    "NIXL lost the connection to remote engine %s.", engine_id
-                )
-                self._mark_remote_engine_invalid(engine_id, now)
+                # Skip an engine whose agents were already removed (no NIXL state left).
+                if engine_id in self._remote_agents:
+                    # The metadata may still be loaded; the connection is not.
+                    logger.warning(
+                        "NIXL lost the connection to remote engine %s.", engine_id
+                    )
+                    self._mark_remote_engine_invalid(engine_id, now)
                 continue
             agents = self._remote_agents.get(engine_id, {}).values()
             try:
