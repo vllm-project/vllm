@@ -7,9 +7,18 @@ import math
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope
 from vllm.triton_utils import tl, triton
+
+
+@eager_break_during_capture
+def _bind_token_rope(
+    rotary_emb: nn.Module, rows: tuple[torch.Tensor, torch.Tensor]
+) -> None:
+    """Keep this graph's rows alive and restore them before eager indexers."""
+    rotary_emb._hy4_token_rope = rows
 
 
 def set_token_rope(
@@ -34,7 +43,7 @@ def set_token_rope(
     cache = rotary_emb._match_cos_sin_cache_dtype(x)
     rows = cache[positions].gather(0, sel.expand(1, num_tokens, -1))[0]
     arange = torch.arange(num_tokens, device=positions.device)
-    rotary_emb._hy4_token_rope = (arange, rows)
+    _bind_token_rope(rotary_emb, (arange, rows))
 
 
 def token_rope(
