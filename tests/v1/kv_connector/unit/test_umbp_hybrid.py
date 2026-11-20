@@ -21,6 +21,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_scheduler_output,
     mori_has_umbp,
 )
+from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
     scheduler as umbp_scheduler,
 )
@@ -48,14 +49,24 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
     SlidingWindowManager,
 )
-from vllm.v1.kv_cache_interface import KVCacheTensor, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheGroup,
+    KVCacheTensor,
+    MLAAttentionSpec,
+    SparseCacheRole,
+)
+from vllm.v1.request import Request
 
 mori_available = importlib.util.find_spec("mori") is not None
 
@@ -214,6 +225,65 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
 
     assert [plan.block_id for plan in plans if plan.group_id == 0] == [1, 2, 3, 4]
     assert [plan.block_id for plan in plans if plan.group_id == 1] == [6, 8]
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+def test_unsharded_draft_keeps_replay_window(dcp_size):
+    """Target DCP must not change the draft pages retained before a checkpoint."""
+    config = VllmConfig(
+        cache_config=CacheConfig(
+            block_size=64, enable_prefix_caching=True, prefix_match_unit=128
+        ),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=8,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="UMBPStoreConnector", kv_role="kv_both"
+        ),
+    )
+    target = AttentionSpec(
+        block_size=9216 // dcp_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    draft = AttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        dcp_sharded=False,
+    )
+    cache = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroup(
+                {"target": target},
+                FullAttentionManager.config(),
+                target.block_size,
+                dcp_sharded=True,
+            ),
+            KVCacheGroup(
+                {"draft": draft},
+                SlidingWindowManager.config(sliding_window=2048),
+                draft.block_size,
+                dcp_sharded=False,
+            ),
+        ],
+        prefix_cache_retention_interval=0,
+    )
+    scheduler = UMBPStoreConnectorScheduler(config, cache, None, None)
+    request = Request("replay", [42] * 10191, SamplingParams(max_tokens=8), None)
+    try:
+        mask = scheduler._store_mask(request, 1, range(8))
+        assert scheduler.block_size == 9216
+        # The 2048-token window ending at 9216 spans draft pages 6 and 7.
+        assert mask is not None and mask[6] and mask[7], mask
+    finally:
+        scheduler.close()
 
 
 def test_single_sliding_window_stores_a_replayable_tail():
