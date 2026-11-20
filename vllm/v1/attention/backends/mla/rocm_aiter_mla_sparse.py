@@ -262,9 +262,12 @@ def _exceeds_aiter_kv_addressing(kv: torch.Tensor) -> bool:
     """AITER's MLA decode kernels address KV rows with 32-bit byte offsets.
 
     A block-outermost cache (BLHNC) gives every layer a view that spans the
-    whole allocation, so rows past 4 GiB from the layer's base would read as
-    zeros. The ragged Triton kernels use 64-bit row offsets.
+    whole allocation, so rows past 4 GiB from the layer's base would read the
+    wrong KV rows (32-bit offsets wrap). The ragged Triton kernels use 64-bit
+    row offsets.
     """
+    # TODO: Remove this route once the pinned AITER includes ROCm/aiter#5893
+    # (gfx950) and ROCm/aiter#6277/#6223 (gfx942).
     return kv.shape[0] * kv.stride(0) * kv.element_size() > 2**32
 
 
@@ -1243,8 +1246,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     q.shape[1],
                     min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
                 )
-                # The split-KV kernel writes the full head width, so it only
-                # serves rope-free rows whose output is the latent.
+                # The split-KV reduce needs a power-of-two head width, so it
+                # only serves rope-free rows.
                 if attn_metadata.num_decode_tokens == num_tokens
                 and q.shape[-1] == self.kv_lora_rank
                 else 1
