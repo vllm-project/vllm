@@ -21,10 +21,17 @@ def test_nemotron_h_lm_head_receives_quant_config():
     mock_vllm_config.scheduler_config = Mock()
     mock_vllm_config.quant_config = mock_quant_config
 
+    mock_pp_group = Mock()
+    mock_pp_group.is_last_rank = True
+
     with (
         patch("vllm.model_executor.models.nemotron_h.NemotronHModel") as MockModel,
         patch("vllm.model_executor.models.nemotron_h.ParallelLMHead") as MockLMHead,
         patch("vllm.model_executor.models.nemotron_h.LogitsProcessor"),
+        patch(
+            "vllm.model_executor.models.nemotron_h.get_pp_group",
+            return_value=mock_pp_group,
+        ),
     ):
         MockModel.return_value.make_empty_intermediate_tensors = Mock()
         MockModel.return_value.has_moe = False
