@@ -100,6 +100,7 @@ def _export_vmm_test_model(connection):
         )
 
 
+@create_new_process_for_each_test()
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="VMM backend requires CUDA or ROCm"
 )
@@ -180,6 +181,7 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
         process.close()
 
 
+@create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="VMM backend requires CUDA or ROCm"
