@@ -10,6 +10,7 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.renderers.hf import rebuild_mm_uuids_from_mm_data
 
 from .utils import assert_mm_uuids
 
@@ -151,6 +152,41 @@ def test_parse_chat_messages_image_vision_chunk_with_uuid(
     assert conversation == expected_conversation
     _assert_mm_data_is_vision_chunk_input(mm_data, 1)
     assert_mm_uuids(mm_uuids, 1, expected_uuids=[image_uuid], modality="vision_chunk")
+
+
+def test_rebuild_vision_chunk_uuids_keeps_missing_uuids(
+    kimi_k2_5_model_config,
+    image_url,
+):
+    image_uuid = "image_123"
+    messages: list[ChatCompletionMessageParam] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "uuid": image_uuid,
+                },
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Compare these images."},
+            ],
+        }
+    ]
+
+    _, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+    assert mm_data is not None and mm_uuids is not None
+
+    mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
+
+    _assert_mm_data_is_vision_chunk_input(mm_data, 2)
+    assert_mm_uuids(
+        mm_uuids, 2, expected_uuids=[image_uuid, None], modality="vision_chunk"
+    )
 
 
 def test_parse_chat_messages_video_vision_chunk_with_uuid(
