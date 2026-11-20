@@ -60,6 +60,23 @@ pub enum LogprobsError {
     PromptLogprobStartOutOfRange { max: u32 },
 }
 
+impl LogprobsError {
+    /// The canonical request parameter name for this validation error.
+    pub fn param(&self) -> &'static str {
+        match self {
+            Self::InvalidCount { parameter, .. } | Self::TooManyCount { parameter, .. } => {
+                parameter
+            }
+            Self::TooManyTokenIds { .. } | Self::TokenIdsMismatch { .. } => "logprob_token_ids",
+            Self::EmptyPromptLogprobTokenIds
+            | Self::PromptLogprobTokenIdsOutOfVocab { .. }
+            | Self::PromptLogprobRowsMismatch { .. } => "prompt_logprob_token_ids",
+            Self::PromptLogprobStartWithoutPromptLogprobs
+            | Self::PromptLogprobStartOutOfRange { .. } => "prompt_logprob_start",
+        }
+    }
+}
+
 /// Validate logprobs count sampling parameters.
 pub(super) fn validate_logprobs(
     logprobs: Option<i32>,

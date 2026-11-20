@@ -14,11 +14,24 @@ pub enum SamplingParamsError {
         value: f32,
         expected: &'static str,
     },
+    #[error("max_tokens must be at least 1, got 0")]
+    InvalidMaxTokens,
     #[error(
         "routed_experts_prompt_start must be between 0 and the prompt length \
          ({prompt_len}), inclusive, got {value}"
     )]
     RoutedExpertsPromptStartOutOfRange { value: u32, prompt_len: u32 },
+}
+
+impl SamplingParamsError {
+    /// The canonical request parameter name for this validation error.
+    pub fn param(&self) -> &'static str {
+        match self {
+            Self::NotFinite { parameter, .. } | Self::OutOfRange { parameter, .. } => parameter,
+            Self::InvalidMaxTokens => "max_tokens",
+            Self::RoutedExpertsPromptStartOutOfRange { .. } => "routed_experts_prompt_start",
+        }
+    }
 }
 
 fn validate_frequency_penalty(value: f32) -> Result<(), SamplingParamsError> {

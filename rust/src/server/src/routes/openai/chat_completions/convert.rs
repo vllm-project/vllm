@@ -1923,11 +1923,15 @@ mod tests {
             [
                 InvalidRequest {
                     message: "tool_choice function `f` was not found in the available tools",
-                    param: None,
+                    param: Some(
+                        "tool_choice",
+                    ),
                 },
                 InvalidRequest {
                     message: "tool_choice requires at least one available tool",
-                    param: None,
+                    param: Some(
+                        "tool_choice",
+                    ),
                 },
                 InvalidRequest {
                     message: "Only function tools are supported in allowed_tools.",

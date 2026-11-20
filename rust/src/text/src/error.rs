@@ -124,12 +124,35 @@ impl Error {
         matches!(self, Self::Llm(LlmError::Unavailable { .. }))
     }
 
-    /// The request parameter a validation error refers to, reported as the
-    /// `param` of the OpenAI error object.
+    /// The canonical request parameter a validation error refers to, reported
+    /// as the `param` of the OpenAI error object.
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::EmptyPromptTokenIds { .. } | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => {
+                Some("prompt")
+            }
+            Self::EmptyStopString { .. } | Self::StopStringsRequireDetokenize { .. } => {
+                Some("stop")
+            }
+            Self::InvalidCacheSalt => Some("cache_salt"),
+            Self::Logprobs(error) => Some(error.param()),
+            Self::TokenIds(error) => error.param(),
+            Self::SamplingParams(error) => Some(error.param()),
+            Self::InvalidThinkingTokenBudget => Some("thinking_token_budget"),
+            Self::TruncatePromptTokensExceedsMaxModelLen { .. }
+            | Self::InvalidTruncatePromptTokens { .. }
+            | Self::TruncateUnsupportedWithMultimodal => Some("truncate_prompt_tokens"),
+            Self::InvalidRepetitionDetection { .. } => Some("repetition_detection"),
             Self::Llm(LlmError::PromptLogprobsUnsupported { parameter }) => Some(parameter),
+            Self::Llm(LlmError::EngineCoreClient(EngineCoreError::InvalidDataParallelRank {
+                ..
+            })) => Some("data_parallel_rank"),
+            Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => {
+                Some("structured_outputs")
+            }
+            // Cross-field checks (`MinTokensExceedsMaxTokens`,
+            // `GreedyParallelSampling`) and non-field errors keep `None`.
             _ => None,
         }
     }

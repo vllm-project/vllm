@@ -403,7 +403,14 @@ fn rejects_continue_final_message() {
     };
 
     let error = renderer().render(&request).unwrap_err();
-    assert!(matches!(error, Error::ChatTemplate(_)));
+    assert!(matches!(
+        error,
+        Error::UnsupportedContinueFinalMessage {
+            renderer: "Inkling"
+        }
+    ));
+    assert!(error.is_request_validation_error());
+    assert_eq!(error.param(), Some("continue_final_message"));
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 
