@@ -16,6 +16,13 @@ if TYPE_CHECKING:
     from vllm.v1.hisparse.runtime import HiSparseRuntime
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
+_HISPARSE_OP_NAMES = (
+    "hisparse_resolve_residency",
+    "hisparse_invalidate_written_slots",
+    "hisparse_gather_plan",
+    "hisparse_gather_compact",
+)
+
 
 class HiSparseBackend:
     supports_shared_host_pool = False
@@ -29,6 +36,15 @@ class HiSparseBackend:
 
     def unpin_tensor(self, tensor: torch.Tensor) -> None:
         raise NotImplementedError
+
+    def allocate_host_pool(
+        self, size: int
+    ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+        """Return (pool, registered range, tensors to unpin on release)."""
+        from vllm.v1.hisparse.runtime import allocate_pinned_host_pool
+
+        pool, registered = allocate_pinned_host_pool(size)
+        return pool, registered, [registered]
 
     def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
         raise NotImplementedError
@@ -119,6 +135,51 @@ class CUDAHiSparseBackend(HiSparseBackend):
 
     def is_current_stream_capturing(self) -> bool:
         return torch.cuda.is_current_stream_capturing()
+
+    def swap_blocks_batch(
+        self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor
+    ) -> None:
+        from vllm import _custom_ops as ops
+
+        ops.swap_blocks_batch(src, dst, sizes)
+
+
+class XPUHiSparseBackend(HiSparseBackend):
+    supports_shared_host_pool = False
+
+    def check_available(self) -> None:
+        if not all(hasattr(torch.ops._C_cache_ops, n) for n in _HISPARSE_OP_NAMES):
+            raise RuntimeError(
+                "HiSparse on XPU requires the hisparse_* ops from vllm-xpu-kernels."
+            )
+
+    def pin_tensor(self, tensor: torch.Tensor) -> None:
+        raise NotImplementedError("Shared host pools are not supported on XPU yet.")
+
+    def unpin_tensor(self, tensor: torch.Tensor) -> None:
+        raise NotImplementedError("Shared host pools are not supported on XPU yet.")
+
+    def allocate_host_pool(
+        self, size: int
+    ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+        # Kernels read the pool directly, so it must be USM host memory.
+        pool = torch.empty(size, dtype=torch.int8, pin_memory=True)
+        return pool, pool, []
+
+    def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
+        return torch.ops._C_cache_ops
+
+    def create_ipc_event(self) -> Any:
+        return torch.xpu.Event(interprocess=True)
+
+    def export_event(self, event: Any) -> Any:
+        return event.ipc_handle()
+
+    def import_event(self, device: torch.device, handle: Any) -> Any:
+        return torch.xpu.Event.from_ipc_handle(device, handle)
+
+    def is_current_stream_capturing(self) -> bool:
+        return torch.xpu.is_current_stream_capturing()
 
     def swap_blocks_batch(
         self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor

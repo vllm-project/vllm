@@ -141,6 +141,10 @@ class XPUPlatform(Platform):
     ]
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        return "vllm.v1.hisparse.backend.XPUHiSparseBackend"
+
+    @classmethod
     def import_kernels(cls) -> None:
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
