@@ -471,6 +471,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         scoring_data = self.valid_inputs_online(request)
+        self._validate_chat_template(
+            request.chat_template,
+            request.chat_template_kwargs,
+            self.trust_request_chat_template,
+        )
+
         data_1 = scoring_data.data_1
         data_2 = scoring_data.data_2
         num_requests = len(data_2)
@@ -607,7 +613,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
             target_prompt.update(engine_prompt_extras)
 
-        engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
+        engine_input = self.renderer.process_for_engine(
+            engine_prompt, arrival_time, skip_mm_cache=render_params["skip_mm_cache"]
+        )
 
         return PoolingEngineInput(
             prompts=engine_input,
@@ -780,7 +788,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         chat_template_kwargs = chat_params.chat_template_kwargs
 
         content_format = chat_params.chat_template_content_format
-        if content_format == "auto":
+        if chat_template is None or content_format == "auto":
             content_format = "string"
         content_format = cast(ChatTemplateContentFormat, content_format)
 

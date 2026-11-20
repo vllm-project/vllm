@@ -9,6 +9,7 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import LateChunkingMetadata
@@ -20,7 +21,6 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
 
-from ...exceptions import VLLMValidationError
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -154,7 +154,7 @@ class OfflineInputsContext:
     continue_final_message: bool | None = None
     chat_template_kwargs: dict[str, Any] | None = None
 
-    # mm_kwargs:
+    # mm_params:
     skip_mm_cache: bool = False
     cache_salt: str | None = None
     media_io_kwargs: dict[str, dict[str, Any]] | None = None

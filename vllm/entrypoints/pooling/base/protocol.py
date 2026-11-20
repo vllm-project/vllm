@@ -226,16 +226,16 @@ class CompletionRequestMixin(OpenAIBaseModel):
 
 class ChatRequestOptionsMixin(OpenAIBaseModel):
     # --8<-- [start:chat-extra-params]
-    add_generation_prompt: bool = Field(
-        default=False,
+    add_generation_prompt: bool | None = Field(
+        default=None,
         description=(
             "If true, the generation prompt will be added to the chat template. "
             "This is a parameter used by chat template in tokenizer config of the "
             "model."
         ),
     )
-    continue_final_message: bool = Field(
-        default=False,
+    continue_final_message: bool | None = Field(
+        default=None,
         description=(
             "If this is set, the chat will be formatted so that the final "
             "message in the chat is open-ended, without any EOS tokens. The "
@@ -307,15 +307,19 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
     ) -> ChatParams:
+        explicit_flags = dict(self.chat_template_kwargs or {})
+
+        if self.add_generation_prompt is not None:
+            explicit_flags["add_generation_prompt"] = self.add_generation_prompt
+        if self.continue_final_message is not None:
+            explicit_flags["continue_final_message"] = self.continue_final_message
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                ),
+                explicit_flags,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
