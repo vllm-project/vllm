@@ -13,18 +13,11 @@ if TYPE_CHECKING:
 def num_offload_blocks(
     kv_cache_config: KVCacheConfig, capacity_bytes: int, bytes_per_block: int
 ) -> int:
-    """The offload pool size in blocks, the same on every worker and the
-    scheduler: as many blocks as fit in `capacity_bytes` on the pipeline stage
-    with the largest blocks. Without `pipeline_stages`, the caller's
-    `bytes_per_block` (its own stage's) sizes the pool.
-    """
+    """How many blocks of the pipeline stage with the largest blocks fit in
+    `capacity_bytes`; without `pipeline_stages`, blocks of `bytes_per_block`."""
     largest = max(
         (stage.bytes_per_block for stage in kv_cache_config.pipeline_stages),
         default=bytes_per_block,
-    )
-    assert bytes_per_block <= largest, (
-        f"Blocks of {bytes_per_block} bytes exceed the largest pipeline "
-        f"stage's {largest}"
     )
     return max(1, capacity_bytes // largest)
 
