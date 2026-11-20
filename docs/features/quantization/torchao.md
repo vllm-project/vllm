@@ -1,5 +1,11 @@
 # TorchAO
 
+!!! warning
+    The TorchAO backend is deprecated and will be removed in v0.37
+    ([RFC #69030](https://github.com/vllm-project/vllm/issues/69030)). Use
+    [online quantization](online.md), or a compressed-tensors, GPTQ, AWQ or FP8
+    checkpoint instead.
+
 TorchAO is an architecture optimization library for PyTorch, it provides high performance dtypes, optimization techniques and kernels for inference and training, featuring composability with native PyTorch features like torch.compile, FSDP etc.. Some benchmark numbers can be found [here](https://github.com/pytorch/ao/tree/main/torchao/quantization#benchmarks).
 
 We recommend installing the latest torchao nightly with
