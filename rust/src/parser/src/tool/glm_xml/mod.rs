@@ -61,7 +61,7 @@ enum GlmEvent {
 
 /// Tool parser core for GLM XML-style tool calls.
 struct GlmXmlToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: GlmMode,
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
@@ -72,7 +72,7 @@ impl GlmXmlToolParser {
     /// Create a GLM XML tool parser with a function-name separator.
     fn new(tools: &[Tool], separator: Separator) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: GlmMode::Text,
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
@@ -84,7 +84,7 @@ impl GlmXmlToolParser {
     fn apply_event(&mut self, event: GlmEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             GlmEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             GlmEvent::ToolCallStart => {
                 self.mode = GlmMode::ToolCall {
@@ -111,20 +111,20 @@ impl GlmXmlToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = GlmMode::Text;
         self.emitted_tool_count = 0;
         std::mem::take(&mut self.buffer)
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_glm_event(input, &mut self.mode, self.separator)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -132,9 +132,9 @@ impl GlmXmlToolParser {
 
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
-        if !self.buffer.is_empty() {
+        if !self.buffer.text.is_empty() {
             match self.mode {
-                GlmMode::Text => output.push_text(&self.buffer),
+                GlmMode::Text => output.push_text(self.buffer.take()),
                 GlmMode::ToolCall { .. } => {
                     return Err(ToolParserError::IncompleteToolCall { parser: "GLM MoE" });
                 }

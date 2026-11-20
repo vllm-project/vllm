@@ -35,7 +35,7 @@ impl CombinedParser {
 
     fn parse_tool(&mut self, content: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(tool) = self.tool.as_mut() else {
-            output.push_text(content.text);
+            output.push_text(content);
             return Ok(());
         };
 
@@ -161,8 +161,8 @@ impl UnifiedParser for CombinedParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
-        self.tool.as_mut().map_or_else(String::new, |parser| parser.reset())
+    fn reset(&mut self) -> DecodedText {
+        self.tool.as_mut().map_or_else(DecodedText::default, |parser| parser.reset())
     }
 }
 
@@ -353,7 +353,7 @@ mod tests {
             chunk: DecodedText,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
-            output.push_text(chunk.text);
+            output.push_text(chunk);
             Ok(())
         }
 
@@ -361,8 +361,8 @@ mod tests {
             Ok(crate::tool::ToolParserOutput::default())
         }
 
-        fn reset(&mut self) -> String {
-            String::new()
+        fn reset(&mut self) -> DecodedText {
+            DecodedText::default()
         }
     }
 
@@ -394,8 +394,8 @@ mod tests {
             Ok(crate::tool::ToolParserOutput::default())
         }
 
-        fn reset(&mut self) -> String {
-            String::new()
+        fn reset(&mut self) -> DecodedText {
+            DecodedText::default()
         }
     }
 
@@ -406,14 +406,20 @@ mod tests {
         let mut parser = CombinedParser::new(Some(reasoning), None);
 
         let output = collect(&mut parser, &["<think>work</think>answer"]);
+        let mut reasoning = decode_chunks(tokenizer.as_ref(), &["work"]).remove(0);
+        for source in &mut reasoning.sources {
+            source.token_index += 1;
+        }
+        let mut answer = decode_chunks(tokenizer.as_ref(), &["answer"]).remove(0);
+        for source in &mut answer.sources {
+            source.token_index += 6;
+        }
 
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Reasoning(
-                    decode_chunks(tokenizer.as_ref(), &["work"]).remove(0)
-                ),
-                UnifiedParserEvent::Text("answer".to_string()),
+                UnifiedParserEvent::Reasoning(reasoning),
+                UnifiedParserEvent::Text(answer),
             ]
         );
     }
@@ -425,6 +431,7 @@ mod tests {
         let mut parser = CombinedParser::new(Some(reasoning), None);
 
         let chunk = |token_id: u32, text: &str| DecodedText {
+            sources: Default::default(),
             text: text.to_string(),
             attributions: [TokenAttribution {
                 token_id,
@@ -461,6 +468,7 @@ mod tests {
             output.events,
             vec![
                 UnifiedParserEvent::Reasoning(DecodedText {
+                    sources: Default::default(),
                     text: "reason".to_string(),
                     attributions: [TokenAttribution {
                         token_id: 2,
@@ -469,7 +477,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 }),
-                UnifiedParserEvent::Text("answer".to_string()),
+                UnifiedParserEvent::Text(chunk(4, "answer")),
             ]
         );
     }
@@ -513,7 +521,7 @@ mod tests {
         assert!(matches!(error, crate::unified::UnifiedParserError::Tool(_)));
         assert_eq!(
             output.events,
-            vec![UnifiedParserEvent::Text("committed".to_string())]
+            vec![UnifiedParserEvent::Text("committed".into())]
         );
     }
 

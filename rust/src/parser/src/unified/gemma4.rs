@@ -142,7 +142,7 @@ impl Gemma4UnifiedParser {
         output: &mut UnifiedParserOutput,
     ) -> Result<()> {
         match event {
-            Gemma4Event::Text => output.push_text(piece.text),
+            Gemma4Event::Text => output.push_text(piece),
             Gemma4Event::Reasoning => output.push_reasoning(piece),
             // Marker and tool-syntax spans are drained and dropped with their tokens.
             Gemma4Event::ReasoningStart => self.mode = Gemma4Mode::Reasoning,
@@ -204,23 +204,22 @@ impl Gemma4UnifiedParser {
         };
     }
 
-    fn reset(&mut self) -> String {
-        let buffer = self.buffer.take().text;
-        let raw = match std::mem::replace(&mut self.mode, Gemma4Mode::Text) {
-            Gemma4Mode::Text => buffer,
-            Gemma4Mode::Reasoning => {
-                format!("{REASONING_START}{buffer}")
-            }
-            Gemma4Mode::Header => {
-                format!("{TOOL_CALL_START}{buffer}")
-            }
+    fn reset(&mut self) -> DecodedText {
+        let buffer = self.buffer.take();
+        let prefix = match std::mem::replace(&mut self.mode, Gemma4Mode::Text) {
+            Gemma4Mode::Text => String::new(),
+            Gemma4Mode::Reasoning => REASONING_START.to_string(),
+            Gemma4Mode::Header => TOOL_CALL_START.to_string(),
             Gemma4Mode::ToolCall { name, body, .. } => {
                 let opener = body.opener();
-                format!("{TOOL_CALL_START}{CALL_PREFIX}{name}{opener}{buffer}")
+                format!("{TOOL_CALL_START}{CALL_PREFIX}{name}{opener}")
             }
         };
         self.mode = Gemma4Mode::Text;
         self.emitted_tool_count = 0;
+        // The fallback prefix is reconstructed from state, not retained bytes.
+        let mut raw = DecodedText::unattributed(prefix);
+        raw.append(buffer);
         raw
     }
 }
@@ -263,7 +262,7 @@ impl UnifiedParser for Gemma4UnifiedParser {
         let mut output = UnifiedParserOutput::default();
 
         match &self.mode {
-            Gemma4Mode::Text => output.push_text(self.buffer.take().text),
+            Gemma4Mode::Text => output.push_text(self.buffer.take()),
             Gemma4Mode::Reasoning => output.push_reasoning(self.buffer.take()),
             Gemma4Mode::Header | Gemma4Mode::ToolCall { .. } => {
                 return Err(UnifiedParserError::IncompleteToolCall { parser: "Gemma4" });
@@ -274,7 +273,7 @@ impl UnifiedParser for Gemma4UnifiedParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         Gemma4UnifiedParser::reset(self)
     }
 }
@@ -637,7 +636,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(text) => Some(text.as_str()),
+                    UnifiedParserEvent::Text(text) => Some(text.text.as_str()),
                     UnifiedParserEvent::Reasoning(_) | UnifiedParserEvent::ToolCall(_) => None,
                 })
                 .collect()
@@ -824,7 +823,7 @@ mod tests {
 
         let error = parser.parse_chunk(&input).unwrap_err();
         assert!(error.to_report_string().contains("parser recursion limit exceeded"));
-        assert_eq!(parser.reset(), input);
+        assert_eq!(parser.reset().text, input);
     }
 
     #[test]
@@ -928,7 +927,7 @@ mod tests {
         let input = "<|tool_call>call:set(flag:true}<tool_call|>";
 
         let _error = parser.parse_chunk(input).unwrap_err();
-        assert_eq!(parser.reset(), input);
+        assert_eq!(parser.reset().text, input);
     }
 
     #[test]
@@ -1278,7 +1277,7 @@ mod tests {
         let raw = parser.reset();
 
         assert_eq!(
-            raw,
+            raw.text,
             "<|tool_call>call:write_file{content:<|\"|>hello world<|\"|>"
         );
     }
@@ -1291,7 +1290,7 @@ mod tests {
         let _error = parser.parse_chunk(input).unwrap_err();
         let raw = parser.reset();
 
-        assert_eq!(raw, input);
+        assert_eq!(raw.text, input);
     }
 
     #[test]
@@ -1299,6 +1298,7 @@ mod tests {
         let mut parser = test_parser();
 
         let chunk = |token_id: u32, text: &str| DecodedText {
+            sources: Default::default(),
             text: text.to_string(),
             attributions: [TokenAttribution {
                 token_id,
@@ -1310,6 +1310,7 @@ mod tests {
         // A zero-width token inside the reasoning channel counts as reasoning,
         // matching Python's current-state rule.
         let zero_width = |token_id: u32| DecodedText {
+            sources: Default::default(),
             text: String::new(),
             attributions: [TokenAttribution {
                 token_id,

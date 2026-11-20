@@ -73,7 +73,7 @@ enum DeepSeekJsonEvent {
 
 /// Tool parser core for DeepSeek JSON-argument tool calls.
 struct DeepSeekJsonToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: DeepSeekJsonMode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -84,7 +84,7 @@ impl DeepSeekJsonToolParser {
     /// Create a parser for one DeepSeek JSON-argument format.
     fn new(format: DeepSeekJsonFormat) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: DeepSeekJsonMode::Text,
             active_tool_index: None,
             emitted_tool_count: 0,
@@ -100,7 +100,7 @@ impl DeepSeekJsonToolParser {
     ) -> Result<()> {
         match event {
             DeepSeekJsonEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             DeepSeekJsonEvent::ToolCallsStart => self.mode = DeepSeekJsonMode::ToolBlock,
             DeepSeekJsonEvent::ToolCallStart => self.mode = DeepSeekJsonMode::Header,
@@ -127,7 +127,7 @@ impl DeepSeekJsonToolParser {
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
-                    arguments: self.buffer[..consumed_len].to_string(),
+                    arguments: self.buffer.text[..consumed_len].to_string(),
                 });
             }
             DeepSeekJsonEvent::ToolCallEnd => {
@@ -144,13 +144,13 @@ impl DeepSeekJsonToolParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_deepseek_json_event(input, &mut self.mode, self.format)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -159,7 +159,7 @@ impl DeepSeekJsonToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            DeepSeekJsonMode::Text => output.push_text(&self.buffer),
+            DeepSeekJsonMode::Text => output.push_text(self.buffer.take()),
             DeepSeekJsonMode::ToolBlock | DeepSeekJsonMode::Done => {}
             DeepSeekJsonMode::Header | DeepSeekJsonMode::Arguments { .. } => {
                 return Err(ToolParserError::IncompleteToolCall {
@@ -171,7 +171,7 @@ impl DeepSeekJsonToolParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = DeepSeekJsonMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;

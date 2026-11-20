@@ -58,7 +58,7 @@ enum MinimaxM2Event {
 ///
 /// Arguments are emitted only after a full `<invoke>` block is parsed.
 pub struct MinimaxM2ToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: MinimaxM2Mode,
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
@@ -68,7 +68,7 @@ impl MinimaxM2ToolParser {
     /// Create a MiniMax M2 tool parser.
     fn new(tools: &[Tool]) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: MinimaxM2Mode::Text,
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
@@ -79,7 +79,7 @@ impl MinimaxM2ToolParser {
     fn apply_event(&mut self, event: MinimaxM2Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             MinimaxM2Event::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             MinimaxM2Event::ToolBlockStart => {
                 self.mode = MinimaxM2Mode::ToolBlock {
@@ -106,7 +106,7 @@ impl MinimaxM2ToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = MinimaxM2Mode::Text;
         self.emitted_tool_count = 0;
         std::mem::take(&mut self.buffer)
@@ -158,13 +158,13 @@ impl ToolParser for MinimaxM2ToolParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_minimax_m2_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -174,7 +174,7 @@ impl ToolParser for MinimaxM2ToolParser {
         let mut output = ToolParserOutput::default();
         match self.mode {
             MinimaxM2Mode::Text => {
-                output.push_text(&self.buffer);
+                output.push_text(self.buffer.take());
             }
             MinimaxM2Mode::ToolBlock { .. } => {
                 return Err(ToolParserError::IncompleteToolCall {
@@ -187,7 +187,7 @@ impl ToolParser for MinimaxM2ToolParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         MinimaxM2ToolParser::reset(self)
     }
 }

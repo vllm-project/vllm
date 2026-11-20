@@ -36,7 +36,7 @@ pub type Result<T> = std::result::Result<T, UnifiedParserError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnifiedParserEvent {
     /// Normal assistant-visible text.
-    Text(String),
+    Text(DecodedText),
     /// Reasoning text hidden from the normal content stream.
     ///
     /// Carries the attributions of the generated tokens that produced it, so
@@ -56,15 +56,16 @@ pub struct UnifiedParserOutput {
 
 impl UnifiedParserOutput {
     /// Append one visible text event if `delta` is non-empty.
-    pub fn push_text(&mut self, delta: impl AsRef<str> + Into<String>) {
-        if delta.as_ref().is_empty() {
+    pub fn push_text(&mut self, delta: impl Into<DecodedText>) {
+        let delta = delta.into();
+        if delta.text.is_empty() {
             return;
         }
         if let Some(UnifiedParserEvent::Text(last_text)) = self.events.last_mut() {
-            last_text.push_str(delta.as_ref());
+            last_text.append(delta);
             return;
         }
-        self.events.push(UnifiedParserEvent::Text(delta.into()));
+        self.events.push(UnifiedParserEvent::Text(delta));
     }
 
     /// Append one reasoning text event if `delta` is non-empty.
@@ -134,14 +135,14 @@ mod tests {
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Text("hello world".to_string()),
+                UnifiedParserEvent::Text("hello world".into()),
                 UnifiedParserEvent::Reasoning(DecodedText::unattributed("thinking")),
                 UnifiedParserEvent::ToolCall(ToolCallDelta {
                     tool_index: 0,
                     name: Some("lookup".to_string()),
                     arguments: "{}".to_string(),
                 }),
-                UnifiedParserEvent::Text("!".to_string()),
+                UnifiedParserEvent::Text("!".into()),
             ]
         );
     }
@@ -165,9 +166,9 @@ mod tests {
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Text("hello world".to_string()),
+                UnifiedParserEvent::Text("hello world".into()),
                 UnifiedParserEvent::Reasoning(DecodedText::unattributed("thinking")),
-                UnifiedParserEvent::Text("!".to_string()),
+                UnifiedParserEvent::Text("!".into()),
             ]
         );
     }
@@ -176,6 +177,7 @@ mod tests {
     fn unified_parser_output_reasoning_coalescing_rebases_attributions() {
         let mut output = UnifiedParserOutput::default();
         output.push_reasoning(DecodedText {
+            sources: Default::default(),
             text: "think".to_string(),
             attributions: [TokenAttribution {
                 token_id: 1,
@@ -185,6 +187,7 @@ mod tests {
             .collect(),
         });
         output.push_reasoning(DecodedText {
+            sources: Default::default(),
             text: "ing".to_string(),
             attributions: [TokenAttribution {
                 token_id: 2,
@@ -195,6 +198,7 @@ mod tests {
         });
         // A zero-width-token-only piece is kept: the tokens count as reasoning.
         output.push_reasoning(DecodedText {
+            sources: Default::default(),
             text: String::new(),
             attributions: [TokenAttribution {
                 token_id: 3,
@@ -207,6 +211,7 @@ mod tests {
         assert_eq!(
             output.events,
             vec![UnifiedParserEvent::Reasoning(DecodedText {
+                sources: Default::default(),
                 text: "thinking".to_string(),
                 attributions: [
                     TokenAttribution {
@@ -274,8 +279,8 @@ pub trait UnifiedParser: Send {
     }
 
     /// Clear parser state and return currently uncommitted buffered text.
-    fn reset(&mut self) -> String {
-        String::new()
+    fn reset(&mut self) -> DecodedText {
+        DecodedText::default()
     }
 }
 

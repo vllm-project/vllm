@@ -56,7 +56,7 @@ impl ToolParser for MistralToolParser {
         self.inner.finish()
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.inner.reset()
     }
 }
@@ -123,7 +123,11 @@ mod tests {
             ToolParserOutput {
                 events: [
                     Text(
-                        "I'll help.\n",
+                        DecodedText {
+                            text: "I'll help.\n",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                     ToolCall(
                         ToolCallDelta {

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::mem::take;
+use std::ops::Range;
 
 use smallvec::SmallVec;
 
@@ -44,6 +45,24 @@ pub struct TokenAttribution {
     pub anchor: TokenAnchor,
 }
 
+/// Decoded bytes contributed by one generated token occurrence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenSource {
+    pub token_index: usize,
+    pub bytes: Range<u32>,
+}
+
+impl TokenSource {
+    fn clipped(&self, range: Range<u32>) -> Option<Self> {
+        let start = self.bytes.start.max(range.start);
+        let end = self.bytes.end.min(range.end);
+        (start < end).then(|| Self {
+            token_index: self.token_index,
+            bytes: start - range.start..end - range.start,
+        })
+    }
+}
+
 /// Decoded text and the generated tokens attributed to it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DecodedText {
@@ -56,6 +75,22 @@ pub struct DecodedText {
     /// `text.len()`.
     /// Four inline records cover one complete UTF-8 byte-fallback sequence.
     pub attributions: SmallVec<[TokenAttribution; 4]>,
+    /// Source occurrences survive on both sides of a split inside a token.
+    /// Unlike `attributions`, these spans describe contribution, not token counts.
+    /// Inserted text has no source occurrences.
+    pub sources: SmallVec<[TokenSource; 4]>,
+}
+
+impl From<String> for DecodedText {
+    fn from(text: String) -> Self {
+        Self::unattributed(text)
+    }
+}
+
+impl From<&str> for DecodedText {
+    fn from(text: &str) -> Self {
+        Self::unattributed(text)
+    }
 }
 
 impl DecodedText {
@@ -64,6 +99,7 @@ impl DecodedText {
         Self {
             text: text.into(),
             attributions: SmallVec::new(),
+            sources: SmallVec::new(),
         }
     }
 
@@ -81,6 +117,7 @@ impl DecodedText {
     pub fn clear(&mut self) {
         self.text.clear();
         self.attributions.clear();
+        self.sources.clear();
     }
 
     /// Split off and return the prefix `[0, len)`; the suffix stays in `self`,
@@ -103,7 +140,10 @@ impl DecodedText {
         let mut prefix = DecodedText {
             text,
             attributions: SmallVec::new(),
+            sources: self.sources.iter().filter_map(|source| source.clipped(0..len)).collect(),
         };
+        self.sources =
+            self.sources.iter().filter_map(|source| source.clipped(len..u32::MAX)).collect();
         for attribution in take(&mut self.attributions) {
             let in_prefix = match attribution.anchor {
                 TokenAnchor::Visible { byte_offset } => byte_offset < len,
@@ -139,6 +179,28 @@ impl DecodedText {
                 anchor: attribution.anchor.offset_by(i64::from(byte_offset)),
             }
         }));
+        self.sources.extend(other.sources.into_iter().map(|source| TokenSource {
+            token_index: source.token_index,
+            bytes: source.bytes.start + byte_offset..source.bytes.end + byte_offset,
+        }));
+    }
+
+    /// Copy a prefix while preserving its token provenance.
+    pub fn prefix(&self, len: usize) -> Self {
+        let end = offset_as_u32(len);
+        Self {
+            text: self.text[..len].to_string(),
+            attributions: self
+                .attributions
+                .iter()
+                .copied()
+                .filter(|attr| match attr.anchor {
+                    TokenAnchor::Visible { byte_offset } => byte_offset < end,
+                    TokenAnchor::ZeroWidth { byte_offset } => byte_offset <= end,
+                })
+                .collect(),
+            sources: self.sources.iter().filter_map(|source| source.clipped(0..end)).collect(),
+        }
     }
 }
 
@@ -152,6 +214,7 @@ enum PendingAnchor {
 struct PendingAttribution {
     token_id: u32,
     anchor: PendingAnchor,
+    end: u32,
 }
 
 /// Cumulative decoded text plus the attribution state needed to emit local
@@ -162,6 +225,7 @@ pub(super) struct AttributedTextBuffer {
     emitted_byte_offset: usize,
     attributions: Vec<PendingAttribution>,
     emitted_attribution_count: usize,
+    emitted_source_count: usize,
     pending_start: Option<usize>,
 }
 
@@ -182,6 +246,7 @@ impl AttributedTextBuffer {
         self.attributions.push(PendingAttribution {
             token_id,
             anchor: PendingAnchor::Unresolved,
+            end: 0,
         });
     }
 
@@ -192,6 +257,7 @@ impl AttributedTextBuffer {
             anchor: PendingAnchor::Resolved(TokenAnchor::ZeroWidth {
                 byte_offset: offset_as_u32(self.text.len()),
             }),
+            end: offset_as_u32(self.text.len()),
         });
     }
 
@@ -203,6 +269,7 @@ impl AttributedTextBuffer {
                 if matches!(attribution.anchor, PendingAnchor::Unresolved) {
                     attribution.anchor =
                         PendingAnchor::Resolved(TokenAnchor::Visible { byte_offset });
+                    attribution.end = offset_as_u32(self.text.len() + text.len());
                 }
             }
         }
@@ -219,6 +286,7 @@ impl AttributedTextBuffer {
             if matches!(attribution.anchor, PendingAnchor::Unresolved) {
                 attribution.anchor =
                     PendingAnchor::Resolved(TokenAnchor::ZeroWidth { byte_offset });
+                attribution.end = byte_offset;
             }
         }
     }
@@ -228,6 +296,7 @@ impl AttributedTextBuffer {
         self.text.truncate(byte_offset);
         let byte_offset = offset_as_u32(byte_offset);
         for attribution in &mut self.attributions {
+            attribution.end = attribution.end.min(byte_offset);
             let PendingAnchor::Resolved(anchor) = &mut attribution.anchor else {
                 continue;
             };
@@ -275,15 +344,59 @@ impl AttributedTextBuffer {
             })
             .collect();
         let text = self.text[chunk_start..cutoff].to_string();
+        let mut sources = SmallVec::new();
+        for (token_index, attribution) in
+            self.attributions.iter().enumerate().skip(self.emitted_source_count)
+        {
+            let PendingAnchor::Resolved(anchor) = attribution.anchor else {
+                break;
+            };
+            if let TokenAnchor::Visible { byte_offset } = anchor {
+                if byte_offset >= cutoff_u32 {
+                    break;
+                }
+                if let Some(source) = (TokenSource {
+                    token_index,
+                    bytes: byte_offset..attribution.end,
+                })
+                .clipped(chunk_start_u32..cutoff_u32)
+                {
+                    sources.push(source);
+                }
+            }
+            if token_index == self.emitted_source_count && attribution.end <= cutoff_u32 {
+                self.emitted_source_count = token_index + 1;
+            }
+        }
 
         self.emitted_byte_offset = cutoff;
         self.emitted_attribution_count = attribution_end;
-        Some(DecodedText { text, attributions })
+        Some(DecodedText {
+            text,
+            attributions,
+            sources,
+        })
     }
 
     /// Emit the final chunk and take the complete decoded output.
     pub(super) fn finish(&mut self) -> (Option<DecodedText>, DecodedText) {
         let last_chunk = self.take_ready(self.text.len());
+        let sources = self
+            .attributions
+            .iter()
+            .enumerate()
+            .filter_map(|(token_index, attribution)| {
+                let PendingAnchor::Resolved(TokenAnchor::Visible { byte_offset }) =
+                    attribution.anchor
+                else {
+                    return None;
+                };
+                (byte_offset < attribution.end).then_some(TokenSource {
+                    token_index,
+                    bytes: byte_offset..attribution.end,
+                })
+            })
+            .collect();
         let attributions = take(&mut self.attributions)
             .into_iter()
             .map(|attribution| {
@@ -299,9 +412,11 @@ impl AttributedTextBuffer {
         let full = DecodedText {
             text: take(&mut self.text),
             attributions,
+            sources,
         };
         self.emitted_byte_offset = 0;
         self.emitted_attribution_count = 0;
+        self.emitted_source_count = 0;
         self.pending_start = None;
         (last_chunk, full)
     }

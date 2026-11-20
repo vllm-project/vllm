@@ -108,6 +108,8 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
+    #[error("output-text logprobs are not supported with native Harmony parsing")]
+    HarmonyTextLogprobsUnsupported,
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
@@ -154,6 +156,7 @@ impl Error {
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate
+            | Self::HarmonyTextLogprobsUnsupported
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::OutputGrammar { error } => matches!(
@@ -182,6 +185,7 @@ impl Error {
         match self {
             Self::Text(error) => error.param(),
             Self::UnsupportedRequestChatTemplate => Some("chat_template"),
+            Self::HarmonyTextLogprobsUnsupported => Some("include"),
             _ => None,
         }
     }

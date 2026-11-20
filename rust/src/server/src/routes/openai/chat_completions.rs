@@ -1236,6 +1236,7 @@ mod tests {
                 kind: AssistantBlockKind::Text,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Text,
                 delta: "hi".to_string(),
@@ -1345,6 +1346,7 @@ mod tests {
                 kind: AssistantBlockKind::Reasoning,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
@@ -1413,6 +1415,7 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
@@ -1475,12 +1478,14 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
                 token_count: None,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
@@ -1536,6 +1541,7 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
@@ -1555,6 +1561,7 @@ mod tests {
                 token_ids: vec![11],
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
@@ -1652,6 +1659,7 @@ mod tests {
                 token_ids: vec![11],
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
@@ -1694,6 +1702,7 @@ mod tests {
                 kind: AssistantBlockKind::Text,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
@@ -1856,6 +1865,7 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Text,
                 delta: "hi".to_string(),
@@ -1928,6 +1938,7 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
@@ -1938,6 +1949,7 @@ mod tests {
                 token_ids: vec![20, 21],
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
@@ -2017,6 +2029,7 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
@@ -2091,6 +2104,7 @@ mod tests {
                     prompt_logprobs: None,
                 }),
                 Ok(ChatEvent::BlockDelta {
+                    text_logprobs: None,
                     index: 0,
                     kind: AssistantBlockKind::Text,
                     delta: "answer".to_string(),

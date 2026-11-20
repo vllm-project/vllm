@@ -111,6 +111,7 @@ impl TokenizeChatRequest {
             )?;
 
         Ok(ChatRequest {
+            attribute_text_logprobs: false,
             request_id,
             messages,
             sampling_params: SamplingParams::default(),

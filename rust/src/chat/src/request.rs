@@ -702,6 +702,9 @@ pub struct ChatRequest {
     /// and [`CollectedAssistantMessage::prompt_text`](crate::CollectedAssistantMessage::prompt_text).
     #[serde(default)]
     pub return_prompt_text: bool,
+    /// Attach sampled probabilities to visible text deltas using parser provenance.
+    #[serde(default)]
+    pub attribute_text_logprobs: bool,
 }
 
 impl ChatRequest {
@@ -724,6 +727,7 @@ impl ChatRequest {
             session_id: None,
             lora_request: None,
             return_prompt_text: false,
+            attribute_text_logprobs: false,
         }
     }
 

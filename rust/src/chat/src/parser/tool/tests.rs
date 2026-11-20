@@ -37,8 +37,8 @@ impl ToolParser for FakeToolParser {
         Ok(ToolParserOutput::default())
     }
 
-    fn reset(&mut self) -> String {
-        String::new()
+    fn reset(&mut self) -> DecodedText {
+        DecodedText::default()
     }
 }
 

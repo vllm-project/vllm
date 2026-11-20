@@ -457,6 +457,8 @@ struct FakeChatBackend {
     sampling_hints: vllm_text::SamplingHints,
     /// Serve without a tokenizer, like `--skip-tokenizer-init`.
     skip_tokenizer_init: bool,
+    tokenizer: Option<DynTokenizer>,
+    response_template: Option<Arc<vllm_parser::unified::ResponseTemplate>>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -483,6 +485,8 @@ impl FakeChatBackend {
             multimodal_model_info: None,
             sampling_hints: Default::default(),
             skip_tokenizer_init: false,
+            tokenizer: None,
+            response_template: None,
         }
     }
 
@@ -496,9 +500,7 @@ impl FakeChatBackend {
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
             model_id: model_id.into(),
-            multimodal_model_info: None,
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 
@@ -506,10 +508,8 @@ impl FakeChatBackend {
         multimodal_model_info: vllm_chat::multimodal::MultimodalModelInfo,
     ) -> Self {
         Self {
-            model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 }
@@ -531,7 +531,7 @@ impl TextBackend for FakeChatBackend {
         if self.skip_tokenizer_init {
             return Arc::new(UnavailableTokenizer::new(1024));
         }
-        Arc::new(fake_chat_tokenizer())
+        self.tokenizer.clone().unwrap_or_else(|| Arc::new(fake_chat_tokenizer()))
     }
 
     fn has_tokenizer(&self) -> bool {
@@ -557,14 +557,20 @@ impl ChatBackend for FakeChatBackend {
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions<'_>,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
-            &self.model_id,
-            self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
-            options.tool_strict_level,
-        )?))
+        Ok(Box::new(
+            DefaultChatOutputProcessor::with_response_template(
+                request,
+                &self.model_id,
+                self.tokenizer(),
+                &self
+                    .response_template
+                    .clone()
+                    .ok_or(vllm_parser::unified::HfTemplateError::Missing),
+                options.tool_call_parser,
+                options.reasoning_parser,
+                options.tool_strict_level,
+            )?,
+        ))
     }
 }
 

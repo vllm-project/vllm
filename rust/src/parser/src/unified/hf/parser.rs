@@ -98,9 +98,9 @@ struct Occurrence {
     opened: bool,
     captures: Captures,
     /// Opener text, returned by [`UnifiedParser::reset`].
-    raw_open: String,
+    raw_open: DecodedText,
     /// Buffered body of a tool-call region.
-    body: String,
+    body: DecodedText,
     /// Index of the tool call started at the opener, if any.
     active_tool_index: Option<usize>,
     /// `join` separator still to emit before this occurrence's content.
@@ -238,9 +238,12 @@ impl HfUnifiedParser {
     /// Return to the implicit region, or discard text when there is none.
     fn reset_to_implicit(&mut self) {
         self.mode = match self.template.implicit {
-            Some(region) => {
-                HfMode::Implicit(self.occurrence(region, false, Captures::new(), String::new()))
-            }
+            Some(region) => HfMode::Implicit(self.occurrence(
+                region,
+                false,
+                Captures::new(),
+                DecodedText::default(),
+            )),
             None => HfMode::Discard,
         };
     }
@@ -251,7 +254,7 @@ impl HfUnifiedParser {
         region: usize,
         opened: bool,
         captures: Captures,
-        raw_open: String,
+        raw_open: DecodedText,
     ) -> Occurrence {
         let spec = &self.template.regions[region];
         let mut separator = None;
@@ -271,7 +274,7 @@ impl HfUnifiedParser {
             opened,
             captures,
             raw_open,
-            body: String::new(),
+            body: DecodedText::default(),
             active_tool_index: None,
             separator,
         }
@@ -314,7 +317,7 @@ impl HfUnifiedParser {
                     self.close_current(output, phase)?;
                     match watch.kind {
                         WatchKind::Open => {
-                            self.open_explicit(watch.region, captures, piece.text, output, phase)
+                            self.open_explicit(watch.region, captures, piece, output, phase)
                         }
                         // The implicit region's close: start a fresh implicit occurrence.
                         WatchKind::Close => {}
@@ -336,7 +339,7 @@ impl HfUnifiedParser {
         let RegionKind::Text(text) = &region.kind else {
             if !piece.text.is_empty() {
                 occurrence.opened = true;
-                occurrence.body.push_str(&piece.text);
+                occurrence.body.append(piece);
             }
             return;
         };
@@ -375,7 +378,7 @@ impl HfUnifiedParser {
         &mut self,
         region: usize,
         captures: Captures,
-        raw_open: String,
+        raw_open: DecodedText,
         output: &mut UnifiedParserOutput,
         phase: Phase,
     ) {
@@ -446,7 +449,7 @@ impl HfUnifiedParser {
                 }
             }
             RegionKind::ToolCalls(calls) => {
-                let parsed = calls.content.parse(&occurrence.body)?;
+                let parsed = calls.content.parse(&occurrence.body.text)?;
                 let value = match &calls.transform {
                     Some(transform) => {
                         transform.apply(region.name.as_str(), parsed, &occurrence.captures)?
@@ -568,7 +571,7 @@ impl StripState {
 /// Push visible text of a text region.
 fn push_text(output: &mut UnifiedParserOutput, role: TextRole, piece: DecodedText) {
     match role {
-        TextRole::Content => output.push_text(piece.text),
+        TextRole::Content => output.push_text(piece),
         TextRole::Reasoning => output.push_reasoning(piece),
     }
 }
@@ -580,6 +583,7 @@ fn push_dropped_reasoning(output: &mut UnifiedParserOutput, dropped: DecodedText
     }
     output.push_reasoning(DecodedText {
         text: String::new(),
+        sources: Default::default(),
         attributions: dropped
             .attributions
             .into_iter()
@@ -803,16 +807,16 @@ impl UnifiedParser for HfUnifiedParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
-        let mut raw = String::new();
+    fn reset(&mut self) -> DecodedText {
+        let mut raw = DecodedText::default();
         if let HfMode::Implicit(occurrence) | HfMode::Explicit(occurrence) =
             std::mem::replace(&mut self.mode, HfMode::Discard)
         {
-            raw.push_str(&occurrence.raw_open);
-            raw.push_str(&occurrence.body);
-            raw.push_str(&self.strip[occurrence.region].held.text);
+            raw.append(occurrence.raw_open);
+            raw.append(occurrence.body);
+            raw.append(self.strip[occurrence.region].held.take());
         }
-        raw.push_str(&self.buffer.take().text);
+        raw.append(self.buffer.take());
         self.reset_state();
         raw
     }

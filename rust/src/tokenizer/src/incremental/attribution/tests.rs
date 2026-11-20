@@ -96,6 +96,7 @@ fn zero_width(byte_offset: u32) -> TokenAnchor {
 fn decoded(text: &str, token_ids: &[u32], anchors: &[TokenAnchor]) -> DecodedText {
     assert_eq!(token_ids.len(), anchors.len());
     DecodedText {
+        sources: Default::default(),
         text: text.to_string(),
         attributions: token_ids
             .iter()
@@ -189,6 +190,33 @@ fn decoded_text_drain_prefix_keeps_straddling_token_in_prefix() {
 
     assert_eq!(prefix, decoded("a", &[1], &[visible(0)]));
     assert_eq!(dt, decoded("b", &[], &[]));
+}
+
+#[test]
+fn source_span_survives_trimming_inside_a_token_without_recounting_it() {
+    let tokenizer = TestTokenizer::new().with_regular_token(" A", 300);
+    let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
+    decoder.push_token(300).unwrap();
+    let mut piece = decoder.next_chunk().unwrap();
+    let whitespace = piece.drain_prefix(1);
+
+    assert_eq!(whitespace.attributions.len(), 1);
+    assert_eq!(piece.text, "A");
+    assert!(piece.attributions.is_empty());
+    assert_eq!(
+        piece.sources.as_slice(),
+        &[TokenSource {
+            token_index: 0,
+            bytes: 0..1
+        }]
+    );
+    assert_eq!(
+        whitespace.sources.as_slice(),
+        &[TokenSource {
+            token_index: 0,
+            bytes: 0..1
+        }]
+    );
 }
 
 #[test]
@@ -319,7 +347,42 @@ struct AttributionCase<'a> {
     expected_full: DecodedText,
 }
 
-fn run_attribution_case(case: AttributionCase<'_>) {
+fn run_attribution_case(mut case: AttributionCase<'_>) {
+    // Existing fixtures describe the complete decoded sequence. Its visible
+    // anchor groups delimit the bytes contributed by each token occurrence.
+    let full = &mut case.expected_full;
+    full.sources = full
+        .attributions
+        .iter()
+        .enumerate()
+        .filter_map(|(token_index, attr)| {
+            let TokenAnchor::Visible { byte_offset: start } = attr.anchor else {
+                return None;
+            };
+            let end = full
+                .attributions
+                .iter()
+                .filter_map(|attr| match attr.anchor {
+                    TokenAnchor::Visible { byte_offset } if byte_offset > start => {
+                        Some(byte_offset)
+                    }
+                    _ => None,
+                })
+                .next()
+                .unwrap_or(full.text.len() as u32);
+            Some(TokenSource {
+                token_index,
+                bytes: start..end,
+            })
+        })
+        .collect();
+    let mut offset = 0;
+    for chunk in &mut case.expected_chunks {
+        let end = offset + chunk.text.len() as u32;
+        chunk.sources =
+            full.sources.iter().filter_map(|source| source.clipped(offset..end)).collect();
+        offset = end;
+    }
     let mut decoder = case.tokenizer.create_decode_stream(
         &case.prompt_token_ids,
         case.skip_special_tokens,

@@ -8,12 +8,12 @@
 //! simple (non-Harmony) streaming path of the Python frontend in
 //! `vllm/entrypoints/openai/responses/streaming_events.py`, with one
 //! deliberate improvement: item IDs stay consistent between streamed events
-//! and the terminal response payload.
+//! and the terminal response payload. Output logprobs follow parsed source
+//! occurrences, and `output_text.done` carries their accumulated values.
 
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::Value;
 use uuid::Uuid;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
@@ -21,9 +21,42 @@ use vllm_chat::{
 
 use super::tools::{ResponsesToolNames, ToolIdentity};
 use super::types::{
-    AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem,
-    ResponsesResponse, TextPart,
+    AssistantRole, ResponseItemStatus, ResponseLogprob, ResponseOutputContentPart,
+    ResponseOutputItem, ResponseTopLogprob, ResponsesResponse, TextPart,
 };
+use crate::error::ApiError;
+use crate::routes::openai::utils::logprobs::decoded_logprobs_to_openai_chat;
+
+/// The streaming schema omits the byte arrays present on completed content parts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ResponseStreamLogprob {
+    token: String,
+    logprob: f32,
+    top_logprobs: Vec<ResponseStreamTopLogprob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct ResponseStreamTopLogprob {
+    token: String,
+    logprob: f32,
+}
+
+impl From<&ResponseLogprob> for ResponseStreamLogprob {
+    fn from(value: &ResponseLogprob) -> Self {
+        Self {
+            token: value.token.clone(),
+            logprob: value.logprob,
+            top_logprobs: value
+                .top_logprobs
+                .iter()
+                .map(|top| ResponseStreamTopLogprob {
+                    token: top.token.clone(),
+                    logprob: top.logprob,
+                })
+                .collect(),
+        }
+    }
+}
 
 /// One Responses API SSE event payload.
 ///
@@ -73,16 +106,14 @@ pub(crate) enum ResponseStreamEvent {
         output_index: u32,
         content_index: u32,
         delta: String,
-        /// TODO: populated when output logprobs are implemented.
-        logprobs: Vec<Value>,
+        logprobs: Vec<ResponseStreamLogprob>,
     },
     OutputTextDone {
         item_id: String,
         output_index: u32,
         content_index: u32,
         text: String,
-        /// TODO: populated when output logprobs are implemented.
-        logprobs: Vec<Value>,
+        logprobs: Vec<ResponseStreamLogprob>,
     },
     ReasoningTextDelta {
         item_id: String,
@@ -176,6 +207,8 @@ pub(crate) struct OutputItemStreamer {
     current: Option<OpenItem>,
     /// Whether reasoning items appear in the stream and final output.
     include_reasoning: bool,
+    output_logprobs: Option<i32>,
+    return_tokens_as_token_ids: bool,
     /// Reports calls of flat namespaced tool names with their namespace.
     tool_names: ResponsesToolNames,
     /// Items completed so far, in output order.
@@ -195,6 +228,7 @@ enum OpenItem {
     Message {
         item_id: String,
         text: String,
+        logprobs: Vec<ResponseLogprob>,
     },
     FunctionCall {
         item_id: String,
@@ -206,10 +240,19 @@ enum OpenItem {
 }
 
 impl OutputItemStreamer {
-    pub(crate) fn new(include_reasoning: bool, tool_names: ResponsesToolNames) -> Self {
+    pub(crate) fn new(
+        include_reasoning: bool,
+        tool_names: ResponsesToolNames,
+        output_logprobs: Option<i32>,
+        return_tokens_as_token_ids: bool,
+    ) -> Self {
         Self {
             current: None,
             include_reasoning,
+            // Original token strings can contain hidden reasoning, including
+            // a token that also contributes visible text.
+            output_logprobs: output_logprobs.filter(|_| include_reasoning),
+            return_tokens_as_token_ids,
             tool_names,
             completed_items: Vec::new(),
             last_item_done_pending: false,
@@ -217,20 +260,28 @@ impl OutputItemStreamer {
     }
 
     /// Process one chat event, returning the SSE events to emit.
-    pub(crate) fn on_event(&mut self, event: &ChatEvent) -> Vec<ResponseStreamEvent> {
+    pub(crate) fn on_event(
+        &mut self,
+        event: &ChatEvent,
+    ) -> Result<Vec<ResponseStreamEvent>, ApiError> {
         let mut events = match event {
             ChatEvent::Start { .. } | ChatEvent::LogprobsDelta { .. } | ChatEvent::Done { .. } => {
                 vec![]
             }
             ChatEvent::BlockStart { .. } => vec![],
-            ChatEvent::BlockDelta { kind, delta, .. } => {
+            ChatEvent::BlockDelta {
+                kind,
+                delta,
+                text_logprobs,
+                ..
+            } => {
                 if delta.is_empty() {
-                    return vec![];
+                    return Ok(vec![]);
                 }
                 match kind {
                     AssistantBlockKind::Reasoning => {
                         if !self.include_reasoning {
-                            return vec![];
+                            return Ok(vec![]);
                         }
                         let mut events = self.open_reasoning_if_needed();
                         events.push(self.reasoning_delta(delta.clone()));
@@ -238,7 +289,7 @@ impl OutputItemStreamer {
                     }
                     AssistantBlockKind::Text => {
                         let mut events = self.open_message_if_needed();
-                        events.push(self.text_delta(delta.clone()));
+                        events.push(self.text_delta(delta.clone(), text_logprobs.as_ref())?);
                         events
                     }
                     // Tool-calls flow through the dedicated events.
@@ -259,7 +310,7 @@ impl OutputItemStreamer {
             }
             ChatEvent::ToolCallArgumentsDelta { delta, .. } => {
                 if delta.is_empty() {
-                    return vec![];
+                    return Ok(vec![]);
                 }
                 vec![self.function_call_delta(delta.clone())]
             }
@@ -272,7 +323,7 @@ impl OutputItemStreamer {
         {
             events.insert(position, done);
         }
-        events
+        Ok(events)
     }
 
     /// Close any still-open item, returning the close events. Defensive: the
@@ -355,6 +406,7 @@ impl OutputItemStreamer {
         self.current = Some(OpenItem::Message {
             item_id: item_id.clone(),
             text: String::new(),
+            logprobs: Vec::new(),
         });
         vec![
             ResponseStreamEvent::OutputItemAdded { output_index, item },
@@ -406,18 +458,53 @@ impl OutputItemStreamer {
         }
     }
 
-    fn text_delta(&mut self, delta: String) -> ResponseStreamEvent {
-        let Some(OpenItem::Message { item_id, text }) = self.current.as_mut() else {
+    fn text_delta(
+        &mut self,
+        delta: String,
+        attributed: Option<&vllm_text::DecodedLogprobs>,
+    ) -> Result<ResponseStreamEvent, ApiError> {
+        let logprobs = match (self.output_logprobs, attributed) {
+            (Some(top), Some(attributed)) => {
+                decoded_logprobs_to_openai_chat(attributed, top, self.return_tokens_as_token_ids)?
+                    .content
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|value| ResponseLogprob {
+                        bytes: value.token.as_bytes().to_vec(),
+                        token: value.token,
+                        logprob: value.logprob,
+                        top_logprobs: value
+                            .top_logprobs
+                            .into_iter()
+                            .map(|top| ResponseTopLogprob {
+                                bytes: top.token.as_bytes().to_vec(),
+                                token: top.token,
+                                logprob: top.logprob,
+                            })
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        };
+        let stream_logprobs = logprobs.iter().map(ResponseStreamLogprob::from).collect();
+        let Some(OpenItem::Message {
+            item_id,
+            text,
+            logprobs: accumulated,
+        }) = self.current.as_mut()
+        else {
             unreachable!("text delta requires an open message item");
         };
         text.push_str(&delta);
-        ResponseStreamEvent::OutputTextDelta {
+        accumulated.extend(logprobs);
+        Ok(ResponseStreamEvent::OutputTextDelta {
             item_id: item_id.clone(),
             output_index: self.output_index(),
             content_index: 0,
             delta,
-            logprobs: vec![],
-        }
+            logprobs: stream_logprobs,
+        })
     }
 
     fn function_call_delta(&mut self, delta: String) -> ResponseStreamEvent {
@@ -474,11 +561,16 @@ impl OutputItemStreamer {
                     item,
                 )
             }
-            OpenItem::Message { item_id, text } => {
+            OpenItem::Message {
+                item_id,
+                text,
+                logprobs,
+            } => {
+                let done_logprobs = logprobs.iter().map(ResponseStreamLogprob::from).collect();
                 let part = ResponseOutputContentPart::OutputText {
                     text: text.clone(),
                     annotations: vec![],
-                    logprobs: None,
+                    logprobs: self.output_logprobs.map(|_| logprobs),
                 };
                 let item = ResponseOutputItem::Message {
                     id: item_id.clone(),
@@ -493,7 +585,7 @@ impl OutputItemStreamer {
                             output_index,
                             content_index: 0,
                             text,
-                            logprobs: vec![],
+                            logprobs: done_logprobs,
                         },
                         ResponseStreamEvent::ContentPartDone {
                             item_id,
@@ -587,21 +679,26 @@ mod tests {
 
     #[test]
     fn empty_function_call_emits_arguments_done() {
-        let mut streamer = OutputItemStreamer::new(true, ResponsesToolNames::default());
-        streamer.on_event(&ChatEvent::ToolCallStart {
-            index: 0,
-            id: "call_1".to_string(),
-            name: "empty".to_string(),
-        });
-
-        let mut events = streamer.on_event(&ChatEvent::ToolCallEnd {
-            index: 0,
-            call: AssistantToolCall {
+        let mut streamer =
+            OutputItemStreamer::new(true, ResponsesToolNames::default(), None, false);
+        streamer
+            .on_event(&ChatEvent::ToolCallStart {
+                index: 0,
                 id: "call_1".to_string(),
                 name: "empty".to_string(),
-                arguments: String::new(),
-            },
-        });
+            })
+            .unwrap();
+
+        let mut events = streamer
+            .on_event(&ChatEvent::ToolCallEnd {
+                index: 0,
+                call: AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "empty".to_string(),
+                    arguments: String::new(),
+                },
+            })
+            .unwrap();
         events.extend(streamer.on_stream_end(Some(&FinishReason::Stop(None))));
         let payloads: Vec<Value> = events
             .iter()
@@ -615,7 +712,8 @@ mod tests {
 
     #[test]
     fn empty_reasoning_block_is_not_an_output_item() {
-        let mut streamer = OutputItemStreamer::new(true, ResponsesToolNames::default());
+        let mut streamer =
+            OutputItemStreamer::new(true, ResponsesToolNames::default(), None, false);
         for event in [
             ChatEvent::BlockStart {
                 index: 0,
@@ -632,6 +730,7 @@ mod tests {
                 kind: AssistantBlockKind::Text,
             },
             ChatEvent::BlockDelta {
+                text_logprobs: None,
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "hi".to_string(),
@@ -644,7 +743,7 @@ mod tests {
                 },
             },
         ] {
-            streamer.on_event(&event);
+            streamer.on_event(&event).unwrap();
         }
 
         let items = streamer.into_output_items();

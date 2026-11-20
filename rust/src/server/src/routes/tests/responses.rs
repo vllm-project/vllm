@@ -64,6 +64,313 @@ async fn responses_stream_terminal(
     payloads.pop().expect("terminal event")["response"].take()
 }
 
+/// Exercise decoding, parsing, attribution and wire formatting with sampled
+/// rows whose probabilities identify occurrences, even for repeated token IDs.
+async fn responses_with_sampled_logprobs(
+    tokenizer: TestTokenizer,
+    template: Option<serde_json::Value>,
+    mut chunks: Vec<Vec<u32>>,
+    mut request: serde_json::Value,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let use_hf = template.is_some();
+    let backend = FakeChatBackend {
+        tokenizer: Some(Arc::new(tokenizer)),
+        response_template: template.map(|template| {
+            Arc::new(vllm_parser::unified::ResponseTemplate::from_json(&template).unwrap())
+        }),
+        ..FakeChatBackend::new()
+    };
+    let expected_top = request
+        .get("include")
+        .map(|_| request.get("top_logprobs").and_then(|value| value.as_i64()).unwrap_or(0) as i32);
+    let stream = request["stream"] == true;
+    // A token-stop completion includes its suppressed terminal token.
+    chunks.push(vec![b'!' as u32]);
+    let (mut chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-responses-logprobs",
+        move |request_id| {
+            let mut occurrence = 0;
+            let last = chunks.len() - 1;
+            RequestBatchOutputs {
+                outputs: chunks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, ids)| {
+                        let positions = ids
+                            .iter()
+                            .map(|&token_id| {
+                                occurrence += 1;
+                                PositionLogprobs {
+                                    entries: vec![
+                                        TokenLogprob {
+                                            token_id,
+                                            logprob: -(occurrence as f32),
+                                            rank: 2,
+                                        },
+                                        TokenLogprob {
+                                            token_id: b'Z' as u32,
+                                            logprob: -0.5,
+                                            rank: 1,
+                                        },
+                                    ],
+                                }
+                            })
+                            .collect();
+                        request_output_with_logprobs(
+                            request_id,
+                            ids,
+                            (index == last).then_some(EngineCoreFinishReason::Stop),
+                            None,
+                            expected_top.map(|_| Logprobs { positions }),
+                            None,
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+            .into()
+        },
+        move |request| {
+            assert_eq!(
+                request.sampling_params.as_ref().unwrap().logprobs,
+                expected_top
+            )
+        },
+        Arc::new(backend),
+    )
+    .await;
+    if use_hf {
+        chat = chat
+            .with_reasoning_parser(ParserSelection::Explicit("hf".to_string()))
+            .with_tool_call_parser(ParserSelection::Explicit("hf".to_string()));
+    } else if request.get("tools").is_some() {
+        chat = chat.with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()));
+    }
+    let app = build_router(Arc::new(AppState::new(
+        vec!["test-model".to_string()],
+        chat,
+    )));
+    request["input"] = json!("hello");
+    let response = responses_call(&app, request).await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    engine_task.await.expect("mock engine task");
+    if stream {
+        let events = sse_json_payloads(std::str::from_utf8(&body).unwrap());
+        assert_eq!(events.last().unwrap()["type"], "response.completed");
+        (events.last().unwrap()["response"].clone(), events)
+    } else {
+        (serde_json::from_slice(&body).unwrap(), vec![])
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_logprobs_follow_source_tokens_across_boundaries_and_synthetic_joins() {
+    let plain = json!({"start_anchor": "assistant:", "fields": {"content": {"content": "text"}}});
+    let thinking = json!({"start_anchor": "assistant:", "fields": {
+        "thinking": {"open": "<think>", "close": "</think>", "content": "text"},
+        "content": {"content": "text"}
+    }});
+    let joined = json!({"start_anchor": "assistant:", "fields": {
+        "content": {"open": "<c>", "close": "</c>", "repeats": true, "join": "\n", "content": "text"}
+    }});
+    for (template, pieces, expected_text, expected_indices) in [
+        (plain, vec![" A"], "A", vec![0]),
+        (thinking.clone(), vec!["<think>x</think>A"], "A", vec![0]),
+        (
+            thinking.clone(),
+            vec!["<think>x", "</think>A"],
+            "A",
+            vec![1],
+        ),
+        // One sampled occurrence contributes to two separate output messages.
+        (thinking, vec!["A<think>x</think>B"], "AB", vec![0]),
+        (joined, vec!["<c>A</c>", "<c>B</c>"], "A\nB", vec![0, 1]),
+    ] {
+        for chunked in [false, true] {
+            for stream in [false, true] {
+                let mut tokenizer = fake_chat_tokenizer();
+                let ids: Vec<_> = pieces
+                    .iter()
+                    .enumerate()
+                    .map(|(index, piece)| {
+                        let id = 300 + index as u32;
+                        tokenizer = tokenizer.clone().with_regular_token(*piece, id);
+                        id
+                    })
+                    .collect();
+                let chunks = if chunked {
+                    ids.into_iter().map(|id| vec![id]).collect()
+                } else {
+                    vec![ids]
+                };
+                let (response, events) = responses_with_sampled_logprobs(
+                    tokenizer, Some(template.clone()), chunks,
+                    json!({"stream": stream, "include": ["message.output_text.logprobs"], "top_logprobs": 1}),
+                ).await;
+                let parts: Vec<_> = response["output"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["type"] == "message")
+                    .flat_map(|item| item["content"].as_array().unwrap())
+                    .collect();
+                let text: String =
+                    parts.iter().map(|part| part["text"].as_str().unwrap()).collect();
+                assert_eq!(text, expected_text);
+                let rows: Vec<_> = parts
+                    .iter()
+                    .flat_map(|part| part["logprobs"].as_array().unwrap())
+                    .cloned()
+                    .collect();
+                let expected: Vec<_> = expected_indices.iter().map(|&index| json!({
+                    "token": pieces[index], "logprob": -((index + 1) as f32), "bytes": pieces[index].as_bytes(),
+                    // Python takes the first entries of the engine's sampled-first
+                    // dictionary; reuse the existing Rust chat formatter's order.
+                    "top_logprobs": [{"token": pieces[index], "logprob": -((index + 1) as f32), "bytes": pieces[index].as_bytes()}]
+                })).collect();
+                assert_eq!(
+                    rows, expected,
+                    "pieces={pieces:?}, chunked={chunked}, stream={stream}"
+                );
+                if stream {
+                    // SSE's logprob schema omits bytes; completed items retain them.
+                    let projected: Vec<_> = expected
+                        .into_iter()
+                        .map(|mut row| {
+                            row.as_object_mut().unwrap().remove("bytes");
+                            row["top_logprobs"][0].as_object_mut().unwrap().remove("bytes");
+                            row
+                        })
+                        .collect();
+                    for kind in ["response.output_text.delta", "response.output_text.done"] {
+                        let rows: Vec<_> = events
+                            .iter()
+                            .filter(|event| event["type"] == kind)
+                            .flat_map(|event| event["logprobs"].as_array().unwrap())
+                            .cloned()
+                            .collect();
+                        assert_eq!(rows, projected, "{kind}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_logprobs_preserve_repeated_occurrences_and_delayed_utf8() {
+    for (ids, text, chosen) in [
+        (vec![b'A' as u32, b'A' as u32], "AA", vec![-1, -2]),
+        (vec![0xc3, 0xa9], "é", vec![-1, -2]),
+    ] {
+        for stream in [false, true] {
+            let (response, _) = responses_with_sampled_logprobs(
+                fake_chat_tokenizer(),
+                None,
+                ids.iter().map(|&id| vec![id]).collect(),
+                json!({"stream": stream, "include": ["message.output_text.logprobs"]}),
+            )
+            .await;
+            let part = &response["output"][0]["content"][0];
+            assert_eq!(part["text"], text);
+            let rows = part["logprobs"].as_array().unwrap();
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row["logprob"].as_f64().unwrap() as i32)
+                    .collect::<Vec<_>>(),
+                chosen
+            );
+            assert!(rows.iter().all(|row| row["top_logprobs"] == json!([])));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_logprobs_require_include_and_validate_requested_counts() {
+    for stream in [false, true] {
+        let (response, events) = responses_with_sampled_logprobs(
+            fake_chat_tokenizer(),
+            None,
+            vec![vec![b'A' as u32]],
+            json!({"stream": stream, "top_logprobs": 1}),
+        )
+        .await;
+        assert!(response["output"][0]["content"][0].get("logprobs").is_none());
+        assert!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "response.output_text.delta")
+                .all(|event| event["logprobs"] == json!([]))
+        );
+    }
+    let (app, _engine_task) = test_app_with_engine_handle().await;
+    for count in [-2, 21] {
+        let response = responses_call(
+            &app,
+            json!({
+                "input": "hello", "include": ["message.output_text.logprobs"], "top_logprobs": count
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_logprobs_do_not_expose_hidden_reasoning_in_boundary_tokens() {
+    for stream in [false, true] {
+        let (response, events) = responses_with_sampled_logprobs(
+            fake_chat_tokenizer().with_regular_token("<think>secret</think>A", 300),
+            Some(json!({"start_anchor": "assistant:", "fields": {
+                "thinking": {"open": "<think>", "close": "</think>", "content": "text"},
+                "content": {"content": "text"}
+            }})),
+            vec![vec![300]],
+            json!({"stream": stream, "include_reasoning": false, "include": ["message.output_text.logprobs"]}),
+        ).await;
+        assert_eq!(response["output"][0]["content"][0]["text"], "A");
+        assert!(response["output"][0]["content"][0].get("logprobs").is_none());
+        assert!(!serde_json::to_string(&(response, events)).unwrap().contains("secret"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_logprobs_exclude_tool_syntax_and_preserve_surrounding_text() {
+    let call = "<tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>";
+    for stream in [false, true] {
+        let (response, _) = responses_with_sampled_logprobs(
+            fake_chat_tokenizer().with_regular_token("Hello ", 300)
+                .with_regular_token(call, 301).with_regular_token(" done", 302),
+            None, vec![vec![300], vec![301], vec![302]],
+            json!({"stream": stream, "tools": [weather_function_tool()], "include": ["message.output_text.logprobs"]}),
+        ).await;
+        let output = response["output"].as_array().unwrap();
+        assert_eq!(output[1]["type"], "function_call");
+        assert_eq!(output[1]["name"], "get_weather");
+        assert_eq!(output[0]["content"][0]["text"], "Hello ");
+        assert_eq!(output[2]["content"][0]["text"], " done");
+        let rows: Vec<_> = output
+            .iter()
+            .filter(|item| item["type"] == "message")
+            .flat_map(|item| item["content"][0]["logprobs"].as_array().unwrap())
+            .map(|row| {
+                (
+                    row["token"].as_str().unwrap(),
+                    row["logprob"].as_f64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, [("Hello ", -1.), (" done", -3.)]);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_empty_model_uses_served_model() {
@@ -152,9 +459,7 @@ async fn responses_rejects_invalid_controls_before_inference() {
             .unwrap(),
         ),
         ("service_tier", json!("bogus")),
-        ("include", json!(["message.output_text.logprobs"])),
         ("include", json!(["unknown"])),
-        ("top_logprobs", json!(1)),
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
         ("media_io_kwargs", json!({"image": {}})),
