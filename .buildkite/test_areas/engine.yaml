@@ -261,6 +261,7 @@ steps:
   device: h100
   num_devices: 2
   key: replayssm-e2e-tp2
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -289,6 +290,7 @@ steps:
       -k "decode_matches_baseline_tp2"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) ReplaySSM E2E TP2"
       dind: false
       device: mi355_2
