@@ -5,7 +5,7 @@ reclassification of non-spec decodes as prefills when spec decodes exist.
 Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 
 import pytest
 import torch
@@ -203,12 +203,11 @@ def _build(
     builder: GDNAttentionMetadataBuilder,
     batch_spec: BatchSpec,
     num_decode_draft_tokens: list[int] | None = None,
-    block_table: torch.Tensor | None = None,
+    common: CommonAttentionMetadata | None = None,
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
-    common = _common_attn_metadata(builder, batch_spec)
-    if block_table is not None:
-        common = common.replace(block_table_tensor=block_table)
+    if common is None:
+        common = _common_attn_metadata(builder, batch_spec)
     kwargs: dict = {}
     if num_decode_draft_tokens is not None:
         kwargs["num_decode_draft_tokens_cpu"] = torch.tensor(
@@ -251,42 +250,42 @@ def test_update_block_table_matches_build(
         _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
         for _ in range(3)
     )
+    source_common = _common_attn_metadata(ref, batch)
+    common = source_common.replace(
+        block_table_tensor=source_common.block_table_tensor + 100
+    )
     for builder in (src, dst, ref):
         builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
-    common = _common_attn_metadata(ref, batch)
     if mamba_cache_mode == "align":
-        # MRV2 precomputes these for every Mamba group each step.
-        dst.mamba_aligned_state_indices = ref.mamba_aligned_state_indices = (
-            mamba_get_block_table_tensor(
-                common.block_table_tensor,
-                common.seq_lens,
-                ref.kv_cache_spec,
-                "align",
-                ref.num_speculative_blocks,
-            )
+        # The first group exercises the CPU gather fallback; the second uses
+        # the indices MRV2 precomputes on CUDA/ROCm.
+        dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+            common.block_table_tensor,
+            common.seq_lens,
+            dst.kv_cache_spec,
+            "align",
+            dst.num_speculative_blocks,
         )
     draft_tokens = test_case.num_decode_draft_tokens
-    expected = _build(ref, batch, draft_tokens, common.block_table_tensor)
-    source = _build(src, batch, draft_tokens)
-    fields = (
+    source = _build(src, batch, draft_tokens, source_common)
+    meta = dst.update_block_table(
+        source, common.block_table_tensor, common.slot_mapping
+    )
+    expected = _build(ref, batch, draft_tokens, common)
+
+    state_fields = (
         "spec_state_indices_tensor",
         "non_spec_state_indices_tensor",
         "prefill_state_indices",
     )
-    source_indices = [getattr(source, f) for f in fields]
-    source_indices = [t if t is None else t.clone() for t in source_indices]
-    meta = dst.update_block_table(
-        source, common.block_table_tensor, common.slot_mapping
-    )
-
-    for field, source_index in zip(fields, source_indices):
-        actual = getattr(meta, field)
-        torch.testing.assert_close(actual, getattr(expected, field))
-        # The source group's indices are untouched.
-        torch.testing.assert_close(getattr(source, field), source_index)
+    for field in fields(GDNAttentionMetadata):
+        actual = getattr(meta, field.name)
+        torch.testing.assert_close(actual, getattr(expected, field.name))
+        if field.name not in state_fields:
+            assert actual is getattr(source, field.name)
         # FULL graph state indices land in this group's own buffers.
-        if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
-            assert actual.data_ptr() == getattr(dst, field).data_ptr()
+        elif full_cuda_graph and meta.num_prefills == 0 and actual is not None:
+            assert actual.data_ptr() == getattr(dst, field.name).data_ptr()
 
 
 def test_has_initial_state_after_reclassification():
@@ -565,12 +564,7 @@ def test_update_block_table_regathers_checkpoint(num_spec):
 
     assert source.checkpoint is not None and expected.checkpoint is not None
     assert actual.checkpoint is not None
-    torch.testing.assert_close(
-        actual.checkpoint.state_indices, expected.checkpoint.state_indices
-    )
-    torch.testing.assert_close(
-        actual.checkpoint.checkpoint_offsets, expected.checkpoint.checkpoint_offsets
-    )
+    torch.testing.assert_close(asdict(actual), asdict(expected))
     assert not torch.equal(
         actual.checkpoint.state_indices, source.checkpoint.state_indices
     )
