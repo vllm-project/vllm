@@ -353,7 +353,7 @@ class KernelConfig:
       mega-kernel with NVFP4 or MXFP4 weights on Blackwell (SM100/SM103,
       where MXFP4 checkpoints are requantized to NVFP4 at load, or SM107,
       where MXFP4 runs with MXFP8 activations), or with block-FP8 (128x128)
-      weights on Hopper; requires expert parallelism and NVSHMEM
+      or MXFP4 weights on Hopper; requires expert parallelism and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
