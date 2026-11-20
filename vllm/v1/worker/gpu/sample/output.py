@@ -133,7 +133,7 @@ def _compact_sampling_mask_xpu(
     rows_per_request: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return torch.ops._xpu_C.compact_sampling_mask(
-        logits,
+        logits.float(),
         cu_num_logits,
         num_sampled_tokens,
         max_num_kept,

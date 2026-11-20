@@ -92,7 +92,8 @@ def test_sampling_mask_lists_slices_multiple_positions_by_request():
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
-def test_sampling_mask_tensors_match_finite_support(max_num_kept):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_sampling_mask_tensors_match_finite_support(max_num_kept, dtype):
     """Whatever its size (empty, one, around the compact width, beyond the
     cap, the whole vocab), a sampled row's mask is exactly the ascending set
     of its finite logits; rows that sampled nothing are empty."""
@@ -112,7 +113,7 @@ def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     expected[1] = expected[7] = []
 
     tensors = SamplingMaskTensors.from_logits(
-        logits.to(DEVICE_TYPE),
+        logits.to(device=DEVICE_TYPE, dtype=dtype),
         torch.arange(len(sizes) + 1, device=DEVICE_TYPE, dtype=torch.int32),
         num_sampled_tokens.to(DEVICE_TYPE),
         max_num_kept,
