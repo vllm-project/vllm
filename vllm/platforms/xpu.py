@@ -14,7 +14,10 @@ import vllm_xpu_kernels._xpu_C  # noqa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    register_backend,
+)
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
@@ -26,6 +29,13 @@ else:
     VllmConfig = None
 
 logger = init_logger(__name__)
+
+# On XPU, FLASH_ATTN_MLA resolves to the XPU-specific subclass everywhere
+# (get_path()/get_class()), not only in the platform's backend selection.
+register_backend(
+    AttentionBackendEnum.FLASH_ATTN_MLA,
+    "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend",
+)
 
 
 def get_mem_info_wrapper(
@@ -106,7 +116,7 @@ class XPUPlatform(Platform):
     device_type: str = "xpu"
     dispatch_key: str = "XPU"
     # Intel XPU's device key is "GPU" for Ray.
-    # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
+    # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
@@ -141,6 +151,27 @@ class XPUPlatform(Platform):
         pass
 
     @classmethod
+    def _get_flash_attn_path(cls, block_size: int | None) -> str:
+        # block_size is set only when the user passed --block-size. Reject
+        # sizes Flash Attention cannot run here rather than at KV cache setup.
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        if not FlashAttentionBackend.supports_block_size(block_size):
+            raise ValueError(
+                f"Flash Attention on {cls.device_name} does not support "
+                f"block_size={block_size}. Supported: "
+                f"{FlashAttentionBackend.get_supported_kernel_block_sizes()}."
+            )
+        if block_size is not None and block_size % 64 != 0:
+            logger.warning_once(
+                "block_size=%d is supported by Flash Attention on XPU but is not "
+                "a multiple of 64, performance may be lower.",
+                block_size,
+            )
+        logger.debug_once("Using Flash Attention backend.")
+        return AttentionBackendEnum.FLASH_ATTN.get_path()
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
@@ -150,16 +181,16 @@ class XPUPlatform(Platform):
         # TurboQuant KV cache: route directly to TQ backend
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
-            logger.info_once("Using TurboQuant attention backend.")
+            logger.debug_once("Using TurboQuant attention backend.")
             return AttentionBackendEnum.TURBOQUANT.get_path()
 
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
-            logger.info_once("Using XPU MLA Sparse backend.")
+            logger.debug_once("Using XPU MLA Sparse backend.")
             return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
             if selected_backend == AttentionBackendEnum.TRITON_MLA:
-                logger.info_once("Using Triton MLA backend on V1 engine.")
+                logger.debug_once("Using Triton MLA backend on V1 engine.")
                 return AttentionBackendEnum.TRITON_MLA.get_path()
             if selected_backend not in (None, AttentionBackendEnum.FLASH_ATTN_MLA):
                 raise ValueError(
@@ -186,10 +217,10 @@ class XPUPlatform(Platform):
                     tuple(invalid_reasons),
                 )
                 return AttentionBackendEnum.TRITON_MLA.get_path()
-            logger.info_once("Using Flash Attention MLA backend on XPU.")
-            return "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend"
+            logger.debug_once("Using Flash Attention MLA backend on XPU.")
+            return AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
-            logger.info_once("Using Triton backend.")
+            logger.debug_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif attn_selector_config.use_batch_invariant:
             # Flash Attention on XPU has not been validated for batch
@@ -204,7 +235,7 @@ class XPUPlatform(Platform):
                     "on XPU and may produce non-deterministic results "
                     "across batch sizes."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
+                return cls._get_flash_attn_path(attn_selector_config.block_size)
             logger.info_once(
                 "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
                 "backend on XPU, which implements batch-invariant kernels."
@@ -213,8 +244,8 @@ class XPUPlatform(Platform):
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
-            # Attention request (for text-only workloads); otherwise fall back
-            # to Triton Attention, which supports mm_prefix.
+            # Attention request (for text-only workloads); otherwise use the
+            # Triton/FlashAttention composite, falling back to Triton Attention.
             if selected_backend == AttentionBackendEnum.FLASH_ATTN:
                 logger.warning_once(
                     "Using Flash Attention on XPU for a multimodal prefix-LM "
@@ -223,7 +254,30 @@ class XPUPlatform(Platform):
                     "inputs will produce incorrect results; only use this for "
                     "text-only workloads."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
+                return cls._get_flash_attn_path(attn_selector_config.block_size)
+            if (
+                selected_backend in (None, AttentionBackendEnum.TRITON_FLASH_ATTN)
+                and dtype != torch.float32
+            ):
+                from vllm.v1.attention.backends.triton_flash_attn import (
+                    TritonFlashAttentionBackend,
+                )
+
+                if TritonFlashAttentionBackend.supports_head_size(
+                    attn_selector_config.head_size
+                ):
+                    logger.info_once(
+                        "Using the Triton/FlashAttention composite backend on "
+                        "XPU: batches with multimodal prefix masks run Triton "
+                        "Attention, causal batches run Flash Attention."
+                    )
+                    return AttentionBackendEnum.TRITON_FLASH_ATTN.get_path()
+                if selected_backend == AttentionBackendEnum.TRITON_FLASH_ATTN:
+                    raise ValueError(
+                        "TRITON_FLASH_ATTN on XPU supports head sizes "
+                        f"{TritonFlashAttentionBackend.get_supported_head_sizes()}"
+                        f", got {attn_selector_config.head_size}."
+                    )
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."
@@ -236,16 +290,14 @@ class XPUPlatform(Platform):
             )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
-            logger.info_once("Using Flash Attention backend.")
-            return AttentionBackendEnum.FLASH_ATTN.get_path()
+            return cls._get_flash_attn_path(attn_selector_config.block_size)
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
-        logger.info_once("Using Flash Attention backend.")
-        return AttentionBackendEnum.FLASH_ATTN.get_path()
+        return cls._get_flash_attn_path(attn_selector_config.block_size)
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
@@ -275,10 +327,10 @@ class XPUPlatform(Platform):
                 f"Supported backends are: "
                 f"{cls.get_supported_vit_attn_backends()}."
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
-        logger.info_once(
+        logger.debug_once(
             f"Using backend {AttentionBackendEnum.FLASH_ATTN} for vit attention"
         )
         return AttentionBackendEnum.FLASH_ATTN
@@ -426,6 +478,25 @@ class XPUPlatform(Platform):
         # This allows custom workers (like vllm-omni workers) to be used on XPU
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+
+        # Batched experts can only be fed by a batched dispatch.
+        if (
+            parallel_config.enable_expert_parallel
+            and vllm_config.kernel_config.moe_backend == "batched_triton"
+            and parallel_config.all2all_backend == "allgather_reducescatter"
+        ):
+            parallel_config.all2all_backend = "alltoall_batched"
+            # The token budget was already sized for a non-batched dispatch.
+            sched = vllm_config.scheduler_config
+            sched.max_num_batched_tokens = min(
+                sched.max_num_batched_tokens,
+                sched.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP,
+            )
+            logger.info_once(
+                "XPU MoE: using alltoall_batched dispatch, max_num_batched_tokens=%d",
+                sched.max_num_batched_tokens,
+            )
+
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
@@ -481,7 +552,7 @@ class XPUPlatform(Platform):
             return
 
         pre_block_size = cache_config.block_size
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded
         if cache_config.mamba_page_size_padded is not None:
@@ -536,6 +607,19 @@ class XPUPlatform(Platform):
     def is_data_center_gpu(cls) -> bool:
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
+
+    @classmethod
+    def support_fp8_query(cls) -> bool:
+        """Whether XPU attention takes an FP8 query.
+
+        VLLM_XPU_SUPPORT_FP8_QUERY overrides; if unset, on for Xe3p only.
+        """
+        if envs.VLLM_XPU_SUPPORT_FP8_QUERY is not None:
+            return envs.VLLM_XPU_SUPPORT_FP8_QUERY
+        try:
+            return bool(torch.ops._xpu_C.is_xe3p_arch())
+        except (AttributeError, RuntimeError):
+            return False
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

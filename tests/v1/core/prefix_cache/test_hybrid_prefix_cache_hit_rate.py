@@ -39,9 +39,9 @@ def _user_turns(conversation: int) -> list[str]:
 async def _scheduler_block_size(client: httpx.AsyncClient) -> int:
     """Return the coarsest boundary an expected cache hit can land on.
 
-    Mirrors ``scheduler_block_size`` in ``resolve_kv_cache_block_sizes``, which
+    Mirrors `scheduler_block_size` in `resolve_kv_cache_block_sizes`, which
     the engine keeps internal: the LCM of the resolved group block sizes. A
-    finer ``prefix_match_unit`` only adds hits, so this stays conservative.
+    finer `prefix_match_unit` only adds hits, so this stays conservative.
     """
     response = await client.get("/metrics")
     response.raise_for_status()
@@ -108,14 +108,11 @@ def server(request):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "server, dropped_blocks",
-    # MTP's prefill lookahead pollutes the tail block, so EAGLE drops one.
-    [pytest.param(False, 0, id="base"), pytest.param(True, 1, id="mtp")],
+    "server",
+    [pytest.param(False, id="base"), pytest.param(True, id="mtp")],
     indirect=["server"],
 )
-async def test_prefix_cache_hit_rate(
-    server: RemoteOpenAIServer, dropped_blocks: int
-) -> None:
+async def test_prefix_cache_hit_rate(server: RemoteOpenAIServer) -> None:
     # Isolate sessions so another conversation cannot hide a cache miss.
     salts = [uuid4().hex for _ in range(NUM_CONVERSATIONS)]
     histories: list[list[ChatCompletionMessageParam]] = [
@@ -164,9 +161,7 @@ async def test_prefix_cache_hit_rate(
                     assert cached == 0, context
                     computed = 0
                 # Every token below the last reachable boundary must be reused.
-                floor = max(
-                    0, round_down(computed, block_size) - dropped_blocks * block_size
-                )
+                floor = max(0, round_down(computed, block_size))
                 print(
                     f"{session=} {turn=} {replay=} {prompt=} {cached=} {floor=} "
                     f"hit_rate={cached / prompt:.4f}"

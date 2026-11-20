@@ -5,14 +5,12 @@ import torch
 from torch import Generator
 
 from tests.utils import large_gpu_mark
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p_cpu,
     apply_top_k_top_p_pytorch,
-    random_sample,
 )
-from vllm.v1.sample.sampler import Sampler
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -23,7 +21,7 @@ VOCAB_SIZE = 128 * 1024
 def _flashinfer_topk_topp_supported() -> bool:
     """True iff the FlashInfer top-k/top-p sampler is usable on this host.
 
-    Mirrors the gate in `TopKTopPSampler.__init__`: CUDA + flashinfer
+    Mirrors the gate in `Sampler`: CUDA + flashinfer
     importable + GPU compute capability supported by the FlashInfer
     backend + more than 16 SMs.
     """
@@ -47,10 +45,6 @@ def _flashinfer_topk_topp_supported() -> bool:
 FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
 
 
-def _seed_default_generator(seed: int) -> None:
-    set_random_seed(seed)
-
-
 @pytest.fixture(autouse=True)
 def reset_default_device():
     """Explicitly set the default device, which can affect subsequent tests.
@@ -59,88 +53,6 @@ def reset_default_device():
     original_device = torch.get_default_device()
     yield
     torch.set_default_device(original_device)
-
-
-def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
-    sampler = Sampler(use_fp64_gumbel=True)
-
-    assert sampler.topk_topp_sampler.use_fp64_gumbel
-
-
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="ROCm aiter sampler test only runs on ROCm",
-)
-def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from vllm.v1.sample.ops import topk_topp_sampler
-
-    class MockPlatform:
-        @staticmethod
-        def is_cuda():
-            return False
-
-        @staticmethod
-        def is_cuda_alike():
-            return True
-
-        @staticmethod
-        def is_cpu():
-            return False
-
-        @staticmethod
-        def is_xpu():
-            return False
-
-    class MockRocmAiterOps:
-        @staticmethod
-        def is_enabled():
-            return True
-
-    real_import = __import__
-
-    def guard_aiter_sampling_import(name, *args, **kwargs):
-        if name == "aiter.ops.sampling":
-            raise AssertionError("aiter sampling import should be deferred")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(topk_topp_sampler, "current_platform", MockPlatform())
-    monkeypatch.setattr(topk_topp_sampler, "rocm_aiter_ops", MockRocmAiterOps())
-    monkeypatch.setattr("builtins.__import__", guard_aiter_sampling_import)
-
-    sampler = topk_topp_sampler.TopKTopPSampler()
-    logits = torch.randn(2, 8)
-    k = torch.full((2,), 2, dtype=torch.int32)
-    generators = {0: torch.Generator(device=logits.device).manual_seed(0)}
-
-    token_ids, logits_to_return = sampler(logits, generators, k, None)
-
-    assert token_ids.shape == (2,)
-    assert logits_to_return is None
-
-
-def test_random_sample_uses_fp64_exponential_race_when_requested():
-    torch.set_default_device(DEVICE_TYPE)
-    probs = torch.tensor(
-        [
-            [0.70, 0.20, 0.10],
-            [0.05, 0.15, 0.80],
-            [0.25, 0.25, 0.50],
-        ],
-        dtype=torch.float32,
-        device=DEVICE_TYPE,
-    )
-
-    _seed_default_generator(12345)
-    q = torch.empty(probs.shape, dtype=torch.float64, device=probs.device)
-    q.exponential_()
-    expected = q.reciprocal_().mul_(probs).argmax(dim=-1).view(-1)
-
-    _seed_default_generator(12345)
-    actual = random_sample(probs.clone(), {}, use_fp64_gumbel=True)
-
-    assert torch.equal(actual, expected)
 
 
 def test_topk_impl_equivalence():
@@ -203,6 +115,22 @@ def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
     with pytest.raises(RuntimeError, match="SM 12.x requires CUDA >= 12.9"):
         flashinfer_sampler_supported()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
+    """Without flashinfer-cubin, nvcc or ninja, FlashInfer cannot build its
+    sampling kernels, so the sampler must fall back to native sampling."""
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setattr(topk_topp_sampler, "has_flashinfer", lambda: False)
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert topk_topp_sampler.flashinfer_sampler_supported() is False
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="FlashInfer kernels are disabled"):
+        topk_topp_sampler.flashinfer_sampler_supported()
 
 
 # =============================================================================
@@ -293,7 +221,7 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k, p=None)
 
-    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 48, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topp_only(self, batch_size: int, vocab_size: int):
         """Test top-p only (k=None)."""
@@ -307,7 +235,7 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k=None, p=p)
 
-    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 48, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
         """Test combined top-k and top-p."""
@@ -325,6 +253,24 @@ class TestTritonTopkTopp:
         # Randomly disable top-p for some rows (~25%)
         disable_p = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
         p.masked_fill_(disable_p, 1.0)
+
+        self._compare_results(logits, k, p)
+
+    @pytest.mark.parametrize("batch_size", [8, 48, 64])
+    @pytest.mark.parametrize("vocab_size", [151936, 200064, 262144])
+    def test_topk_and_topp_large_vocab(self, batch_size: int, vocab_size: int):
+        """Mixed batches at vocab sizes where the split top-p pipeline uses
+        its largest split counts (up to _SPLIT_MAX_SPLITS)."""
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(1, 100, (batch_size,), generator=self.generator)
+        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
+        # Rows cycle through top-k + top-p, top-p only, top-k only, neither.
+        k[1::4] = vocab_size
+        p[2::4] = 1.0
+        k[3::4] = vocab_size
+        p[3::4] = 1.0
 
         self._compare_results(logits, k, p)
 
@@ -402,7 +348,7 @@ class TestTritonTopkTopp:
         """
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
-        if not current_platform.is_cuda():
+        if not current_platform.is_cuda_alike():
             pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
         vocab_size = 131072
         batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31
@@ -788,6 +734,38 @@ class TestTritonTopkTopp:
             f"{kept_topk_topp.tolist()}"
         )
 
+    @pytest.mark.parametrize("batch_size", [8, 48])
+    def test_skip_split_without_topp_only_rows(
+        self, batch_size: int, monkeypatch: pytest.MonkeyPatch
+    ):
+        """has_topp_only_rows=False skips the split pipeline; the result must
+        not change when every top-p row also has a top-k, grammar rows
+        (k >= #finite logits) included."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        vocab_size = 32000
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[1] = float("-inf")
+        idx = torch.randperm(vocab_size, generator=self.generator)[:30]
+        logits[1, idx] = torch.randn(30, generator=self.generator)
+        k = torch.randint(
+            50, 100, (batch_size,), generator=self.generator, dtype=torch.int32
+        )
+        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
+        k[::4] = vocab_size
+        p[::4] = 1.0
+
+        expected = tt.apply_top_k_top_p_triton(logits.clone(), k, p)
+        monkeypatch.setattr(
+            tt, "_apply_topp_split", lambda *args: pytest.fail("split launched")
+        )
+        actual = tt.apply_top_k_top_p_triton(
+            logits.clone(), k, p, has_topp_only_rows=False
+        )
+        assert torch.equal(actual, expected)
+
     def test_topp_tie_break_deterministic(self):
         """Boundary-duplicate trimming must be deterministic across calls.
 
@@ -821,6 +799,68 @@ class TestTritonTopkTopp:
         )
         assert len(kept_idx) == pytorch_kept
 
+    # Both sizes take the split top-p pipeline (64 is its max batch). 1e9 / 0.6
+    # models the forced logit after temperature=0.6.
+    @pytest.mark.parametrize("batch_size", [4, 64], ids=["split", "split-boundary"])
+    @pytest.mark.parametrize(
+        "forced_logit", [1e9, 1e9 / 0.6], ids=["1e9", "1e9_over_temp0.6"]
+    )
+    def test_topp_keeps_forced_huge_logit(self, batch_size: int, forced_logit: float):
+        """A forced logit of huge magnitude must survive top-p.
+
+        Regression: thinking-budget forcing writes 1e9 to the end-of-thinking
+        logit. The split top-p mask kernel mapped its pivot back to logit
+        space as log(pivot) + log(Z) + M, which fp32 rounds to M at that
+        magnitude, so every token was masked and sampling produced token 0.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab_size, forced_token = 131072, 13
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[:, forced_token] = forced_logit
+        p = torch.full((batch_size,), 0.95, dtype=torch.float32)
+
+        result = apply_top_k_top_p_triton(logits.clone(), None, p)
+        assert (result[:, forced_token] == forced_logit).all()
+        probs = result.softmax(dim=-1)
+        assert not probs.isnan().any()
+        assert (probs.argmax(dim=-1) == forced_token).all()
+        if current_platform.is_cuda_alike():
+            # Split path only; the monolithic kernel leaves this row unmasked.
+            assert ((result != float("-inf")).sum(-1) == 1).all()
+
+    def test_topp_ties_across_blocks(self):
+        """The split top-p tie budget must carry across a slice's blocks.
+
+        Regression: the split top-p mask kernel restarted its count of
+        boundary-value copies at every 8192-entry block, so each block of a
+        slice could keep up to `numkeep` copies of its own.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size, num_ties = 64, 151936, 4096
+        # 4096 tied tokens spread over many blocks, between 64 tokens above
+        # and a low tail; the p=0.75 boundary lands mid-copy in the tie group.
+        tie_idx = torch.arange(num_ties) * 37
+        logits = torch.full((batch_size, vocab_size), -8.0)
+        logits[:, tie_idx] = 0.0
+        logits[:, -64:] = 4.0
+        p = torch.full((batch_size,), 0.75, dtype=torch.float32)
+
+        kept = apply_top_k_top_p_triton(logits.clone(), None, p) != float("-inf")
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p) != float("-inf")
+        num_kept, num_expected = kept.sum(dim=-1), expected.sum(dim=-1)
+        assert torch.equal(num_kept, num_expected), (
+            f"kept {num_kept.unique().tolist()}, "
+            f"expected {num_expected.unique().tolist()}"
+        )
+        # Kept copies of the boundary value are the first ones in index order.
+        kept_ties = kept[:, tie_idx]
+        num_kept_ties = kept_ties.sum(dim=-1, keepdim=True)
+        assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
+
 
 # =============================================================================
 # FlashInfer top-k/top-p robustness tests
@@ -839,7 +879,7 @@ class TestFlashInferTopkToppRobustness:
     single poisoned request (NaN / +Inf / -Inf in row 0) must not:
 
     1. crash or hang the process;
-    2. produce out-of-range token ids (anything outside ``[0, vocab)``);
+    2. produce out-of-range token ids (anything outside `[0, vocab)`);
     3. corrupt other batch rows — neighbours of a poisoned row must
        still receive valid token ids (regression for cross-row
        corruption in a DP batch where one bad request would otherwise
@@ -932,8 +972,8 @@ class TestFlashInferTopkToppRobustness:
     def test_flashinfer_handles_pathological_logits(self, pattern: str, path: str):
         """flashinfer_sample must return valid ids even on poisoned logits.
 
-        Direct call into ``flashinfer_sample`` — exactly the code path
-        ``TopKTopPSampler.forward_cuda`` takes when FI is enabled.
+        Direct call into `flashinfer_sample` — exactly the code path the
+        sampler takes when FI is enabled.
         """
         from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sample
 
@@ -1012,7 +1052,6 @@ class TestFlashInferDistributionMatch:
         from vllm.v1.sample.ops.topk_topp_sampler import (
             apply_top_k_top_p,
             flashinfer_sample,
-            random_sample,
         )
 
         torch.set_default_device(DEVICE_TYPE)
@@ -1060,7 +1099,7 @@ class TestFlashInferDistributionMatch:
         # PyTorch-native dispatch path (Triton-routed filter + Gumbel sample).
         processed = apply_top_k_top_p(batch.clone(), k_batch, p_batch)
         probs = processed.softmax(dim=-1, dtype=torch.float32)
-        pt_tokens = random_sample(probs, {})
+        pt_tokens = torch.multinomial(probs, num_samples=1).view(-1)
         pt_counts = torch.bincount(pt_tokens, minlength=self.VOCAB).cpu().numpy()
         self._chi2_check(
             pt_counts,
@@ -1096,4 +1135,477 @@ class TestFlashInferDistributionMatch:
         assert p_value > self.ALPHA, (
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
+        )
+
+
+# =============================================================================
+# CPU kernel tests
+# =============================================================================
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu()
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="CPU top-k/top-p C++ kernels require a non-x86 CPU build",
+)
+class TestCpuTopkTopp:
+    """Tests for the CPU top-k/top-p kernel.
+
+    Structurally mirrors `TestTritonTopkTopp`: same `_compare_results`
+    contract (parity vs. PyTorch reference, with the same survivor-count
+    tolerance for top-p), same per-mode and edge-case test names. The
+    CPU kernel runs on `cpu` device regardless of `DEVICE_TYPE`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Set up test fixtures."""
+        torch.set_default_device("cpu")
+        self.generator = Generator(device="cpu").manual_seed(42)
+
+    def _compare_results(
+        self,
+        logits: torch.Tensor,
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ):
+        """Compare CPU kernel results with PyTorch sorting implementation.
+
+        For top-k only, we expect exact match.
+        For top-p (with or without top-k), we allow small differences due to
+        floating-point precision in probability sum calculations.
+        """
+        logits_pytorch = logits.clone()
+        logits_cpu = logits.clone().to(torch.float32)
+
+        result_pytorch = apply_top_k_top_p_pytorch(
+            logits_pytorch, k, p, allow_cpu_sync=True
+        )
+        k_i32 = k.to(torch.int32) if k is not None else None
+        p_f32 = p.to(torch.float32) if p is not None else None
+        result_cpu = apply_top_k_top_p_cpu(logits_cpu, k_i32, p_f32)
+
+        assert not result_cpu.isnan().any(), "NaN found in CPU kernel result"
+
+        pytorch_kept = (result_pytorch != float("-inf")).sum(dim=-1)
+        cpu_kept = (result_cpu != float("-inf")).sum(dim=-1)
+
+        if p is None:
+            # Top-k only: expect exact match
+            assert torch.equal(pytorch_kept, cpu_kept), (
+                f"Top-k mask mismatch: PyTorch kept {pytorch_kept.tolist()}, "
+                f"CPU kept {cpu_kept.tolist()}"
+            )
+        else:
+            # Top-p involved: allow small differences
+            # Either < 1% of kept values OR < 5 values absolute
+            max_diff = (pytorch_kept - cpu_kept).abs().max().item()
+            max_kept = pytorch_kept.max().item()
+            if max_kept > 0 and max_diff > 3:
+                diff_pct = max_diff / max_kept * 100
+                assert diff_pct < 0.5, (
+                    f"Top-p mask difference too large: {diff_pct:.2f}% "
+                    f"(max diff {max_diff} values out of {max_kept})"
+                )
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
+    def test_topk_only(self, batch_size: int, vocab_size: int):
+        """Test top-k only (p=None)."""
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(
+            1, min(100, vocab_size), (batch_size,), generator=self.generator
+        )
+        # Randomly disable top-k for some rows (~25%)
+        disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
+        k.masked_fill_(disable_mask, vocab_size)
+
+        self._compare_results(logits, k, p=None)
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
+    def test_topp_only(self, batch_size: int, vocab_size: int):
+        """Test top-p only (k=None)."""
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1  # [0.1, 1.0]
+        # Randomly disable top-p for some rows (~25%)
+        disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
+        p.masked_fill_(disable_mask, 1.0)
+
+        self._compare_results(logits, k=None, p=p)
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
+    def test_topk_and_topp(self, batch_size: int, vocab_size: int):
+        """Test combined top-k and top-p."""
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(
+            1, min(100, vocab_size), (batch_size,), generator=self.generator
+        )
+        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1  # [0.1, 1.0]
+
+        # Randomly disable top-k for some rows (~25%)
+        disable_k = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
+        k.masked_fill_(disable_k, vocab_size)
+        # Randomly disable top-p for some rows (~25%)
+        disable_p = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
+        p.masked_fill_(disable_p, 1.0)
+
+        self._compare_results(logits, k, p)
+
+    def test_both_disabled(self):
+        """Test when both k and p are None (should be no-op)."""
+        logits = torch.randn(32, 1024, generator=self.generator, dtype=torch.float32)
+        logits_clone = logits.clone()
+
+        result = apply_top_k_top_p_cpu(logits_clone, k=None, p=None)
+
+        assert torch.equal(result, logits), "Should be no-op when both k and p are None"
+
+    def test_extreme_k_values(self):
+        """Test edge cases for k values."""
+        batch_size, vocab_size = 16, 1024
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+
+        # k=1 (keep only top 1)
+        k = torch.ones(batch_size, dtype=torch.int32)
+        self._compare_results(logits.clone(), k, p=None)
+
+        # k=vocab_size (keep all)
+        k = torch.full((batch_size,), vocab_size, dtype=torch.int32)
+        self._compare_results(logits.clone(), k, p=None)
+
+        # Mixed extreme values
+        k = torch.tensor([1, vocab_size, 2, vocab_size - 1] * 4, dtype=torch.int32)
+        self._compare_results(logits.clone(), k, p=None)
+
+    def test_extreme_p_values(self):
+        """Test edge cases for p values."""
+        batch_size, vocab_size = 16, 1024
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+
+        # p=1.0 (keep all)
+        p = torch.ones(batch_size, dtype=torch.float32)
+        self._compare_results(logits.clone(), k=None, p=p)
+
+        # Mixed values
+        p = torch.tensor([0.1, 0.5, 0.9, 1.0] * 4, dtype=torch.float32)
+        self._compare_results(logits.clone(), k=None, p=p)
+
+        # p close to 0: kernel diff vs. sort-based ref is ≤2 tokens at
+        # vocab=1024 with no PAD inputs (standard binary-search precision).
+        p = torch.full((batch_size,), 0.01, dtype=torch.float32)
+        self._compare_results(logits.clone(), k=None, p=p)
+
+    def test_large_batch(self):
+        """Test with a large batch size."""
+        batch_size, vocab_size = 512, 32000
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(1, 50, (batch_size,), generator=self.generator)
+        p = torch.rand(batch_size, generator=self.generator) * 0.5 + 0.5
+
+        self._compare_results(logits, k, p)
+
+    # -----------------------------------------------------------------
+    # Tests for -inf logits (e.g. from grammar / structured output masks)
+    # -----------------------------------------------------------------
+
+    @pytest.mark.parametrize("inf_fraction", [0.5, 0.9, 0.99])
+    def test_topk_with_neginf_logits(self, inf_fraction: float):
+        """Top-k with many -inf logits (simulating grammar bitmask)."""
+        batch_size, vocab_size = 32, 128256
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        mask = (
+            torch.rand(batch_size, vocab_size, generator=self.generator) < inf_fraction
+        )
+        logits[mask] = float("-inf")
+
+        k = torch.randint(
+            1, 50, (batch_size,), generator=self.generator, dtype=torch.int32
+        )
+        result = apply_top_k_top_p_cpu(logits.clone(), k, None)
+
+        assert not result.isnan().any(), "NaN found in top-k result with -inf logits"
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept <= k[i].item(), f"Row {i}: kept {kept} > k={k[i].item()}"
+            finite_in = (logits[i] > float("-inf")).sum().item()
+            if finite_in > 0:
+                assert kept > 0, f"Row {i}: no tokens kept despite finite input"
+
+    @pytest.mark.parametrize("inf_fraction", [0.5, 0.9, 0.99])
+    def test_topp_with_neginf_logits(self, inf_fraction: float):
+        """Top-p with many -inf logits.
+
+        Exercises the PAD-sentinel blend in Pass 1 of the kernel.
+        """
+        batch_size, vocab_size = 32, 128256
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        mask = (
+            torch.rand(batch_size, vocab_size, generator=self.generator) < inf_fraction
+        )
+        logits[mask] = float("-inf")
+
+        p = (
+            torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.9
+            + 0.1
+        )
+        result = apply_top_k_top_p_cpu(logits.clone(), None, p)
+
+        assert not result.isnan().any(), "NaN found in top-p result with -inf logits"
+        for i in range(batch_size):
+            finite_in = (logits[i] > float("-inf")).sum().item()
+            kept = (result[i] > float("-inf")).sum().item()
+            if finite_in > 0:
+                assert kept > 0, f"Row {i}: no tokens kept despite finite input"
+
+    @pytest.mark.parametrize("inf_fraction", [0.5, 0.9, 0.99])
+    def test_topk_topp_with_neginf_logits(self, inf_fraction: float):
+        """Combined top-k + top-p with many -inf logits."""
+        batch_size, vocab_size = 32, 128256
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        mask = (
+            torch.rand(batch_size, vocab_size, generator=self.generator) < inf_fraction
+        )
+        logits[mask] = float("-inf")
+
+        k = torch.randint(
+            1, 50, (batch_size,), generator=self.generator, dtype=torch.int32
+        )
+        p = (
+            torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.9
+            + 0.1
+        )
+        result = apply_top_k_top_p_cpu(logits.clone(), k, p)
+
+        assert not result.isnan().any(), (
+            "NaN found in top-k+top-p result with -inf logits"
+        )
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept <= k[i].item(), f"Row {i}: kept {kept} > k={k[i].item()}"
+
+    def test_all_neginf_logits(self):
+        """All logits are -inf (fully masked). Kernel should be a no-op."""
+        batch_size, vocab_size = 16, 128256
+        logits = torch.full(
+            (batch_size, vocab_size), float("-inf"), dtype=torch.float32
+        )
+
+        k = torch.randint(
+            1, 50, (batch_size,), generator=self.generator, dtype=torch.int32
+        )
+        p = torch.full((batch_size,), 0.9, dtype=torch.float32)
+
+        # top-k only
+        result = apply_top_k_top_p_cpu(logits.clone(), k, None)
+        assert not result.isnan().any(), "NaN from all-inf top-k"
+        assert (result == float("-inf")).all(), "Expected all -inf unchanged"
+
+        # top-p only
+        result = apply_top_k_top_p_cpu(logits.clone(), None, p)
+        assert not result.isnan().any(), "NaN from all-inf top-p"
+        assert (result == float("-inf")).all(), "Expected all -inf unchanged"
+
+        # top-k + top-p
+        result = apply_top_k_top_p_cpu(logits.clone(), k, p)
+        assert not result.isnan().any(), "NaN from all-inf top-k+top-p"
+        assert (result == float("-inf")).all(), "Expected all -inf unchanged"
+
+    def test_few_valid_tokens_with_neginf(self):
+        """Only a handful of tokens are finite per row (strict grammar)."""
+        batch_size, vocab_size = 32, 128256
+        logits = torch.full(
+            (batch_size, vocab_size), float("-inf"), dtype=torch.float32
+        )
+        for i in range(batch_size):
+            indices = torch.randperm(vocab_size, generator=self.generator)[:5]
+            logits[i, indices] = torch.randn(
+                5, generator=self.generator, dtype=torch.float32
+            )
+
+        k = torch.full((batch_size,), 50, dtype=torch.int32)
+        p = torch.full((batch_size,), 0.9, dtype=torch.float32)
+
+        # top-k only (k=50 but only 5 finite → keep all 5)
+        result = apply_top_k_top_p_cpu(logits.clone(), k, None)
+        assert not result.isnan().any()
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept == 5, f"Row {i}: expected 5 kept, got {kept}"
+
+        # top-k with k < num_finite
+        k_small = torch.full((batch_size,), 3, dtype=torch.int32)
+        result = apply_top_k_top_p_cpu(logits.clone(), k_small, None)
+        assert not result.isnan().any()
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept <= 3, f"Row {i}: expected <=3 kept, got {kept}"
+
+        # top-p only
+        result = apply_top_k_top_p_cpu(logits.clone(), None, p)
+        assert not result.isnan().any()
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept > 0, f"Row {i}: no tokens kept"
+
+    @pytest.mark.parametrize("num_valid", [1, 2, 5, 10, 50])
+    @pytest.mark.parametrize(
+        "mode",
+        ["topk_only", "topp_only", "topk_and_topp"],
+    )
+    def test_equal_logits_few_valid(self, num_valid: int, mode: str):
+        """Few valid tokens all sharing the same logit value.
+
+        Stresses the boundary-tie duplicate-keep logic. With all-equal
+        finite logits the binary-search pivot can't differentiate — the
+        kernel's safe-fallback path must keep at least one token rather
+        than masking everything.
+        """
+        batch_size, vocab_size = 32, 128256
+        logits = torch.full(
+            (batch_size, vocab_size), float("-inf"), dtype=torch.float32
+        )
+        for i in range(batch_size):
+            indices = torch.randperm(vocab_size, generator=self.generator)[:num_valid]
+            logits[i, indices] = 1.0  # all equal
+
+        k: torch.Tensor | None = None
+        p: torch.Tensor | None = None
+        if mode in ("topk_only", "topk_and_topp"):
+            k = torch.full((batch_size,), max(1, num_valid - 1), dtype=torch.int32)
+        if mode in ("topp_only", "topk_and_topp"):
+            p = torch.full((batch_size,), 0.95, dtype=torch.float32)
+
+        result = apply_top_k_top_p_cpu(logits.clone(), k, p)
+
+        assert not result.isnan().any(), "NaN in equal-logit result"
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept > 0, (
+                f"Row {i}: all tokens masked with {num_valid} equal-valued "
+                f"finite logits ({mode})"
+            )
+
+    @pytest.mark.parametrize("num_valid", [2, 5, 10])
+    def test_nearly_equal_logits_topp(self, num_valid: int):
+        """Few valid tokens with very similar (but not identical) logits."""
+        batch_size, vocab_size = 32, 128256
+        logits = torch.full(
+            (batch_size, vocab_size), float("-inf"), dtype=torch.float32
+        )
+        for i in range(batch_size):
+            indices = torch.randperm(vocab_size, generator=self.generator)[:num_valid]
+            # Tiny spread: values in [1.0, 1.0 + 1e-6]
+            logits[i, indices] = (
+                1.0
+                + torch.rand(num_valid, generator=self.generator, dtype=torch.float32)
+                * 1e-6
+            )
+
+        p = torch.full((batch_size,), 0.95, dtype=torch.float32)
+        result = apply_top_k_top_p_cpu(logits.clone(), None, p)
+
+        assert not result.isnan().any(), "NaN in nearly-equal-logit result"
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept > 0, (
+                f"Row {i}: all tokens masked with {num_valid} "
+                f"nearly-equal finite logits"
+            )
+
+    def test_mixed_neginf_and_normal_rows(self):
+        """Batch with a mix of normal rows and heavily-masked rows."""
+        batch_size, vocab_size = 32, 32000
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        # Mask even rows heavily (99% -inf), leave odd rows normal.
+        for i in range(0, batch_size, 2):
+            mask = torch.rand(vocab_size, generator=self.generator) < 0.99
+            logits[i][mask] = float("-inf")
+
+        k = torch.randint(
+            1, 50, (batch_size,), generator=self.generator, dtype=torch.int32
+        )
+        p = (
+            torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.9
+            + 0.1
+        )
+
+        result = apply_top_k_top_p_cpu(logits.clone(), k, p)
+        assert not result.isnan().any(), "NaN in mixed normal/-inf batch"
+        for i in range(batch_size):
+            kept = (result[i] > float("-inf")).sum().item()
+            assert kept <= k[i].item()
+            finite_in = (logits[i] > float("-inf")).sum().item()
+            if finite_in > 0:
+                assert kept > 0, f"Row {i}: no tokens kept"
+
+    @pytest.mark.parametrize("vocab_size", [17, 128, 1024, 32000])
+    @pytest.mark.parametrize("batch_size", [1, 8, 32])
+    def test_fused_equals_sequential(self, batch_size: int, vocab_size: int):
+        """Fused top_k_p_row must produce the same output as sequential
+        top_k_row + top_p_row on non-tied rows (no boundary duplicates).
+
+        Uses torch.allclose with rtol=1e-5, atol=1e-7 because FP64
+        reduction order may differ between the two code paths.
+        """
+        from vllm._cpu_ops import (
+            cpu_topk_sampling as _cpu_topk_sampling_op,
+        )
+        from vllm._cpu_ops import (
+            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+        )
+        from vllm._cpu_ops import (
+            cpu_topp_sampling as _cpu_topp_sampling_op,
+        )
+
+        # Random non-tied logits; avoid uniform rows so boundary-tie is unlikely.
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(
+            1,
+            min(50, vocab_size - 1),
+            (batch_size,),
+            generator=self.generator,
+            dtype=torch.int32,
+        )
+        p = (
+            torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.7
+            + 0.2
+        )  # [0.2, 0.9]
+
+        # Sequential path: apply top-k then top-p independently.
+        seq = logits.clone()
+        _cpu_topk_sampling_op(seq, k)
+        _cpu_topp_sampling_op(seq, p)
+
+        # Fused path.
+        fused = logits.clone()
+        _cpu_topk_topp_sampling_op(fused, k, p)
+
+        assert torch.allclose(fused, seq, rtol=1e-5, atol=1e-7), (
+            f"Fused and sequential outputs differ at "
+            f"batch_size={batch_size}, vocab_size={vocab_size}.\n"
+            f"Max abs diff: {(fused - seq).abs().max().item():.2e}"
         )

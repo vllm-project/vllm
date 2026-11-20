@@ -41,6 +41,9 @@ fn load_lora_api_error(error: LoadLoraError) -> ApiError {
     match error {
         LoadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
         LoadLoraError::InvalidAdapter { .. } => ApiError::invalid_request(message, None),
+        LoadLoraError::PathAccess(LoraPathAccessError::NotFound { .. }) => {
+            ApiError::not_found(message)
+        }
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => {
             ApiError::invalid_request(message, Some("lora_path"))
         }
@@ -66,13 +69,11 @@ fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
         UnloadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
-        UnloadLoraError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
+        UnloadLoraError::NotFound { .. } => ApiError::not_found(message),
         UnloadLoraError::IntIdMismatch { .. } => {
             ApiError::invalid_request(message, Some("lora_int_id"))
         }
-        UnloadLoraError::Engine { .. } | UnloadLoraError::NotRemoved { .. } => {
-            ApiError::server_error(message)
-        }
+        UnloadLoraError::Engine { .. } => ApiError::server_error(message),
     }
 }
 
@@ -119,4 +120,20 @@ pub async fn unload_lora_adapter(
         "Success: LoRA adapter '{}' removed successfully.",
         lora_request.lora_name
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::load_lora_api_error;
+    use crate::lora::{LoadLoraError, LoraPathAccessError};
+
+    #[test]
+    fn load_lora_reports_missing_adapter_path_as_not_found() {
+        let error = load_lora_api_error(LoadLoraError::PathAccess(LoraPathAccessError::NotFound {
+            lora_path: "/not/an/adapter".to_string(),
+        }));
+        assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+    }
 }

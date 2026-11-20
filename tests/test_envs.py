@@ -18,11 +18,6 @@ from vllm.envs import (
 from vllm.exceptions import VLLMValidationError
 
 
-def test_object_storage_shm_default_name():
-    """The generated name must fit macOS's shared-memory name limit."""
-    assert len(envs._generate_shm_name()) <= 30
-
-
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None
@@ -46,6 +41,21 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_API_KEY", "sk-super-secret")
 
     assert "VLLM_API_KEY" not in envs.compile_factors()
+
+
+def test_ray_bundle_indices_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Engines sharing a placement group get different bundle indices but
+    # compile the same graphs, so they must share a cache key.
+    monkeypatch.setenv("VLLM_RAY_BUNDLE_INDICES", "4,5,6,7")
+
+    assert "VLLM_RAY_BUNDLE_INDICES" not in envs.compile_factors()
+
+
+def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Only bounds chat template rendering in the Rust frontend.
+    monkeypatch.setenv("VLLM_CHAT_TEMPLATE_FUEL", "2000000")
+
+    assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):

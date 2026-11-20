@@ -6,6 +6,10 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -36,16 +40,69 @@ class ShortConvAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # causal_conv1d computes each token from its own window only.
+        return True
+
 
 @dataclass
 class ShortConvAttentionMetadata(BaseMambaAttentionMetadata):
-    pass
+    checkpoint: MambaPrefillCheckpointMetadata | None = None
 
 
 class ShortConvAttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[ShortConvAttentionMetadata]
 ):
     metadata_cls = ShortConvAttentionMetadata
+
+    def __init__(
+        self,
+        kv_cache_spec: MambaSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec, self.checkpoint_alignment
+        )
+
+    def _checkpoint_rows(self, num_reqs: int, num_prefills: int) -> list[int]:
+        return list(range(num_reqs - num_prefills, num_reqs))
+
+    def build(  # type: ignore[override]
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs: Any,
+    ) -> ShortConvAttentionMetadata:
+        metadata = super().build(
+            common_prefix_len, common_attn_metadata, fast_build, **kwargs
+        )
+        if metadata.num_prefills == 0:
+            return metadata
+        checkpoint = self.checkpoint_builder.build(
+            common_attn_metadata,
+            self._checkpoint_rows(common_attn_metadata.num_reqs, metadata.num_prefills),
+        )
+        return replace(metadata, checkpoint=checkpoint)
+
+    def update_block_table(
+        self,
+        metadata: ShortConvAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> ShortConvAttentionMetadata:
+        new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
+        if metadata.checkpoint is None:
+            return new_metadata
+        # Checkpoint destinations are block-table entries of this group.
+        return replace(
+            new_metadata,
+            checkpoint=metadata.checkpoint.regather_state_indices(blk_table),
+        )
 
 
 @dataclass
@@ -99,6 +156,11 @@ class PleShortConvAttentionBackend(ShortConvAttentionBackend):
     def get_builder_cls() -> type["PleShortConvAttentionMetadataBuilder"]:
         return PleShortConvAttentionMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # The dilated PLE conv path has not been validated.
+        return False
+
 
 class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     metadata_cls = PleShortConvAttentionMetadata
@@ -150,6 +212,10 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         self.has_initial_states_d = torch.empty(
             (self.decode_cudagraph_max_bs,), dtype=torch.bool, device=device
         )
+
+    def _checkpoint_rows(self, num_reqs: int, num_prefills: int) -> list[int]:
+        # The PLE conv exports over all non-spec rows (decodes, then prefills).
+        return list(range(num_reqs))
 
     def _build_non_spec_metadata(
         self,
@@ -271,7 +337,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             m.block_table_tensor,
             m.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
+            self.num_speculative_blocks,
         )
 
         if query_start_loc.device.type == "cpu":
@@ -375,6 +442,10 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 out=non_spec_query_start_loc[1:],
             )
 
+        checkpoint = None
+        if num_prefills > 0:
+            checkpoint = self.checkpoint_builder.build(m, non_spec_req_idx_cpu.tolist())
+
         # Compute the conv-state slots for the non-spec decode/prefill split.
         if non_spec_state_indices_tensor is None:
             state_indices_tensor = block_table_tensor[:0, 0]
@@ -477,6 +548,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
             seq_lens=m.seq_lens,
+            checkpoint=checkpoint,
         )
 
     def build_for_cudagraph_capture(

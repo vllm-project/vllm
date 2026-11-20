@@ -11,6 +11,7 @@ import numpy as np
 
 # Patch torch APIs
 import torch
+from vllm.triton_utils import HAS_TRITON
 
 
 def noop(*args: Any, **kwargs: Any) -> None:
@@ -59,11 +60,14 @@ def get_memory_info(*args: Any, **kwargs: Any) -> tuple[int, int]:
 
 
 torch.Event = _EventPlaceholder
+torch.Stream = _StreamPlaceholder
 torch.cuda.Event = _EventPlaceholder
 torch.cuda.Stream = _StreamPlaceholder
 torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.cuda.stream = lambda *args, **kwargs: _StreamPlaceholder()
+torch.accelerator.set_stream = noop
+torch.accelerator.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
 torch.accelerator.empty_cache = empty_cache_noop
 torch.Tensor.pin_memory = fake_pin_memory
@@ -82,6 +86,11 @@ def async_tensor_h2d(
 ) -> torch.Tensor:
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
+        if out is None:
+            # Triton specializes on pointer alignment, so a tensor aliasing a
+            # numpy view recompiles the first time a batch arrives unaligned.
+            # Torch allocations are always aligned, so warmup stays valid.
+            return data.to(dtype=dtype, copy=True)
     if not isinstance(data, torch.Tensor):
         data = torch.tensor(data, dtype=dtype, device="cpu")
     elif out is None:
@@ -91,14 +100,19 @@ def async_tensor_h2d(
 
 torch_utils.async_tensor_h2d = async_tensor_h2d
 
-# Patch model runner APIs
-import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
-import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
-
-gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
-
-# Patch Triton
-from vllm.triton_utils import HAS_TRITON, tl
-
 if HAS_TRITON:
+    # Patch model runner APIs used by the Triton CPU runner.
+    import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
+    import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
+    import vllm.v1.worker.gpu.sample.penalties as gpu_penalties
+    import vllm.v1.worker.gpu.structured_outputs as gpu_structured_outputs
+    from vllm.triton_utils import tl
+
+    gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
+
+    # triton-cpu lowers the bitmask unpack in these kernels to IR quadratic in
+    # the block size: ~70 s per cold compile at 8192, ~2 s at 1024, at no
+    # runtime cost.
+    gpu_penalties.PENALTIES_BLOCK_SIZE = 1024
+    gpu_structured_outputs.GRAMMAR_BITMASK_BLOCK_SIZE = 1024
     tl.debug_barrier = noop

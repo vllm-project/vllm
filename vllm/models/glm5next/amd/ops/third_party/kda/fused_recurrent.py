@@ -16,12 +16,12 @@ from vllm.triton_utils import tl, triton
 
 
 def token_stride(x: torch.Tensor) -> int:
-    """Token stride (elements) of a ``[B, T, H, D]`` or ``[B, T, H]`` tensor.
+    """Token stride (elements) of a `[B, T, H, D]` or `[B, T, H]` tensor.
 
     The recurrent kernel walks tokens with this stride and addresses heads
-    densely inside a token, so each token's ``[H, D]`` (or ``[H]``) block must
-    be contiguous, tokens must not overlap, and with ``B > 1`` sequence ``n``
-    must start at token ``n * T`` (dense batch). Column slices of a wider
+    densely inside a token, so each token's `[H, D]` (or `[H]`) block must
+    be contiguous, tokens must not overlap, and with `B > 1` sequence `n`
+    must start at token `n * T` (dense batch). Column slices of a wider
     per-token projection buffer satisfy this and are consumed in place.
     """
     st = x.stride()

@@ -4,12 +4,14 @@
 
 import ast
 import inspect
+from collections.abc import MutableMapping
 from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.utils.deprecation import deprecate_kwarg
 
 from vllm.model_executor.models.transformers.fuser import Fusers, get_fuser, get_fusers
 from vllm.model_executor.models.transformers.fusers import (
@@ -20,6 +22,7 @@ from vllm.model_executor.models.transformers.fusers import (
     packed_qkv,
     qkv,
 )
+from vllm.model_executor.models.transformers.fusers.glu import ActAndMulQuant
 from vllm.model_executor.models.transformers.fx_utils import (
     bypass_existence_guard,
     trace,
@@ -305,6 +308,31 @@ class PerHeadQKNormAttention(FakeAttention):
         k = self.k_norm(self.k_proj(hidden_states).view(shape))
         v = self.v_proj(hidden_states).view(shape)
         return self.o_proj((q + k + v).flatten(-2)), None
+
+
+class DeprecatedKwargAttention(FakeAttention):
+    """Transformers v5.24 style: `cache` instead of `past_key_values`, with a
+    `deprecate_kwarg` wrapper fx can't trace -> the undecorated forward is traced."""
+
+    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
+    def forward(self, hidden_states, attention_mask=None, cache=None, **kwargs):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if cache is not None:
+            k, v = cache.update(k, v, self.layer_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, attn_weights = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return self.o_proj(attn_output), attn_weights
 
 
 class ResidDropoutAttention(FakeAttention):
@@ -683,6 +711,114 @@ class PackedQKVAttention(nn.Module):
         return self.resid_dropout(self.c_proj(attn_output)), attn_weights
 
 
+class SlicedQKVAttention(nn.Module):
+    """Phi3-style: one packed projection sliced into q/k/v in the forward."""
+
+    is_causal = True
+
+    def __init__(
+        self,
+        hidden: int = 32,
+        head_dim: int = 8,
+        heads: int = 4,
+        kv_heads: int = 1,
+        layer_idx: int = 0,
+    ):
+        super().__init__()
+        self.config = SimpleNamespace(_attn_implementation="vllm")
+        self.layer_idx = layer_idx
+        self.head_dim = head_dim
+        self.scaling = head_dim**-0.5
+        self.query_pos = heads * head_dim
+        self.kv_dim = kv_heads * head_dim
+        self.qkv_proj = nn.Linear(hidden, self.query_pos + 2 * self.kv_dim, bias=False)
+        self.o_proj = nn.Linear(self.query_pos, hidden, bias=False)
+
+    def attend(self, hidden_states, q, k, v, attention_mask, **kwargs):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        q = q.reshape(*input_shape, -1, self.head_dim).transpose(1, 2)
+        k, v = k.unsqueeze(1), v.unsqueeze(1)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, attn_weights = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), attn_weights
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class RopeSlicedQKVAttention(SlicedQKVAttention):
+    """Also slices a tensor derived from the projection with int bounds."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        q = torch.cat([q[..., :4] * 2, q[..., 4:]], dim=-1)
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class GapSlicedQKVAttention(SlicedQKVAttention):
+    """A hole between k and v, so the slices do not tile the projection."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim + 1 :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class TracedBoundSlicedQKVAttention(SlicedQKVAttention):
+    """Slice bounds computed from a tensor shape, so fx sees them as nodes."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        n = hidden_states.shape[-1]
+        k_end = n + self.kv_dim
+        q = qkv[..., :n]
+        k = qkv[..., n:k_end]
+        v = qkv[..., k_end:]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class AnnotatedSlicedQKVAttention(SlicedQKVAttention):
+    """The source binds the projection with an annotated assign."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv: torch.Tensor = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class ReusedSlicedQKVAttention(SlicedQKVAttention):
+    """The projection has a fourth consumer."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos] + qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
 class PerHeadSplitAttention(nn.Module):
     """A packed projection reshaped and split *per head* -> not a q/k/v split."""
 
@@ -745,7 +881,10 @@ def _apply_glu_fuser_with_stubs(module: nn.Module, fuser: GLUFuser):
         if gate.bias is not None:
             merged.bias.copy_(torch.cat([gate.bias, up.bias], dim=0))
     setattr(module, fuser.merged_name, merged)
-    setattr(module, fuser.act_name, SiluAndMulStub())
+    act = SiluAndMulStub()
+    setattr(
+        module, fuser.act_name, ActAndMulQuant(act) if fuser.fuses_act_quant else act
+    )
     delattr(module, fuser.gate_name)
     delattr(module, fuser.up_name)
     module.forward = MethodType(fuser.fused_forward, module)
@@ -804,6 +943,8 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
     names = fuser.fused_forward.__code__.co_names
     assert "gate_up_proj" in names and "act_fn" in names and "down_proj" in names
     assert not {"gate_proj", "up_proj"} & set(names)
+    # The activation can fuse with the down projection's input quantization
+    assert fuser.fuses_act_quant
 
     # Numerics: the fused forward must match the original on a real instance.
     real = mlp_cls(bias=bias)
@@ -838,9 +979,14 @@ def test_glu_identifies_down_projection():
     matches the column-parallel merged gate/up; `None` when there is no such
     projection to force (fusion of gate/up still applies)."""
     with torch.device("meta"):
-        assert get_fuser(GLUMLP(), GLUFuser).down_name == "down_proj"
-        assert get_fuser(ReversedGLUMLP(), GLUFuser).down_name == "down_proj"
-        assert get_fuser(NoDownGLU(), GLUFuser).down_name is None
+        for cls, down_name in [
+            (GLUMLP, "down_proj"),
+            (ReversedGLUMLP, "down_proj"),
+            (NoDownGLU, None),
+        ]:
+            fuser = get_fuser(cls(), GLUFuser)
+            assert fuser is not None
+            assert fuser.down_name == down_name
 
 
 @pytest.mark.parametrize("attn_cls", [FakeAttention, ReversedFakeAttention])
@@ -891,14 +1037,21 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
 
 def test_qkv_identifies_output_projection():
     with torch.device("meta"):
-        assert get_fuser(FakeAttention(), QKVFuser).o_name == "o_proj"
-        assert get_fuser(ReversedFakeAttention(), QKVFuser).o_name == "o_proj"
-        assert get_fuser(ExtraProjAttention(), QKVFuser).o_name == "o_proj"
-        # Norm children (q_norm/k_norm) must not disturb o_proj identification.
-        assert get_fuser(QKNormAttention(), QKVFuser).o_name == "o_proj"
-        assert get_fuser(PerHeadQKNormAttention(), QKVFuser).o_name == "o_proj"
-        # A module between o_proj and the return is transparent.
-        assert get_fuser(ResidDropoutAttention(), QKVFuser).o_name == "o_proj"
+        for cls in [
+            FakeAttention,
+            ReversedFakeAttention,
+            ExtraProjAttention,
+            # Norm children must not disturb o_proj identification.
+            QKNormAttention,
+            PerHeadQKNormAttention,
+            # A module between o_proj and the return is transparent.
+            ResidDropoutAttention,
+            # A decorated forward with the renamed `cache` argument still traces.
+            DeprecatedKwargAttention,
+        ]:
+            fuser = get_fuser(cls(), QKVFuser)
+            assert fuser is not None
+            assert fuser.o_name == "o_proj"
 
 
 @pytest.mark.parametrize(
@@ -1253,6 +1406,87 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
     torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
 
 
+@pytest.mark.parametrize(
+    "attn_cls",
+    [SlicedQKVAttention, RopeSlicedQKVAttention, AnnotatedSlicedQKVAttention],
+)
+def test_detects_and_rewrites_sliced_qkv(attn_cls):
+    """A projection sliced into q/k/v with global offsets must be re-sharded too.
+
+    Slices of derived tensors (e.g. rotary) must not interfere with the match."""
+    with torch.device("meta"):
+        meta = attn_cls()
+    fuser = get_fuser(meta, PackedQKVFuser)
+    assert isinstance(fuser, PackedQKVFuser)
+    assert (fuser.qkv_name, fuser.o_name) == ("qkv_proj", "o_proj")
+    assert (fuser.q_size, fuser.kv_size) == (32, 8)
+    names = fuser.fused_forward.__code__.co_names
+    assert "output_sizes" in names and "tp_size" in names
+
+    real = attn_cls(layer_idx=3)
+    for p in real.parameters():
+        nn.init.normal_(p, std=0.05)
+    x = torch.randn(1, 5, 32)
+    real.attn = FakeMQASelfAttn()
+    expected, _ = real(x)
+    fused = _apply_packed_qkv_fuser_with_stubs(real, fuser)
+    assert fused is real and fused.layer_idx == 3
+    out, _ = fused(x)
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_sliced_qkv_forward_reads_per_rank_sections():
+    """With a head-sharded projection, the slices must follow the per-rank layout
+    `[q_r | k_r | v_r]`, not the global offsets."""
+    tp_size = 2
+    with torch.device("meta"):
+        meta = SlicedQKVAttention(heads=8, kv_heads=4)
+    fuser = get_fuser(meta, PackedQKVFuser)
+    assert fuser is not None
+
+    real: nn.Module = SlicedQKVAttention(heads=8, kv_heads=4)
+    q_size, kv_size = fuser.q_size, fuser.kv_size
+    weight = real.qkv_proj.weight.data
+    wq, wk, wv = (
+        weight[:q_size],
+        weight[q_size : q_size + kv_size],
+        weight[q_size + kv_size :],
+    )
+    x = torch.randn(1, 5, 32)
+    seen: dict[str, torch.Tensor] = {}
+
+    class Capture(FakeSelfAttn):
+        def forward(self, q, k, v):
+            seen.update(q=q, k=k, v=v)
+            return q
+
+    for rank in range(tp_size):
+        local = torch.cat([w.chunk(tp_size)[rank] for w in (wq, wk, wv)])
+        qkv = nn.Linear(32, local.shape[0], bias=False)
+        qkv.weight.data.copy_(local)
+        qkv.tp_size = tp_size
+        qkv.output_sizes = [q_size, kv_size, kv_size]
+        real.qkv_proj, real.attn = qkv, Capture()
+        real.o_proj = nn.Identity()
+        real.forward = MethodType(fuser.fused_forward, real)
+        real(x)
+        for name, w in (("q", wq), ("k", wk), ("v", wv)):
+            torch.testing.assert_close(
+                seen[name].reshape(5, -1),
+                (x @ w.chunk(tp_size)[rank].T).reshape(5, -1),
+            )
+
+
+@pytest.mark.parametrize(
+    "attn_cls",
+    [GapSlicedQKVAttention, ReusedSlicedQKVAttention, TracedBoundSlicedQKVAttention],
+)
+def test_irregular_slices_are_not_packed_qkv(attn_cls):
+    """Anything but exactly three tiling slices of the projection is left alone."""
+    with torch.device("meta"):
+        assert get_fuser(attn_cls(), PackedQKVFuser) is None
+
+
 def test_per_head_split_is_not_packed_qkv():
     """The split must consume the whole projection, else its sizes are head
     widths and re-sharding by them would be wrong."""
@@ -1265,6 +1499,7 @@ def test_fuser_is_cached_per_class_and_structure():
         fuser_a = get_fuser(GLUMLP(), GLUFuser)
         fuser_b = get_fuser(GLUMLP(), GLUFuser)
     assert fuser_a is fuser_b
+    assert get_fusers.cache is not None
     assert any(key[0] is GLUMLP for key in get_fusers.cache)
 
 
@@ -1297,8 +1532,10 @@ def test_weight_mappings_are_scoped_to_fused_prefixes():
     with torch.device("meta"):
         glu_fuser = get_fuser(GLUMLP(), GLUFuser)
         qkv_fuser = get_fuser(FakeAttention(), QKVFuser)
+    assert glu_fuser is not None and qkv_fuser is not None
 
     mapper = WeightsMapper()
+    assert isinstance(mapper.orig_to_new_stacked, MutableMapping)
     for prefix in ("model.layers.0.mlp", "model.layers.1.mlp"):
         mapper.orig_to_new_stacked.update(glu_fuser.orig_to_new_stacked(prefix))
     mapper.orig_to_new_stacked.update(

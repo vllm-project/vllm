@@ -54,7 +54,7 @@ class ProducerPushState(Enum):
     FAILED = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class ProducerPushRecord:
     """Collect all asynchronous state for one Producer push."""
 
