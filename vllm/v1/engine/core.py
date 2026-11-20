@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_planning import (
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
+    resolve_mamba_block_size,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -289,6 +290,11 @@ class EngineCore:
 
         # Get all kv cache needed by the model
         layer_configs = self.model_executor.get_kv_cache_layer_configs()
+        mamba_block_size = resolve_mamba_block_size(vllm_config, layer_configs)
+        if mamba_block_size is not None:
+            vllm_config.cache_config.mamba_block_size = mamba_block_size
+            self.model_executor.set_mamba_block_size(mamba_block_size)
+            layer_configs = self.model_executor.get_kv_cache_layer_configs()
 
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
@@ -1271,12 +1277,13 @@ class EngineCore:
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
-        # Only the LRU receiver cache lives in the engine process.
         if self.mm_receiver_cache is not None and request.mm_features:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
             )
 
+        # The lookup above only runs with the engine-side LRU cache. Requests
+        # that bypass it can still arrive with missing multimodal data.
         if request.mm_features:
             missing_mm_hashes = [
                 feature.mm_hash or feature.identifier
@@ -2193,6 +2200,9 @@ class EngineCoreProc(EngineCore):
             ),
             allow_missing_mm_embeddings=(
                 mm_config is not None and mm_config.allow_missing_mm_embeddings
+            ),
+            max_mm_embeds_per_request=getattr(
+                self.scheduler, "max_mm_embeds_per_request", None
             ),
         )
 
