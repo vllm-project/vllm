@@ -1,0 +1,33 @@
+{{ bos_token }}{{ bos_token }}
+{%- for message in messages -%}
+    {%- if message['content'] is iterable -%}
+        {%- for item in message['content'] -%}
+            {{ '<start_of_turn>user
+' }}
+            {%- if item['type'] == 'image' -%}
+                {{ '<start_of_image>' }}
+            {%- elif item['type'] == 'text' -%}
+                {{ 'You are a policy expert trying to help determine whether a generated or real image is in' }}
+                {{ ' violation of the safety policy below. Your decision must very clearly follow the specific'}}
+                {{ ' language used in the safety policy and should not include any interpretation outside of the' }}
+                {{ ' safety policy.
+
+' }}
+                {{ '<BEGIN_SAFETY_POLICY>
+' }}
+                {{ item['text'] + '
+' }}
+                {{ '</END_SAFETY_POLICY>
+
+' }}
+                {{ 'Does the image violate the above policy? Your Answer must start with \'Yes\' or \'No\'.' }}
+                {{ '<end_of_turn>
+' }}
+            {%- endif -%}
+        {%- endfor -%}
+        {{'<start_of_turn>model
+'}}
+    {%- else -%}
+        {{ raise_exception("Conversation messages must contain iterable content containing images and policy definitions in text.") }}
+    {%- endif -%}
+{%- endfor -%}
