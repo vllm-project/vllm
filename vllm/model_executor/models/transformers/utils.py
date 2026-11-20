@@ -466,6 +466,43 @@ def maybe_disable_dynamic_rope_update(
         module.rope_type = rope_types if per_layer else rope_types[None]
 
 
+class _PreambleDone(Exception):
+    """Stops a decoder forward before its first layer."""
+
+
+@torch.no_grad()
+def decoder_mutates_inputs_embeds(
+    model: nn.Module, first_layer: nn.Module, hidden_size: int, uses_mrope: bool
+) -> bool:
+    """Whether `model`'s pre-layer code modifies `inputs_embeds` in place.
+
+    Runs `model` on one token and stops it at `first_layer`. If the probe fails,
+    assumes it does, so callers fall back to copying the input."""
+
+    def stop(module, args):
+        raise _PreambleDone
+
+    inputs_embeds = torch.zeros(1, 1, hidden_size)
+    position_ids = torch.zeros(1, 1, dtype=torch.long)
+    if uses_mrope:
+        position_ids = position_ids.expand(3, 1, 1)
+    handle = first_layer.register_forward_pre_hook(stop)
+    try:
+        model(
+            inputs_embeds=inputs_embeds,
+            use_cache=False,
+            position_ids=position_ids,
+            return_dict=False,
+        )
+    except _PreambleDone:
+        return inputs_embeds._version > 0
+    except Exception:
+        logger.debug("Decoder input mutation probe failed", exc_info=True)
+    finally:
+        handle.remove()
+    return True
+
+
 def has_bidirectional_attention(model: nn.Module) -> bool:
     """Whether any of the attention layers in `model` has `is_causal=False`."""
     return any(not getattr(module, "is_causal", True) for module in model.modules())

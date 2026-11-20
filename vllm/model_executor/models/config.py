@@ -481,6 +481,12 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
 
         # Generic JIT warmup submits text-only requests, which DASH cannot use.
         vllm_config.kernel_config.enable_jit_warmup = False
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            logger.warning(
+                "Unlimited-OCR-2 does not support the extensible KV cache; "
+                "turning it off."
+            )
+        vllm_config.cache_config.enable_extensible_kv_cache = False
         compilation = vllm_config.compilation_config
         breakable = is_breakable_cudagraph_enabled()
         if not vllm_config.model_config.enforce_eager:

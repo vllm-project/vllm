@@ -6,6 +6,7 @@ import ast
 import contextlib
 import os
 import tempfile
+from collections import Counter
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -61,15 +62,9 @@ def count_modules(model, cls: type) -> int:
     return sum(isinstance(m, cls) for m in model.modules())
 
 
-def get_num_fused(model) -> tuple[int, int]:
-    from vllm.model_executor.layers.linear import (
-        MergedColumnParallelLinear,
-        QKVParallelLinear,
-    )
-
-    glu = count_modules(model, MergedColumnParallelLinear)
-    qkv = count_modules(model, QKVParallelLinear)
-    return glu, qkv
+def count_fusers(model) -> dict[str, int]:
+    counts = Counter(type(f).__name__ for fs in model.fusers.values() for f in fs)
+    return dict(counts)
 
 
 def check_implementation(
@@ -79,9 +74,11 @@ def check_implementation(
     model: str,
     kwargs_ref: dict[str, Any] | None = None,
     kwargs_test: dict[str, Any] | None = None,
-    num_fused: tuple[int, int] = (1, 1),
+    num_fused: dict[str, int] | None = None,
     **kwargs,
 ):
+    if num_fused is None:
+        num_fused = {"GLUFuser": 1, "QKVFuser": 1}
     if kwargs_ref is None:
         kwargs_ref = {}
     if kwargs_test is None:
@@ -97,10 +94,9 @@ def check_implementation(
         assert model_config.using_transformers_backend()
 
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
-        expected_glu, expected_qkv = num_fused
-        for num_glu, num_qkv in model_test.apply_model(get_num_fused):
-            assert num_glu == expected_glu * num_layers
-            assert num_qkv == expected_qkv * num_layers
+        expected = {name: n * num_layers for name, n in num_fused.items()}
+        for counts in model_test.apply_model(count_fusers):
+            assert {name: counts.get(name, 0) for name in expected} == expected
 
         tp_size = kwargs_test.get("tensor_parallel_size", 1)
         from vllm.model_executor.layers.attention import Attention
@@ -127,9 +123,9 @@ def check_implementation(
 @pytest.mark.parametrize(
     "model,model_impl,num_fused,trust_remote_code",
     [
-        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1), False),
-        ("vllm-project/Ilama-3.2-1B", "auto", (1, 1), True),
-        ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1), False),  # MoE
+        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", None, False),
+        ("vllm-project/Ilama-3.2-1B", "auto", None, True),
+        ("allenai/OLMoE-1B-7B-0924", "transformers", {"QKVFuser": 1}, False),  # MoE
     ],
 )
 def test_models(
@@ -138,7 +134,7 @@ def test_models(
     example_prompts: list[str],
     model: str,
     model_impl: str,
-    num_fused: tuple[int, int],
+    num_fused: dict[str, int] | None,
     trust_remote_code: bool,
 ) -> None:
     check_implementation(
@@ -319,18 +315,29 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "model, num_fused",
+    [
+        ("meta-llama/Llama-3.2-1B-Instruct", None),
+        # Packed qkv_proj sliced with global offsets in the forward
+        ("microsoft/Phi-4-mini-instruct", {"PackedQKVFuser": 1}),
+    ],
+)
 def test_distributed(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     example_prompts,
+    model: str,
+    num_fused: dict[str, int] | None,
 ):
     kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
     check_implementation(
         hf_runner,
         vllm_runner,
         example_prompts,
-        "meta-llama/Llama-3.2-1B-Instruct",
+        model,
         kwargs_test=kwargs,
+        num_fused=num_fused,
     )
 
 

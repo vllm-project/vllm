@@ -130,7 +130,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
             quant_config=quant,
             prefix=f"{prefix}.linear_gate",
         )
-        self.use_hpc_gated_mla = False
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             config.hidden_size,

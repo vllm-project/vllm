@@ -229,9 +229,9 @@ def test_model_tensor_schema(model_id: str):
 
     if (
         model_config.hf_config.model_type == "hy_v4_flash_vl"
-        and not current_platform.is_cuda()
+        and not current_platform.is_cuda_alike()
     ):
-        # Flash has no non-CUDA implementation; enforce its runtime contract.
+        # Flash has no implementation outside CUDA/ROCm; enforce that contract.
         with pytest.raises(
             NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA"
         ):

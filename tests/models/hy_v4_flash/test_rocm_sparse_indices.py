@@ -1,106 +1,131 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HYV4 Flash ROCm top-k rows against the AITER sparse MLA contract.
-
-AITER reads the first `paged_kv_indptr[i+1] - paged_kv_indptr[i]` entries of
-each row, so every row must hold its live indices at the front, and the
-builder's per-row count must equal the number of live entries.
+"""HYV4 Flash ROCm row contract: AITER sparse MLA reads the first
+`paged_kv_indptr` delta entries of each row and maps -1 to slot 0, so builder
+counts must equal the indexers' live entries and rows must be front-packed.
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import set_random_seed
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm() or not HAS_TRITON or not torch.cuda.is_available(),
-    reason="Requires ROCm, Triton, and a GPU",
+if not current_platform.is_rocm():
+    pytest.skip("HYV4 Flash ROCm sparse indices", allow_module_level=True)
+
+from vllm.models.hy_v4_flash.amd import swa
+from vllm.models.hy_v4_flash.amd.indexpool_ops import expand_groups, select_groups
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseImpl,
 )
 
 DEVICE = "cuda"
+# (seq_len, query_len) per request: decode, short and long extend, an empty
+# padded request, a full prefill, and a decode past the compressed budget.
+REQUESTS = [(1, 1), (300, 3), (0, 0), (64, 64), (2000, 1), (150, 64)]
 
 
-@pytest.fixture(autouse=True)
-def _reset_random_seed() -> None:
-    set_random_seed(0)
-
-
-def _batch(seq_lens: list[int], query_lens: list[int]):
-    seq_lens_t = torch.tensor(seq_lens, device=DEVICE, dtype=torch.int32)
-    query_lens_t = torch.tensor(query_lens, device=DEVICE, dtype=torch.int32)
-    query_start_loc = torch.zeros(len(seq_lens) + 1, device=DEVICE, dtype=torch.int32)
-    query_start_loc[1:] = query_lens_t.cumsum(0)
-    num_tokens = sum(query_lens)
-    requests = torch.repeat_interleave(
-        torch.arange(len(seq_lens), device=DEVICE), query_lens_t.long()
+def _logical_positions() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    seq_lens = torch.tensor([s for s, _ in REQUESTS], dtype=torch.int32)
+    query_lens = torch.tensor([q for _, q in REQUESTS], dtype=torch.int32)
+    query_start_loc = torch.zeros(len(REQUESTS) + 1, dtype=torch.int32)
+    torch.cumsum(query_lens, 0, out=query_start_loc[1:])
+    positions = torch.cat(
+        [torch.arange(s - q, s, dtype=torch.int64) for s, q in REQUESTS]
     )
-    positions = (
-        (seq_lens_t - query_lens_t)[requests]
-        + torch.arange(num_tokens, device=DEVICE)
-        - query_start_loc[requests]
-    ).long()
-    return seq_lens_t, query_start_loc, num_tokens, max(query_lens), positions
-
-
-def _assert_front_packed(indices: torch.Tensor, counts: torch.Tensor) -> None:
-    columns = torch.arange(indices.shape[1], device=DEVICE)
-    front = columns[None] < counts[:, None]
-    assert torch.equal(indices >= 0, front)
-
-
-def test_window_rows_match_live_counts():
-    from vllm.models.hy_v4_flash.amd.swa import live_counts, window_indices
-
-    window = 512
-    seq_lens, query_start_loc, num_tokens, max_query_len, positions = _batch(
-        [7, 600, 513, 2000], [7, 3, 1, 6]
+    return (
+        seq_lens.to(DEVICE),
+        query_start_loc.to(DEVICE),
+        positions.to(DEVICE),
     )
-    indices = window_indices(positions, window, window)
-    counts = live_counts(
-        seq_lens, query_start_loc, num_tokens, max_query_len, window, 4, 511
+
+
+def _assert_front_packed(rows: torch.Tensor, counts: torch.Tensor) -> None:
+    columns = torch.arange(rows.shape[1], device=rows.device)
+    head = columns < counts[:, None].long()
+    assert torch.all((rows >= 0) == head)
+
+
+@pytest.mark.parametrize("window", [0, 128], ids=["compressed", "swa"])
+def test_live_counts_match_indexer_rows(window):
+    ratio, budget, width = 16, 7, 128
+    seq_lens, query_start_loc, positions = _logical_positions()
+    num_tokens = positions.numel()
+    if window:
+        rows = swa.window_indices(positions, window, width)
+    else:
+        upper = (positions // ratio).int()
+        torch.manual_seed(0)
+        logits = torch.randn(num_tokens, int(upper.max()) + 1, device=DEVICE)
+        rows = expand_groups(select_groups(logits, upper, budget), positions, ratio)
+
+    counts = swa.live_counts(
+        seq_lens,
+        query_start_loc,
+        num_tokens,
+        max(q for _, q in REQUESTS),
+        window,
+        ratio,
+        budget,
     )
-    _assert_front_packed(indices, counts)
-    for row, position in enumerate(positions.tolist()):
-        expected = torch.arange(
-            max(0, position - window + 1), position + 1, device=DEVICE
-        )
-        assert torch.equal(indices[row, : int(counts[row])].long(), expected)
+
+    torch.testing.assert_close(counts, (rows >= 0).sum(-1).int(), rtol=0, atol=0)
+    _assert_front_packed(rows, counts)
 
 
-def test_compressed_rows_match_live_counts():
-    from vllm.models.hy_v4_flash.amd.indexpool_ops import (
-        expand_groups,
-        select_groups,
+def _stable_pack_reference(rows: torch.Tensor) -> torch.Tensor:
+    packed = torch.full_like(rows, -1)
+    for i, row in enumerate(rows):
+        live = row[row >= 0]
+        packed[i, : live.numel()] = live
+    return packed
+
+
+@pytest.mark.parametrize("width", [2176, 300])
+def test_pack_live_indices_is_stable_compaction(width):
+    torch.manual_seed(0)
+    storage = torch.randint(0, 1 << 20, (9, width + 32), device=DEVICE).int()
+    storage.masked_fill_(torch.rand_like(storage, dtype=torch.float) < 0.6, -1)
+    storage[3] = -1
+    storage[5] = torch.arange(width + 32, device=DEVICE)
+    original = storage.clone()
+    rows = storage[:, :width]
+
+    counts = swa.pack_live_indices_(rows)
+
+    expected = _stable_pack_reference(original[:, :width])
+    torch.testing.assert_close(rows, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        counts, (original[:, :width] >= 0).sum(-1).int(), rtol=0, atol=0
     )
-    from vllm.models.hy_v4_flash.amd.swa import live_counts
+    torch.testing.assert_close(storage[:, width:], original[:, width:], rtol=0, atol=0)
 
-    ratio, budget = 4, 511
-    seq_lens, query_start_loc, num_tokens, max_query_len, positions = _batch(
-        [5, 2047, 2048, 2049, 9000, 70000], [5, 1, 1, 1, 6, 2]
+
+def test_packed_impl_rebuilds_indptr_from_live_counts(monkeypatch):
+    monkeypatch.setattr(
+        ROCMAiterMLASparseImpl, "forward_mqa", lambda *args: "forwarded"
     )
-    upper = (positions // ratio).int()
-    logits = torch.randn(num_tokens, int(upper.max()) + 64, device=DEVICE)
-    indices = expand_groups(select_groups(logits, upper, budget), positions, ratio)
-    counts = live_counts(
-        seq_lens, query_start_loc, num_tokens, max_query_len, 0, ratio, budget
-    )
-    _assert_front_packed(indices, counts)
-    assert bool((indices <= positions[:, None]).all())
+    torch.manual_seed(0)
+    buffer = torch.randint(0, 4096, (8, 256), device=DEVICE).int()
+    buffer.masked_fill_(torch.rand_like(buffer, dtype=torch.float) < 0.5, -1)
+    buffer[6:] = 7
+    original = buffer.clone()
+    num_tokens = 5
+    indptr = torch.full((10,), -3, dtype=torch.int32, device=DEVICE)
+    indptr[0] = 0
+    impl = object.__new__(swa.FlashPackedSparseImpl)
+    impl.topk_indices_buffer = buffer
+    q = torch.empty(num_tokens, 16, 576, device=DEVICE)
 
+    result = impl.forward_mqa(q, None, SimpleNamespace(paged_kv_indptr=indptr), None)
 
-def test_pack_live_indices_is_stable_and_in_place():
-    from vllm.models.hy_v4_flash.amd.swa import pack_live_indices_
-
-    rows, width = 37, 2176
-    values = torch.randint(0, 100000, (rows, width), device=DEVICE, dtype=torch.int32)
-    holes = torch.rand(rows, width, device=DEVICE) < 0.6
-    holes[0] = True
-    holes[1] = False
-    indices = torch.where(holes, -1, values)
-    expected = [row[row >= 0] for row in indices.clone()]
-    counts = pack_live_indices_(indices)
-    _assert_front_packed(indices, counts)
-    for row in range(rows):
-        assert torch.equal(indices[row, : int(counts[row])], expected[row])
+    assert result == "forwarded"
+    counts = (original[:num_tokens] >= 0).sum(-1).int()
+    expected = torch.zeros(10, dtype=torch.int32, device=DEVICE)
+    expected[1 : num_tokens + 1] = torch.cumsum(counts, 0)
+    expected[num_tokens + 1 :] = expected[num_tokens]
+    torch.testing.assert_close(indptr, expected, rtol=0, atol=0)
+    _assert_front_packed(buffer[:num_tokens], counts)
+    torch.testing.assert_close(buffer[num_tokens:], original[num_tokens:])

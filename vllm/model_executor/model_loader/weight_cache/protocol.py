@@ -359,6 +359,11 @@ class WeightCacheKey:
     repacked), so weights processed for one backend are wrong for another."""
     linear_backend: str = "auto"
     linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
+    language_model_only: bool = False
+    mm_encoder_only: bool = False
+    mm_disabled_modalities: tuple[str, ...] = ()
+    """With the two flags above, decides which components (e.g. the vision
+    tower) are built; skipped ones are absent from the daemon's export."""
 
     @classmethod
     def from_model_config(
@@ -396,6 +401,8 @@ class WeightCacheKey:
         linear_backend_per_quant = tuple(
             sorted((kernel_config.linear_backend_per_quant or {}).items())
         )
+        mm_config = model_config.multimodal_config
+        mm_limits = mm_config.limit_per_prompt if mm_config else {}
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -424,6 +431,11 @@ class WeightCacheKey:
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
             linear_backend_per_quant=linear_backend_per_quant,
+            language_model_only=bool(mm_config and mm_config.language_model_only),
+            mm_encoder_only=bool(mm_config and mm_config.mm_encoder_only),
+            mm_disabled_modalities=tuple(
+                sorted(m for m, opts in mm_limits.items() if opts.count == 0)
+            ),
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
