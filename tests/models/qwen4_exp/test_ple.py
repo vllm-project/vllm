@@ -2405,8 +2405,15 @@ def test_fused_conv_correctness(
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "layer_cls",
+    [
+        pytest.param(Qwen4ExpPLELayer, id="nvidia"),
+        pytest.param(Qwen4ExpPLELayerAMD, id="amd"),
+    ],
+)
 def test_prefill_exports_conv_window_at_checkpoint(
-    case: _ConvBatchCase, state_layout: str
+    case: _ConvBatchCase, state_layout: str, layer_cls: type[nn.Module]
 ) -> None:
     """A checkpoint holds the conv state of the prefill stopped at its offset.
 
@@ -2416,7 +2423,7 @@ def test_prefill_exports_conv_window_at_checkpoint(
     """
     device = torch.device("cuda")
     metadata, num_real_tokens = _make_conv_metadata(case, device)
-    module = object.__new__(Qwen4ExpPLELayer)
+    module = object.__new__(layer_cls)
     nn.Module.__init__(module)
     module.conv_state_len = (case.kernel_size - 1) * case.dilation
     module.short_conv_dilation = case.dilation
