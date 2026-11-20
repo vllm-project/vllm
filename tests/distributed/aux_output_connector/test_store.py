@@ -3397,6 +3397,83 @@ def test_session_object_writer_sends_a_deferred_removal_after_the_batches_before
         assert _run_within(writer.close) is None
 
 
+def test_session_object_writer_drain_abandons_a_retry_that_starts_while_it_decides(
+    monkeypatch,
+):
+    failed = threading.Event()
+    attempts: list[str] = []
+
+    def put(keys):
+        attempts.append(keys[0])
+        if len(attempts) == 1:
+            failed.set()
+            return -900
+        return 0
+
+    client, writer = _timed_writer(put, 600.0, 4)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+
+    def hung():
+        start = time.monotonic()
+        while len(attempts) < 2 and time.monotonic() - start < 0.5:
+            time.sleep(0.01)
+        return True
+
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        writer.add_tail("job/s/tail/1", rows, {})
+        assert failed.wait(10)
+        monkeypatch.setattr(writer, "_hung", hung)
+        assert _run_within(writer.drain) is None
+    finally:
+        assert _run_within(writer.close) is None
+    assert attempts == ["job/s/tail/0"] and not client.objects
+
+
+def test_session_object_writer_sends_a_removal_deferred_as_the_queue_empties(
+    monkeypatch,
+):
+    now = [0.0]
+    monkeypatch.setattr(
+        session_objects_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def put(keys):
+        if keys[0] == "job/s/tail/1":
+            entered.set()
+            gate.wait(30)
+
+    client, writer = _timed_writer(put, 1.0, 1)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+    check = writer.check
+
+    def check_after_the_queue_empties():
+        gate.set()
+        deadline = time.monotonic() + 10
+        while writer._queue.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.01)
+        check()
+
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        assert _run_within(writer.drain) is None
+        writer.add_tail("job/s/tail/1", rows, {})
+        assert entered.wait(10)
+        writer.add_tail("job/s/tail/2", rows, {})
+        now[0] += 1.0
+        monkeypatch.setattr(writer, "check", check_after_the_queue_empties)
+        writer.remove(["job/s/tail/0"])
+        deadline = time.monotonic() + 10
+        while "job/s/tail/0" in client.objects and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert list(client.objects) == ["job/s/tail/1", "job/s/tail/2"]
+    finally:
+        gate.set()
+        assert _run_within(writer.close) is None
+
+
 def test_session_object_writer_close_stops_retrying():
     attempts = []
     client, writer = _timed_writer(lambda keys: attempts.append(keys), 600.0, 1)
