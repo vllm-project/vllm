@@ -174,6 +174,11 @@ _MAX_SEQLEN_BACKENDS = {
     AttentionBackendEnum.TRITON_ATTN,
 }
 
+_AUDIO_CUDAGRAPH_BACKENDS = {
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.TRITON_ATTN,
+}
+
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     input_lengths_leave = input_lengths % 100
@@ -1682,10 +1687,11 @@ class Qwen3OmniMoeAudioEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         # The graph needs a varlen kernel that reads cu_seqlens on device:
         # TORCH_SDPA splits on host lengths, and FLASHINFER needs extra
-        # metadata the audio tower does not compute yet.
+        # metadata the audio tower does not compute yet. ROCM_AITER_FA is not
+        # validated with graphs yet.
         supported = (
             not isinstance(self.audio_tower, StageMissingLayer)
-            and self.audio_tower.attn_backend in _MAX_SEQLEN_BACKENDS
+            and self.audio_tower.attn_backend in _AUDIO_CUDAGRAPH_BACKENDS
         )
         return EncoderCudaGraphConfig(
             modalities=["audio"] if supported else [],
