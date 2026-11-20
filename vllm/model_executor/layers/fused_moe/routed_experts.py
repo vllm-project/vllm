@@ -5,7 +5,6 @@ from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
-import regex as re
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -39,9 +38,6 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
-
-
-_PER_EXPERT_NAME = re.compile(r"experts\.\d+\.[^.]+\.")
 
 
 def _index_expert_mapping(
@@ -1034,14 +1030,15 @@ class RoutedExperts(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        expert_mapping = self.get_expert_mapping(include_fused=True)
+        # Checkpoint names do not depend on LoRA wrapping: match plain names
+        # and drop PEFT's `base_layer` segment from incoming ones.
+        expert_mapping = self.get_expert_mapping(
+            include_fused=True, lora_base_layer_prefix=""
+        )
         mapping_by_expert = _index_expert_mapping(expert_mapping)
 
         for expert_name, loaded_weight in weights:
-            qual_name = f"{self.layer_name}.{expert_name}"
-            if self.lora_base_layer_prefix and ".base_layer." not in qual_name:
-                # LoRA-wrapped experts also take the plain checkpoint names
-                qual_name = _PER_EXPERT_NAME.sub(r"\g<0>base_layer.", qual_name, 1)
+            qual_name = f"{self.layer_name}.{expert_name.replace('.base_layer.', '.')}"
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
                 mapping_by_expert.get(expert_key)
@@ -1147,6 +1144,7 @@ class RoutedExperts(PluggableLayer):
         ckpt_down_proj_name: str | None = None,
         ckpt_up_proj_name: str | None = None,
         include_fused: bool = False,
+        lora_base_layer_prefix: str | None = None,
     ) -> list[tuple[str, str, int, str]]:
         moe_config = self.moe_config
         num_fused_shared_experts = self.expert_map_manager.num_fused_shared_experts
@@ -1158,7 +1156,11 @@ class RoutedExperts(PluggableLayer):
             num_experts=moe_config.num_logical_experts + num_fused_shared_experts,
             num_redundant_experts=num_redundant_experts,
             routed_experts_prefix="",
-            lora_base_layer_prefix=self.lora_base_layer_prefix,
+            lora_base_layer_prefix=(
+                self.lora_base_layer_prefix
+                if lora_base_layer_prefix is None
+                else lora_base_layer_prefix
+            ),
             include_fused=include_fused,
             is_gated=moe_config.is_act_and_mul,
         )
