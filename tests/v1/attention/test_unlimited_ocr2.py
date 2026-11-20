@@ -12,10 +12,18 @@ from vllm.model_executor.layers.dash_attention import (
 )
 from vllm.platforms import current_platform
 
-# Should be fixed by https://github.com/vllm-project/vllm/pull/66031
-requires_cuda_dash = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Unlimited-OCR-2 DASH attention is CUDA-only",
+DASH_BACKENDS = (
+    ["ROCM_AITER_FA"] if current_platform.is_rocm() else ["FLASH_ATTN", "FLASHINFER"]
+)
+DASH_FLASH_VERSIONS = (
+    [("ROCM_AITER_FA", None)]
+    if current_platform.is_rocm()
+    else [("FLASH_ATTN", None), ("FLASH_ATTN", 2), ("FLASHINFER", None)]
+)
+
+requires_dash_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="Unlimited-OCR-2 DASH attention requires CUDA or ROCm",
 )
 
 
@@ -107,14 +115,10 @@ def test_page_filter_excludes_other_page_remote_values():
 @pytest.mark.parametrize("rswa", [False, True])
 @pytest.mark.parametrize(
     "dtype,backend,fa_version",
-    [
-        (torch.bfloat16, "FLASH_ATTN", None),
-        (torch.bfloat16, "FLASH_ATTN", 2),
-        (torch.bfloat16, "FLASHINFER", None),
-    ],
+    [(torch.bfloat16, backend, version) for backend, version in DASH_FLASH_VERSIONS],
 )
-@requires_cuda_dash
 @pytest.mark.parametrize("block_size", [16, 32])
+@requires_dash_accelerator
 def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
     dtype, backend, fa_version, block_size, rswa
 ):
@@ -124,8 +128,8 @@ def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
         _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache=False)
 
 
-@requires_cuda_dash
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
+@requires_dash_accelerator
 def test_paged_decode_large_physical_cache_offsets(backend):
     """Read/write offsets beyond int32 while replaying the real paged kernels."""
     _check_paged_decode_graph(torch.bfloat16, backend, 16, True, high_cache=True)
@@ -342,10 +346,10 @@ def test_rswa_keeps_input_and_bounds_1000_output_tokens(block_size):
 
 @pytest.mark.parametrize(
     "backend,fa_version",
-    [("FLASH_ATTN", None), ("FLASH_ATTN", 2), ("FLASHINFER", None)],
+    DASH_FLASH_VERSIONS,
 )
-@requires_cuda_dash
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@requires_dash_accelerator
 def test_flash_prefill_preserves_route_priors_and_gqa(backend, fa_version, dtype):
     """Compare real kernels with DASH math across page and partial-block edges."""
     torch.manual_seed(23)
@@ -376,9 +380,9 @@ def test_flash_prefill_preserves_route_priors_and_gqa(backend, fa_version, dtype
     torch.testing.assert_close(result, expected, atol=atol, rtol=0.01)
 
 
-@requires_cuda_dash
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("main", [False, True])
+@requires_dash_accelerator
 def test_decode_rope_preserves_long_position_rounding(dtype, main):
     from vllm.model_executor.layers.dash_attention import page_rope
     from vllm.v1.attention.ops.dash_attention import decode_page_rope
@@ -398,8 +402,8 @@ def test_decode_rope_preserves_long_position_rounding(dtype, main):
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@requires_cuda_dash
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
+@requires_dash_accelerator
 def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(backend):
     """Chunks can end before an image, inside it, or at the instruction tail."""
     from vllm.model_executor.layers.dash_attention import prompt_page_positions
@@ -528,10 +532,10 @@ def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(ba
         torch.testing.assert_close(actual, expected, atol=0.00390625, rtol=0.01)
 
 
-@requires_cuda_dash
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 @pytest.mark.parametrize("extra_marker", [False, True])
 @pytest.mark.parametrize("tail_tokens", [1, 2])
+@requires_dash_accelerator
 def test_recomputed_output_remains_outside_remote_input_prefix(
     backend, extra_marker, tail_tokens
 ):
@@ -656,7 +660,7 @@ def test_recomputed_output_remains_outside_remote_input_prefix(
     torch.testing.assert_close(actual, expected[start:], atol=0.00390625, rtol=0.01)
 
 
-@requires_cuda_dash
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA FlashInfer")
 def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():
     """Tail plans are evicted while captured plans keep their buffers alive."""
     from vllm.v1.attention.ops.dash_attention import (
@@ -689,7 +693,7 @@ def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():
     torch.testing.assert_close(captured, captured_expected, atol=0.00390625, rtol=0.01)
 
 
-@requires_cuda_dash
+@requires_dash_accelerator
 def test_dash_mixed_forward_does_not_read_cuda_metadata(dist_init):
     """A decode sharing a prefill batch must keep metadata on the host."""
     from tests.v1.attention.utils import (
@@ -776,3 +780,72 @@ def test_dash_mixed_forward_does_not_read_cuda_metadata(dist_init):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
         assert metadata.requests == ((0, 0, 1, 3), (1, 1, 6, 5))
         assert builder.build_for_cudagraph_capture(common).requests == ()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("kv_heads", [1, 2])
+@pytest.mark.parametrize("bs,local", [(8, 16), (32, 128)])
+def test_rocm_aiter_ck_segments_preserve_gqa_priors_and_masked_padding(
+    dtype, kv_heads, bs, local
+):
+    """DASH merges live segments with their priors, ignoring poisoned padding."""
+    from vllm.v1.attention.ops.dash_attention import flash_dash_attention
+
+    torch.manual_seed(317)
+    n, heads, dim, topk = 3, 4, 128, 2
+    span = topk * bs + local
+    q = torch.randn(n, heads, dim, device="cuda", dtype=dtype) * 0.3
+    k = torch.randn(n, span, kv_heads, dim, device="cuda", dtype=dtype) * 0.3
+    v = torch.randn_like(k)
+    used = torch.tensor(
+        [[bs, 0, local - 3], [1, bs - 1, 0], [0, 0, 0]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    bias = torch.tensor([[0.7, -0.3], [-1.2, 0.4], [0.0, 0.0]], device="cuda")
+    expected = torch.zeros_like(q)
+    for row in range(n):
+        keys, values, priors = [], [], []
+        for segment in range(topk + 1):
+            start = segment * bs
+            count = int(used[row, segment])
+            if count:
+                keys.append(
+                    k[row, start : start + count]
+                    .float()
+                    .repeat_interleave(heads // kv_heads, 1)
+                )
+                values.append(
+                    v[row, start : start + count]
+                    .float()
+                    .repeat_interleave(heads // kv_heads, 1)
+                )
+                prior = bias[row, segment] if segment < topk else 0.0
+                priors.append(torch.ones(count, device="cuda") * prior)
+            end = start + (bs if segment < topk else local)
+            k[row, start + count : end] = float("nan")
+            v[row, start + count : end] = float("nan")
+        if keys:
+            scores = (
+                torch.einsum("hd,shd->hs", q[row].float(), torch.cat(keys)) * dim**-0.5
+            )
+            scores += torch.cat(priors)
+            expected[row] = torch.einsum(
+                "hs,shd->hd", scores.softmax(-1), torch.cat(values)
+            ).to(dtype)
+    actual = flash_dash_attention(
+        q,
+        k.flatten(0, 1),
+        v.flatten(0, 1),
+        used.flatten(),
+        bias,
+        "ROCM_AITER_FA",
+        bs,
+        local,
+    )
+    torch.testing.assert_close(
+        actual, expected, atol=0.002 if dtype == torch.bfloat16 else 0.0003, rtol=0.01
+    )
+    assert torch.isfinite(actual).all()
+    assert torch.count_nonzero(actual[2]) == 0
