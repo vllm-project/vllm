@@ -37,6 +37,8 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     _PullHooks,
 )
 from vllm.model_executor.model_loader.reload import lifecycle
+from vllm.model_executor.model_loader.reload.direct import track_loaded_params
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 BF16 = torch.bfloat16
 
@@ -228,7 +230,10 @@ def _check_equals_cold_start(fleet, make, shapes):
 
 
 def _toy_fleet(monkeypatch, **kw):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
+    model = _toy_model()
+    track_loaded_params(model)  # so finish checks each update loaded everything
+    model.load_weights(_checkpoint(_TOY_SHAPES, seed=0).items())
+    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cpu"))
     return _Fleet(monkeypatch, model, _TOY_SHAPES, **kw)
 
 
@@ -478,7 +483,8 @@ def test_a_failed_sync_leaves_no_partial_fallback(monkeypatch):
     fleet.engine._hooks = fleet.loopback.hooks()
     with pytest.raises(RuntimeError, match="pull failed"):
         fleet.sync(_checkpoint(_TOY_SHAPES, seed=5), 5)
-    fleet.engine.finish_weight_update()
+    with pytest.raises(RuntimeError, match="did not load"):  # a partial update
+        fleet.engine.finish_weight_update()
     fleet.loopback.get = get
     fleet.engine._hooks = fleet.loopback.hooks()
     _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)

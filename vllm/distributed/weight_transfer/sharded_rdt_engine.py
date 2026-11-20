@@ -252,6 +252,7 @@ class ShardedRDTWeightTransferEngine(
         # Built at the first start_weight_update after an init.
         self._planned = False
         self._buckets: list[_Bucket] = []
+        self._written: list[str] = []  # parameters the direct copies write
         # Receive arena: `num_buffers` slots of the largest bucket of at most
         # `buffer_bytes`, pinned with NIXL from planning until the plan is
         # dropped.
@@ -369,6 +370,11 @@ class ShardedRDTWeightTransferEngine(
             t0 = time.perf_counter()
             plan = plan_loads(self.model, self._metas)
             buckets = self._build_buckets(plan)
+            self._written = sorted(
+                f"{w.module}.{w.tensor}" if w.module else w.tensor
+                for e in plan.entries.values()
+                for w in e.writes or ()
+            )
             self._send_buckets(buckets)
             self._pin_arena(buckets)
         except Exception as e:
@@ -531,6 +537,7 @@ class ShardedRDTWeightTransferEngine(
         """
         from vllm.model_executor.model_loader.reload.direct import (
             direct_reload_active,
+            mark_loaded,
         )
 
         validate_int("sync_idx", update_info.sync_idx, minimum=0)
@@ -599,6 +606,8 @@ class ShardedRDTWeightTransferEngine(
             ready = hooks.wait(list(inflight))
             spent[0] += time.perf_counter() - t0
             land(ready)
+        for name in self._written:  # for direct reload's completeness check
+            mark_loaded(self.model, name)
         logger.info(
             "Sharded RDT sync %d: %d pulls, %.1f MiB, %d fallbacks, in %.2f s "
             "(waiting %.2f s, fetching %.2f s, applying %.2f s)",
@@ -698,7 +707,7 @@ class ShardedRDTWeightTransferEngine(
 
     def _drop_plan(self) -> None:
         self._planned = False
-        self._buckets = []
+        self._buckets, self._written = [], []
         if self._arena is not None:
             deregister_nixl_memory(self._arena)
             self._arena = None
