@@ -13,9 +13,9 @@ configuration on the same machine. It is not a portable model artifact.
 A snapshot is in-place by default: the artifact stays where it was created, the
 host keeps the generated caches the engine depends on, and restore refuses to
 run once one of them changes. `vllm snapshot create --portable` instead marks
-the artifact as one to restore in another container or on another host, and
-`vllm snapshot restore` requires `--portable` to match what the manifest
-recorded, so neither mode can be mistaken for the other.
+the artifact for a cross-machine restore, in another container or on another
+host, and `vllm snapshot restore` requires `--portable` to match what the
+manifest recorded, so neither mode can be mistaken for the other.
 
 A portable create also keeps the run's control files and logs outside the
 artifact, in a work directory: one named by `--work-dir`, or otherwise a
