@@ -345,6 +345,7 @@ def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
     [
         ({"num_frames": [8, 16]}, [{"num_frames": 8}, {"num_frames": 16}]),
         ({"fps": [2.0, 4.0]}, [{"fps": 2.0}, {"fps": 4.0}]),
+        ({"fps": [2, 4]}, [{"fps": 2}, {"fps": 4}]),
         ({"num_frames": [8, 16, 32]}, [{"num_frames": 8}, {"num_frames": 16}]),
         ({"fps": [2.0, 4.0, 8.0]}, [{"fps": 2.0}, {"fps": 4.0}]),
     ],
@@ -460,7 +461,9 @@ def test_processor_rejects_short_per_video_options(
         process([value] * length)
 
 
-@pytest.mark.parametrize("kwargs", [{"fps": [2.0, 4.0]}, {"num_frames": [8, 16]}])
+@pytest.mark.parametrize(
+    "kwargs", [{"fps": [2.0, 4.0]}, {"fps": [2, 4]}, {"num_frames": [8, 16]}]
+)
 def test_processor_profiles_fewer_videos_than_configured_options(
     kwargs: dict[str, list[float] | list[int]],
 ) -> None:
