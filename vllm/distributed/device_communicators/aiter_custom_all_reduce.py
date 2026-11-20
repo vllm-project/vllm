@@ -49,13 +49,8 @@ class AiterCustomAllreduce:
         if not register_graph_buffers:
             kwargs["enable_register_for_capturing"] = False
         self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
-        # AITER's CudaCommunicator over this CustomAllreduce. AITER routes the
-        # all-reduce and the fused ops itself, on gfx1250 also to its Gluon
-        # kernels if AITER_GLUON_FUSED_AR=1.
         self.aiter_comm = None
         if not self._impl.disabled and device_group is not None:
-            # No second CustomAllreduce: vLLM registers the graph buffers of
-            # this one.
             enable_custom_ar = aiter_parallel_state._ENABLE_CUSTOM_ALL_REDUCE
             aiter_parallel_state.set_custom_all_reduce(False)
             try:
