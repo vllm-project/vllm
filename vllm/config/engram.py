@@ -44,7 +44,8 @@ class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
 
     cpu_offload: bool = True
-    """Store embedding weights in host memory for non-pool and RDMA use."""
+    """Store embedding weights in host memory. NVLink peer groups use local
+    Grace EGM when enabled and HBM when disabled."""
 
     disk_offload: bool = False
     """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
@@ -83,10 +84,6 @@ class EngramConfig:
     through CUDA FABRIC handles and an IMEX channel.
     With `rdma`, the owners' NICs gather them from HBM, or from host memory
     with `cpu_offload`."""
-
-    peer_group_egm: bool = False
-    """Place NVLink peer shards in Grace Extended GPU Memory (EGM). Requires
-    an NVLink peer group; independent of `cpu_offload`."""
 
     peer_group_fetch: Literal["sync", "async"] = "sync"
     """Where a peer group's fetch kernels run. `sync`: on the compute stream,
@@ -142,20 +139,6 @@ class EngramConfig:
         ):
             raise ValueError(
                 "peer_group_size does not support dp_shared_memory or use_thp"
-            )
-        if self.peer_group_egm and (
-            not self.peer_group_size or self.peer_group_transport != "nvlink"
-        ):
-            raise ValueError("peer_group_egm requires an NVLink peer group")
-        if (
-            self.peer_group_size
-            and self.peer_group_transport == "nvlink"
-            and self.cpu_offload
-            and not self.peer_group_egm
-        ):
-            raise ValueError(
-                "NVLink peer_group_size with cpu_offload requires explicit "
-                "peer_group_egm=True; set cpu_offload=False for HBM"
             )
         return self
 

@@ -114,8 +114,7 @@ class EngramPool:
     Args:
         group: The peer group splitting the tables.
         transport: "nvlink" or "rdma".
-        host_shards: Keep RDMA shards in pinned host memory.
-        egm: Back NVLink shards with Grace EGM.
+        host_shards: Use Grace EGM with NVLink or pinned host memory with RDMA.
         max_items: Most rows of one table one fetch gathers on this GPU.
         max_row_bytes: Largest row of any table.
         max_tables: Most tables one fetch reads.
@@ -138,23 +137,17 @@ class EngramPool:
         rdma_inflight: int = 8,
         fetch_mode: str = "sync",
         thp_dir: str | None = None,
-        *,
-        egm: bool = False,
     ) -> None:
-        if host_shards and transport != "rdma":
-            raise ValueError("Host shards require RDMA; select EGM for NVLink")
-        if egm and transport != "nvlink":
-            raise ValueError("EGM shards require NVLink")
         self.group, self.fetch_mode = group, fetch_mode
-        self.egm = egm
-        self._check_same(("pool", transport, host_shards, egm))
+        self.egm = transport == "nvlink" and host_shards
+        self._check_same(("pool", transport, host_shards))
         self.max_row_bytes = round_up(max_row_bytes, _ROW_ALIGN)
         self.max_items, self.max_tables = max_items, max_tables
         self.transport: NvlinkTransport | RdmaTransport
         if transport == "nvlink":
             from vllm.distributed.engram_pool import nvlink
 
-            self.transport = nvlink.NvlinkTransport(group, egm)
+            self.transport = nvlink.NvlinkTransport(group, self.egm)
         else:
             from vllm.distributed.engram_pool import rdma
 
@@ -167,7 +160,7 @@ class EngramPool:
                 rdma_inflight,
                 thp_dir,
             )
-        if egm:
+        if self.egm:
             self._where = "EGM"
         else:
             self._where = "host memory" if host_shards else "HBM"
@@ -278,14 +271,13 @@ def get_engram_pool(max_items: int, max_row_bytes: int, max_tables: int = 1):
     return EngramPool(
         join_peer_group(config.peer_group_size, config.peer_group_store),
         config.peer_group_transport,
-        config.cpu_offload and config.peer_group_transport == "rdma",
+        config.cpu_offload,
         max_items,
         max_row_bytes,
         max_tables,
         config.peer_group_rdma_inflight,
         config.peer_group_fetch,
         config.peer_group_thp_dir,
-        egm=config.peer_group_egm,
     )
 
 

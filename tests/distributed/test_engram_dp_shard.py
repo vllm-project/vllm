@@ -325,14 +325,7 @@ def _check_pool_tables(store_dir: str):
         # node == 1: each GPU as its own machine, so rows move over RDMA.
         machine = str(group.rank_in_group) if node == 1 else rdma.node_id()
         with patch.object(rdma, "node_id", lambda machine=machine: machine):
-            pool = EngramPool(
-                group,
-                transport,
-                host and transport == "rdma",
-                max_items,
-                72,
-                egm=host and transport == "nvlink",
-            )
+            pool = EngramPool(group, transport, host, max_items, 72)
         with torch.device("cuda"):
             table = PoolEngramEmbedding(
                 sum(HEAD_SIZES), DIM, HEAD_SIZES, False, pool, "table"
