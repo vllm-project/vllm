@@ -644,6 +644,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "KananaVDecideModel": _HfExamplesInfo(
         "kakaocorp/kanana-2-v-decide-3b-2611",
         revision="12820d654ed9789a0f7f48daeee1703c3483c464",
+        trust_remote_code=True,
     ),
     "LlamaNemotronVLModel": _HfExamplesInfo(
         "nvidia/llama-nemotron-embed-vl-1b-v2", trust_remote_code=True

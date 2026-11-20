@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.transformers_utils.configs.kanana_v_decide import KananaVDecideConfig
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -142,11 +141,8 @@ class KananaVDecideVisionTransformer(Qwen3_VisionTransformer):
 
 
 class KananaVDecideProcessingInfo(Qwen3VLProcessingInfo):
-    """Transformers does not know the checkpoint's model type, so the Qwen3-VL
-    processor is built from its preprocessor config."""
-
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(KananaVDecideConfig)
+    """The checkpoint names no processor class, so the Qwen3-VL processor is
+    built from its preprocessor config."""
 
     @cached_property
     def _image_options(self) -> dict[str, object]:

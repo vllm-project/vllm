@@ -378,10 +378,11 @@ vllm serve vllm-sr/d3
 [`kakaocorp/kanana-2-v-decide-3b-2611`](https://huggingface.co/kakaocorp/kanana-2-v-decide-3b-2611)
 is a Qwen3-VL embedding model with a gated vision attention. It answers a
 question by comparing an embedding of the state and the question with an
-embedding of each option. vLLM serves it as an embedding model.
+embedding of each option. vLLM serves it as an embedding model, with
+`--trust-remote-code` for the checkpoint's config class.
 
 ```bash
-vllm serve kakaocorp/kanana-2-v-decide-3b-2611
+vllm serve kakaocorp/kanana-2-v-decide-3b-2611 --trust-remote-code
 ```
 
 - Each question is one embedding of the prompt the checkpoint's

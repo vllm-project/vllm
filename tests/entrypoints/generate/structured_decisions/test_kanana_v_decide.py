@@ -26,7 +26,6 @@ from vllm.entrypoints.openai.decisions.strategies import (
     kanana_fit_image,
 )
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.transformers_utils.configs.kanana_v_decide import KananaVDecideConfig
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -50,7 +49,7 @@ EXECUTOR = ThreadPoolExecutor(1)
 def tokenizer():
     from vllm.tokenizers import get_tokenizer
 
-    return get_tokenizer(MODEL, revision=REVISION)
+    return get_tokenizer(MODEL, revision=REVISION, trust_remote_code=True)
 
 
 def question(type_name: str, instructions: Any, criteria: Any):
@@ -59,7 +58,12 @@ def question(type_name: str, instructions: Any, criteria: Any):
 
 def make_strategy(tokenizer, encode=None, renderer=None) -> KananaVDecideStrategy:
     model_config = SimpleNamespace(
-        hf_config=KananaVDecideConfig(decision_temperature=TEMPERATURE),
+        hf_config=SimpleNamespace(
+            decision_temperature=TEMPERATURE,
+            max_length=20480,
+            truncate_inputs=True,
+            show_criteria=True,
+        ),
         max_model_len=20480,
         get_multimodal_config=lambda: SimpleNamespace(media_io_kwargs={}),
         allowed_local_media_path="",

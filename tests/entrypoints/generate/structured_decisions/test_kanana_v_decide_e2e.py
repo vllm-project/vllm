@@ -88,6 +88,7 @@ def server(reference):
         "0.6",
         "--revision",
         REVISION,
+        "--trust-remote-code",
     ]
     with RemoteOpenAIServer(MODEL, args) as remote_server:
         yield remote_server

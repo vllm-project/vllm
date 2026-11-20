@@ -102,6 +102,7 @@ def test_kanana_v_decide_matches_the_checkpoint_runtime(hf_runner, vllm_runner):
         enforce_eager=True,
         limit_mm_per_prompt={"image": 1},
         revision=REVISION,
+        trust_remote_code=True,
         **ROCM_ENGINE_KWARGS,
     ) as vllm_model:
         outputs = vllm_model.llm.embed(prompts, use_tqdm=False)
