@@ -33,7 +33,9 @@ use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, M
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use crate::error::{
+    Error, Result, bail_invalid_preprocessed_multimodal, bail_multimodal, multimodal,
+};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
@@ -831,6 +833,16 @@ impl MultimodalModelInfo {
         prompt_len: usize,
     ) -> Result<MmFeatures> {
         preprocessed::validate_features(&mut features, prompt_len)?;
+        // Qwen2-VL M-RoPE position construction assumes disjoint media spans.
+        if matches!(
+            self.context.model_type.as_deref(),
+            Some("qwen2_vl" | "qwen2_5_vl")
+        ) && features.windows(2).any(|pair| {
+            let previous = &pair[0].mm_position;
+            pair[1].mm_position.offset < previous.offset + previous.length
+        }) {
+            bail_invalid_preprocessed_multimodal!("placeholder ranges must not overlap");
+        }
         for feature in &features {
             let supported = match feature.modality {
                 MmModality::Image => self.image.is_some(),
@@ -1239,7 +1251,7 @@ mod tests {
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
-    fn test_info(
+    pub(super) fn test_info(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
