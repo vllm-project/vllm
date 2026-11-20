@@ -467,8 +467,13 @@ Flags:
 
 ### HY V4 and HY4 Flash (`hy_v4`)
 
-Use `--enable-auto-tool-choice --tool-call-parser hy_v4 --reasoning-parser hy_v4`
-with HY V4 checkpoints, including `tencent/Hy4-Flash-FP8`.
+Supported models:
+
+* `tencent/Hy4-preview`
+* `tencent/Hy4-Flash`
+* `tencent/Hy4`
+
+Flags: `--tool-call-parser hy_v4`
 
 ### Cohere Command (`cohere_command3` / `cohere_command4`)
 
