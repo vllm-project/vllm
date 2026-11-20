@@ -461,6 +461,15 @@ REFIT_CASES = [
         for parallel in (TP2, TP2_EP, TP2_EP_EPLB, DP2_EP)
     ),
     RefitCase("qwen3-moe", "fp8-block", "Qwen/Qwen3-30B-A3B-FP8", TP2_EP),
+    # LoRA wraps the experts after cold start: plain names must still load
+    RefitCase(
+        "qwen3-moe-lora",
+        "fp8-block",
+        "Qwen/Qwen3-30B-A3B-FP8",
+        TP2,
+        engine=dict(enable_lora=True),
+        marks=NIGHTLY,
+    ),
 ]
 
 
