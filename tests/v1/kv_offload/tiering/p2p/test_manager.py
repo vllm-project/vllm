@@ -47,7 +47,9 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
     _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
+    P2PDestInfo,
     P2PSecondaryTierManager,
+    P2PSourceInfo,
     _annotate_req_context,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
@@ -444,10 +446,11 @@ class TestServeExternalRequests:
 
 
 class TestSubmitStore:
-    def test_no_decode_succeeds_immediately(self):
-        """Without a `remote_decoder` block, job succeeds immediately."""
+    @pytest.mark.parametrize("params", [{}, {"remote_decoder": None}])
+    def test_no_decode_succeeds_immediately(self, params):
+        """An absent or null `remote_decoder` permits a local store."""
         mgr = _make_manager()
-        job = _job_metadata(job_id=1, kv_params={})
+        job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
@@ -3702,3 +3705,120 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
     finally:
         tiering.shutdown()
         region.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Tests for non-dict role params rejection
+# ---------------------------------------------------------------------------
+
+
+class TestNonDictRoleParamsRejected:
+    """Non-dict role values must not crash EngineCore.
+
+    Consumer roles (remote_prefiller / remote_kv_source) are treated as
+    absent. A present but malformed remote_decoder is a remote-decode
+    signal and must fail closed.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_prefiller_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_prefiller": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_decoder_fails_closed(self, bad_value):
+        ctx = _req_context(kv_params={"remote_decoder": bad_value})
+        dest = ctx.get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_kv_source_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_kv_source": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_params",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_kv_params_treated_as_absent(self, bad_params):
+        ctx = _req_context(kv_params=bad_params)
+        assert ctx.get_state(P2PSourceInfo) is None
+        assert ctx.get_state(P2PDestInfo) is None
+
+    @pytest.mark.parametrize("request_id", [17, ["id"], {"id": "req"}])
+    def test_non_string_transfer_ids_do_not_become_routing_keys(self, request_id):
+        source = _req_context(
+            kv_params={
+                "remote_prefiller": {
+                    "remote_host": "host",
+                    "remote_port": 8000,
+                    "kv_request_id": request_id,
+                }
+            }
+        )
+        assert source.get_state(P2PSourceInfo) is None
+
+        dest = _req_context(
+            kv_params={"remote_decoder": {"kv_request_id": request_id}}
+        ).get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    def test_manager_survives_malformed_prefiller_role(self):
+        """Full manager flow: malformed remote_prefiller does not crash
+        on_new_request or lookup — the request is handled locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_prefiller": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+    def test_malformed_decoder_role_fails_store(self):
+        """Malformed remote_decoder does not crash; submit_store fails
+        closed instead of succeeding as a local store."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_decoder": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        job = _job_metadata(job_id=1, kv_params={"remote_decoder": "not-a-dict"})
+        mgr.submit_store(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+    def test_manager_survives_malformed_kv_source_role(self):
+        """Malformed remote_kv_source does not crash — request handled
+        locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_kv_source": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
