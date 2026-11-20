@@ -21,6 +21,7 @@ from transformers import (
     AutoModelForCausalLM,
     PreTrainedConfig,
 )
+from transformers.utils.generic import is_flash_attention_requested
 
 from vllm import SamplingParams
 from vllm.compilation.counter import compilation_counter
@@ -36,7 +37,10 @@ from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
-from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
+from vllm.model_executor.models.transformers.fusers.attention import (
+    VLLM_ATTN_IMPL,
+    VLLM_MM_ENCODER_ATTN_IMPL,
+)
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
@@ -245,6 +249,13 @@ def test_infer_dynamic_arg_dims():
 
     expected = {"pixel_values": 0, "position_ids": 0, "mask": 0, "embeddings": 0}
     assert infer_dynamic_arg_dims(Encoder) == expected
+
+
+def test_mm_encoder_attn_impl_flash():
+    """Transformers only takes the `cu_seqlens` branch if it thinks flash is used."""
+    assert is_flash_attention_requested(
+        requested_attention_implementation=VLLM_MM_ENCODER_ATTN_IMPL
+    )
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
