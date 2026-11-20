@@ -672,21 +672,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         ) and cls._is_fp8_w8a8(weight_quant, input_quant)
 
     @staticmethod
-    def _is_fp8_w8a16_group(
-        weight_quant: QuantizationArgs | None, input_quant: QuantizationArgs | None
-    ) -> bool:
-        return (
-            weight_quant is not None
-            and weight_quant.type == QuantizationType.FLOAT
-            and weight_quant.num_bits == 8
-            and weight_quant.strategy == QuantizationStrategy.GROUP
-            and weight_quant.group_size == 128
-            and weight_quant.symmetric
-            and not weight_quant.dynamic
-            and input_quant is None
-        )
-
-    @staticmethod
     def _is_fp8_w8a16(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
@@ -940,25 +925,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                     )
 
             # note: input_quant can be None
-            if self._is_fp8_w8a16_group(weight_quant, input_quant):
-                # Treat each output channel as a separate block for loading.
-                block_shape = GroupShape(1, 128)
-                scheme = CompressedTensorsW8A16Fp8(
-                    weight_quant=weight_quant.model_copy(
-                        update={
-                            "strategy": QuantizationStrategy.BLOCK,
-                            "block_structure": list(block_shape),
-                            "group_size": None,
-                        }
-                    ),
-                    is_static_input_scheme=False,
-                )
-                # Preserve the scale shape when selecting a kernel.
-                scheme.weight_quant_key = create_fp8_quant_key(
-                    static=True, group_shape=block_shape
-                )
-                return scheme
-
             if self._is_fp8_w8a16(weight_quant, input_quant):
                 is_static_input_scheme = input_quant and not input_quant.dynamic
                 return CompressedTensorsW8A16Fp8(
