@@ -21,7 +21,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    init_vllm_registered_model,
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -73,6 +72,9 @@ class HYV4VLForConditionalGeneration(
 
     supports_mm_device_do_normalize = True
     language_model_architecture = "HYV4ForCausalLM"
+    # Not resolved through the registry: on ROCm, the registered
+    # HYV4ForCausalLM is the text-only model in amd/model.py.
+    language_model_cls: type[nn.Module] = HYV4ForCausalLM
 
     packed_modules_mapping = {
         **HYV4ForCausalLM.packed_modules_mapping,
@@ -116,12 +118,22 @@ class HYV4VLForConditionalGeneration(
                     prefix=maybe_prefix(prefix, "visual"),
                     input_norm=build_mm_input_norm(vllm_config.model_config),
                 )
+        from vllm.model_executor.model_loader.utils import (
+            convert_model_cls,
+            initialize_model,
+        )
+
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                hf_config=self.config.text_config,
+            text_vllm_config = vllm_config.with_hf_config(
+                self.config.text_config,
                 architectures=[self.language_model_architecture],
+            )
+            self.language_model = initialize_model(
+                vllm_config=text_vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
+                model_class=convert_model_cls(
+                    self.language_model_cls, text_vllm_config.model_config
+                ),
             )
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -260,7 +272,6 @@ class HYV4VLForConditionalGeneration(
         video_grids = [grid.tolist() for grid in data.get("video_grid_thw", [])]
         config = self.config
         vision = config.vision_config
-        extra = int(bool(vision.cat_extra_token))
         starts = torch.where(tokens == config.image_start_token_id)[0].tolist()
         ends = torch.where(tokens == config.image_end_token_id)[0].tolist()
         if len(starts) != len(ends):
@@ -270,7 +281,6 @@ class HYV4VLForConditionalGeneration(
         inside_video = False
         while mm_index < len(starts):
             marker = starts[mm_index]
-            pos = marker + 1 + extra
             while scan < marker:
                 if input_tokens[scan] == config.video_start_token_id:
                     inside_video = True
@@ -281,11 +291,6 @@ class HYV4VLForConditionalGeneration(
                 image_index + 1 >= len(image_grids)
                 and video_index + 1 < len(video_grids)
             )
-            if start_pos < pos:
-                positions[:, start_pos:pos] = (
-                    torch.arange(pos - start_pos) + start_index
-                )
-                start_index += pos - start_pos
             if is_video:
                 video_index += 1
                 if video_index >= len(video_grids):
@@ -302,6 +307,13 @@ class HYV4VLForConditionalGeneration(
                 )
             if mm_index + frames > len(starts) or mm_index + frames > len(ends):
                 raise ValueError("Missing HYV4 image/frame boundary tokens")
+            extra = int(bool(vision.cat_extra_token))
+            pos = marker + 1 + extra
+            if start_pos < pos:
+                positions[:, start_pos:pos] = (
+                    torch.arange(pos - start_pos) + start_index
+                )
+                start_index += pos - start_pos
             count = rows * cols
             for frame in range(frames):
                 begin = starts[mm_index + frame] + 1 + extra
