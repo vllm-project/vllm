@@ -86,7 +86,8 @@ def moriio_engine_key(
 
 
 class WriteProducer(NamedTuple):
-    """One prefill DP rank, with all of its TP ranks, writing into a decode."""
+    """One prefill DP rank, with all of its TP ranks and pipeline stages,
+    writing into a decode."""
 
     host: str
     handshake_port: int
@@ -95,13 +96,29 @@ class WriteProducer(NamedTuple):
     # Per-pod local DP rank: the one in the producer's ports and engine keys.
     dp_rank: int
     tp_size: int
+    pp_size: int = 1
 
-    def engine_key(self, tp_rank: int) -> str:
+    def engine_key(self, tp_rank: int, pp_rank: int = 0) -> str:
         return moriio_engine_key(
-            "producer", self.host, self.handshake_port, tp_rank, self.dp_rank
+            "producer",
+            self.host,
+            self.handshake_port,
+            tp_rank,
+            self.dp_rank,
+            pp_rank if self.pp_size > 1 else None,
         )
 
+    def engine_keys(self) -> dict[str, int]:
+        """The engine key of every rank of every stage, with its TP rank."""
+        return {
+            self.engine_key(tp_rank, pp_rank): tp_rank
+            for tp_rank in range(self.tp_size)
+            for pp_rank in range(self.pp_size)
+        }
+
     def notify_endpoint(self, tp_rank: int) -> tuple[str, int]:
+        """Where a TP rank of the first stage listens; it forwards decode's
+        messages to the same TP rank of the later stages."""
         return self.host, self.notify_port + get_port_offset(self.dp_rank, tp_rank)
 
 

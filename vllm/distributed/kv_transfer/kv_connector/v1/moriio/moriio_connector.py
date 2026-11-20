@@ -9,7 +9,7 @@ import socket
 import threading
 import time
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -257,6 +257,14 @@ def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -
     """TP size of the peer named in `kv_transfer_params`; unknown means equal."""
     params = params or {}
     return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
+
+
+def get_moriio_peer_pp_size(params: dict[str, Any] | None) -> int:
+    """Pipeline stages of the peer named in `kv_transfer_params`; unknown means 1."""
+    try:
+        return max(int((params or {}).get("remote_pp_size") or 1), 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
@@ -1174,6 +1182,7 @@ class MoRIIOConnectorScheduler:
             # dp_local), not the global rank. Single-pod is bit-identical.
             dp_rank=fold_local_rank(remote_dp_rank, dp_local),
             tp_size=get_moriio_peer_tp_size(params, self.tp_size),
+            pp_size=get_moriio_peer_pp_size(params),
         )
 
     def update_state_after_alloc(
@@ -2423,10 +2432,10 @@ class MoRIIOConnectorWorker:
         # Producer engine key -> fences that still need the producer's ack
         # before the key is unfenced.
         self._fenced_producer_keys: dict[str, set[str]] = {}
-        # fence_id -> (order, TP rank -> producer key not yet acked,
+        # fence_id -> (order, producer key not yet acked -> its TP rank,
         # monotonic time the abort was last sent).
         self._fence_pending: dict[
-            str, tuple[WriteFenceOrder, dict[int, str], float]
+            str, tuple[WriteFenceOrder, dict[str, int], float]
         ] = {}
         # Receives the fences failed, reported in the next get_transfer_results.
         self._fence_failed_req_ids: set[ReqId] = set()
@@ -2560,6 +2569,7 @@ class MoRIIOConnectorWorker:
             ),
             "dp_size": self.moriio_config.dp_size,
             "tp_size": self.moriio_config.tp_size,
+            "pp_size": self.moriio_config.pp_size,
             "transfer_mode": self.mode.name,
         }
         return MoRIIOHeartbeat(
@@ -3487,11 +3497,11 @@ class MoRIIOConnectorWorker:
         """
         assert self.moriio_engine is not None
         producer = order.producer
-        keys = {tp: producer.engine_key(tp) for tp in range(producer.tp_size)}
+        keys = producer.engine_keys()
         safe = True
         endpoints_fenced = 0
         known = False
-        for key in keys.values():
+        for key in keys:
             self._fenced_producer_keys.setdefault(key, set()).add(order.fence_id)
             try:
                 result = self.moriio_engine.fence_remote_engine(key)
@@ -3514,15 +3524,20 @@ class MoRIIOConnectorWorker:
         if not known:
             # A rank that had requests in flight from the producer had a
             # connection with it, so when no key is known, the keys do not
-            # match the producer's engines, and the producer is not fenced.
-            # Asked of every fence, so a wrong key never counts as fenced.
+            # match the producer's engines (e.g. the router did not pass a
+            # pipeline-parallel producer's remote_pp_size), and the producer is
+            # not fenced. Asked of every fence, so a wrong key never counts as
+            # fenced. Nothing was cut, so the fence is undone, and the producer
+            # is not told to abort: its writes into the blocks this rank keeps
+            # may still complete, and its acks would not match these keys.
             logger.error(
                 "MoRI-IO fence %s: this engine never had a connection with "
                 "producer keys %s; keeping the blocks of its receives allocated.",
                 order.fence_id,
-                sorted(keys.values()),
+                sorted(keys),
             )
-            safe = False
+            self._end_fence(order.fence_id, keys)
+            return
         if safe:
             self._fence_failed_req_ids.update(order.requests)
             for transfer_id in order.requests.values():
@@ -3552,7 +3567,8 @@ class MoRIIOConnectorWorker:
             if now - last_sent < interval:
                 continue
             transfer_ids = list(order.requests.values())
-            for tp in keys:
+            # The first stage forwards the abort to the later ones.
+            for tp in sorted(set(keys.values())):
                 host, port = order.producer.notify_endpoint(tp)
                 self.moriio_wrapper.send_notify(
                     fence_id,
@@ -3576,30 +3592,32 @@ class MoRIIOConnectorWorker:
             if pending is None:
                 continue
             order, keys, last_sent = pending
-            keys = {tp: key for tp, key in keys.items() if key != producer_key}
+            keys = {key: tp for key, tp in keys.items() if key != producer_key}
             if keys:
                 self._fence_pending[fence_id] = (order, keys, last_sent)
                 continue
             del self._fence_pending[fence_id]
-            producer = order.producer
-            for tp in range(producer.tp_size):
-                key = producer.engine_key(tp)
-                fences = self._fenced_producer_keys.get(key)
-                if fences is None:
-                    continue
-                fences.discard(fence_id)
-                if fences:
-                    continue
-                del self._fenced_producer_keys[key]
-                self.moriio_engine.unfence_remote_engine(key)
-                logger.info(
-                    "MoRI-IO producer %s acked fence %s; accepting its "
-                    "connections again.",
-                    key,
-                    fence_id,
-                )
+            self._end_fence(fence_id, order.producer.engine_keys())
         if self._fence_pending:
             self._send_fence_aborts()
+
+    def _end_fence(self, fence_id: str, keys: Iterable[str]) -> None:
+        """Unfence each key of a fence that no other pending fence holds."""
+        assert self.moriio_engine is not None
+        for key in keys:
+            fences = self._fenced_producer_keys.get(key)
+            if fences is None:
+                continue
+            fences.discard(fence_id)
+            if fences:
+                continue
+            del self._fenced_producer_keys[key]
+            self.moriio_engine.unfence_remote_engine(key)
+            logger.info(
+                "MoRI-IO fence %s ended; accepting connections from producer %s again.",
+                fence_id,
+                key,
+            )
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()

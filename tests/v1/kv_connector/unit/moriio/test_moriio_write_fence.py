@@ -69,6 +69,11 @@ PRODUCER = WriteProducer(
 MAPPING = {"xfer-stuck": "stuck", "xfer-coll": "collateral"}
 # The producer of `_setup_kv_transfer_request`'s requests, as decode keys it.
 TEST_PRODUCER_KEY = moriio_engine_key("producer", "127.0.0.1", 4789, 0, 0)
+# Its engines' keys when it runs two pipeline stages.
+TEST_STAGE_KEYS = {
+    moriio_engine_key("producer", "127.0.0.1", 4789, 0, 0, pp_rank)
+    for pp_rank in (0, 1)
+}
 
 
 @pytest.fixture(autouse=True)
@@ -88,15 +93,21 @@ def clock(monkeypatch):
 
 
 class FakeEngine:
-    """MoRI IOEngine fence API; every key fences one connection unless told."""
+    """MoRI IOEngine fence API; every key fences one connection unless told.
 
-    def __init__(self, results: dict | None = None):
+    With `known`, only those keys belong to a peer; any other was never seen.
+    """
+
+    def __init__(self, results: dict | None = None, known: set[str] | None = None):
         self.results = results or {}
+        self.known = known
         self.fenced: list[str] = []
         self.unfenced: list[str] = []
 
     def fence_remote_engine(self, key: str):
         self.fenced.append(key)
+        if self.known is not None and key not in self.known:
+            return NEVER_SEEN
         return self.results.get(key, _fence_result())
 
     def unfence_remote_engine(self, key: str) -> bool:
@@ -164,6 +175,16 @@ def test_pipeline_stages_have_distinct_engine_keys():
     assert keys == {"producer:h:1:tp0:dp0:pp0", "producer:h:1:tp0:dp0:pp1"}
 
 
+def test_pipeline_producer_has_a_key_for_every_rank_of_every_stage():
+    """A stage registers its engine with its PP rank; decode must fence them all."""
+    producer = PRODUCER._replace(pp_size=2)
+    assert producer.engine_keys() == {
+        moriio_engine_key("producer", "10.0.0.1", 6001, tp_rank, 0, pp_rank): tp_rank
+        for tp_rank in range(2)
+        for pp_rank in range(2)
+    }
+
+
 def test_producer_notify_endpoint_matches_the_producer_listener():
     producer = PRODUCER._replace(dp_rank=1)
     assert producer.notify_endpoint(1) == (
@@ -187,7 +208,16 @@ def test_producer_is_resolved_from_the_router_embedded_address(plain_engine):
 
     producer = scheduler._resolve_write_producer(request, 0, 0)
 
-    assert producer == WriteProducer("10.0.0.7", 4789, 4789, 0, 1)
+    assert producer == WriteProducer("10.0.0.7", 4789, 4789, 0, 1, pp_size=1)
+
+
+def test_producer_stages_come_from_remote_pp_size(plain_engine):
+    scheduler = plain_engine.scheduler.connector.connector_scheduler
+    request = create_request(num_tokens=16, do_remote_prefill=True)
+    _setup_kv_transfer_request(request)
+    request.kv_transfer_params["remote_pp_size"] = 2
+
+    assert scheduler._resolve_write_producer(request, 0, 0).pp_size == 2
 
 
 def test_producer_uses_the_pod_host_of_its_dp_rank(plain_engine):
@@ -229,11 +259,15 @@ def fence_engine(request, monkeypatch):
     )
 
 
-def _waiting_request(engine, transfer_id: str, host: str = "127.0.0.1"):
+def _waiting_request(
+    engine, transfer_id: str, host: str = "127.0.0.1", pp_size: int | None = None
+):
     request = create_request(
         num_tokens=4 * engine.scheduler.block_size, do_remote_prefill=True
     )
     _setup_kv_transfer_request(request, remote_host=host, fake_transfer_id=transfer_id)
+    if pp_size is not None:
+        request.kv_transfer_params["remote_pp_size"] = pp_size
     engine.scheduler.add_request(request)
     engine.step()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -375,6 +409,43 @@ def test_fence_unsafe_on_one_rank_keeps_the_blocks(fence_engine):
     assert engine.pool.get_num_free_blocks() == free_before
 
 
+def test_stuck_pipeline_producer_is_fenced_on_every_stage(fence_engine):
+    engine = fence_engine
+    for worker in engine.workers:
+        worker.moriio_engine.known = TEST_STAGE_KEYS
+    free_before = engine.pool.get_num_free_blocks()
+    stuck = _waiting_request(engine, "xfer-stuck", pp_size=2)
+
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    engine.step()
+
+    assert stuck.status == RequestStatus.FINISHED_ERROR
+    assert engine.pool.get_num_free_blocks() == free_before
+    for worker in engine.workers:
+        assert sorted(worker.moriio_engine.fenced) == sorted(TEST_STAGE_KEYS)
+
+
+def test_pipeline_producer_whose_stages_decode_was_not_told_keeps_the_blocks(
+    fence_engine,
+):
+    engine = fence_engine
+    for worker in engine.workers:
+        worker.moriio_engine.known = TEST_STAGE_KEYS
+    stuck = _waiting_request(engine, "xfer-stuck")
+    held = engine.pool.get_num_free_blocks()
+
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    engine.step()
+
+    assert stuck.status == RequestStatus.FINISHED_ERROR
+    assert engine.pool.get_num_free_blocks() == held
+    for worker in engine.workers:
+        assert worker.moriio_wrapper.sent == []
+        assert worker.moriio_engine.unfenced == [TEST_PRODUCER_KEY]
+
+
 # --- worker: fencing ---------------------------------------------------------
 
 
@@ -472,14 +543,10 @@ def test_fence_tells_every_producer_rank_to_abort():
     }
 
 
-@pytest.mark.parametrize(
-    "result",
-    [_fence_result(ok=False), NEVER_SEEN],
-    ids=["a-connection-could-not-be-fenced", "no-key-ever-seen"],
-)
-def test_unsafe_fence_reports_nothing(result):
+def test_unsafe_fence_reports_nothing():
+    unsafe = _fence_result(ok=False)
     engine = FakeEngine(
-        {PRODUCER.engine_key(0): result, PRODUCER.engine_key(1): result}
+        {PRODUCER.engine_key(0): unsafe, PRODUCER.engine_key(1): unsafe}
     )
     worker = _fence_worker(engine)
 
@@ -491,6 +558,23 @@ def test_unsafe_fence_reports_nothing(result):
     assert results.finished_sending == set()
     # The producer is still told to stop.
     assert len(worker.moriio_wrapper.sent) == 2
+
+
+def test_fence_of_keys_no_peer_has_is_undone_without_an_abort():
+    """E.g. a pipeline-parallel producer whose stages decode was not told of.
+    Nothing was cut, so an abort would only stop writes into blocks this rank
+    keeps, and the producer's acks would never match these keys."""
+    worker = _fence_worker(FakeEngine(known=set()))
+
+    _apply(worker, _order(), timed_out={"stuck"})
+    results = worker.get_transfer_results()
+
+    assert results.finished_recving == {"stuck"}
+    assert results.finished_sending == set()
+    assert worker.moriio_wrapper.sent == []
+    assert sorted(worker.moriio_engine.unfenced) == sorted(PRODUCER.engine_keys())
+    assert worker._fence_pending == {}
+    assert worker._fenced_producer_keys == {}
 
 
 def test_fence_without_connections_on_one_rank_is_safe():
@@ -597,12 +681,12 @@ def test_fence_does_not_report_a_request_already_gone():
 # --- worker: acks and unfence -------------------------------------------------
 
 
-def _ack(worker, fence_id: str, tp_rank: int, producer=PRODUCER):
+def _ack(worker, fence_id: str, tp_rank: int, producer=PRODUCER, pp_rank: int = 0):
     worker.moriio_wrapper._handle_structured_message(
         {
             "type": "fence_ack",
             "transfer_id": fence_id,
-            "producer_key": producer.engine_key(tp_rank),
+            "producer_key": producer.engine_key(tp_rank, pp_rank),
         }
     )
 
@@ -656,6 +740,81 @@ def test_unacked_abort_is_resent(clock):
     assert [(s[2], s[3]) for s in resent] == [
         (7000 + get_port_offset(0, 1), "fence_abort")
     ]
+
+
+# --- worker: pipeline-parallel producers -------------------------------------
+
+PP_PRODUCER = PRODUCER._replace(pp_size=2)
+
+
+def test_pipeline_producer_is_fenced_on_every_stage_and_told_through_the_first():
+    worker = _fence_worker()
+
+    _apply(worker, _order(producer=PP_PRODUCER))
+
+    assert sorted(worker.moriio_engine.fenced) == sorted(PP_PRODUCER.engine_keys())
+    # One abort per TP rank, to the first stage, which forwards it.
+    assert [(s[2], s[3]) for s in worker.moriio_wrapper.sent] == [
+        (7000 + get_port_offset(0, tp), "fence_abort") for tp in range(2)
+    ]
+    assert worker.get_transfer_results().failed_recving == {"stuck", "collateral"}
+
+
+def test_pipeline_producer_is_unfenced_once_every_stage_acked():
+    worker = _fence_worker()
+    _apply(worker, _order(producer=PP_PRODUCER))
+
+    for tp in range(2):
+        _ack(worker, "f1", tp, PP_PRODUCER)
+    worker.get_transfer_results()
+    assert worker.moriio_engine.unfenced == []
+
+    for tp in range(2):
+        _ack(worker, "f1", tp, PP_PRODUCER, pp_rank=1)
+    worker.get_transfer_results()
+    assert sorted(worker.moriio_engine.unfenced) == sorted(PP_PRODUCER.engine_keys())
+    assert worker._fence_pending == {}
+
+
+def test_abort_is_resent_to_the_tp_ranks_with_a_stage_that_did_not_ack(clock):
+    worker = _fence_worker()
+    _apply(worker, _order(producer=PP_PRODUCER))
+    _ack(worker, "f1", 0, PP_PRODUCER)
+    _ack(worker, "f1", 0, PP_PRODUCER, pp_rank=1)
+    _ack(worker, "f1", 1, PP_PRODUCER)
+    worker.get_transfer_results()
+
+    clock.now += MoRIIOConstants.FENCE_ABORT_RESEND_INTERVAL + 1
+    worker.get_transfer_results()
+
+    resent = worker.moriio_wrapper.sent[2:]
+    assert [(s[2], s[3]) for s in resent] == [
+        (7000 + get_port_offset(0, 1), "fence_abort")
+    ]
+
+
+def test_heartbeat_advertises_the_pipeline_stages(monkeypatch):
+    """The router passes them on to decode as `remote_pp_size`."""
+    payloads = []
+    monkeypatch.setattr(
+        moriio_connector,
+        "MoRIIOHeartbeat",
+        lambda address, payload, *args: payloads.append(payload),
+    )
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = True
+    worker.mode = MoRIIOMode.WRITE
+    worker.request_address = "10.0.0.1:8100"
+    worker.local_ip = "10.0.0.1"
+    worker.handshake_port = 6001
+    worker.notify_port = 7000
+    worker.proxy_ip = "10.0.0.2"
+    worker.proxy_ping_port = 36367
+    worker.moriio_config = SimpleNamespace(dp_size=1, tp_size=2, pp_size=2)
+
+    worker._start_heartbeat()
+
+    assert payloads[0]["pp_size"] == 2
 
 
 # --- wrapper: write_failed across writers ----------------------------------

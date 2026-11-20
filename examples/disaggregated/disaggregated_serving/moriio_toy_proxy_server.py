@@ -89,6 +89,8 @@ def _listen_for_register(hostname, port):
                     "zmq_address": data["zmq_address"],
                     "dp_size": data["dp_size"],
                     "tp_size": data["tp_size"],
+                    # Sent by newer instances only.
+                    "pp_size": data.get("pp_size", 1),
                     "transfer_mode": data["transfer_mode"],
                 }
                 # zmq_address format: "host:IP,handshake:PORT,notify:PORT"
@@ -375,6 +377,10 @@ async def handle_request(api: str, request: Request):
         ]
         req_data["kv_transfer_params"]["remote_tp_size"] = prefill_instance_endpoint[
             "tp_size"
+        ]
+        # The decode fences every pipeline stage of a stuck prefill.
+        req_data["kv_transfer_params"]["remote_pp_size"] = prefill_instance_endpoint[
+            "pp_size"
         ]
 
         if selected_prefill_dp_rank is not None:
