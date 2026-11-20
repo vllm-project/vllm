@@ -195,11 +195,13 @@ class SessionObjectWriter:
     `_PUT_RETRY_INTERVAL_S`, without the objects already written, and queuing
     and draining wait while it is. Once writes have been pending for
     `put_stall_timeout_s` without a successful put, the rest of the batch is
-    dropped, and later batches get one attempt each until a put succeeds with
-    no refusal in the last `put_stall_timeout_s`. A dropped object is absent
-    from the store; the response that lists it is not changed. Once a store
-    call has not returned for `put_stall_timeout_s`, queuing and draining stop
-    waiting for it, and the puts queued behind it are dropped."""
+    dropped, and later batches get one attempt each until a put succeeds. A
+    dropped object is absent from the store; the response that lists it is not
+    changed. While batches are dropped, or no put succeeded for
+    `put_stall_timeout_s`, queuing does not wait: a put that meets a full queue
+    is dropped, and a removal is sent after the batches queued before it. Once
+    a store call has not returned for `put_stall_timeout_s`, draining stops
+    waiting for it and drops the puts queued behind it."""
 
     def __init__(
         self,
@@ -212,12 +214,11 @@ class SessionObjectWriter:
     ) -> None:
         self._store = store
         self._unremoved: list[str] = []
-        self._deferred: deque[str] = deque()
+        self._deferred: deque[tuple[int, list[str]]] = deque()
         self._key_prefix = key_prefix
         self._fields = fields
         self._put_stall_timeout_s = put_stall_timeout_s
         self._last_progress = time.monotonic()
-        self._last_refusal = float("-inf")
         self._busy_since: float | None = None
         self._dropped = 0
         self._enqueued = 0
@@ -281,6 +282,8 @@ class SessionObjectWriter:
 
     def _write(self, batch: tuple[list[str], list[bytes] | None]) -> None:
         keys, values = batch
+        if values is not None and self._deferred and self._deferred[0][0] < self._taken:
+            self._remove([])
         if values is None:
             self._remove(keys)
             if self._unremoved:
@@ -299,7 +302,6 @@ class SessionObjectWriter:
             try:
                 self._call(self._store.put_batch, keys[:1], values[:1])
             except BlockObjectStoreError as error:
-                self._last_refusal = time.monotonic()
                 attempts += 1
                 if attempts & (attempts - 1) == 0 or attempts % 32 == 0:
                     self._remove([])
@@ -314,11 +316,7 @@ class SessionObjectWriter:
                 keys, values = keys[1:], values[1:]
                 attempts = 0
                 self._last_progress = time.monotonic()
-                if (
-                    self._dropped
-                    and self._last_progress - self._last_refusal
-                    >= self._put_stall_timeout_s
-                ):
+                if self._dropped:
                     logger.warning(
                         "Auxiliary output objects are written again; %d were dropped.",
                         self._dropped,
@@ -326,7 +324,9 @@ class SessionObjectWriter:
                     self._dropped = 0
 
     def _remove(self, keys: list[str]) -> None:
-        deferred = [self._deferred.popleft() for _ in range(len(self._deferred))]
+        deferred = []
+        while self._deferred and self._deferred[0][0] < self._taken:
+            deferred += self._deferred.popleft()[1]
         keys = self._unremoved + deferred + keys
         codes = self._call(self._store.remove, keys) if keys else []
         self._unremoved = [
@@ -347,20 +347,19 @@ class SessionObjectWriter:
         if not self._queue.unfinished_tasks:
             self._last_progress = time.monotonic()
         while True:
-            hung = self._hung()
+            wait = not (self._dropped or self._stalled() or self._hung())
             try:
-                self._queue.put(batch, not hung, _PUT_RETRY_INTERVAL_S)
+                self._queue.put(batch, wait, _PUT_RETRY_INTERVAL_S)
                 self._enqueued += 1
                 return
             except queue.Full:
                 self.check()
-                if hung:
-                    self._abandon_upto = self._enqueued
+                if not wait:
                     keys, values = batch
                     if values is None:
-                        self._deferred.extend(keys)
+                        self._deferred.append((self._enqueued, keys))
                     else:
-                        self._drop(keys, "a store call hangs")
+                        self._drop(keys, "the queue is full while the store fails")
                     return
 
     def drain(self, timeout_s: float | None = None) -> None:

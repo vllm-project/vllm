@@ -3195,7 +3195,7 @@ def test_session_object_writer_drops_what_the_store_refuses_and_recovers(
     monkeypatch.setattr(
         session_objects_module, "time", SimpleNamespace(monotonic=lambda: now[0])
     )
-    refusals = {"0": 9, "1": 9, "2": 0, "3": 9, "4": 0, "5": 2}
+    refusals = {"0": 9, "1": 9, "2": 0, "3": 2}
     attempts: list[str] = []
 
     def put(keys):
@@ -3209,15 +3209,13 @@ def test_session_object_writer_drops_what_the_store_refuses_and_recovers(
     client, writer = _timed_writer(put, 1.0, 1)
     try:
         for index in refusals:
-            if index == "4":
-                now[0] += 1.0
             writer.add_tail(f"job/s/tail/{index}", np.zeros((1, 1), np.uint8), {})
             assert _run_within(writer.drain) is None
         writer.check()
     finally:
         assert _run_within(writer.close) is None
-    assert [attempts.count(index) for index in refusals] == [3, 1, 1, 1, 1, 3]
-    assert list(client.objects) == [f"job/s/tail/{index}" for index in "245"]
+    assert [attempts.count(index) for index in refusals] == [3, 1, 1, 3]
+    assert list(client.objects) == ["job/s/tail/2", "job/s/tail/3"]
     assert writer._dropped == 0
 
 
@@ -3230,15 +3228,15 @@ def test_session_object_writer_drain_stops_waiting_once_a_put_hangs():
         release.wait(30)
         return 0
 
-    client, writer = _timed_writer(put, 1.0, 4)
+    client, writer = _timed_writer(put, 2.0, 4)
     try:
         writer.add_tail("job/s/tail/0", np.zeros((1, 1), dtype=np.uint8), {})
         assert entered.wait(10)
         with pytest.raises(BlockObjectStoreError, match="not written in time"):
-            writer.drain(timeout_s=0.5)
+            writer.drain(timeout_s=0.2)
         start = time.monotonic()
         writer.drain(timeout_s=10)
-        assert time.monotonic() - start < 1.5
+        assert time.monotonic() - start < 2.5
         writer.check()
     finally:
         release.set()
@@ -3261,14 +3259,82 @@ def test_session_object_writer_defers_removals_its_queue_cannot_take_behind_a_ha
         writer.remove(["job/s/tail/0"])
         assert _run_within(lambda: writer.remove(["job/s/tail/1"])) is None
         release.set()
+        deadline = time.monotonic() + 10
+        while writer._queue.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.01)
+        writer.add_tail("job/s/tail/1", np.zeros((1, 1), dtype=np.uint8), {})
         assert _run_within(writer.drain) is None
         writer.check()
     finally:
         release.set()
         assert _run_within(writer.close) is None
-    assert not client.objects
-    removed = sorted(key for keys in client.removes for key in keys)
-    assert removed == ["job/s/tail/0", "job/s/tail/1"]
+    assert list(client.objects) == ["job/s/tail/1"]
+    assert client.removes == [["job/s/tail/0"], ["job/s/tail/1"]]
+
+
+def test_session_object_writer_drain_drops_the_puts_queued_behind_a_hung_put():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def put(keys):
+        entered.set()
+        release.wait(30)
+
+    client, writer = _timed_writer(put, 0.5, 4)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        assert entered.wait(10)
+        writer.add_tail("job/s/tail/1", rows, {})
+        assert _run_within(writer.drain) is None
+        release.set()
+        writer.add_tail("job/s/tail/2", rows, {})
+        assert _run_within(writer.drain) is None
+    finally:
+        release.set()
+        assert _run_within(writer.close) is None
+    assert list(client.objects) == ["job/s/tail/0", "job/s/tail/2"]
+
+
+def test_session_object_writer_drops_instead_of_waiting_once_it_drops(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(
+        session_objects_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    entered = threading.Event()
+    gate = threading.Event()
+    attempts: list[str] = []
+
+    def put(keys):
+        attempts.append(keys[0])
+        if keys[0] == "job/s/tail/0":
+            now[0] += 0.6
+        else:
+            entered.set()
+            gate.wait(30)
+        return -900
+
+    client, writer = _timed_writer(put, 1.0, 1)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+
+    def produce():
+        for index in range(2, 4):
+            writer.add_tail(f"job/s/tail/{index}", rows, {})
+
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        assert _run_within(writer.drain) is None
+        writer.add_tail("job/s/tail/1", rows, {})
+        assert entered.wait(10)
+        assert _run_within(produce, 5) is None
+        gate.set()
+        assert _run_within(writer.drain) is None
+        writer.check()
+    finally:
+        gate.set()
+        assert _run_within(writer.close) is None
+    assert attempts == ["job/s/tail/0"] * 2 + ["job/s/tail/1", "job/s/tail/2"]
+    assert not client.objects and writer._dropped == 4
 
 
 def test_session_object_writer_close_stops_retrying():

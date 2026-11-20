@@ -2552,7 +2552,9 @@ def test_llm_engine_abort_returns_when_the_engine_dies_before_its_outputs_arrive
             ).start()
 
     engine, client, released = _sync_client_and_llm_engine(send_input)
-    aborting = threading.Thread(target=engine.abort_request, args=(["r-ext"],))
+    aborting = threading.Thread(
+        target=engine.abort_request, args=(["r-ext"],), daemon=True
+    )
     aborting.start()
     aborting.join(5)
     assert not aborting.is_alive()
