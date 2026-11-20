@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     init_distributed_environment,
 )
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
@@ -79,6 +80,33 @@ def worker_fn():
 )
 def test_pynccl():
     distributed_run(worker_fn, 2)
+
+
+def standalone_worker_fn(env):
+    rank = int(env["RANK"])
+    torch.accelerator.set_device_index(rank)
+    group = StatelessProcessGroup.create(
+        host=env["MASTER_ADDR"],
+        port=int(env["MASTER_PORT"]),
+        rank=rank,
+        world_size=int(env["WORLD_SIZE"]),
+    )
+    caller_stream = torch.accelerator.current_stream()
+    pynccl_comm = PyNcclCommunicator(group, device=rank)
+    assert torch.accelerator.current_stream() == caller_stream
+    tensor = pynccl_comm.all_reduce(torch.ones(16, device=pynccl_comm.device))
+    assert torch.accelerator.current_stream() == caller_stream
+    torch.accelerator.synchronize()
+    assert torch.all(tensor == 2).cpu().item()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+)
+def test_pynccl_keeps_caller_stream():
+    """A communicator built outside a vLLM engine (e.g. in a trainer) must not
+    change the caller's current stream, neither when built nor when used."""
+    distributed_run(standalone_worker_fn, 2)
 
 
 @worker_fn_wrapper

@@ -13,13 +13,17 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
     should_nccl_symm_mem_ag_rs,
     should_nccl_symm_mem_allreduce,
 )
-from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
+from vllm.distributed.device_communicators.pynccl import (
+    PyNcclCommunicator,
+    register_nccl_symmetric_ops,
+)
 from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
     is_symmetric_memory_tensor,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream
 
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
@@ -30,6 +34,12 @@ logger = init_logger(__name__)
 # Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
 # non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
 NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
+
+
+class _VllmPyNcclCommunicator(PyNcclCommunicator):
+    # vLLM's own groups use its dedicated stream, which CUDA graph capture needs.
+    def _current_stream(self) -> torch.cuda.Stream:
+        return current_stream()
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -97,7 +107,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (  # noqa: E501
             FlashInferPcieIpcAllReduce,
         )
-        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
         )
@@ -105,7 +114,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
-            self.pynccl_comm = PyNcclCommunicator(
+            self.pynccl_comm = _VllmPyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
             )
