@@ -10,12 +10,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.pp_transport.fields import PPTransportField
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
-PP_POSITIONS_KEY = "pp_positions"
+PP_POSITIONS_KEY = PPTransportField.POSITIONS.value
 
 
 @dataclass(slots=True)

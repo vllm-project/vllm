@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from operator import setitem
 
 import pytest
 import torch
@@ -12,6 +13,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.pp_transport.fields import PPTransportField
 from vllm.distributed.pp_transport.ops import copy_intermediate_tensors
 from vllm.distributed.pp_transport.schema import (
     PPTransportSchema,
@@ -40,10 +42,10 @@ def _run_pp2_tp2_transport(rank: int, init_method: str):
         for sharded_fields in ((), ("hidden_states",), ("residual",)):
             transport = PPTransportSchema(
                 {
-                    "hidden_states": PPTransportTensorSpec(
+                    PPTransportField.HIDDEN_STATES: PPTransportTensorSpec(
                         (4,), sequence_parallel="hidden_states" in sharded_fields
                     ),
-                    "residual": PPTransportTensorSpec(
+                    PPTransportField.RESIDUAL: PPTransportTensorSpec(
                         (4,), sequence_parallel="residual" in sharded_fields
                     ),
                 },
@@ -279,6 +281,28 @@ def test_downstream_descriptor_drives_all_buffer_views(compiled):
         captured = copy_intermediate_tensors(buffers, output)
         torch.testing.assert_close(captured.tensors, expected, rtol=0, atol=0)
         assert {key: value.data_ptr() for key, value in captured.items()} == addresses
+
+
+def test_public_field_descriptions_preserve_directions_and_wire_names():
+    schema = PPTransportSchema(tp_size=2)
+    incoming, outgoing = schema.recv_specs, schema.send_specs
+    sharded = PPTransportTensorSpec((4,), dtype=torch.float32, sequence_parallel=True)
+    full = PPTransportTensorSpec((4,), dtype=torch.float32)
+    schema.register_tensor(PPTransportField.HIDDEN_STATES, sharded, send=False)
+    schema.register_tensor(PPTransportField.HIDDEN_STATES, full, receive=False)
+    route = PPTransportTensorSpec((2,), dtype=torch.int32)
+    schema.register_tensor("downstream.route_state", route, receive=False)
+    assert incoming == {"hidden_states": sharded}
+    assert outgoing == {"hidden_states": full, "downstream.route_state": route}
+    assert all(type(name) is str for name in (*incoming, *outgoing))
+    buffers = schema.make_empty_intermediate_tensors(8, torch.float16, "cpu")
+    assert buffers[PPTransportField.HIDDEN_STATES].shape == (4, 4)
+    assert buffers[PPTransportField.HIDDEN_STATES].dtype == torch.float32
+    for description in (incoming, outgoing):
+        with pytest.raises(TypeError):
+            setitem(description, "hidden_states", route)
+    with pytest.raises(ValueError, match="already registered"):
+        schema.register_tensor("hidden_states", full, receive=False)
 
 
 def test_registration_is_model_local():
