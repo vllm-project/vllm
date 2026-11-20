@@ -423,12 +423,12 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   carry the reference's ask when absent or null; an explicit empty value
   (`""`, `[]` or `{}`) renders as empty, as the reference server does.
 - The reads score the labels in the serving dtype. Under bf16 the label
-  logprobs move in steps of 0.125, so close options can tie exactly: a
-  noul of exactly 0.5 is a tie, not a signal. The reference serves FP8
-  weights with an fp32 LM head: add `--quantization fp8_per_tensor` to the command
-  above and `"head_dtype": "float32"` to the same `--hf-overrides` JSON as
-  the marker. Against that setting the bf16 picks differ only on
-  near-ties.
+  logprobs move in steps of 0.125 at this checkpoint's logit scale, so
+  close options can tie exactly: a noul of exactly 0.5 is a tie, not a
+  signal. The reference serves FP8 weights with an fp32 LM head: add
+  `--quantization fp8_per_tensor` to the command above and
+  `"head_dtype": "float32"` to the same `--hf-overrides` JSON as the
+  marker. Against that setting the bf16 picks differ only on near-ties.
 - Labels run `A` to `Z`, then two-letter labels from `AA`, skipping any
   that is not one token right after `Answer:`. A choice can have up to 255
   options and a score up to 255 levels. With the checkpoint's tokenizer,
@@ -477,7 +477,7 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
 - The OpenAI-style `/v1/decisions` serves the model too, with the stock
   question types (at most 26 options, the stock confidence). An option
   line shows the option's value (a choice's JSON-encoded, a score's
-  label), then `: ` and its description when it has one; a predicate
+  label), then `:` and its description when it has one; a predicate
   reads `A. false` and `B. true`. Prefer `/v1/systemone` for the trained
   answer shapes.
 
