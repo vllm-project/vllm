@@ -309,12 +309,13 @@ def test_native_routes_with_repeated_experts_and_nan_rows(
 
 
 # The compact experts and the FlyDSL stages share the quant rules and the output
-# rounding; only fp32 accumulation order may differ.
+# rounding; only fp32 accumulation order and SiLU ulps may differ, and a single
+# requantized block that flips stays well below this.
 COMPACT_REL_L2 = 1e-3
 
 
 @pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
-@pytest.mark.parametrize("local_experts", [32, 64])
+@pytest.mark.parametrize("local_experts", [32, 64, 128])
 @pytest.mark.parametrize("num_tokens", [1, 8, 24, 64, 65, 192, COMPACT_MAX_TOKENS])
 @torch.inference_mode()
 def test_compact_experts_match_the_flydsl_stages(
@@ -346,9 +347,14 @@ def test_compact_experts_match_the_flydsl_stages(
         torch.randn(num_tokens, NUM_EXPERTS, device=device), TOP_K, dim=-1
     ).indices.to(torch.int32)
     w1_scale, w2_scale = quant_config.w1_scale, quant_config.w2_scale
-    assert supports_compact_moe(
-        num_tokens, TOP_K, HIDDEN, HIDDEN, w13, w2, w1_scale, w2_scale
-    )
+    assert supports_compact_moe(x, topk_ids, w13, w2, w1_scale, w2_scale)
+    # Callers with other dtypes or layouts fall back instead of asserting.
+    assert not supports_compact_moe(x.half(), topk_ids, w13, w2, w1_scale, w2_scale)
+    assert not supports_compact_moe(x, topk_ids.long(), w13, w2, w1_scale, w2_scale)
+    if num_tokens > 1:
+        assert not supports_compact_moe(
+            x.t().contiguous().t(), topk_ids, w13, w2, w1_scale, w2_scale
+        )
     kernels = decode_moe._stage_kernels(num_tokens, TOP_K, local, HIDDEN, HIDDEN)
     assert kernels is not None
 
@@ -365,6 +371,103 @@ def test_compact_experts_match_the_flydsl_stages(
     assert torch.isfinite(compact).all()
     rel = (compact - flydsl).norm() / flydsl.norm().clamp_min(1e-30)
     assert rel < COMPACT_REL_L2, f"relative L2 {rel:.2e}"
+
+
+def _mxfp4_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Packed E2M1 codes and E8M0 scales of fp32 rows `x` per 32 columns: scale
+    2^ceil(log2(amax / 6)) (2^-126 for an all-zero block), codes rounded to the
+    nearest E2M1 value, ties to the even code; even column in the low nibble."""
+    rows, cols = x.shape
+    blocks = x.view(rows, cols // 32, 32)
+    amax = blocks.abs().amax(dim=-1, keepdim=True)
+    sixth = torch.tensor(1.0 / 6.0, dtype=torch.float32, device=x.device)
+    ratio = torch.clamp(amax, min=6.0 * 2.0**-126) * sixth
+    e8m0 = (ratio.view(torch.int32) + 0x7FFFFF) >> 23
+    scaled = blocks * ((254 - e8m0) << 23).view(torch.float32)
+    values = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x.device
+    ).view(1, 1, 1, 8)
+    dist = (scaled.abs().unsqueeze(-1) - values).abs()
+    nearest = dist == dist.amin(dim=-1, keepdim=True)
+    even = nearest & (torch.arange(8, device=x.device) % 2 == 0)
+    pick = torch.where(even.any(-1, keepdim=True), even, nearest)
+    codes = pick.int().argmax(dim=-1) | ((scaled < 0).int() << 3)
+    codes = codes.view(rows, cols)
+    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).to(torch.uint8)
+    return packed, e8m0.view(rows, cols // 32).to(torch.uint8)
+
+
+def _quant_rule_rows(device: torch.device) -> torch.Tensor:
+    """`[16, 64]` fp32 rows that probe the MXFP4 rule: amax at 6 * 2^k and the
+    next float above it, every E2M1 midpoint, an all-zero block, tiny and large
+    blocks, and random rows."""
+    g = torch.Generator(device="cpu").manual_seed(0)
+    rows = torch.randn(16, 64, generator=g) * 3.0
+    mids = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0])
+    for r, k in enumerate(range(-3, 3)):
+        scale = 2.0**k
+        block = torch.cat([mids, -mids, mids / 2, -mids / 2]) * scale
+        rows[r, :32] = block
+        above = torch.nextafter(torch.tensor(6.0 * scale), torch.tensor(1e9))
+        rows[r, 32:] = torch.cat([block[:-1], above.view(1)])
+    rows[6, :32] = 0.0
+    rows[7, :32] = torch.randn(32, generator=g) * 2.0**-100
+    rows[8, :32] = torch.randn(32, generator=g) * 2.0**100
+    return rows.to(device)
+
+
+if ROCM_GFX950_AITER:
+    from vllm.models.muse_spark.amd.ops import compact_moe
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _quant_rows_probe(x_ptr, q_ptr, s_ptr, BM: tl.constexpr, BN: tl.constexpr):
+        r = tl.arange(0, BM)[:, None]
+        x = tl.load(x_ptr + r * BN + tl.arange(0, BN)[None, :])
+        q, s = compact_moe._quant_rows(x, BM, BN)
+        tl.store(q_ptr + r * (BN // 2) + tl.arange(0, BN // 2)[None, :], q)
+        tl.store(s_ptr + r * (BN // 32) + tl.arange(0, BN // 32)[None, :], s)
+
+    @triton.jit
+    def _silu_mul_quant_probe(
+        g_ptr, u_ptr, q_ptr, s_ptr, BM: tl.constexpr, BN: tl.constexpr
+    ):
+        r = tl.arange(0, BM)[:, None]
+        c = tl.arange(0, BN)[None, :]
+        gate = tl.load(g_ptr + r * BN + c)
+        up = tl.load(u_ptr + r * BN + c)
+        q, s = compact_moe._silu_mul_quant(gate, up, BM, BN)
+        tl.store(q_ptr + r * (BN // 2) + tl.arange(0, BN // 2)[None, :], q)
+        tl.store(s_ptr + r * (BN // 32) + tl.arange(0, BN // 32)[None, :], s)
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@torch.inference_mode()
+def test_compact_quant_rule() -> None:
+    """The compact input quant and the stage-1 epilogue quant give the MXFP4
+    rule's exact scale and code bytes."""
+    device = torch.device("cuda")
+    x = _quant_rule_rows(device)
+    q = torch.empty(16, 32, dtype=torch.uint8, device=device)
+    s = torch.empty(16, 2, dtype=torch.uint8, device=device)
+    _quant_rows_probe[(1,)](x, q, s, BM=16, BN=64)
+    ref_q, ref_s = _mxfp4_reference(x)
+    torch.testing.assert_close(s, ref_s, rtol=0, atol=0)
+    torch.testing.assert_close(q, ref_q, rtol=0, atol=0)
+
+    # SiLU(32) is exactly 32 in fp32, so the epilogue sees 32 * up. Each up
+    # value sits just above a value that bf16 rounds back to an E2M1 midpoint,
+    # so only a product rounded to bf16 before the quant ties to the even code.
+    gate = torch.full((16, 64), 32.0, device=device)
+    target = x.to(torch.bfloat16).float()
+    nudged = target * (1.0 + 2.0**-12)
+    up = nudged / 32.0
+    q.zero_()
+    s.zero_()
+    _silu_mul_quant_probe[(1,)](gate, up, q, s, BM=16, BN=64)
+    ref_q, ref_s = _mxfp4_reference((32.0 * up).to(torch.bfloat16).float())
+    torch.testing.assert_close(s, ref_s, rtol=0, atol=0)
+    torch.testing.assert_close(q, ref_q, rtol=0, atol=0)
 
 
 LOCAL_EXPERTS = 64

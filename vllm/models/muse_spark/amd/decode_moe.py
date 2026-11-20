@@ -359,7 +359,9 @@ def _native_routes_experts(
     in one launch.
 
     Calls that `supports_compact_moe` accepts take `compact_moe_experts`
-    instead, with the same quant rules and output.
+    instead, with the same quant rules and output. They are still gated on
+    `kernels`: `MuseSparkDecodeMoE.kernels` sends a call to the per-route path
+    when AITER has no launchable FlyDSL stages for its shape.
     """
     from aiter.fused_moe import _flydsl_stage1_wrapper, moe_sorting
     from aiter.ops.flydsl import moe_kernels as fly
@@ -368,9 +370,7 @@ def _native_routes_experts(
     num_tokens, top_k = topk_ids.shape
     hidden = hidden_states.shape[1]
     inter = w1.shape[1] // 2
-    if supports_compact_moe(
-        num_tokens, top_k, hidden, inter, w1, w2, w1_scale, w2_scale
-    ):
+    if supports_compact_moe(hidden_states, topk_ids, w1, w2, w1_scale, w2_scale):
         logger.info_once("Muse Spark decode MoE: compact MXFP4 experts.")
         return compact_moe_experts(
             hidden_states, topk_ids, local_index, w1, w2, w1_scale, w2_scale

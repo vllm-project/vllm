@@ -83,32 +83,40 @@ def _on_gfx950() -> bool:
 
 
 def supports_compact_moe(
-    num_tokens: int,
-    top_k: int,
-    hidden: int,
-    inter: int,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> bool:
-    """Whether `compact_moe_experts` takes these routes and preshuffled MXFP4
-    expert weights (`w13`: `[E, 2 * inter, hidden / 2]`, `w2`:
-    `[E, hidden, inter / 2]`, E8M0 scales per 32 columns)."""
-    e = w13.shape[0]
+    """Whether `compact_moe_experts` takes these bf16 rows `x` (`[T, H]`), their
+    int32 routes `topk_ids` (`[T, top_k]`) and preshuffled MXFP4 expert weights
+    (`w13`: `[E, 2 * I, H / 2]`, `w2`: `[E, H, I / 2]`, E8M0 scales per 32
+    columns)."""
+    if x.dim() != 2 or topk_ids.dim() != 2 or w13.dim() != 3 or w2.dim() != 3:
+        return False
+    num_tokens, hidden = x.shape
+    e, inter = w13.shape[0], w2.shape[2] * 2
     return (
         _mxfp4_quant_op is not None
         and _on_gfx950()
         and 0 < num_tokens <= MAX_TOKENS
-        and top_k == TOP_K
+        and topk_ids.shape == (num_tokens, TOP_K)
+        and x.dtype == torch.bfloat16
+        and topk_ids.dtype == torch.int32
+        and x.is_contiguous()
+        and topk_ids.is_contiguous()
         and hidden % 1024 == 0
         and inter % 1024 == 0
-        and 0 < e <= 256
+        and 0 < e <= 128
         and e & (e - 1) == 0
         and w13.shape == (e, 2 * inter, hidden // 2)
         and w2.shape == (e, hidden, inter // 2)
         and w13_scale.shape == (e, 2 * inter, hidden // 32)
         and w2_scale.shape == (e, hidden, inter // 32)
+        and getattr(w13, "is_shuffled", False)
+        and getattr(w2, "is_shuffled", False)
         and all(
             t.element_size() == 1 and t.is_contiguous()
             for t in (w13, w2, w13_scale, w2_scale)
@@ -168,8 +176,10 @@ def _route_quant_kernel(
             rank = tl.cumsum(hit.to(tl.int32), axis=0) - 1
             base = first * BM
             c = tl.arange(0, PER_E * BM)
-            tl.store(sorted_ptr + base + c, M * TOPK, mask=c < blocks * BM)
-            tl.debug_barrier()
+            # Padding and routes write disjoint slots of the expert's blocks.
+            tl.store(
+                sorted_ptr + base + c, M * TOPK, mask=(c < blocks * BM) & (c >= count)
+            )
             tl.store(sorted_ptr + base + rank, s, mask=hit)
     else:
         chunks: tl.constexpr = D // DC
@@ -177,10 +187,7 @@ def _route_quant_kernel(
         chunk = (pid - LE) % chunks
         col = chunk * DC + tl.arange(0, DC)
         x = tl.load(x_ptr + row * D + col).to(tl.float32)
-        # RoundUp E8M0 scale, round-half-even E2M1, as sort_quant.
-        q, qs = _mxfp4_quant_op(
-            tl.reshape(x, [1, DC]), DC, 1, 32, SCALING_MODE=1, USE_ASM=True
-        )
+        q, qs = _quant_rows(tl.reshape(x, [1, DC]), 1, DC)
         tl.store(
             q_ptr + row * (D // 2) + chunk * (DC // 2) + tl.arange(0, DC // 2),
             tl.reshape(q, [DC // 2]),
@@ -224,10 +231,18 @@ def _s_offset(n, c, SC: tl.constexpr):
 
 
 @triton.jit
+def _quant_rows(x, BM: tl.constexpr, BN: tl.constexpr):
+    """MXFP4 quant of `[BM, BN]` fp32 rows per 32 columns, as sort_quant: E8M0
+    scale 2^ceil(log2(amax / 6)) (all-zero blocks 2^-126), round-half-even
+    E2M1 codes packed two per byte, the even column in the low nibble."""
+    return _mxfp4_quant_op(x, BN, BM, 32, SCALING_MODE=1, USE_ASM=True)
+
+
+@triton.jit
 def _silu_mul_quant(gate, up, BM: tl.constexpr, BN: tl.constexpr):
     """SiLU(gate) * up, rounded to bf16 as a bf16 stage-1 output is, and its
-    MXFP4 quant per 32 columns with the rounding of `_route_quant_kernel`
-    (the stage-2 input quant of the bf16-output expert stages)."""
+    MXFP4 quant per 32 columns (`_quant_rows`, the stage-2 input quant of the
+    bf16-output expert stages)."""
     # 1 / (1 + 2^(-gate * log2(e))) with the hardware exp2 and reciprocal, one
     # instruction per asm block so the compiler resolves their hazards.
     exp = tl.inline_asm_elementwise(
@@ -247,8 +262,7 @@ def _silu_mul_quant(gate, up, BM: tl.constexpr, BN: tl.constexpr):
         pack=1,
     )
     act = (gate * sig * up).to(tl.bfloat16).to(tl.float32)
-    q, q_s = _mxfp4_quant_op(act, BN, BM, 32, SCALING_MODE=1, USE_ASM=True)
-    return q, q_s
+    return _quant_rows(act, BM, BN)
 
 
 @triton.jit(do_not_specialize=["rows"])
@@ -355,11 +369,9 @@ def compact_moe_experts(
     T, H = x.shape
     top_k = topk_ids.shape[1]
     num_local, inter = w13.shape[0], w2.shape[2] * 2
-    assert supports_compact_moe(T, top_k, H, inter, w13, w2, w13_scale, w2_scale), (
-        "compact MoE does not support these routes or weights"
+    assert supports_compact_moe(x, topk_ids, w13, w2, w13_scale, w2_scale), (
+        "compact MoE does not support these rows, routes or weights"
     )
-    assert x.dtype == torch.bfloat16 and x.is_contiguous()
-    assert topk_ids.dtype == torch.int32 and topk_ids.is_contiguous()
     cfg = tile_config(T)
     bm = cfg.block_m
     dev = x.device
