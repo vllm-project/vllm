@@ -15,7 +15,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-import torch.distributed as dist
 
 from vllm.platforms import current_platform
 
@@ -47,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
     KVCacheSpec,
+    KVCacheStage,
     KVCacheTensor,
     MLAAttentionSpec,
 )
@@ -61,7 +61,6 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
-from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.utils import allocate_kv_cache
@@ -554,57 +553,35 @@ def test_register_separate_kv_head_groups(monkeypatch):
     }
 
 
-def test_sync_num_cpu_blocks_across_workers_noop_when_dist_uninitialized(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
-        lambda: False,
+def test_cpu_blocks_follow_the_largest_pipeline_stage(monkeypatch):
+    """A worker sizes the pool by the stage whose blocks are largest, so every
+    stage allocates the same number of CPU blocks."""
+    num_blocks = 4
+    raw = torch.zeros(num_blocks * BLOCK_BYTES, dtype=torch.int8, device="cuda")
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=["layer.0"],
+                layer_stride=num_blocks * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+        pipeline_stages=(
+            KVCacheStage((), BLOCK_BYTES),
+            KVCacheStage((), 3 * BLOCK_BYTES),
+        ),
     )
-    assert sync_num_offload_blocks_across_workers(42) == 42
-
-
-def test_sync_num_cpu_blocks_across_workers_noop_when_world_size_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeGroup:
-        world_size = 1
-
-    monkeypatch.setattr(
-        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_world_group",
-        lambda: FakeGroup(),
-    )
-    assert sync_num_offload_blocks_across_workers(42) == 42
-
-
-def test_sync_num_cpu_blocks_across_workers_all_reduce_min(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeGroup:
-        world_size = 4
-        cpu_group = object()
-
-    def fake_all_reduce(tensor, group, op) -> None:
-        assert op is dist.ReduceOp.MIN
-        tensor.fill_(5)
-
-    monkeypatch.setattr(
-        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_world_group",
-        lambda: FakeGroup(),
-    )
-    monkeypatch.setattr(
-        "vllm.v1.simple_kv_offload.sizing.dist.all_reduce",
-        fake_all_reduce,
-    )
-    assert sync_num_offload_blocks_across_workers(10) == 5
+    worker = _make_worker(config, 8 * BLOCK_BYTES)
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+    try:
+        worker.register_kv_caches({"layer.0": raw.view(num_blocks, BLOCK_BYTES)})
+        assert worker.num_cpu_blocks == 2
+    finally:
+        if worker._backend is not None:
+            worker._backend.shutdown()
 
 
 def _dsa_specs(num_layers: int, block_size: int) -> dict[str, KVCacheSpec]:

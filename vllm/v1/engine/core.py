@@ -408,24 +408,8 @@ class EngineCore:
             if max_model_len != max_model_len_after:
                 self.collective_rpc("update_max_model_len", args=(max_model_len,))
             self.model_executor.extend_kv_cache(num_blocks)
-        # Under the extensible KV cache, workers create the connector in
-        # `extend_kv_cache`, so ask for its block count only afterwards.
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
-            and vllm_config.cache_config.enable_prefix_caching
-        ):
-            aligned_num_cpu_blocks = (
-                self.model_executor.get_simple_cpu_offload_num_blocks()
-            )
-            assert aligned_num_cpu_blocks is not None, (
-                "SimpleCPUOffloadConnector workers must report their block count"
-            )
-            vllm_config.cache_config.simple_cpu_offload_num_blocks = (
-                aligned_num_cpu_blocks
-            )
 
+        kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None
             and kv_transfer_config.is_kv_transfer_instance

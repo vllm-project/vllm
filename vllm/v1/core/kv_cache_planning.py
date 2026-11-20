@@ -1485,7 +1485,7 @@ def get_pipeline_stages(
     kv_cache_configs: list[KVCacheConfig],
     pipeline_parallel_size: int,
 ) -> tuple[KVCacheStage, ...]:
-    """The KV cache layers of every pipeline stage.
+    """The KV cache of every pipeline stage.
 
     Workers are ordered by PP rank, then by PCP and TP rank, and every worker
     of a stage holds the same layers, so the first worker of each stage
@@ -1506,21 +1506,25 @@ def get_pipeline_stages(
     workers_per_stage = num_workers // pipeline_parallel_size
     stages: list[KVCacheStage] = []
     for first in range(0, num_workers, workers_per_stage):
-        groups = kv_cache_configs[first].kv_cache_groups
+        config = kv_cache_configs[first]
         assert all(
             [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
-            == [g.layer_names for g in groups]
+            == [g.layer_names for g in config.kv_cache_groups]
             for worker in range(first, first + workers_per_stage)
         ), "Workers of one pipeline stage must hold the same KV cache layers."
-        # A model runner adds KV-sharing layers to the groups of its own copy
-        # of the config in place; the stage keeps groups of its own, so every
-        # worker and the scheduler see the same stages.
+        # Every device tensor spans the one device allocation.
+        device_bytes = next(
+            (t.size for t in config.kv_cache_tensors if not t.host_resident), 0
+        )
         stages.append(
             KVCacheStage(
+                # Copies, as a model runner adds KV-sharing layers to the groups
+                # of its own config in place.
                 kv_cache_groups=tuple(
                     replace(group, kv_cache_specs=dict(group.kv_cache_specs))
-                    for group in groups
-                )
+                    for group in config.kv_cache_groups
+                ),
+                bytes_per_block=device_bytes // config.num_blocks,
             )
         )
     return tuple(stages)
