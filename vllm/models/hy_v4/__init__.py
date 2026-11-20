@@ -50,7 +50,7 @@ def __getattr__(name: str) -> Any:
         if current_platform.is_rocm()
         else ".nvidia.model",
         "HYV4MTP": ".nvidia.mtp",
-        "HYV4DFlyForCausalLM": "vllm.models.hy_v4_flash.amd.hy_v4.dfly"
+        "HYV4DFlyForCausalLM": ".amd.dfly"
         if current_platform.is_rocm()
         else ".nvidia.dfly",
         "HYV4VLForConditionalGeneration": (

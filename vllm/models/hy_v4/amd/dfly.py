@@ -34,6 +34,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.hy_v4.dfly_config import HYV4DFlySpeculatorConfig
+from vllm.models.hy_v4_flash.amd.swa import FlashPackedSparseBackend
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
@@ -43,9 +44,8 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 
-from ..swa import FlashPackedSparseBackend
 from .attention import HYV4MLAAttention
-from .model import HYV4DecoderLayer
+from .base_model import HYV4DecoderLayer
 from .moe import HYV4FeedForward
 from .mrope import set_token_rope
 
