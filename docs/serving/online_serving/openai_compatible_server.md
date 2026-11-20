@@ -188,6 +188,12 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+`/v1/chat/completions/batch` uses the same `VLLM_MAX_COMPLETION_PROMPTS`
+limit as `/v1/completions`. It accepts up to 1,024 conversations in the outer
+`messages` list by default. Set the variable to a positive integer before
+starting the server to change the limit. Larger batches receive HTTP 400
+before any conversation is preprocessed.
+
 With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
 
 With `--reasoning-parser`, `/v1/chat/completions/batch` sums `reasoning_tokens` across conversations in `usage.completion_tokens_details`, as `/v1/chat/completions` does for one conversation, also when `include_reasoning` is `false`.
