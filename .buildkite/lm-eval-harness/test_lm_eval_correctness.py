@@ -164,16 +164,26 @@ def launch_lm_eval(eval_config, tp_size):
     if tokenizer_mode is not None:
         model_args += f"tokenizer_mode={tokenizer_mode},"
 
+    hf_overrides = eval_config.get("hf_overrides", None)
+
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):
         if current_platform.is_rocm():
             model = get_model(backend).create_from_arg_string(
                 model_args,
-                {"batch_size": batch_size, "max_batch_size": None, "device": None},
+                {
+                    "batch_size": batch_size,
+                    "max_batch_size": None,
+                    "device": None,
+                    "hf_overrides": hf_overrides,
+                },
             )
             model_kwargs = {"metadata": simple_parse_args_string(model_args)}
         else:
             model = backend
+            if hf_overrides is not None:
+                model_args = simple_parse_args_string(model_args)
+                model_args["hf_overrides"] = hf_overrides
             model_kwargs = {"model_args": model_args}
         results = lm_eval.simple_evaluate(
             model=model,

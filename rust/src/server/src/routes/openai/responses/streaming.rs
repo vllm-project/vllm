@@ -19,6 +19,7 @@ use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
 };
 
+use super::tools::{ResponsesToolNames, ToolIdentity};
 use super::types::{
     AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem,
     ResponsesResponse, TextPart,
@@ -175,6 +176,8 @@ pub(crate) struct OutputItemStreamer {
     current: Option<OpenItem>,
     /// Whether reasoning items appear in the stream and final output.
     include_reasoning: bool,
+    /// Reports calls of flat namespaced tool names with their namespace.
+    tool_names: ResponsesToolNames,
     /// Items completed so far, in output order.
     completed_items: Vec<ResponseOutputItem>,
     /// Whether the last completed item still owes its `output_item.done`
@@ -196,16 +199,18 @@ enum OpenItem {
     FunctionCall {
         item_id: String,
         call_id: String,
-        name: String,
+        /// The name the model called, flat for a namespaced function.
+        called_name: String,
         arguments: String,
     },
 }
 
 impl OutputItemStreamer {
-    pub(crate) fn new(include_reasoning: bool) -> Self {
+    pub(crate) fn new(include_reasoning: bool, tool_names: ResponsesToolNames) -> Self {
         Self {
             current: None,
             include_reasoning,
+            tool_names,
             completed_items: Vec::new(),
             last_item_done_pending: false,
         }
@@ -373,13 +378,15 @@ impl OutputItemStreamer {
         self.current = Some(OpenItem::FunctionCall {
             item_id: item_id.clone(),
             call_id: call_id.clone(),
-            name: name.to_string(),
+            called_name: name.to_string(),
             arguments: String::new(),
         });
+        let ToolIdentity { namespace, name } = self.tool_names.decode(name);
         let item = ResponseOutputItem::FunctionCall {
             id: item_id,
             call_id,
             name: name.to_string(),
+            namespace: namespace.map(str::to_string),
             arguments: String::new(),
             status: Some(ResponseItemStatus::InProgress),
         };
@@ -501,23 +508,25 @@ impl OutputItemStreamer {
             OpenItem::FunctionCall {
                 item_id,
                 call_id,
-                name,
+                called_name,
                 arguments,
             } => {
-                let (call_id, name, arguments) = match final_call {
+                let (call_id, called_name, arguments) = match final_call {
                     Some(call) => (call.id.clone(), call.name.clone(), call.arguments.clone()),
-                    None => (call_id, name, arguments),
+                    None => (call_id, called_name, arguments),
                 };
+                let ToolIdentity { namespace, name } = self.tool_names.decode(&called_name);
                 let events = vec![ResponseStreamEvent::FunctionCallArgumentsDone {
                     item_id: item_id.clone(),
                     output_index,
-                    name: name.clone(),
+                    name: name.to_string(),
                     arguments: arguments.clone(),
                 }];
                 let item = ResponseOutputItem::FunctionCall {
                     id: item_id,
                     call_id,
-                    name,
+                    name: name.to_string(),
+                    namespace: namespace.map(str::to_string),
                     arguments,
                     status: Some(ResponseItemStatus::Completed),
                 };
@@ -578,7 +587,7 @@ mod tests {
 
     #[test]
     fn empty_function_call_emits_arguments_done() {
-        let mut streamer = OutputItemStreamer::new(true);
+        let mut streamer = OutputItemStreamer::new(true, ResponsesToolNames::default());
         streamer.on_event(&ChatEvent::ToolCallStart {
             index: 0,
             id: "call_1".to_string(),
@@ -606,7 +615,7 @@ mod tests {
 
     #[test]
     fn empty_reasoning_block_is_not_an_output_item() {
-        let mut streamer = OutputItemStreamer::new(true);
+        let mut streamer = OutputItemStreamer::new(true, ResponsesToolNames::default());
         for event in [
             ChatEvent::BlockStart {
                 index: 0,

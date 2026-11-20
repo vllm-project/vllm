@@ -810,7 +810,7 @@ def _unaligned_max_history_inputs() -> tuple[torch.Tensor, ...]:
     """One row whose only repeated context ends at position 680.
 
     680 is not a multiple of the kernel's 512-position block, so the scan window
-    selected by ``max_history`` starts in the middle of a block.
+    selected by `max_history` starts in the middle of a block.
     """
     history = list(range(1_000, 2_200))
     history[676:680] = [1, 2, 3, 4]
@@ -1181,6 +1181,76 @@ def test_speculative_context_repetition_accelerator_parity(
         expected, torch.tensor([False, False, False, False, expected_last])
     )
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda_alike(),
+                reason="requires a CUDA-like accelerator",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "include_prompt,expected_repeated,expected_watermarked",
+    [
+        (False, [False] * 5, [True] * 4),
+        (True, [True, True, False, True, False], [False, False, True, False]),
+    ],
+    ids=["single_turn", "all"],
+)
+def test_speculative_contexts_compare_prompt_tokens(
+    device, include_prompt, expected_repeated, expected_watermarked
+):
+    """Width 3, prompt `[9, 5, 7]`, output `[8]`, drafts `[5, 7, 8, 6]`. The
+    context `[5, 7, 8]` repeats two prompt tokens and the output token, which
+    only `include_prompt=True` (scope `all`) searches. `[8, 5, 7]` and
+    `[7, 8, 6]` occur nowhere earlier and stay unrepeated."""
+    all_token_ids = torch.tensor(
+        [[9, 5, 7, 8, 0, 0, 0, 0, 0]], dtype=torch.int32, device=device
+    )
+    prompt_lens = torch.tensor([3], dtype=torch.int32, device=device)
+    total_lens = torch.tensor([4], dtype=torch.int32, device=device)
+    # Contexts hold -1 at prompt positions.
+    contexts = torch.tensor(
+        [[-1, -1, 8], [-1, 8, 5], [8, 5, 7], [5, 7, 8], [7, 8, 6]], device=device
+    )
+    positions = torch.arange(5, device=device)
+
+    repeated = repeated_context_mask(
+        all_token_ids,
+        torch.zeros_like(positions),
+        prompt_lens,
+        total_lens,
+        contexts,
+        include_prompt=include_prompt,
+        history_offsets=positions,
+        local_positions=positions,
+        num_speculative_steps=4,
+    )
+    prior_contexts = torch.zeros(1, 4, 3, dtype=contexts.dtype, device=device)
+    watermarked = [
+        draft_watermarking_mask(
+            all_token_ids,
+            torch.tensor([0], device=device),
+            prompt_lens,
+            total_lens,
+            prior_contexts,
+            contexts[step : step + 1],
+            positions[step : step + 1],
+            torch.tensor([True], device=device),
+            max_history=None,
+            include_prompt=include_prompt,
+        ).item()
+        for step in range(4)
+    ]
+
+    assert (repeated.tolist(), watermarked) == (expected_repeated, expected_watermarked)
 
 
 @pytest.mark.skipif(

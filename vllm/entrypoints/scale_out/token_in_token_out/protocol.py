@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated, Any, Literal, TypeAlias
+from dataclasses import dataclass
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -19,6 +20,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
@@ -68,6 +71,9 @@ class ParseContext(BaseModel):
     ) = "none"
     parallel_tool_calls: bool | None = True
     include_reasoning: bool = True
+    return_tokens_as_token_ids: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
     """Template kwargs with the render server's defaults already applied,
     without the API server only entries a handler keeps out of the engine."""
@@ -112,9 +118,14 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Positions in the span that receive embeddings; `None` means all."""
+
+    @model_validator(mode="after")
+    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed must have `length` entries")
+        return self
 
 
 def _has_serialized_mm_items(
@@ -201,9 +212,7 @@ class MultiModalFeatures(BaseModel):
             )
 
         flattened_ranges.sort()
-        for (offset, end), (next_offset, _) in zip(
-            flattened_ranges, flattened_ranges[1:]
-        ):
+        for (_, end), (next_offset, _) in zip(flattened_ranges, flattened_ranges[1:]):
             if next_offset < end:
                 raise ValueError(
                     "mm_placeholders must be globally non-overlapping and sorted"
@@ -251,19 +260,16 @@ class GenerateRequest(BaseModel):
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
     content_parts: list[dict[str, Any]] | None = None
-    """Raw multimodal input; server resolves media. Mutually exclusive
-    with `features`."""
+    """Raw multimodal input; server resolves media and expands its
+    placeholders. With `features`, these placeholders must follow the
+    last `features` range, which is left as is."""
 
-    @model_validator(mode="after")
-    def _check_mm_fields_exclusive(self) -> "GenerateRequest":
-        if self.content_parts and self.features:
-            raise ValueError("content_parts and features are mutually exclusive")
-        return self
+    _metadata_only_requires_ec: ClassVar[bool] = True
 
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None:
+        if features is None or not self._metadata_only_requires_ec:
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
@@ -342,8 +348,8 @@ class GenerateRequest(BaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=-(2**63),
-        le=2**63 - 1,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -372,6 +378,7 @@ class GenerateRequest(BaseModel):
     _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
         PrivateAttr(default=None)
     )
+    _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -463,6 +470,17 @@ class GenerateRequest(BaseModel):
         )
 
 
+class RenderedGenerateRequest(GenerateRequest):
+    """A `GenerateRequest` produced by `/render`.
+
+    `ec_transfer_params` come from the encode response, so a render with
+    `mm_payload="metadata"` cannot have them yet. `/inference/v1/generate`
+    still validates the request it receives as a `GenerateRequest`.
+    """
+
+    _metadata_only_requires_ec: ClassVar[bool] = False
+
+
 class GenerateLogProb(BaseModel):
     """A single (token, logprob) candidate on the generate wire protocol.
 
@@ -479,7 +497,7 @@ class GenerateLogProb(BaseModel):
 class GenerateLogProbsContent(GenerateLogProb):
     """The sampled token at one position, plus its top-k candidates.
 
-    ``top_logprobs`` is a list, not a dict: JSON turns dict keys into strings
+    `top_logprobs` is a list, not a dict: JSON turns dict keys into strings
     and the order would be implicit. It is in the engine's order: the sampled
     token first, then the remaining candidates in rank order.
     """
@@ -490,7 +508,7 @@ class GenerateLogProbsContent(GenerateLogProb):
 class GenerateLogProbs(BaseModel):
     """Output logprobs for one choice.
 
-    ``content`` holds one entry per generated token.
+    `content` holds one entry per generated token.
     """
 
     content: list[GenerateLogProbsContent] | None = None
@@ -594,6 +612,10 @@ class GenerateStreamResponseBase(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
 
@@ -637,6 +659,10 @@ class GenerateResponseBase(BaseModel):
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -664,6 +690,14 @@ class GenerateTextResponse(GenerateResponseBase):
 class GenerateDerenderResponse(GenerateResponseBase):
     output_mode: Literal["derender"] = "derender"
     choices: list[GenerateDerenderChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """The JSON of a non-streaming `GenerateResponse`, as parts to send
+    without joining them into one copy."""
+
+    parts: list[bytes]
 
 
 def output_mode_or_tokens(value: Any) -> Any:
@@ -722,10 +756,8 @@ class DerenderChatRequest(BaseModel):
     """
 
     prompt_tokens: int | None = None
-    """Prompt token count for usage; defaults to 0 if omitted.
-
-    GenerateResponse carries only output tokens; the caller already has
-    len(GenerateRequest.token_ids) from the render step.
+    """Prompt token count for usage. If omitted, falls back to
+    `generate_response.usage.prompt_tokens`, then to 0.
     """
 
     prompt_token_ids: list[NonNegativeInt] | None = None
@@ -770,7 +802,8 @@ class DerenderCompletionRequest(BaseModel):
     list[GenerateRequest] returned by /v1/completions/render."""
 
     prompt_tokens: list[int] | None = None
-    """One prompt token count per response; each defaults to 0 if omitted.
+    """One prompt token count per response. If omitted, each falls back to
+    that response's `usage.prompt_tokens`, then to 0.
 
     If provided, len(prompt_tokens) must equal len(generate_responses).
     """
@@ -879,7 +912,7 @@ class DerenderStreamState(BaseModel):
         return v
 
     role_sent: bool = False
-    """True once the initial `role: "assistant"` delta has been emitted.
+    """True once the initial role delta (and any `echo` text) has been emitted.
 
     Prevents re-emitting the role on subsequent chunks even when the detok
     window is transiently empty (e.g. usage only final chunk).
@@ -889,13 +922,13 @@ class DerenderStreamState(BaseModel):
     """Trailing sampled token IDs carried across chunks so byte-fallback
     (U+FFFD) correction during logprob placeholder resolution has context
     at chunk boundaries. Bounded to the 4-token window that
-    ``_correct_decoded_token`` reads."""
+    `_correct_decoded_token` reads."""
 
     logprob_text_offset: int = Field(default=0, ge=0)
     """Cumulative length of reported logprob tokens, including special tokens.
-    Seeds ``text_offset`` for completion
+    Seeds `text_offset` for completion
     streaming logprobs so offsets stay absolute across chunks, mirroring
-    ``initial_text_offset`` in the generate streaming path."""
+    `initial_text_offset` in the generate streaming path."""
 
     output_token_ids: list[int] = Field(default_factory=list)
     """All output tokens seen so far. Parser path only.

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp decode GEMM selection on Hopper and Blackwell.
 
-Dispatch follows Kimi-K3 and uses the local ``(N, K)`` shape and token count.
+Dispatch follows Kimi-K3 and uses the local `(N, K)` shape and token count.
 Plans contain measured CUDA graph capture sizes; other token counts use the
 standard linear implementation.
 """

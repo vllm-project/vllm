@@ -36,10 +36,10 @@ _REVISIONS = {
 
 
 def _side_channel_ports(count: int) -> list[int]:
-    """Free ports below the ephemeral range, which ``bind(0)`` never returns.
+    """Free ports below the ephemeral range, which `bind(0)` never returns.
 
     NIXL binds its side channel only after the model loads, and until then an
-    ephemeral port could be given to another ``bind(0)`` listener.
+    ephemeral port could be given to another `bind(0)` listener.
     """
     with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
         ephemeral_start = int(f.read().split()[0])
@@ -174,7 +174,6 @@ def run_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
         "VLLM_HOST_IP": "127.0.0.1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_KV_CACHE_LAYOUT": "HND",
     }

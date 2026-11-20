@@ -8,7 +8,8 @@ use futures::StreamExt;
 
 use super::streaming::StreamedResponseHandler;
 use super::{
-    CompletionChunk, RequestFuncInput, RequestFuncOutput, build_headers, update_server_metrics,
+    CompletionChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
+    update_server_metrics,
 };
 use crate::error::Result;
 
@@ -37,6 +38,7 @@ impl OpenAICompletionsBackend {
         let mut payload = serde_json::json!({
             "model": model,
             "prompt": prompt_value,
+            "repetition_penalty": 1.0,
             "max_tokens": input.output_len,
             "stream": true,
             "stream_options": {
@@ -152,9 +154,7 @@ impl OpenAICompletionsBackend {
                         output.success = true;
                     } else {
                         output.success = false;
-                        output.error = "Never received a valid chunk to calculate TTFT. \
-                                        This response will be marked as failed!"
-                            .to_string();
+                        output.error = NO_VALID_CHUNK_ERROR.to_string();
                     }
                     output.generated_text = generated_text;
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();

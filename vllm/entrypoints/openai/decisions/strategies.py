@@ -18,6 +18,7 @@ from functools import cached_property, partial
 from typing import Any, ClassVar, TypeVar
 
 import numpy as np
+import torch
 from PIL import Image
 
 import vllm.envs as envs
@@ -45,7 +46,9 @@ from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.math_utils import round_up
+from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN, prefix_lm_salt
 
+from . import slot_prompt
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -71,7 +74,7 @@ def common_prefix_len(prompts: Sequence[Sequence[int]]) -> int:
     return len(shortest)
 
 
-@dataclass
+@dataclass(slots=True)
 class ReadContext:
     engine_client: EngineClient
     online_renderer: OnlineRenderer
@@ -80,7 +83,7 @@ class ReadContext:
     default_chat_template_kwargs: dict[str, Any]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecisionLimits:
     max_questions: int
     max_options: int
@@ -89,14 +92,14 @@ class DecisionLimits:
     labeled: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JointSlot:
     canvas: int
     width: int
     position: int
 
 
-@dataclass
+@dataclass(slots=True)
 class QuestionRead:
     probs: list[float]
     label_mass: float
@@ -153,12 +156,16 @@ class ReadStrategy(ABC):
     def __init__(self, context: ReadContext):
         self.context = context
 
+    def _media_io_kwargs(self) -> dict[str, dict[str, Any]]:
+        model_config = self.context.engine_client.model_config
+        return model_config.get_multimodal_config().media_io_kwargs
+
     @cached_property
     def _connector(self) -> MediaConnector:
         model_config = self.context.engine_client.model_config
         return MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=model_config.get_multimodal_config().media_io_kwargs,
+            media_io_kwargs=self._media_io_kwargs(),
             allowed_local_media_path=model_config.allowed_local_media_path,
             allowed_media_domains=model_config.allowed_media_domains,
         )
@@ -222,7 +229,7 @@ def reply_label_ids(
     labels: Sequence[str] = LABELS,
 ) -> tuple[list[int], list[int]]:
     """The prompt's ids after its last added token, and the token each of
-    ``labels`` adds after them as the first token of the reply. Raises
+    `labels` adds after them as the first token of the reply. Raises
     ValueError if a label is not one distinct token there."""
     tail = prompt_tail(tokenizer, prompt_ids)
     text = tokenizer.decode(tail)
@@ -251,7 +258,7 @@ def type_label_ids(
 
 
 def cap_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
-    """Shrink ``image`` to at most ``max_pixels`` pixels (bicubic)."""
+    """Shrink `image` to at most `max_pixels` pixels (bicubic)."""
     w, h = image.size
     if w * h <= max_pixels:
         return image
@@ -279,6 +286,11 @@ class NextTokenStrategy(ReadStrategy):
         # read() currently renders only images into the user turn.
         if context.engine_client.model_config.supports_multimodal_inputs:
             self.modalities = frozenset({"image"})
+
+    def _media_io_kwargs(self) -> dict[str, dict[str, Any]]:
+        # The images are resized with Pillow and passed on as `image_pil` parts.
+        kwargs = super()._media_io_kwargs()
+        return kwargs | {"image": kwargs.get("image", {}) | {"image_backend": "pil"}}
 
     def _tokenizer(self) -> TokenizerLike:
         return self.context.online_renderer.renderer.get_tokenizer()
@@ -377,6 +389,7 @@ class NextTokenStrategy(ReadStrategy):
         priority: int,
         cache_salt: str | None,
         trace_headers: Mapping[str, str] | None,
+        extra_args: dict[str, Any] | None = None,
     ) -> None:
         """Prefill the tokens every question starts with, before the reads.
 
@@ -397,7 +410,7 @@ class NextTokenStrategy(ReadStrategy):
             return
         generator = engine_client.generate(
             tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
-            SamplingParams(max_tokens=1, temperature=0.0),
+            SamplingParams(max_tokens=1, temperature=0.0, extra_args=extra_args),
             f"{request_id}-prefix",
             lora_request=lora_request,
             trace_headers=trace_headers,
@@ -439,7 +452,7 @@ class NextTokenStrategy(ReadStrategy):
         position: int = 0,
         usage: bool = True,
     ) -> QuestionRead:
-        """The answer at ``position``. Only a read with ``usage`` counts tokens."""
+        """The answer at `position`. Only a read with `usage` counts tokens."""
         token_ids = result.outputs[0].token_ids
         remaining = iter(logprobs)
         read = QuestionRead(
@@ -843,7 +856,7 @@ class JointSchemaStrategy(ReadStrategy):
     question with its options, as the model was trained to read them. The
     model's joint schema head scores each option, so a read has no labels.
 
-    Mirrors ``encode_record`` in the checkpoint's ``joint_schema_model.py``.
+    Mirrors `encode_record` in the checkpoint's `joint_schema_model.py`.
     Each piece is tokenized on its own, so the spans of the questions and the
     options are known. The spans count from the end of the prompt, so they
     hold after the media placeholders, which come before the state, expand."""
@@ -996,7 +1009,7 @@ class JointSchemaStrategy(ReadStrategy):
         return engine_input
 
     def _options(self, q: Question) -> list[tuple[int, str, Any]]:
-        """Each option's index in ``q.options``, id and description, in the
+        """Each option's index in `q.options`, id and description, in the
         model's order: choices sorted by name, noul true then false, score
         levels by index."""
         if q.type.name == "noul":
@@ -1023,7 +1036,7 @@ class JointSchemaStrategy(ReadStrategy):
         self, questions: list[Question], state: str, prefix: list[int] | None = None
     ) -> tuple[list[int], dict[str, list[Any]], list[list[int]]]:
         """The prompt, the schema for the pooler, and each question's option
-        indices in the order of the output. ``prefix`` is what precedes the
+        indices in the order of the output. `prefix` is what precedes the
         state: the system prompt, and the media if there are any."""
         prefix = self.prefix if prefix is None else prefix
         schema_ids = self._tokens("\n\nSCHEMA FIELDS:\n")
@@ -1096,7 +1109,7 @@ class JointSchemaStrategy(ReadStrategy):
             prompt, schema, orders = self.encode(questions, state)
             engine_input = tokens_input(prompt, cache_salt=cache_salt)
         result = None
-        async for result in self.context.engine_client.encode(
+        async for result in self.context.engine_client.encode(  # noqa: B007
             engine_input,
             PoolingParams(task="token_classify", extra_kwargs={"joint_schema": schema}),
             f"{request_id}-0",
@@ -1239,7 +1252,7 @@ class D3Strategy(ReadStrategy):
 
     def _options(self, q: Question) -> tuple[list[str], list[int]]:
         """Each option's line in the model's order, and the index of each of
-        ``q.options`` in that order."""
+        `q.options` in that order."""
         if q.type.name == "noul":
             yes, no = q.options
             texts = [
@@ -1406,7 +1419,7 @@ class D3Strategy(ReadStrategy):
 
         async def read_one(n: int, engine_input: EngineInput) -> list[float]:
             result = None
-            async for result in self.context.engine_client.encode(
+            async for result in self.context.engine_client.encode(  # noqa: B007
                 engine_input,
                 PoolingParams(task="classify", use_activation=False),
                 f"{request_id}-{n}",
@@ -1444,6 +1457,181 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class SlotLMStrategy(NextTokenStrategy):
+    """Slot-readout models: one PrefixLM request per question on `slot_prompt`."""
+
+    MAX_SCORE_LEVELS = 10
+    #: The most options the checkpoint was trained to read in one question.
+    MAX_OPTIONS = 255
+
+    def __init__(self, context: ReadContext):
+        model_config = context.engine_client.model_config
+        if model_config.head_dtype != torch.float32:
+            raise ValueError(
+                "slot reads need the fp32 LM head the checkpoint was trained "
+                f"with, but head_dtype is {model_config.head_dtype}"
+            )
+        super().__init__(context)
+        # read() renders no media, though the base model takes images.
+        self.modalities = frozenset()
+        self.max_model_len = model_config.max_model_len
+        n_slots = model_config.hf_config.modeling_overrides.get(
+            "n_slots", len(slot_prompt.SLOT_LABELS)
+        )
+        # Each slot label's own token must also be the reply's first token.
+        labels = slot_prompt.SLOT_LABELS[:n_slots]
+        _, self.slot_ids = reply_label_ids(
+            self._tokenizer(), self._generation_prompt(), labels
+        )
+        if any(self._tokens(label) != [i] for label, i in zip(labels, self.slot_ids)):
+            raise ValueError("the slot labels' tokens differ at the start of the reply")
+        # read() tokenizes the state once and each suffix on its own, which
+        # needs the suffix to start a pre-token after the prefix.
+        prefix = self._prefix_text("x")
+        for type_name in ("choice", "score"):
+            suffix = slot_prompt.render_suffix(type_name, None, {"x": None})
+            tail = self._prompt("x", suffix)[len(prefix) :]
+            if self._tokens(prefix) + self._tokens(tail) != self._tokens(prefix + tail):
+                raise ValueError("the slot prompt's suffix merges with its prefix")
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(
+            max_questions=64,
+            max_options=min(
+                len(self.slot_ids), self.MAX_OPTIONS, MAX_LOGPROB_TOKEN_IDS
+            ),
+            labeled=False,
+        )
+
+    def render_state(self, state: Any) -> str:
+        return slot_prompt.render_state(state)
+
+    def _generation_prompt(self) -> list[int]:
+        return self._tokens(self._prompt("x", "y"))
+
+    def _prompt(self, state: str, suffix: str) -> str:
+        prompt = self._tokenizer().apply_chat_template(
+            [
+                {"role": "system", "content": slot_prompt.SYSTEM_PROMPT},
+                {"role": "user", "content": f"<state>\n{state}\n</state>\n\n{suffix}"},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        assert isinstance(prompt, str)
+        return prompt
+
+    def _tokens(self, text: str) -> list[int]:
+        return self._tokenizer().encode(text, add_special_tokens=False)
+
+    def _prefix_text(self, state: str) -> str:
+        """The prompt up to where the suffix starts."""
+        marked = self._prompt(state, slot_prompt.PREFIX_MARK)
+        # The last mark is the suffix's: the state may contain the mark too.
+        return marked[: marked.rindex(slot_prompt.PREFIX_MARK)]
+
+    def _suffix(self, q: Question) -> str:
+        if q.type.name not in slot_prompt.DEFAULT_INSTRUCTIONS:
+            raise StructuredDecisionError(
+                f"question {q.id!r}: this model does not answer "
+                f"{q.type.name!r} questions"
+            )
+        if q.type.name == "score" and len(q.options) > self.MAX_SCORE_LEVELS:
+            raise StructuredDecisionError(
+                f"question {q.id!r}: a score has at most "
+                f"{self.MAX_SCORE_LEVELS} levels for this model"
+            )
+        if q.raw is not None:
+            instructions, criteria = q.raw
+        else:
+            # Decisions API questions have no raw criteria; options key them
+            # by name.
+            names = [o.name for o in q.options]
+            if len(set(names)) != len(names):
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: option labels must be distinct for this model"
+                )
+            instructions = q.instructions
+            criteria = {o.name: o.description for o in q.options}
+        return slot_prompt.render_suffix(q.type.name, instructions, criteria)
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str,
+        *,
+        request_id: str,
+        chat_template_kwargs: dict[str, Any] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        fixed = chat_template_kwargs in (None, {}, {"enable_thinking": False})
+        if instructions or not fixed:
+            raise StructuredDecisionError(
+                "this model reads a fixed prompt, so it takes no instructions "
+                "or chat_template_kwargs"
+            )
+        suffixes = [self._suffix(q) for q in questions]
+        # The state is most of every prompt, so it is tokenized once.
+        prefix_text = self._prefix_text(state)
+        prefix = self._tokens(prefix_text)
+        prefix_len = len(prefix)
+        prompts = []
+        for suffix in suffixes:
+            prompt = self._prompt(state, suffix)
+            assert prompt.startswith(prefix_text)
+            prompts.append(prefix + self._tokens(prompt[len(prefix_text) :]))
+        for q, ids in zip(questions, prompts):
+            # The read samples one token, so the prompt must leave room for it.
+            if len(ids) >= self.max_model_len:
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: the prompt has {len(ids)} tokens, which "
+                    f"with the answer token exceeds max_model_len="
+                    f"{self.max_model_len}; nothing is truncated"
+                )
+        cache_salt = prefix_lm_salt(prefix, cache_salt)
+
+        await self._warm_shared_prefix(
+            [ids[:prefix_len] for ids in prompts],
+            request_id,
+            lora_request=lora_request,
+            priority=priority,
+            cache_salt=cache_salt,
+            trace_headers=trace_headers,
+            extra_args={PREFIX_LM_LEN: prefix_len},
+        )
+        slots = [[[i] for i in self.slot_ids[: len(q.options)]] for q in questions]
+        label_reads = await next_token_label_reads(
+            self.context.engine_client,
+            [tokens_input(ids, cache_salt=cache_salt) for ids in prompts],
+            [
+                SamplingParams(
+                    max_tokens=1,
+                    temperature=0.0,
+                    logprob_token_ids=self.slot_ids[: len(groups)],
+                    extra_args={PREFIX_LM_LEN: prefix_len},
+                    # The read needs ids only: up to 255 label tokens per read
+                    # would each be detokenized otherwise.
+                    detokenize=False,
+                )
+                for groups in slots
+            ],
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        return [
+            self._question_read(r.result, groups, r.logprobs)
+            for groups, r in zip(slots, label_reads)
+        ]
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
@@ -1454,6 +1642,7 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,
+    "Qwen3_5ForSlotDecision": SlotLMStrategy,
     "Qwen3_5MoeForConditionalGeneration": NextTokenStrategy,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaCanvasStrategy,
 }

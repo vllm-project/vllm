@@ -16,7 +16,6 @@ def main():
         pooler_config=PoolerConfig(task="token_embed"),
         runner="pooling",
         max_model_len=1024,
-        gpu_memory_utilization=0.8,
     )
 
     # Create text prompts
