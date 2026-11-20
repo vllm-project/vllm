@@ -597,16 +597,16 @@ impl ResolvedToolContext {
             });
         }
 
-        let tool_choice = requested_tool_choice.unwrap_or({
-            if effective_tools.is_empty() {
-                ChatToolChoice::None
-            } else {
-                ChatToolChoice::Auto
-            }
-        });
+        // With no tool available, `auto` (also the default) has nothing to
+        // call and means `none`, while `required` cannot be satisfied.
+        let tool_choice = match requested_tool_choice {
+            None | Some(ChatToolChoice::Auto) if effective_tools.is_empty() => ChatToolChoice::None,
+            None => ChatToolChoice::Auto,
+            Some(tool_choice) => tool_choice,
+        };
 
         match &tool_choice {
-            ChatToolChoice::Auto | ChatToolChoice::Required if effective_tools.is_empty() => {
+            ChatToolChoice::Required if effective_tools.is_empty() => {
                 return Err(Error::ToolChoiceRequiresTools);
             }
             ChatToolChoice::Function { name } if !names.contains(name) => {
@@ -1049,6 +1049,55 @@ mod tests {
 
         let error = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap_err();
         assert!(matches!(error, Error::ToolReferenceNotFound { name } if name == "lookup"));
+    }
+
+    /// Without tools, an omitted or `auto` choice resolves to `none`, and every
+    /// choice that needs a tool is rejected.
+    #[test]
+    fn resolved_tool_context_resolves_choice_by_tool_availability() {
+        let lookup = || ChatToolChoice::Function {
+            name: "lookup".to_string(),
+        };
+        let cases = [
+            (None, Ok(ChatToolChoice::None), Ok(ChatToolChoice::Auto)),
+            (
+                Some(ChatToolChoice::None),
+                Ok(ChatToolChoice::None),
+                Ok(ChatToolChoice::None),
+            ),
+            (
+                Some(ChatToolChoice::Auto),
+                Ok(ChatToolChoice::None),
+                Ok(ChatToolChoice::Auto),
+            ),
+            (
+                Some(ChatToolChoice::Required),
+                Err("ToolChoiceRequiresTools"),
+                Ok(ChatToolChoice::Required),
+            ),
+            (
+                Some(lookup()),
+                Err("ToolChoiceFunctionNotFound"),
+                Ok(lookup()),
+            ),
+        ];
+
+        for (requested, without_tools, with_tools) in cases {
+            for (tools, expected) in [
+                (Vec::new(), without_tools),
+                (vec![chat_tool("lookup")], with_tools),
+            ] {
+                let case = format!("tools={}, tool_choice={requested:?}", tools.len());
+                let resolved = ResolvedToolContext::new(&[], tools, requested.clone(), true)
+                    .map(|context| context.tool_choice)
+                    .map_err(|error| match error {
+                        Error::ToolChoiceRequiresTools => "ToolChoiceRequiresTools",
+                        Error::ToolChoiceFunctionNotFound { .. } => "ToolChoiceFunctionNotFound",
+                        error => panic!("{case}: {error:?}"),
+                    });
+                assert_eq!(resolved, expected, "{case}");
+            }
+        }
     }
 
     #[test]

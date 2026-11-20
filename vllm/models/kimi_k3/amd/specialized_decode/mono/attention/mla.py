@@ -138,7 +138,7 @@ REGIONS = ("part", "wgt", "msq", "xrdy", "qa", "qcr", "qn", "qg")
 _SOURCES = source_digest(".")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MlaPreBuild:
     tokens: int  # S
     nblocks: int  # AttnRes block sources (the prefix is one more)
