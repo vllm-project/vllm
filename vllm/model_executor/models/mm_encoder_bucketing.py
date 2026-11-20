@@ -41,7 +41,10 @@ The feature is opt-in via `additional_config.audio_bucket_seconds` (a ladder of
 seconds, e.g. `[2, 4, 8, 16, 30]`) and engages only for models that are both
 listed in `_VERIFIED_FOR_BUCKETING` (the maintainers' gate restricting the
 feature to adapted models) and declare an `EncoderBucketingSpec` carrying the
-model's own length/crop semantics and frame-rate knobs. A model still being
+model's own length/crop semantics and frame-rate knobs. Setting
+`additional_config.audio_bucket_budget` additionally enables compute-budget
+merging, which keeps each encoder call's compute inside a band (see
+`EncoderBucketing`). A model still being
 adapted stays off until maintainers verify it and add it to the whitelist. With
 the feature off, no shim is installed and the original forward runs untouched
 (byte-identical); a per-batch waste gate keeps bucketing from ever computing more
@@ -218,13 +221,11 @@ def _compute_budget(
     """Read `additional_config.audio_bucket_budget`, or `None` to skip merging.
 
     The budget bounds one encoder call's compute (items x padded frames):
-    oversized groups are split into balanced chunks, each near the budget, and
-    under-filled groups are folded into their larger neighbor while the merged
-    call stays within the budget. The fold trigger is derived (`budget // 6`)
-    rather than exposed as a knob: sweeping it over a 6x range (4000-24000) at
-    c=8/32/128 on Cohere moved throughput and TTFT by less than 2%, i.e. inside
-    run-to-run noise. The retired `audio_bucket_min_size` threshold is ignored
-    (a warning is logged when it is still present).
+    oversized groups split into balanced chunks and under-filled groups fold
+    into their larger neighbor while the merged call stays within the budget.
+    The fold trigger is derived (`budget // 6`); sweeping it at c=8/32/128
+    changed throughput and TTFT by under 2%, so it is not a knob. The retired
+    `audio_bucket_min_size` key is ignored (a warning is logged).
 
     Args:
         additional_config: The `VllmConfig.additional_config` mapping in effect.
@@ -368,9 +369,8 @@ class EncoderBucketing:
         self.spec = spec
         self.ladder = ladder
         self.compute_budget = compute_budget
-        # Derived, not a knob: sweeping the merge trigger over a 6x range
-        # (4000-24000 at budget 48000) at c=8/32/128 on Cohere moved
-        # throughput and TTFT by under 2% -- inside run-to-run noise.
+        # Derived, not a knob: sweeping it at c=8/32/128 changed throughput
+        # and TTFT by under 2% (run-to-run noise).
         self.fill_floor = max(1, compute_budget // 6) if compute_budget else None
 
     @property

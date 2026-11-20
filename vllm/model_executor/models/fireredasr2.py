@@ -525,8 +525,7 @@ class FireRedASR2ForConditionalGeneration(
     ) -> torch.Tensor:
         inputs_embeds = self.model.decoder.embed_input_ids(input_ids)
 
-        # Text-only path (e.g. warmup/dummy runs): no multimodal embeddings to
-        # merge, so `is_multimodal` is not required.
+        # Text-only runs (warmup/dummy) have no multimodal embeddings to merge.
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
