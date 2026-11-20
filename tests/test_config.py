@@ -906,7 +906,7 @@ def test_hisparse_requires_hisparse_connector(
         "get_hisparse_backend_cls",
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
-    with pytest.raises(ValueError, match="requires a KV transfer config"):
+    with pytest.raises(ValueError, match="requires hisparse_config.host_pool_gib"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
             cache_config=CacheConfig(kv_offloading_size=kv_offloading_size),

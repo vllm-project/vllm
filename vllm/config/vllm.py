@@ -2356,9 +2356,10 @@ class VllmConfig:
             and hisparse_host_pool_gib(self.kv_transfer_config) is None
         ):
             raise ValueError(
-                "HiSparse requires a KV transfer config with HiSparseConnector "
-                "and host_pool_gib; to combine it with another connector, nest "
-                "both in MultiConnector instead of using --kv-offloading-size."
+                "HiSparse requires hisparse_config.host_pool_gib, or a KV "
+                "transfer config with HiSparseConnector and host_pool_gib; to "
+                "combine it with another connector, nest both in MultiConnector "
+                "instead of using --kv-offloading-size."
             )
         if (
             self.attention_config.hisparse_config is not None

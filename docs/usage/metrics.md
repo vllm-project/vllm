@@ -47,8 +47,8 @@ The following metrics are exposed:
 
 ## HiSparse KV Connector Metrics
 
-These metrics are exposed when the `HiSparseConnector` KV connector is
-configured. The host-pool gauges are reported by the scheduler once per engine
+These metrics are exposed when HiSparse is enabled, through
+`hisparse_config.host_pool_gib` or an explicit `HiSparseConnector`. The host-pool gauges are reported by the scheduler once per engine
 step, for the host pool shared by all tensor-parallel ranks; evictable cached
 blocks count as free. With `--kv-cache-metrics`, the
 `vllm:hisparse_host_block_*_seconds` histograms sample host-pool block
