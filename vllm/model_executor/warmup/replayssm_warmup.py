@@ -82,6 +82,20 @@ def _temporary_replayssm_autotune_state(
         for tensor in (ring_start, prev_num_accepted):
             if tensor.numel():
                 reset_trackers.setdefault(tensor.data_ptr(), tensor)
+        if module.ssm_state_quantized:
+            # Valid zero checkpoints (scale 1) so autotuning reads finite state.
+            state_indices = torch.arange(
+                1,
+                max_num_reqs + 1,
+                dtype=torch.int32,
+                device=module.kv_cache[1].device,
+            )
+            initial = torch.zeros(
+                (1, *module.kv_cache[1].shape[1:]),
+                dtype=torch.float32,
+                device=module.kv_cache[1].device,
+            ).expand(max_num_reqs, -1, -1, -1)
+            module.store_quantized_ssm_state(initial, state_indices)
 
     try:
         yield

@@ -478,21 +478,29 @@ class ReplaySSMModelContext:
                 state_slot_strides=_cuda_i64_slot_strides(
                     [m.kv_cache[1] for m in mixers]
                 ),
-                x_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[2] for m in mixers]),
+                x_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[-3] for m in mixers]),
                 x_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[2] for m in mixers]
+                    [m.kv_cache[-3] for m in mixers]
                 ),
-                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[4] for m in mixers]),
+                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[-1] for m in mixers]),
                 B_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[4] for m in mixers]
+                    [m.kv_cache[-1] for m in mixers]
                 ),
-                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[3] for m in mixers]),
+                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[-2] for m in mixers]),
                 dt_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[3] for m in mixers]
+                    [m.kv_cache[-2] for m in mixers]
                 ),
                 A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
-                state_scale_ptrs=zero_table,
-                state_scale_slot_strides=zero_table,
+                state_scale_ptrs=(
+                    _cuda_i64_ptrs([m.ssm_state_scale for m in mixers])
+                    if first.ssm_state_quantized
+                    else zero_table
+                ),
+                state_scale_slot_strides=(
+                    _cuda_i64_slot_strides([m.ssm_state_scale for m in mixers])
+                    if first.ssm_state_quantized
+                    else zero_table
+                ),
             ),
             src_slots=src_slots,
             dst_slots=dst_slots,
@@ -506,7 +514,7 @@ class ReplaySSMModelContext:
             max_num_reqs=max_num_reqs,
             mamba_block_size=first_spec.block_size,
             logical_window=int(first.replayssm_buffer_len),
-            ring_buffer_len=first.kv_cache[2].size(2),
+            ring_buffer_len=first.kv_cache[-3].size(2),
             materialize_prefixes=materialize_prefixes,
         )
 
@@ -524,13 +532,13 @@ class ReplaySSMModelContext:
                 self.active_request_indices,
                 num_reqs=num_reqs,
                 state_dtype=first.kv_cache[1].dtype,
-                input_dtype=first.kv_cache[2].dtype,
+                input_dtype=first.kv_cache[-3].dtype,
                 matrixA_dtype=first.A.dtype,
                 num_heads=first.kv_cache[1].size(1),
                 dim=first.kv_cache[1].size(2),
                 dstate=first.kv_cache[1].size(3),
                 heads_per_group=(
-                    first.kv_cache[1].size(1) // first.kv_cache[4].size(1)
+                    first.kv_cache[1].size(1) // first.kv_cache[-1].size(1)
                 ),
                 ring_buffer_len=self.ring_buffer_len,
             )
@@ -550,12 +558,12 @@ class ReplaySSMModelContext:
             self.plan_flush_count,
             self.active_request_indices,
             state_dtype=first.kv_cache[1].dtype,
-            input_dtype=first.kv_cache[2].dtype,
+            input_dtype=first.kv_cache[-3].dtype,
             matrixA_dtype=first.A.dtype,
             dim=first.kv_cache[1].size(2),
             dstate=first.kv_cache[1].size(3),
             num_heads=first.kv_cache[1].size(1),
-            heads_per_group=(first.kv_cache[1].size(1) // first.kv_cache[4].size(1)),
+            heads_per_group=(first.kv_cache[1].size(1) // first.kv_cache[-1].size(1)),
             max_window=self.logical_window,
             ring_buffer_len=self.ring_buffer_len,
             pad_slot_id=NULL_BLOCK_ID,

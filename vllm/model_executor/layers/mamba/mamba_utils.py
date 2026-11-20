@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 import torch
 
 import vllm.envs as envs
-from vllm.config.cache import MambaDType
+from vllm.config.cache import QUANTIZED_MAMBA_SSM_DTYPES, MambaDType, MambaSSMDType
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
@@ -73,7 +73,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaSSMDType,
     ) -> tuple[torch.dtype, ...]:
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
@@ -84,8 +84,15 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaSSMDType,
     ) -> tuple[torch.dtype, ...]:
+        """`(conv, ssm)`, plus an FP32 per-row scale page for 8-bit SSM state."""
+        if mamba_ssm_cache_dtype in QUANTIZED_MAMBA_SSM_DTYPES:
+            conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+            ssm_state_dtype = (
+                torch.int8 if mamba_ssm_cache_dtype == "int8" else torch.float8_e4m3fn
+            )
+            return (conv_state_dtype, ssm_state_dtype, torch.float32)
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
@@ -96,7 +103,7 @@ class MambaStateDtypeCalculator:
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, ...]:
-        """Append the ReplaySSM ring dtypes to a base `(conv, ssm)` tuple:
+        """Append the ReplaySSM ring dtypes after the Mamba2 state dtypes:
         `(x_cache, dt_cache, B_cache)` = `(activation, fp32, activation)`.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
@@ -107,8 +114,14 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaSSMDType,
     ) -> tuple[torch.dtype, ...]:
+        if mamba_ssm_cache_dtype in QUANTIZED_MAMBA_SSM_DTYPES:
+            # Only Mamba2 layers store the per-row scales 8-bit state needs.
+            raise ValueError(
+                f"--mamba-ssm-cache-dtype {mamba_ssm_cache_dtype} is supported "
+                "only for Mamba2 layers"
+            )
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         if mamba_ssm_cache_dtype == "auto":
             temporal_state_dtype = conv_state_dtype
@@ -131,7 +144,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType = "auto",
+        mamba_ssm_cache_dtype: MambaSSMDType = "auto",
     ) -> tuple[torch.dtype, torch.dtype]:
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
@@ -142,7 +155,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType = "auto",
+        mamba_ssm_cache_dtype: MambaSSMDType = "auto",
     ) -> tuple[torch.dtype, torch.dtype]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         if mamba_ssm_cache_dtype == "auto":
@@ -201,7 +214,12 @@ class MambaStateShapeCalculator:
         state_size: int,
         conv_kernel: int,
         num_spec: int = 0,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        mamba_ssm_cache_dtype: MambaSSMDType = "auto",
+    ) -> (
+        tuple[tuple[int, int], tuple[int, int, int]]
+        | tuple[tuple[int, int], tuple[int, int, int], tuple[int, int]]
+    ):
+        """`(conv, ssm)`, plus a `(heads, head_dim)` scale page for 8-bit SSM state."""
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
         n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
@@ -216,26 +234,24 @@ class MambaStateShapeCalculator:
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
+        if mamba_ssm_cache_dtype in QUANTIZED_MAMBA_SSM_DTYPES:
+            return conv_state_shape, temporal_state_shape, temporal_state_shape[:2]
         return conv_state_shape, temporal_state_shape
 
     @classmethod
     def append_replayssm_ring(
         cls,
-        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
+        base_shapes: tuple[tuple[int, ...], ...],
         n_groups: int,
         tp_world_size: int,
         logical_window: int,
         backend: MambaBackendEnum,
         num_speculative_tokens: int = 0,
-    ) -> tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int],
-        tuple[int, int, int],
-    ]:
-        """Append the physical ReplaySSM ring shapes.
+    ) -> tuple[tuple[int, ...], ...]:
+        """Append the physical ReplaySSM ring shapes after the Mamba2 states.
 
+        The rings are always the last three states, so `(conv, ssm)` and
+        `(conv, ssm, ssm_scale)` both work.
         `base_shapes[1]` is `(nheads // tp, head_dim, state_size)`;
         B_cache extends `n_groups` for head shards as in `mamba2_state_shape`.
         """

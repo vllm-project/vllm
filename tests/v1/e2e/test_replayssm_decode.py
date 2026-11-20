@@ -10,6 +10,7 @@ import pytest
 import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_replayssm_fp8_checkpoints
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -83,6 +84,10 @@ FLASHINFER_PROMPTS = [
 requires_flashinfer_replayssm_materialization = pytest.mark.skipif(
     not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
     reason="FlashInfer ReplaySSM materialization APIs not available",
+)
+requires_flashinfer_replayssm_fp8_checkpoints = pytest.mark.skipif(
+    not has_flashinfer_replayssm_fp8_checkpoints(),
+    reason="Installed FlashInfer does not bound FP8 checkpoint scales",
 )
 
 
@@ -272,6 +277,7 @@ def _check_replayssm_prefix_caching(
     speculative_method: str | None = None,
     mamba_backend: str = "flashinfer",
     tensor_parallel_size: int = 1,
+    ssm_dtype: str | None = None,
 ):
     common = dict(
         max_model_len=8192,
@@ -300,12 +306,20 @@ def _check_replayssm_prefix_caching(
             enable_mamba_cache_stochastic_rounding=True,
             mamba_cache_philox_rounds=5,
         )
+    if ssm_dtype is not None:
+        common.update(dtype="bfloat16", mamba_cache_dtype="bfloat16")
     outputs = []
     for use_replayssm in (False, True):
         with vllm_runner(
             model_name,
             use_replayssm=use_replayssm,
             replayssm_buffer_len=16,
+            # The baseline keeps floating-point state; ReplaySSM uses ssm_dtype.
+            **(
+                {"mamba_ssm_cache_dtype": ssm_dtype}
+                if use_replayssm and ssm_dtype is not None
+                else {}
+            ),
             # Shared prompts must not populate the baseline's cache.
             enable_prefix_caching=use_replayssm,
             **common,
@@ -357,21 +371,30 @@ def _check_replayssm_prefix_caching(
 @requires_flashinfer_replayssm_materialization
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 @pytest.mark.parametrize(
-    "use_ngram",
+    ("use_ngram", "ssm_dtype"),
     [
-        pytest.param(True, id="align-ngram-t4"),
-        pytest.param(False, id="align-stp"),
+        pytest.param(True, None, id="align-ngram-t4"),
+        pytest.param(False, None, id="align-stp"),
+        pytest.param(
+            False,
+            "fp8",
+            id="align-fp8",
+            marks=requires_flashinfer_replayssm_fp8_checkpoints,
+        ),
+        pytest.param(False, "int8", id="align-int8"),
     ],
 )
 def test_flashinfer_replayssm_prefix_cache_tp1(
     vllm_runner,
     model_name,
     use_ngram: bool,
+    ssm_dtype: str | None,
 ):
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,
         speculative_method="ngram" if use_ngram else None,
+        ssm_dtype=ssm_dtype,
     )
 
 

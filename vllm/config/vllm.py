@@ -28,7 +28,7 @@ from vllm.utils.math_utils import cdiv
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
-from .cache import CacheConfig
+from .cache import QUANTIZED_MAMBA_SSM_DTYPES, CacheConfig
 from .compilation import (
     CompilationConfig,
     CompilationMode,
@@ -48,7 +48,12 @@ from .kv_transfer import KVCacheAccess, KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
-from .mamba import MambaBackendEnum, MambaConfig
+from .mamba import (
+    MambaBackendEnum,
+    MambaConfig,
+    decode_backend_ssm_dtypes,
+    prefill_backend_ssm_dtypes,
+)
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -1697,14 +1702,14 @@ class VllmConfig:
             self.lora_config.verify_with_kernel_config(self.kernel_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
-        if (
-            self.mamba_config.enable_stochastic_rounding
-            and self.cache_config.mamba_ssm_cache_dtype != "float16"
+        if self.mamba_config.enable_stochastic_rounding and (
+            self.cache_config.mamba_ssm_cache_dtype
+            not in ("float16", *QUANTIZED_MAMBA_SSM_DTYPES)
         ):
             raise ValueError(
                 "Stochastic rounding for Mamba cache requires "
-                "the SSM cache to be float16. Please set it explicitly, "
-                "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
+                "the SSM cache to be float16, int8 or fp8. Please set it "
+                "explicitly, e.g. `--mamba-ssm-cache-dtype float16`, or disable "
                 "stochastic rounding by not specifying "
                 "`--enable-mamba-cache-stochastic-rounding`."
             )
@@ -3805,6 +3810,68 @@ class VllmConfig:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_ssm_cache_dtype(self) -> "VllmConfig":
+        """Check the SSM state dtype against what the Mamba backends declare."""
+        ssm_dtype = self.cache_config.mamba_ssm_cache_dtype
+        if ssm_dtype not in QUANTIZED_MAMBA_SSM_DTYPES:
+            return self
+        use_replayssm = self.cache_config.use_replayssm
+        for kind, backend, supported in (
+            (
+                "decode",
+                self.mamba_config.backend,
+                decode_backend_ssm_dtypes(self.mamba_config.backend, use_replayssm),
+            ),
+            (
+                "prefill",
+                self.mamba_config.prefill_backend,
+                prefill_backend_ssm_dtypes(self.mamba_config.prefill_backend),
+            ),
+        ):
+            if ssm_dtype not in supported:
+                name = backend.value + (
+                    " ReplaySSM" if kind == "decode" and use_replayssm else ""
+                )
+                raise ValueError(
+                    f"--mamba-ssm-cache-dtype {ssm_dtype} is not supported by "
+                    f"the {name} Mamba {kind} backend (supported: "
+                    f"{', '.join(supported)})"
+                )
+        # Limits of the FlashInfer ReplaySSM scaled-state kernel.
+        if self.mamba_config.ssu_algorithm not in (None, "auto"):
+            raise ValueError(
+                f"--mamba-ssm-cache-dtype {ssm_dtype} requires the automatic "
+                "SSU algorithm"
+            )
+        if self.model_config is not None:
+            if self.model_config.dtype != torch.bfloat16:
+                raise ValueError(
+                    f"--mamba-ssm-cache-dtype {ssm_dtype} requires BF16 activations"
+                )
+            config = self.model_config.hf_text_config
+            if (
+                getattr(config, "mamba_head_dim", None) != 64
+                or getattr(config, "ssm_state_size", None) != 128
+            ):
+                raise ValueError(
+                    f"--mamba-ssm-cache-dtype {ssm_dtype} requires Mamba2 head "
+                    "dimension 64 and state size 128"
+                )
+        if ssm_dtype == "fp8":
+            from vllm.utils.flashinfer import (
+                _REPLAYSSM_FP8_MIN_FLASHINFER,
+                has_flashinfer_replayssm_fp8_checkpoints,
+            )
+
+            if not has_flashinfer_replayssm_fp8_checkpoints():
+                raise ValueError(
+                    "--mamba-ssm-cache-dtype fp8 requires FlashInfer "
+                    f">= {_REPLAYSSM_FP8_MIN_FLASHINFER}, which bounds FP8 "
+                    "checkpoint scales; use --mamba-ssm-cache-dtype int8"
+                )
         return self
 
     @model_validator(mode="after")

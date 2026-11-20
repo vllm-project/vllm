@@ -174,6 +174,9 @@ def is_known_kv_cache_dtype(name: str) -> bool:
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
+MambaSSMDType = Literal["auto", "float32", "float16", "bfloat16", "int8", "fp8"]
+QUANTIZED_MAMBA_SSM_DTYPES: tuple[str, ...] = ("int8", "fp8")
+"""SSM state dtypes stored with an FP32 scale per state row."""
 MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -308,10 +311,14 @@ class CacheConfig:
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
     config."""
-    mamba_ssm_cache_dtype: MambaDType = "auto"
+    mamba_ssm_cache_dtype: MambaSSMDType = "auto"
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
-    for the ssm state will be determined by mamba_cache_dtype."""
+    for the ssm state will be determined by mamba_cache_dtype. 'int8' and 'fp8'
+    (E4M3FN) store one FP32 scale per state row; only Mamba2 decode and prefill
+    backends that declare these dtypes accept them (currently FlashInfer
+    ReplaySSM with Triton prefill). Decode writes honor the Mamba
+    stochastic-rounding settings; prefill uses nearest rounding."""
     mamba_cache_mode: MambaCacheMode = "none"
     """The cache strategy for Mamba layers, derived from `enable_prefix_caching`:
 

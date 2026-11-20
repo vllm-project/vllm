@@ -709,25 +709,52 @@ def validate_mamba_state_copy_funcs(
         )
 
 
+def _mamba2_ssm_scale_pages(spec: MambaSpec) -> int:
+    """Return 1 when a Mamba2 spec stores 8-bit SSM state with its scale page.
+
+    The FP32 `(heads, head_dim)` scale page directly follows the SSM state and
+    must move with it.
+    """
+    if (
+        spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+        or len(spec.dtypes) < 2
+        or spec.dtypes[1] not in (torch.int8, torch.float8_e4m3fn)
+    ):
+        return 0
+    if (
+        len(spec.shapes) < 3
+        or len(spec.dtypes) != len(spec.shapes)
+        or spec.dtypes[2] != torch.float32
+        or tuple(spec.shapes[2]) != tuple(spec.shapes[1][:2])
+    ):
+        raise ValueError(
+            "8-bit Mamba2 SSM state requires an FP32 (heads, head_dim) scale "
+            "page right after it"
+        )
+    return 1
+
+
 def _get_mamba_gpu_state_copy_funcs(
     spec: MambaSpec,
     layer: Any,
     copy_funcs: MambaStateCopyFuncsByType,
 ) -> MambaStateCopyFuncs:
     state_copy_funcs = copy_funcs[spec.mamba_type]
+    scale_pages = _mamba2_ssm_scale_pages(spec)
     if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-            or len(spec.shapes) != 5
-            or len(spec.dtypes) != 5
+            or len(spec.shapes) != 5 + scale_pages
+            or len(spec.dtypes) != len(spec.shapes)
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
-                "ReplaySSM trackers require two canonical Mamba2 "
-                "states and three ring states"
+                "ReplaySSM trackers require two canonical Mamba2 states, an "
+                "optional SSM scale page, and three ring states"
             )
-        state_copy_funcs += (get_temporal_copy_spec,) * 3
-    return state_copy_funcs
+        # Scale page and x/dt/B rings are per-slot pages copied like the state.
+        return state_copy_funcs + (get_temporal_copy_spec,) * (3 + scale_pages)
+    return state_copy_funcs + (get_temporal_copy_spec,) * scale_pages
 
 
 @dataclasses.dataclass(slots=True)
@@ -959,7 +986,7 @@ class MambaSpecDecodeGPUContext:
                 if uses_replayssm_trackers:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "ReplaySSM trackers require five bound Mamba2 states"
+                            "ReplaySSM trackers require all bound Mamba2 cache states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):

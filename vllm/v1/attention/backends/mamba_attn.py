@@ -160,9 +160,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.decode_is_flush_d: torch.Tensor = torch.zeros(
                 (bc_scratch_bs,), dtype=torch.int8, device=device
             )
-            # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
-            # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
-            bc_ngroups = kv_cache_spec.shapes[4][0]
+            # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the rings
+            # (x_cache, dt_cache, B_cache) are always the last three states.
+            bc_ngroups = kv_cache_spec.shapes[-1][0]
             self.decode_bc_pre_scratch = torch.empty(
                 (
                     bc_scratch_bs,
@@ -178,7 +178,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     allocate_checkpointing_ssu_scratch,
                 )
 
-                nheads = kv_cache_spec.shapes[2][0]
+                nheads = kv_cache_spec.shapes[-3][0]
                 self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                     batch_size=scheduler_config.max_num_seqs,
                     num_heads=nheads,

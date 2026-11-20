@@ -805,6 +805,7 @@ class NemotronHForCausalLM(
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
+            mamba_ssm_cache_dtype=cache_config.mamba_ssm_cache_dtype,
         )
         if cache_config.use_replayssm:
             return MambaStateShapeCalculator.append_replayssm_ring(
