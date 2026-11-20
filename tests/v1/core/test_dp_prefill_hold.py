@@ -376,12 +376,10 @@ def test_rank_without_a_free_slot_is_blocked():
     assert row[dph._BLOCKED] == 1 and row[dph._X] == 0
 
 
-def _kv_stopped_scheduler(ttft_target: float = T):
+def _kv_stopped_scheduler():
     """A hold scheduler with a running decode that leaves too few free KV
     blocks for a 300-token request, and the decode."""
-    scheduler, hold = _hold_scheduler(
-        ttft_target, num_blocks=30, block_size=16, max_model_len=1024
-    )
+    scheduler, hold = _hold_scheduler(num_blocks=30, block_size=16, max_model_len=1024)
     (dec,) = create_requests(num_requests=1, num_tokens=200, req_ids=["d"])
     scheduler.add_request(dec)
     _finish_step(scheduler, scheduler.schedule())
@@ -430,22 +428,21 @@ def test_queue_scan_stops_where_running_slots_run_out():
     assert row[dph._X] == 8 and row[dph._QUEUED] == 1
 
 
-def test_waits_count_from_a_release_that_stopped_on_kv(monkeypatch):
-    """A request waiting behind a release that stopped for lack of KV blocks
-    could not start before it, so its age does not force a release: the hold
-    may add up to the target to its wait from then on."""
+def test_request_past_the_target_bounds_only_the_hold(monkeypatch):
+    """A request that can still meet the target bounds the hold by its age. One
+    that has waited longer, say behind a full KV cache, can no longer meet it,
+    and releasing now would not change that: it bounds only how long the
+    current hold lasts."""
     clock = _Clock()
     monkeypatch.setattr(dph, "time", clock)
-    scheduler, hold, dec = _kv_stopped_scheduler(10.0)
-    (big,) = create_requests(num_requests=1, num_tokens=300, req_ids=["b"])
-    big.arrival_time = clock.wall - 20.0
-    scheduler.add_request(big)
-    assert hold.local_row()[dph._SLACK] == pytest.approx(-10.0)
+    scheduler, hold = _hold_scheduler(10.0)
+    (req,) = create_requests(num_requests=1, num_tokens=300, req_ids=["r"])
+    scheduler.add_request(req)
+    req.arrival_time = clock.wall - 4.0
+    assert hold.local_row()[dph._SLACK] == pytest.approx(6.0)
 
-    scheduler.schedule()
-    scheduler.finish_requests(dec.request_id, RequestStatus.FINISHED_ABORTED)
+    req.arrival_time = clock.wall - 20.0
     assert hold.local_row()[dph._SLACK] == pytest.approx(10.0)
-    # Held for 0.5 s since that release.
     hold._hold_start, hold._clock = 0.0, 0.5
     assert hold.local_row()[dph._SLACK] == pytest.approx(9.5)
 
@@ -463,7 +460,7 @@ def test_finished_kv_load_is_queued_work():
     _finish_step(scheduler, scheduler.schedule(), finished_recving={"d"})
     _finish_step(scheduler, scheduler.schedule())
 
-    req.arrival_time -= 2 * T
+    req.arrival_time -= T / 2
     scheduler.add_request(req)
     hold.hold = True
     output = scheduler.schedule()
@@ -475,7 +472,7 @@ def test_finished_kv_load_is_queued_work():
     for _ in range(2):
         row = hold.local_row()
         assert row[dph._WORK] == 1 and row[dph._QUEUED] == 1
-        assert row[dph._X] == 200 - 64 and row[dph._SLACK] < 0
+        assert row[dph._X] == 200 - 64 and row[dph._SLACK] < T / 2
         output = scheduler.schedule()
         assert set(output.num_scheduled_tokens) == {"d"}
         scheduler.prepare_dp_row()
@@ -487,8 +484,7 @@ def test_finished_kv_load_is_queued_work():
 
 def test_paused_streaming_session_is_not_work():
     """A streaming session waiting for its next input sits in
-    `kv_holding_waiting` with nothing to prefill. Its arrival time is its last
-    input's, so counting it would release every step."""
+    `kv_holding_waiting` with nothing to prefill, so it is no work."""
     scheduler, hold = _hold_scheduler()
     dec, session = create_requests(
         num_requests=2, num_tokens=8, stop_token_ids=[7], req_ids=["d", "s"]
@@ -501,7 +497,6 @@ def test_paused_streaming_session_is_not_work():
         ModelRunnerOutput(req_ids=["d", "s"], sampled_token_ids=[[0], [7]]),
     )
     assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-    session.arrival_time -= 2 * T
     row = hold.local_row()
     assert row[dph._WORK] == 0 and row[dph._DECODES] == 1
 

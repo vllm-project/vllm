@@ -15,9 +15,10 @@ engine core's state sync, and every rank runs the same deterministic
 - Bound the hold per request: a request of age `a` with `k` releases still
   ahead of it may be held `(T - a - (k - 1) * e) / k - t_mix` more, where `e`
   is the time held so far, `t_mix` is the mixed step time and `T` is the TTFT
-  target. A request older than `T` releases every step. After a release stops
-  for lack of KV blocks or running slots, only the queue ahead of the first
-  request that does not fit counts, and its ages start at that release.
+  target. A request that has waited `T` can no longer meet it, so from then
+  on its age is the time held so far. After a release stops for lack of KV
+  blocks or running slots, only the queue ahead of the first request that
+  does not fit counts.
 - Step costs come from an online least-squares fit of measured step times,
   with no latency model. Until the fit is pinned down, it releases.
 """
@@ -419,8 +420,8 @@ class PrefillHold:
             queue_tokens += remaining
             k = -(-queue_tokens // budget)
             age = wall - arrival
-            if state.kv_free_blocks is not None:
-                age = min(age, held)  # it could start only since that release
+            if age >= target:
+                age = min(age, held)  # it missed the target; bound the hold only
             slack = min(slack, (target - age - (k - 1) * min(held, age)) / k)
             if slack <= 0:
                 # Releases whatever the rest of the queue is.
