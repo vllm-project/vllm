@@ -6,7 +6,6 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from vllm import envs
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -302,8 +301,7 @@ async def test_per_request_metrics_non_streaming(client: openai.AsyncOpenAI):
 
     metrics = response.model_extra.get("metrics")
     _assert_complete_timing_metrics(metrics)
-    if not envs.VLLM_USE_RUST_FRONTEND:
-        assert metrics["time_to_first_content_token_ms"] is None
+    assert metrics["time_to_first_content_token_ms"] is None
 
 
 @pytest.mark.asyncio
@@ -330,11 +328,9 @@ async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpen
     metrics = (usage_chunk.model_extra or {}).get("metrics")
     assert isinstance(metrics, dict)
     assert metrics["time_to_first_token_ms"] >= 0
-    if not envs.VLLM_USE_RUST_FRONTEND:
-        assert (
-            metrics["time_to_first_content_token_ms"]
-            == metrics["time_to_first_token_ms"]
-        )
+    assert (
+        metrics["time_to_first_content_token_ms"] == metrics["time_to_first_token_ms"]
+    )
     assert metrics["generation_time_ms"] >= 0
     assert metrics["queue_time_ms"] >= 0
     assert metrics["tokens_per_second"] >= 0

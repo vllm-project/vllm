@@ -238,11 +238,13 @@ fn push_piece_delta(
 pub(crate) async fn unified_event_stream(
     decoded_stream: impl DecodedTextEventStream,
     parser: Box<dyn UnifiedParser>,
+    has_parser: bool,
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
     pin_mut!(decoded_stream);
 
     let mut state = UnifiedParserState::new(parser);
+    let mut first_content_token_ts = None;
 
     while let Some(event) = decoded_stream.next().await.transpose()? {
         match event {
@@ -261,6 +263,7 @@ pub(crate) async fn unified_event_stream(
                 decoded,
                 sampled:
                     SampledDelta {
+                        timestamp,
                         token_ids,
                         logprobs,
                         ..
@@ -268,6 +271,7 @@ pub(crate) async fn unified_event_stream(
                 finished,
             } => {
                 for next in state.process_delta(decoded)? {
+                    next.record_first_content_token(timestamp, &mut first_content_token_ts);
                     y.yield_ok(next).await;
                 }
                 if logprobs.is_some() || !token_ids.is_empty() {
@@ -279,6 +283,7 @@ pub(crate) async fn unified_event_stream(
                 }
                 if let Some(finished) = finished {
                     for next in state.finish()? {
+                        next.record_first_content_token(timestamp, &mut first_content_token_ts);
                         y.yield_ok(next).await;
                     }
                     y.yield_ok(AssistantEvent::Done {
@@ -287,7 +292,12 @@ pub(crate) async fn unified_event_stream(
                             reasoning_tokens: state.reasoning_tokens,
                         },
                         timestamps: finished.timestamps,
-                        spec_decode_metrics: finished.spec_decode_metrics,
+                        first_content_token_ts: if has_parser {
+                            first_content_token_ts
+                        } else {
+                            Some(finished.timestamps.first_token_ts)
+                        },
+                        spec_decode_metrics: finished.spec_decode_metrics.map(Box::new),
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
@@ -311,7 +321,7 @@ mod tests {
     use vllm_parser::reasoning::ReasoningError;
     use vllm_parser::tool::{Tool, ToolCallDelta};
     use vllm_parser::unified::{Gemma4UnifiedParser, UnifiedParserError, UnifiedParserOutput};
-    use vllm_text::DecodedText;
+    use vllm_text::{DecodedText, DecodedTextEvent};
     use vllm_tokenizer::test_utils::TestTokenizer;
     use vllm_tokenizer::{TokenAnchor, TokenAttribution};
 
@@ -444,7 +454,7 @@ mod tests {
         events: Vec<vllm_text::output::DecodedTextEvent>,
     ) -> Vec<AssistantEvent> {
         let stream = stream::iter(events.into_iter().map(Ok));
-        unified_event_stream(stream, Box::new(parser))
+        unified_event_stream(stream, Box::new(parser), true)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -536,7 +546,7 @@ mod tests {
         );
 
         let stream = stream::iter(vec![d1, d2].into_iter().map(Ok));
-        let events = unified_event_stream(stream, Box::new(parser))
+        let events = unified_event_stream(stream, Box::new(parser), true)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -759,6 +769,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(0),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
@@ -772,12 +783,18 @@ mod tests {
 
     #[tokio::test]
     async fn unified_stream_counts_reasoning_tokens_across_deltas() {
+        let mut deltas = vec![decoded_delta("a"), finished_delta("b")];
+        for (event, timestamp) in deltas.iter_mut().zip([1.0, 2.5]) {
+            if let DecodedTextEvent::TextDelta { sampled, .. } = event {
+                sampled.timestamp = timestamp;
+            }
+        }
         let events = collect(
             ScriptedParser::new([
                 ScriptedStep::Output(attributed_reasoning("think", 2)),
                 ScriptedStep::Output(combined(text("visible"), attributed_reasoning("more", 3))),
             ]),
-            vec![decoded_delta("a"), finished_delta("b")],
+            deltas,
         )
         .await;
 
@@ -803,6 +820,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(5),
                     timestamps: Default::default(),
+                    first_content_token_ts: Some(2.5),
                     spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
@@ -839,6 +857,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(2),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
@@ -895,6 +914,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(5),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
@@ -930,7 +950,7 @@ mod tests {
                 finished_delta("world<|\"|>"),
             ];
             let stream = stream::iter(events.into_iter().map(Ok));
-            let events = unified_event_stream(stream, Box::new(parser))
+            let events = unified_event_stream(stream, Box::new(parser), true)
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()
@@ -945,6 +965,7 @@ mod tests {
             let done = AssistantEvent::Done {
                 usage: done_usage(0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: crate::FinishReason::Stop(None),
                 kv_transfer_params: None,
@@ -978,7 +999,7 @@ mod tests {
                 .map(|delta| Ok(decoded_delta(delta)))
                 .chain([Ok(finished_delta(last))])
                 .collect();
-            let events = unified_event_stream(stream::iter(events), Box::new(parser))
+            let events = unified_event_stream(stream::iter(events), Box::new(parser), true)
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()

@@ -311,6 +311,7 @@ async fn collect_completion(
         collected.timestamps,
         collected.usage.output_token_count,
         collected.spec_decode_metrics,
+        None,
     );
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None);
 
@@ -519,6 +520,7 @@ async fn completion_chunk_stream(
                                 finished.timestamps,
                                 finished.usage.output_token_count,
                                 finished.spec_decode_metrics,
+                                Some(finished.timestamps.first_token_ts),
                             );
                             y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                                 &envelope,
@@ -616,6 +618,7 @@ async fn completion_chunk_stream(
                             finished.timestamps,
                             finished.usage.output_token_count,
                             finished.spec_decode_metrics,
+                            Some(finished.timestamps.first_token_ts),
                         );
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
@@ -764,6 +767,7 @@ mod tests {
         DecodedTextEvent::TextDelta {
             decoded: DecodedText::unattributed(text),
             sampled: SampledDelta {
+                timestamp: 0.0,
                 token_ids,
                 logprobs,
                 sampling_mask: None,

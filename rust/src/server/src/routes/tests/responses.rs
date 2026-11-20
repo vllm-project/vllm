@@ -549,6 +549,17 @@ async fn responses_per_request_metrics_follow_server_option() {
             terminal
         };
         assert_eq!(final_response["metrics"].is_object(), enabled, "{text}");
+        if enabled {
+            let metrics = &final_response["metrics"];
+            if stream {
+                assert_eq!(
+                    metrics["time_to_first_content_token_ms"],
+                    metrics["time_to_first_token_ms"]
+                );
+            } else {
+                assert!(metrics["time_to_first_content_token_ms"].is_null());
+            }
+        }
         assert!(
             lifecycle.iter().all(|event| event["response"].get("metrics").is_none()),
             "{text}"

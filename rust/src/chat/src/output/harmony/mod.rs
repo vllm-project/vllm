@@ -391,6 +391,7 @@ async fn harmony_assistant_event_stream(
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
     let mut state = HarmonyState::new(encoding, tool_calls_enabled)?;
+    let mut first_content_token_ts = None;
     futures::pin_mut!(decoded);
 
     while let Some(event) = decoded.next().await.transpose()? {
@@ -410,6 +411,7 @@ async fn harmony_assistant_event_stream(
                 decoded: _, // harmony takes raw token IDs as input, so we ignore decoded text here
                 sampled:
                     SampledDelta {
+                        timestamp,
                         token_ids,
                         logprobs,
                         ..
@@ -417,11 +419,13 @@ async fn harmony_assistant_event_stream(
                 finished,
             } => {
                 for event in state.process_token_ids(&token_ids)? {
+                    event.record_first_content_token(timestamp, &mut first_content_token_ts);
                     y.yield_ok(event).await;
                 }
 
                 if finished.is_some() {
                     for event in state.process_eos()? {
+                        event.record_first_content_token(timestamp, &mut first_content_token_ts);
                         y.yield_ok(event).await;
                     }
                 }
@@ -441,7 +445,8 @@ async fn harmony_assistant_event_stream(
                             reasoning_tokens: state.reasoning_tokens,
                         },
                         timestamps: finished.timestamps,
-                        spec_decode_metrics: finished.spec_decode_metrics,
+                        first_content_token_ts,
+                        spec_decode_metrics: finished.spec_decode_metrics.map(Box::new),
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,

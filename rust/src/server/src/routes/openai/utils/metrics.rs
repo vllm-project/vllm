@@ -9,6 +9,7 @@ use vllm_llm::RequestTimestamps;
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PerRequestMetrics {
     pub time_to_first_token_ms: Option<f64>,
+    pub time_to_first_content_token_ms: Option<f64>,
     pub generation_time_ms: Option<f64>,
     pub queue_time_ms: Option<f64>,
     pub mean_itl_ms: Option<f64>,
@@ -17,13 +18,20 @@ pub struct PerRequestMetrics {
 }
 
 impl PerRequestMetrics {
-    pub fn from_timestamps(times: RequestTimestamps, num_generation_tokens: usize) -> Self {
+    pub fn from_timestamps(
+        times: RequestTimestamps,
+        num_generation_tokens: usize,
+        first_content_token_ts: Option<f64>,
+    ) -> Self {
         let duration = |end: f64, start: f64| (end > 0.0 && start > 0.0).then_some(end - start);
         let decode = duration(times.last_token_ts, times.first_token_ts);
         let inference = duration(times.last_token_ts, times.scheduled_ts);
 
         Self {
             time_to_first_token_ms: duration(times.first_token_ts, times.scheduled_ts)
+                .map(|seconds| seconds * 1000.0),
+            time_to_first_content_token_ms: first_content_token_ts
+                .and_then(|timestamp| duration(timestamp, times.scheduled_ts))
                 .map(|seconds| seconds * 1000.0),
             generation_time_ms: decode.map(|seconds| seconds * 1000.0),
             queue_time_ms: duration(times.scheduled_ts, times.queued_ts)
@@ -43,11 +51,12 @@ impl PerRequestMetrics {
         times: RequestTimestamps,
         num_generation_tokens: usize,
         spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+        first_content_token_ts: Option<f64>,
     ) -> Option<Self> {
         let speculative_decoding = spec_decode_metrics.map(Into::into);
         (include_timing || speculative_decoding.is_some()).then(|| {
             let mut metrics = if include_timing {
-                Self::from_timestamps(times, num_generation_tokens)
+                Self::from_timestamps(times, num_generation_tokens, first_content_token_ts)
             } else {
                 Self::default()
             };
@@ -65,6 +74,7 @@ impl PerRequestMetrics {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StreamPerRequestMetrics {
     pub time_to_first_token_ms: Option<f64>,
+    pub time_to_first_content_token_ms: Option<f64>,
     pub generation_time_ms: Option<f64>,
     pub queue_time_ms: Option<f64>,
     pub mean_itl_ms: Option<f64>,
@@ -76,6 +86,7 @@ impl From<PerRequestMetrics> for StreamPerRequestMetrics {
     fn from(metrics: PerRequestMetrics) -> Self {
         let PerRequestMetrics {
             time_to_first_token_ms,
+            time_to_first_content_token_ms,
             generation_time_ms,
             queue_time_ms,
             mean_itl_ms,
@@ -84,6 +95,7 @@ impl From<PerRequestMetrics> for StreamPerRequestMetrics {
         } = metrics;
         Self {
             time_to_first_token_ms,
+            time_to_first_content_token_ms,
             generation_time_ms,
             queue_time_ms,
             mean_itl_ms,
@@ -192,17 +204,21 @@ mod tests {
             first_token_ts: 10.5,
             last_token_ts: 11.0,
         };
-        let metrics = PerRequestMetrics::from_timestamps(times, 6);
+        let metrics = PerRequestMetrics::from_timestamps(times, 6, Some(10.75));
+        assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
         assert_eq!(metrics.generation_time_ms, Some(500.0));
         assert!((metrics.queue_time_ms.unwrap() - 200.0).abs() < 1e-9);
         assert_eq!(metrics.mean_itl_ms, Some(100.0));
         assert!((metrics.tokens_per_second.unwrap() - 7.5).abs() < 1e-9);
 
-        let single_token = PerRequestMetrics::from_timestamps(times, 1);
+        let single_token = PerRequestMetrics::from_timestamps(times, 1, None);
+        assert_eq!(single_token.time_to_first_content_token_ms, None);
         assert_eq!(single_token.mean_itl_ms, None);
 
-        let missing = PerRequestMetrics::from_timestamps(RequestTimestamps::default(), 0);
+        let missing =
+            PerRequestMetrics::from_timestamps(RequestTimestamps::default(), 0, Some(10.75));
+        assert_eq!(missing.time_to_first_content_token_ms, None);
         assert_eq!(missing.time_to_first_token_ms, None);
         assert_eq!(missing.generation_time_ms, None);
         assert_eq!(missing.queue_time_ms, None);
@@ -221,6 +237,7 @@ mod tests {
                 last_token_ts: 10.5,
             },
             1,
+            None,
         );
         let value = serde_json::to_value(StreamPerRequestMetrics::from(metrics)).unwrap();
         let metrics = value.as_object().unwrap();
