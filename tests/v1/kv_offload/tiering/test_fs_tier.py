@@ -590,7 +590,7 @@ def test_store_short_write_names_likely_cause(tmp_path, monkeypatch, use_c_ext):
 
 
 def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
-    """Completion wakes the idle waiter without broadcasting to workers."""
+    """wait_idle must not return while a task is still in flight."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
     worker_notify_all = MagicMock(wraps=pool._condition.notify_all)
     monkeypatch.setattr(pool._condition, "notify_all", worker_notify_all)
