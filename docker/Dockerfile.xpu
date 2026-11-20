@@ -105,9 +105,13 @@ ENV UV_LINK_MODE="copy"
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip
 
+    
 ENV LD_LIBRARY_PATH=/opt/venv/lib:/usr/local/lib
 CMD ["/bin/bash"]
 
+######################### UCX + NIXL BUILD STAGE #########################
+# Build UCX and NIXL in a dedicated stage so compiler/autotools layers are
+# never included in the final runtime image (mirrors ROCm's build_rixl stage).
 ######################### WHEEL BUILD STAGE #########################
 # Produces a standalone dist/*.whl artifact (used by the release pipeline's
 # "Build wheel - XPU" step), independent of the runtime image below.
@@ -137,9 +141,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=xpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
-######################### UCX + NIXL BUILD STAGE #########################
-# Build UCX and NIXL in a dedicated stage so compiler/autotools layers are
-# never included in the final runtime image (mirrors ROCm's build_rixl stage).
 FROM vllm-base AS ucx-nixl-build
 
 # Keep UCX_VERSION aligned with the UCX that NIXL itself builds against for this
