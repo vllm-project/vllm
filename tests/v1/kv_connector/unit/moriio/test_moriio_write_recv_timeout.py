@@ -233,6 +233,51 @@ def engine(request, consumer_role, monkeypatch):
     return _Engine(monkeypatch, request.param)
 
 
+def test_dead_prefill_does_not_leave_its_request_waiting(consumer_role, monkeypatch):
+    """#59114: the prefill dies after the decode allocated the request's blocks,
+    so no `write_done` ever arrives. Without the timer the request waits in
+    `WAITING_FOR_REMOTE_KVS` forever. Uses nothing that exists only with the
+    timer, so it also runs, and fails, without it."""
+    clock = _Clock()
+    monkeypatch.setattr(moriio_connector, "time", clock)
+    config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
+    extra = config.kv_transfer_config.kv_connector_extra_config
+    # Equal timeouts make the deadline final, so there is no prefill to probe.
+    extra["write_recv_timeout"] = extra["write_recv_max_timeout"] = TIMEOUT_S
+    scheduler = create_scheduler(config)
+    monkeypatch.setattr(
+        scheduler.connector.connector_scheduler,
+        "send_notify_block",
+        lambda **kwargs: None,
+    )
+    worker = _make_consumer_worker()
+
+    def step():
+        out = scheduler.schedule()
+        worker.start_load_kv(out.kv_connector_metadata)
+        results = worker.get_transfer_results()
+        scheduler.update_from_output(
+            out,
+            create_model_runner_output(
+                [scheduler.requests[i] for i in out.num_scheduled_tokens],
+                finished_sending=results.finished_sending,
+                finished_recving=results.finished_recving,
+                failed_recving=results.failed_recving,
+            ),
+        )
+
+    request = create_request(num_tokens=4 * BLOCK_SIZE, do_remote_prefill=True)
+    _setup_kv_transfer_request(request)
+    scheduler.add_request(request)
+    step()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    clock.now += 60 * TIMEOUT_S
+    for _ in range(3):
+        step()
+    assert request.status == RequestStatus.FINISHED_ERROR
+
+
 def test_prefill_dies_request_fails_and_blocks_stay_allocated(engine):
     free_before = engine.pool.get_num_free_blocks()
     request = engine.add_waiting_request()
