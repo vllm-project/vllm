@@ -1714,11 +1714,11 @@ class VllmConfig:
                 # mismatch at runtime. Until LoRA-aware SP kernels are
                 # supported, fall back to disabling sequence parallelism.
                 logger.warning_once(
-                    "Sequence parallelism (--enable-sequence-parallel) is "
+                    "Sequence parallelism (--sp-config) is "
                     "not yet supported together with LoRA. Disabling "
                     "sequence parallelism for this run."
                 )
-                self.parallel_config.enable_sequence_parallel = False
+                self.parallel_config.sp_config.enable = False
 
         if (
             self.mamba_config.enable_stochastic_rounding

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the SP/AsyncTP comm+GEMM kernels in
+"""Benchmark the SP comm+GEMM kernels (fused and unfused) in
 `vllm.model_executor.kernels.sequence_parallel` against each other and
 against doing the GEMM and the collective separately.
 
@@ -18,13 +18,13 @@ For each, five candidates are timed:
   unfused paths feed it -- the compute floor.
 - `collective`: the all-gather/reduce-scatter alone, on the same message
   size -- the comm floor.
-- `unfused`: what `--enable-sequence-parallel` runs without
-  `--enable-async-tp` -- a plain collective, then (or after) the layer's
+- `unfused`: what `--sp-config` runs without `fuse_gemm_comms` -- a
+  plain collective, then (or after) the layer's
   own GEMM.
-- `fused`: what `--enable-async-tp` swaps in instead -- a
+- `fused`: what `fuse_gemm_comms` swaps in instead -- a
   symmetric-memory kernel that overlaps the collective with the GEMM,
   chosen by `init_fused_comm_kernel` exactly as in serving.
-- `baseline`: plain TP with neither SP nor AsyncTP enabled. For
+- `baseline`: plain TP with SP disabled. For
   `qkv`/`gate_up` this is identical to `gemm` (the input is already
   full/replicated, so there is no collective at this boundary at all). For
   `o`/`down` this is the GEMM followed by a full
@@ -177,7 +177,7 @@ def make_linear(
 def pick_fused_kernel(
     linear: ColumnParallelLinear | RowParallelLinear,
 ) -> LinearCommKernel | None:
-    """The kernel `--enable-async-tp` would swap in."""
+    """The kernel `fuse_gemm_comms` would swap in."""
     return init_fused_comm_kernel(linear)
 
 

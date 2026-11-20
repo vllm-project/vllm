@@ -137,7 +137,7 @@ def is_sp_active(parallel_config: "ParallelConfig") -> bool:
 
     True only if SP is enabled, there's a live batch to check (a forward
     context with a batch descriptor), and its token count is at least
-    `sequence_parallel_min_tokens`.
+    `sp_config.threshold`.
 
     Args:
         parallel_config: Pass the `vllm_config` a model's `__init__`
@@ -155,7 +155,7 @@ def is_sp_active(parallel_config: "ParallelConfig") -> bool:
         return False
 
     num_tokens = ctx.batch_descriptor.num_tokens
-    return num_tokens >= parallel_config.sequence_parallel_min_tokens
+    return num_tokens >= parallel_config.sp_config.threshold
 
 
 def mark_sp_region(
@@ -180,19 +180,20 @@ def mark_sp_region(
     behavior (bias, `gather_output`, `return_bias`, ...) changes.
 
     While SP is active, the wrapper runs a comm+GEMM kernel: a fused
-    (symmetric-memory) one if `enable_async_tp`
+    (symmetric-memory) one if `sp_config.fuse_gemm_comms`
     is set and the layer's quant method has one, otherwise an unfused one
     built on plain collectives.
 
-    No-op when `enable_sequence_parallel` is off.
+    No-op when `sp_config.enable` is off.
 
     """
-    if not parallel_config.enable_sequence_parallel:
+    sp_config = parallel_config.sp_config
+    if not sp_config.enable:
         return
     logger.info_once(
-        "Sequence parallelism enabled (min_tokens=%d, async_tp=%s).",
-        parallel_config.sequence_parallel_min_tokens,
-        parallel_config.enable_async_tp,
+        "Sequence parallelism enabled (threshold=%d, fuse_gemm_comms=%s).",
+        sp_config.threshold,
+        sp_config.fuse_gemm_comms,
     )
 
     from vllm.model_executor.kernels.sequence_parallel import (
@@ -202,7 +203,7 @@ def mark_sp_region(
 
     def _patch_linear_forward(linear: "ColumnParallelLinear | RowParallelLinear"):
         kernel = None
-        if parallel_config.enable_async_tp:
+        if sp_config.fuse_gemm_comms:
             kernel = init_fused_comm_kernel(linear)
         if kernel is None:
             kernel = init_unfused_comm_kernel(linear)

@@ -30,31 +30,29 @@ For supported dense and MoE models, enable SP with:
 ```bash
 vllm serve <model-path> \
   --tensor-parallel-size 4 \
-  --enable-sequence-parallel
+  --sp-config '{"enable": true}'
 ```
 
 SP is intended for sufficiently large batch/token counts. By default, vLLM
-enables it only when the padded token count reaches
-`--sequence-parallel-min-tokens` (default: 256). Smaller batches fall back to
-the normal tensor-parallel path.
+enables it only when the padded token count reaches `threshold` (default:
+256). Smaller batches fall back to the normal tensor-parallel path.
 
 ```bash
 vllm serve <model-path> \
   --tensor-parallel-size 4 \
-  --enable-sequence-parallel \
-  --sequence-parallel-min-tokens 512
+  --sp-config '{"enable": true, "threshold": 512}'
 ```
 
-### Async-TP
+### Fused GEMM-collective
 
-Async-TP overlaps communication and GEMM at SP boundaries. Enable it together
-with SP:
+`fuse_gemm_comms` (a.k.a. async TP) fuses the SP collectives with the adjacent
+GEMMs (AllGather+GEMM and GEMM+ReduceScatter) so communication overlaps with
+compute. It requires `enable`:
 
 ```bash
 vllm serve <model-path> \
   --tensor-parallel-size 4 \
-  --enable-sequence-parallel \
-  --enable-async-tp
+  --sp-config '{"enable": true, "threshold": 256, "fuse_gemm_comms": true}'
 ```
 
 When a platform or quantization format does not provide a fused comm+GEMM

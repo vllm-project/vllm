@@ -1864,12 +1864,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _pad_for_sequence_parallelism(self, num_tokens: int) -> int:
         # Pad tokens to a multiple of tensor_parallel_size when SP is active.
         tp_size = self.parallel_config.tensor_parallel_size
-        sp_min_tokens = self.parallel_config.sequence_parallel_min_tokens
-        if (
-            self.parallel_config.enable_sequence_parallel
-            and num_tokens >= sp_min_tokens
-            and tp_size > 1
-        ):
+        sp_config = self.parallel_config.sp_config
+        if sp_config.enable and num_tokens >= sp_config.threshold and tp_size > 1:
             return round_up(num_tokens, tp_size)
         return num_tokens
 
