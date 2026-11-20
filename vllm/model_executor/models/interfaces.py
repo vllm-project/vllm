@@ -8,6 +8,7 @@ from collections.abc import (
     AsyncGenerator,
     Callable,
     Hashable,
+    Iterator,
     Mapping,
     MutableSequence,
     Sequence,
@@ -64,7 +65,7 @@ if TYPE_CHECKING:
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheLayerConfig
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -120,6 +121,40 @@ class StreamingTranscriptionPostProcessor:
 
     def process_delta(self, text_delta: str, finished: bool) -> str:
         return text_delta
+
+
+class StreamingDiarizedTranscriptParser:
+    """Stateful parser for streamed `diarized_json` output.
+
+    This default parses the output once generation has finished.
+    """
+
+    def __init__(
+        self, model_cls: type["SupportsTranscription"], model_config: "ModelConfig"
+    ) -> None:
+        self.model_cls = model_cls
+        self.model_config = model_config
+        self._text_parts: list[str] = []
+
+    def process_delta(
+        self, text_delta: str, finished: bool
+    ) -> Iterator[DiarizedTranscriptionSegment]:
+        """Yield the segments that this raw decoded delta completes.
+
+        Raises:
+            ValueError: If the output is not a valid diarized transcript.
+
+        """
+        if text_delta:
+            self._text_parts.append(text_delta)
+        if not finished:
+            return
+        text = "".join(self._text_parts)
+        self._text_parts.clear()
+        segments = self.model_cls.parse_diarized_transcript(text, self.model_config)
+        if not segments:
+            raise ValueError("Model output did not contain a valid diarized transcript")
+        yield from segments
 
 
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
@@ -691,8 +726,8 @@ class SupportsKVCacheGrouping(Protocol):
     def get_kv_cache_groups(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: dict[str, "KVCacheSpec"],
-    ) -> list["KVCacheGroupSpec"]:
+        layer_configs: dict[str, "KVCacheLayerConfig"],
+    ) -> list["KVCacheGroup"]:
         """Split the model's layers into logical KV cache groups."""
         ...
 
@@ -1473,6 +1508,18 @@ class SupportsTranscription(Protocol):
         raise NotImplementedError
 
     @classmethod
+    def get_streaming_diarized_parser_cls(
+        cls,
+    ) -> type[StreamingDiarizedTranscriptParser]:
+        """Return a stateful parser class for streamed `diarized_json` output.
+
+        The default sends all segments once the output is complete. Models
+        whose output marks where each segment ends can return a parser that
+        sends each segment as soon as it is final.
+        """
+        return StreamingDiarizedTranscriptParser
+
+    @classmethod
     def get_streaming_post_processor_cls(
         cls,
     ) -> type[StreamingTranscriptionPostProcessor]:
@@ -1667,7 +1714,11 @@ class EagleModelMixin:
             layer_idx >= self._aux_first_local_layer
             and layer_idx in self.aux_hidden_state_layers
         ):
-            value = hidden_states + residual if residual is not None else hidden_states
+            if residual is None:
+                # The first layer updates its residual (the embeddings) in place
+                value = hidden_states.clone()
+            else:
+                value = hidden_states + residual
             aux_hidden_states.append(value)
         return aux_hidden_states
 
@@ -1721,6 +1772,9 @@ def _get_decoder_holder(model: object) -> object:
         parent_ref = model.get_language_model()
     elif hasattr(model, "language_model"):
         parent_ref = model.language_model
+    # The Transformers modeling backend's `.model` is the HF model, not the decoder
+    if isinstance(parent_ref, EagleModelMixin):
+        return parent_ref
     # A multimodal model that builds its decoder inside `_mark_language_model`
     # has get_language_model() return the decoder itself, with no `.model`.
     return getattr(parent_ref, "model", parent_ref)
@@ -1916,7 +1970,15 @@ class SupportsEncoderCudaGraph(Protocol):
         `encoder_cudagraph_max_vision_items_per_batch` are not explicitly
         specified by the user.
         """
-        ...
+        # Min: about one small image (224x224, patch_size=14, 2x2 merge ->
+        # 64 tokens).
+        return (
+            64,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.max_model_len,
+            ),
+        )
 
     def get_encoder_cudagraph_item_specs(
         self,
@@ -2023,7 +2085,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.

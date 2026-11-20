@@ -16,6 +16,13 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 
+DEVICE_TYPE = current_platform.device_type
+
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="This test requires CUDA, ROCm or XPU",
+)
+
 
 def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
     return sum(1 for pos in range(length) if (pos // interleave) % world == rank)
@@ -439,7 +446,7 @@ def test_local_topk_union_is_not_equivalent_to_global_topk_attention():
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     torch.manual_seed(3)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     world = 2
     interleave = 1
     topk = 512
@@ -527,7 +534,7 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
     )
 
     torch.manual_seed(13)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     rows = 4
     valid_width = 1024
     width = valid_width + (8 if use_row_starts else 0)
@@ -658,10 +665,86 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="This test requires CUDA and CuteDSL",
 )
-def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
+@pytest.mark.parametrize("epoch", [1, 2])
+# 14 id bits fit the spare score bits; 20 leave 4 for the token-id passes.
+@pytest.mark.parametrize("score_bits,id_bits", [(32, 32), (16, 14), (16, 20)])
+def test_cutedsl_pingpong_select_matches_gathered_select(
+    epoch: int, score_bits: int, id_bits: int
+):
+    """The direct-exchange selector (32-bit score keys, token-id pass only for
+    boundary ties, no radix when the valid candidates fit) selects the same set
+    as the all-gather selector, reading the inbox slot of the published epoch.
+    Upcast BF16 scores rank on their high 16 bits and the ids on the bits they
+    need, in both selectors."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_pingpong_cutedsl import (  # noqa: E501
+        stable_topk_from_pingpong_candidates_cutedsl,
+    )
+
+    torch.manual_seed(7)
     device = torch.device("cuda")
+    world, topk, max_rows = 8, 2048, 8
+    num_candidates = world * topk
+    gathered = torch.empty((max_rows, num_candidates, 2), device=device)
+    gathered[..., 0] = torch.randn((max_rows, num_candidates), device=device)
+    gathered[..., 1] = torch.randperm(num_candidates, device=device).float()
+    # Row 1: coarse scores, so ties straddle the top-k boundary.
+    gathered[1, :, 0] = torch.randint(0, 64, (num_candidates,), device=device).float()
+    # Row 2: fewer valid candidates than topk.
+    gathered[2, 1000:, 1] = -1
+    # Row 3: no valid candidate.
+    gathered[3, :, 1] = -1
+    # Row 4: negative scores and padding mixed in.
+    gathered[4, :, 0] = -gathered[4, :, 0].abs()
+    gathered[4, ::3, 1] = -1
+    if score_bits == 16:
+        gathered[..., 0] = gathered[..., 0].bfloat16().float()
+
+    inboxes = torch.full((2, max_rows, num_candidates, 2), float("nan"), device=device)
+    inboxes[(epoch - 1) & 1] = gathered
+    write_seq = torch.tensor([epoch], device=device, dtype=torch.int64)
+
+    rows = 6
+    # The all-gather selector reads the rank-major [world, rows, topk, 2]
+    # layout; the ping-pong inbox is row-major.
+    rank_major = gathered[:rows].view(rows, world, topk, 2).transpose(0, 1).contiguous()
+    expected = torch.empty((rows, topk), device=device, dtype=torch.int32)
+    stable_topk_from_gathered_candidates_cutedsl(rank_major, topk, out=expected)
+    compact = torch.empty_like(expected)
+    stable_topk_from_gathered_candidates_cutedsl(
+        rank_major,
+        topk,
+        out=compact,
+        score_bits=score_bits,
+        id_bits=id_bits,
+    )
+    for row in range(rows):
+        assert sorted(compact[row].tolist()) == sorted(expected[row].tolist())
+    for use_pdl in (False, True):
+        actual = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
+        stable_topk_from_pingpong_candidates_cutedsl(
+            inboxes,
+            write_seq,
+            topk,
+            out=actual,
+            use_pdl=use_pdl,
+            score_bits=score_bits,
+            id_bits=id_bits,
+        )
+        for row in range(rows):
+            got = actual[row].cpu().tolist()
+            want = expected[row].cpu().tolist()
+            assert sorted(got) == sorted(want), f"row {row}"
+
+
+@requires_accelerator
+def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
+    device = torch.device(DEVICE_TYPE)
     seq_len = 8
 
     query_start_loc = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
@@ -734,9 +817,7 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
-)
+@requires_accelerator
 @pytest.mark.parametrize("block_stride_rows", [None, 12])
 def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     block_stride_rows: int | None,
@@ -744,10 +825,10 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     block_size = 4
     num_topk = 128
     dcp_size = 2
-    req_id = torch.zeros(1, dtype=torch.int32, device="cuda")
-    token_indices = torch.full((1, num_topk), -1, dtype=torch.int32, device="cuda")
-    token_indices[0, :8] = torch.arange(8, dtype=torch.int32, device="cuda")
-    block_table = torch.tensor([[10]], dtype=torch.int32, device="cuda")
+    req_id = torch.zeros(1, dtype=torch.int32, device=DEVICE_TYPE)
+    token_indices = torch.full((1, num_topk), -1, dtype=torch.int32, device=DEVICE_TYPE)
+    token_indices[0, :8] = torch.arange(8, dtype=torch.int32, device=DEVICE_TYPE)
+    block_table = torch.tensor([[10]], dtype=torch.int32, device=DEVICE_TYPE)
 
     out, valid_counts = triton_filter_and_convert_dcp_index(
         req_id,
@@ -774,9 +855,7 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
-)
+@requires_accelerator
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
 # Include padded single-tile compaction and the multi-tile atomic fallback.
@@ -788,7 +867,7 @@ def test_dcp_filter_compaction_matches_reference(
     physical slots packed into [0, valid_count) with -1 in the tail -- the same
     SET a reference filter + sort/gather produces. Uses wide rows (> BLOCK_N
     valid slots), with interior -1 gaps."""
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     torch.manual_seed(7)
     dcp_size = 2
     block_size = 8
@@ -841,13 +920,11 @@ def test_dcp_filter_compaction_matches_reference(
         assert set(out[r, :n].cpu().tolist()) == set(expected.cpu().tolist())
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
-)
+@requires_accelerator
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.manual_seed(2)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     dcp_size = 2
     block_size = 4
     num_topk = 128
@@ -916,16 +993,14 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
-)
+@requires_accelerator
 @pytest.mark.parametrize("is_lse_base_on_e", [True, False])
 def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
-    out = torch.full((1, 1, 4), float("nan"), device="cuda")
+    out = torch.full((1, 1, 4), float("nan"), device=DEVICE_TYPE)
     lses = torch.tensor(
         [[[0.0]], [[float("-inf")]]],
         dtype=torch.float32,
-        device="cuda",
+        device=DEVICE_TYPE,
     )
 
     corrected, final_lse = correct_attn_out(
@@ -941,9 +1016,7 @@ def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     torch.testing.assert_close(final_lse, torch.zeros_like(final_lse))
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
-)
+@requires_accelerator
 def test_decode_topk_pads_surplus_with_negative_one():
     """When a row's valid length < topk the top-k kernel must pad the surplus
     slots with -1: the DCP merge (`topk_indices >= 0`) and
@@ -953,7 +1026,7 @@ def test_decode_topk_pads_surplus_with_negative_one():
     Checked on the *set* of valid indices (the kernel may order them by score,
     not position)."""
     torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     topk = 8
     next_n = 1
     seq_lens_list = [0, 3, 5, 8]
@@ -975,7 +1048,7 @@ def test_decode_topk_pads_surplus_with_negative_one():
 def test_persistent_topk_pads_surplus_with_negative_one():
     """Same surplus=-1 invariant for the persistent_topk kernel (k>=512)."""
     torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     topk = 512  # persistent_topk requires k in {512, 1024, 2048}
     seq_lens_list = [100, 300, 512]
     num_rows = len(seq_lens_list)
@@ -999,7 +1072,7 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     -> global top-k -> physical localize -> LSE merge chain for the common
     short-context decode case, vs the non-DCP reference."""
     torch.manual_seed(4)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     world = 2
     interleave = 1
     topk = 512

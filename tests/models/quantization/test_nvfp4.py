@@ -68,7 +68,6 @@ def test_models(example_prompts, model_name) -> None:
     llm = LLM(
         model=model_name,
         max_model_len=MAX_MODEL_LEN,
-        trust_remote_code=True,
         enforce_eager=True,
         quantization="modelopt_fp4",
     )
@@ -109,6 +108,7 @@ SM_100_NVFP4_BACKENDS = [
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "torch",
+    "cutlass",
 ]
 
 SM_10X_ONLY_NVFP4_BACKENDS = ["flashinfer_cutedsl", "flashinfer_trtllm", "torch"]
@@ -125,6 +125,7 @@ SM_10X_ONLY_NVFP4_BACKENDS = ["flashinfer_cutedsl", "flashinfer_trtllm", "torch"
         "flashinfer_trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
         "flashinfer_cutlass",
         "torch",
+        "cutlass",
     ],
 )
 def test_nvfp4(vllm_runner, model, eager, backend):
