@@ -477,6 +477,8 @@ class LocalSnapshotTools:
             )
         _validate_tcp_connections(self._tcp_records(), socket_owners)
         gpu_uuid = self._gpu_uuid_for_pids(cuda_holders, cuda_rows)
+        generated_files: tuple[GeneratedFile, ...]
+        external_cache_files: tuple[tuple[str, str], ...]
         if portable:
             # A portable artifact carries every file itself, so restore
             # verifies the copies it materializes and needs no fingerprints
@@ -775,7 +777,7 @@ class LocalSnapshotTools:
             if portable:
                 attachments = capture_attachments(artifact, inventory.generated_files)
             else:
-                attachments = ()
+                attachments = []
         except BaseException as primary:
             try:
                 remaps_after = self._link_remap_names()
@@ -884,11 +886,10 @@ class LocalSnapshotTools:
         attachments: tuple[SnapshotAttachment, ...] = (),
         *,
         work_dir: Path | None = None,
-        cleanup_work_dir: bool | None = None,
+        cleanup_work_dir: bool = False,
     ) -> SnapshotManifest:
         if work_dir is None:
             work_dir = Path(os.path.abspath(artifact))
-            cleanup_work_dir = False
         identity = self.current_identity(inventory.gpu_uuid)
         redacted_argv = list(engine_argv)
         redact_api_keys = False
