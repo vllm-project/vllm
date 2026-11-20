@@ -1630,6 +1630,7 @@ mod tests {
         ]);
         let chunks = completion_chunk_stream(
             stream,
+            Some("hello".to_string()),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1637,7 +1638,6 @@ mod tests {
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
-                echo: Some("hello".to_string()),
                 requested_logprobs: Some(1),
                 ..Default::default()
             },
@@ -1675,6 +1675,7 @@ mod tests {
         ]);
         let chunks = completion_chunk_stream(
             stream,
+            None,
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
