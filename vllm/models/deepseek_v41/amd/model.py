@@ -73,10 +73,13 @@ from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    MHC_SEAM_MIN_TOKENS,
     MHCOverlapStream,
     mhc_pre_delayed_mxfp8,
     mhc_pre_delayed_overlap,
+    mhc_pre_delayed_seam,
     supports_mhc_overlap,
+    supports_mhc_seam,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import (
     MonoDecodeLayer,
@@ -343,6 +346,19 @@ class DeepseekV4DecoderLayer(nn.Module):
         # input as MXFP8 for the first GEMM (fused_wqa_wkv / shared gate_up).
         self.attn_seam_mxfp8 = False
         self.ffn_seam_mxfp8 = False
+        # On gfx942, seams with a post block run as one AITER call
+        # from MHC_SEAM_MIN_TOKENS tokens.
+        self.mhc_seam = (
+            partial(mhc_pre_delayed_seam, self.mhc_pre_delayed)
+            if not self.fuse_seam_norm
+            and supports_mhc_seam(self.hidden_size, self.hc_mult)
+            else None
+        )
+        if self.mhc_seam is not None:
+            logger.info_once(
+                "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
+                MHC_SEAM_MIN_TOKENS,
+            )
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
@@ -424,7 +440,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
             if mhc_overlap is not None
-            else self.mhc_pre_delayed
+            else self.mhc_seam or self.mhc_pre_delayed
         )
         # The overlap's layer input comes from the Triton collapse, not Mega-MHC.
         mxfp8_pre = partial(mhc_pre_delayed_mxfp8, self.mhc_pre_delayed)
@@ -585,7 +601,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         pre_fn = (
             partial(mhc_pre_delayed_mxfp8, self.mhc_pre_delayed)
             if self.attn_seam_mxfp8
-            else self.mhc_pre_delayed
+            else self.mhc_seam or self.mhc_pre_delayed
         )
         residual, post_mix, res_mix, x, _attn_pre = pre_fn(
             residual,
