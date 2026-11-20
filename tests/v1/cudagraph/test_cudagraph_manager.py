@@ -929,7 +929,7 @@ def test_speculator_replays_graph_for_runtime_width(monkeypatch, specialize):
 
     def capture(manager, create_forward_fn, progress_bar_desc):
         for desc in manager._capture_descs[CUDAGraphMode.FULL]:
-            create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+            create_forward_fn(desc, warmup=False)(CUDAGraphMode.FULL)
             k = forward.call_args.kwargs["num_speculative_steps"]
             graph = MagicMock()
             graph.replay.side_effect = lambda k=k: replayed_widths.append(k)
