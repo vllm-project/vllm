@@ -1314,27 +1314,13 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
-            if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = "align"
-                logger.info(
-                    "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching is enabled",
-                    cache_config.mamba_cache_mode,
-                    model_config.architecture,
-                )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = cache_config.block_size
-        else:
-            if cache_config.mamba_cache_mode != "none":
-                cache_config.mamba_cache_mode = "none"
-                logger.warning(
-                    "Mamba cache mode is set to 'none' when prefix caching is disabled"
-                )
-            if cache_config.mamba_block_size is None:
-                cache_config.mamba_block_size = model_config.max_model_len
+        elif cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
 
 class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
@@ -1503,6 +1489,22 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         text_config = config.get_text_config()
         text_config.method = "from_2_way_softmax"
         text_config.classifier_from_token = tokens
+
+
+class ShieldGemma2ForImageClassificationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        text_config = hf_config.get_text_config()
+        # A logit softcap would make the two-way softmax shortcut inexact.
+        if getattr(text_config, "final_logit_softcapping", None) is not None:
+            raise ValueError("ShieldGemma 2 does not support final_logit_softcapping")
+
+        # Same Yes/No ids as ShieldGemma2ForImageClassification in transformers.
+        text_config.method = "from_2_way_softmax"
+        text_config.classifier_from_token = ["No", "Yes"]
+        hf_config.num_labels = 1
+        text_config.num_labels = 1
 
 
 class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
@@ -1945,6 +1947,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
     "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
     "Qwen4ExpMTP": Qwen4ExpMTPConfig,
+    "ShieldGemma2ForImageClassification": (ShieldGemma2ForImageClassificationConfig),
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
