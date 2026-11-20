@@ -122,6 +122,7 @@ class Base(
 ):
     hf_to_vllm_mapper: WeightsMapper
     supports_aux_hidden_states_over_pp = True
+    _tower_model_names: tuple[str, ...] = ()
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
@@ -584,12 +585,6 @@ class Base(
             )
         # Decoder layers are detected as they are built, after their pre-replace hook
         fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
-        # Towers were built on `meta`, so `_mark_tower_model` could not offload them
-        tower_names = (
-            set(getattr(self, "_tower_model_names", ()))
-            if offloader.supports_tower_offload
-            else set()
-        )
 
         def _materialise(module: nn.Module, prefix: str) -> nn.Module:
             """Mimic what `__init__` does to the whole model, for a module offloaded
@@ -633,13 +628,16 @@ class Base(
             native models."""
             for child_name, child_module in tower.named_children():
                 _replace_child(tower, child_name, child_module, prefix)
-            offloader.wrap_modules(iter([_materialise(tower, prefix)]), prefix=prefix)
+            if offloader.supports_tower_offload:
+                towers = (_materialise(t, prefix) for t in [tower])
+                offloader.wrap_modules(towers, prefix=prefix)
 
         def _recursive_replace(module: nn.Module, prefix: str):
             if module is decoder_layers:
                 _replace_decoder_layers(module, prefix)
                 return
-            if prefix in tower_names:
+            # Built on meta, so `_mark_tower_model` could not offload them
+            if prefix in self._tower_model_names:
                 _replace_tower(module, prefix)
                 return
             for child_name, child_module in module.named_children():
