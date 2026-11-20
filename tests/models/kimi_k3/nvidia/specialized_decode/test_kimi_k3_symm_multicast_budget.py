@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The NVLink multicast budget of the Kimi K3 symmetric-memory mailboxes
-(``specialized_decode/symm.py``).
+(`specialized_decode/symm.py`).
 
 A GB300 NVL72 rack shares one pool of about 820 multicast objects across every
-process of its NVLink domain; each ``symm_mem.rendezvous`` binds one unless
+process of its NVLink domain; each `symm_mem.rendezvous` binds one unless
 multicast is disabled for it. Checked here:
 
-- ``peer_rendezvous``: no multicast address, every peer's stores land through
-  ``buffer_ptrs`` / ``get_buffer``, and the process environment is restored;
-- ``multicast_rendezvous``: the multicast address on multicast platforms, and 0 on
+- `peer_rendezvous`: no multicast address, every peer's stores land through
+  `buffer_ptrs` / `get_buffer`, and the process environment is restored;
+- `multicast_rendezvous`: the multicast address on multicast platforms, and 0 on
   every rank when one rank's binding is skipped (the ranks agree on the path);
 - the specialized decode's peer-store mailboxes (DCP partials, top-k exchange,
   MoE tail reduce-scatter) bind no multicast object and still map every peer.
 
-Runs on 2 GPUs (``mp.spawn``), or on every rank of a ``torchrun`` / ``srun`` launch
-(e.g. TP8 across two GB300 NVL72 trays) when ``RANK`` and ``WORLD_SIZE`` are set.
+Runs on 2 GPUs (`mp.spawn`), or on every rank of a `torchrun` / `srun` launch
+(e.g. TP8 across two GB300 NVL72 trays) when `RANK` and `WORLD_SIZE` are set.
 """
 
 import os

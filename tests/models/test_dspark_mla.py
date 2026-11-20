@@ -217,7 +217,7 @@ def test_context_kv_weights_are_loaded_as_merged_linear_shards():
 def test_v41_dspark_loads_linear_scales(
     monkeypatch, scale_dtype, checkpoint_name, runtime_module, shard_id
 ):
-    """Checkpoint ``.scale`` maps to the quant method's scale parameter and
+    """Checkpoint `.scale` maps to the quant method's scale parameter and
     loads untouched. MXFP8 block-scale expansion lives in the KMxfp8Static
     loader (see tests/quantization/test_modelopt.py), not in load_weights."""
     from vllm.models.deepseek_v41.nvidia import dspark
@@ -256,6 +256,7 @@ def test_v41_dspark_loads_linear_scales(
                 SimpleNamespace(
                     ffn=SimpleNamespace(
                         use_native_mega_moe=False,
+                        n_redundant_experts=0,
                         experts=SimpleNamespace(has_fused_shared_experts=False),
                     )
                 )
@@ -384,7 +385,12 @@ def test_v41_context_wkv_loads_each_layer_into_both_projections(monkeypatch):
         pad_shared_expert=False,
         model=SimpleNamespace(
             layers=[
-                SimpleNamespace(ffn=SimpleNamespace(use_native_mega_moe=False))
+                SimpleNamespace(
+                    ffn=SimpleNamespace(
+                        use_native_mega_moe=False,
+                        n_redundant_experts=0,
+                    )
+                )
                 for _ in range(3)
             ],
             confidence_head=None,
@@ -474,19 +480,16 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
         head_size=576,
         sliding_window=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
         attn_backend=SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA"),
         _uses_flat_kv_cache=lambda: False,
     )
-    draft_attn = SimpleNamespace(
-        kv_cache_dtype="fp8", head_size=576, non_causal_multi_token_decode=True
-    )
-    target_spec = MLAAttention.get_kv_cache_spec(target_attn, vllm_config)
-    draft_spec = MultiHeadLatentAttention.get_kv_cache_spec(draft_attn, vllm_config)
+    draft_attn = SimpleNamespace(kv_cache_dtype="fp8", head_size=576)
+    target_config = MLAAttention.get_kv_cache_config(target_attn, vllm_config)
+    draft_config = MultiHeadLatentAttention.get_kv_cache_config(draft_attn, vllm_config)
 
-    kv_cache_spec = {f"model.layers.{i}.attn": target_spec for i in range(24)}
-    kv_cache_spec |= {f"draft.layers.{i}.attn": draft_spec for i in range(5)}
+    layer_configs = {f"model.layers.{i}.attn": target_config for i in range(24)}
+    layer_configs |= {f"draft.layers.{i}.attn": draft_config for i in range(5)}
 
-    groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(layer_configs)
     assert len(groups) == 1
     assert len(groups[0].layer_names) == 29

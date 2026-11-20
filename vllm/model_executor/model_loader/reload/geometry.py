@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Integer geometry of the load plan: one traced ``copy_`` as a box of the
+"""Integer geometry of the load plan: one traced `copy_` as a box of the
 checkpoint tensor plus a strided destination region, merging of writes, and
 the byte runs a write covers. No torch state."""
 
 import itertools
 from dataclasses import dataclass
 from math import prod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 Box = tuple[tuple[int, int], ...]  # half-open (start, stop) per dim, HF coords
 
@@ -15,10 +19,10 @@ class Fallback(Exception):
     """A name cannot be written directly; the message is the reported reason."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Region:
-    """``as_strided`` arguments relative to the target's storage offset, in
-    checkpoint-dtype elements. ``shape`` is the shape of the write's box, or
+    """`as_strided` arguments relative to the target's storage offset, in
+    elements of the write's dtype. `shape` is the shape of the write's box, or
     that shape with some dimensions split."""
 
     offset: int
@@ -26,12 +30,14 @@ class Region:
     stride: tuple[int, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Write:
     src: Box  # part of one of the entry's boxes
     module: str  # target tensor, by name
     tensor: str
     dst: Region
+    # dtype the loader's copy_ casts to; None: a byte copy in the checkpoint dtype
+    dtype: "torch.dtype | None" = None
 
 
 def box_and_region(
@@ -39,21 +45,21 @@ def box_and_region(
     src_offset: int,
     dims: list[tuple[int, int, int]],
 ) -> tuple[Box, tuple[int, ...], tuple[int, ...]]:
-    """Reduce one ``copy_`` to a box of the (contiguous) checkpoint tensor and
+    """Reduce one `copy_` to a box of the (contiguous) checkpoint tensor and
     the destination shape and strides of the box's elements, in row-major box
     order.
 
-    ``dims`` are the copied tensor's (size, source stride, destination
-    stride); ``src_offset`` is where its first element sits in the checkpoint
+    `dims` are the copied tensor's (size, source stride, destination
+    stride); `src_offset` is where its first element sits in the checkpoint
     tensor. Each dim is assigned to the checkpoint dim its source stride steps
-    through, split where it spans several (``flatten``); the parts assigned to
+    through, split where it spans several (`flatten`); the parts assigned to
     one checkpoint dim must tile a contiguous range of it.
 
-    Example: ``P.copy_(W.t())`` with ``W`` [4, 6] and ``P`` [6, 4] contiguous
-    has dims ``[(6, 1, 4), (4, 6, 1)]``: the box is ``((0, 4), (0, 6))`` and
-    the destination ``shape (4, 6), stride (1, 4)``. A box dim the loader
-    splits and sends to unrelated places stays split: ``6`` becomes
-    ``(2, 3)`` with two destination strides.
+    Example: `P.copy_(W.t())` with `W` [4, 6] and `P` [6, 4] contiguous
+    has dims `[(6, 1, 4), (4, 6, 1)]`: the box is `((0, 4), (0, 6))` and
+    the destination `shape (4, 6), stride (1, 4)`. A box dim the loader
+    splits and sends to unrelated places stays split: `6` becomes
+    `(2, 3)` with two destination strides.
 
     Raises:
         Fallback: the copy is not a view of a box (step slice, expand, ...).
@@ -130,10 +136,10 @@ def merge_writes(writes: list[Write]) -> list[Write]:
 
 
 def _merge(a: Write, b: Write) -> Write | None:
-    """``a`` and ``b`` as one write if ``b`` continues ``a`` along exactly one
+    """`a` and `b` as one write if `b` continues `a` along exactly one
     box dim, into the same target, with an equal destination stride there."""
     rank = len(a.src)
-    if (a.module, a.tensor) != (b.module, b.tensor) or not (
+    if (a.module, a.tensor, a.dtype) != (b.module, b.tensor, b.dtype) or not (
         len(a.dst.shape) == len(b.dst.shape) == rank
     ):
         return None  # other target, or a split dim
@@ -156,24 +162,32 @@ def _merge(a: Write, b: Write) -> Write | None:
     src = tuple((a.src[j][0], b.src[j][1]) if j == k else a.src[j] for j in range(rank))
     shape = tuple(na + nb if j == k else n for j, n in enumerate(a.dst.shape))
     stride = tuple(stride_a if j == k else s for j, s in enumerate(a.dst.stride))
-    return Write(src, a.module, a.tensor, Region(a.dst.offset, shape, stride))
+    return Write(src, a.module, a.tensor, Region(a.dst.offset, shape, stride), a.dtype)
 
 
 _MAX_RUNS = 1 << 16
+
+
+def byte_span(
+    byte_offset: int, shape: tuple[int, ...], stride: tuple[int, ...], itemsize: int
+) -> tuple[int, int]:
+    """The [start, stop) bytes from the first to the last element of a
+    non-empty strided write with non-negative strides."""
+    span = sum((n - 1) * s for n, s in zip(shape, stride)) + 1
+    return byte_offset, byte_offset + span * itemsize
 
 
 def byte_runs(
     byte_offset: int, shape: tuple[int, ...], stride: tuple[int, ...], itemsize: int
 ) -> list[tuple[int, int]]:
     """The bytes a strided write covers as [start, stop) runs; one covering
-    span when there would be more than ``_MAX_RUNS``."""
+    span when there would be more than `_MAX_RUNS`."""
     dims = sorted(((n, s) for n, s in zip(shape, stride) if n > 1), key=lambda x: -x[1])
     run = 1  # contiguous elements at the innermost end
     while dims and dims[-1][1] == run:
         run *= dims.pop()[0]
     if prod(n for n, _ in dims) > _MAX_RUNS:
-        span = sum((n - 1) * s for n, s in dims) + run
-        return [(byte_offset, byte_offset + span * itemsize)]
+        return [byte_span(byte_offset, shape, stride, itemsize)]
     return [
         (byte_offset + sum(o) * itemsize, byte_offset + (sum(o) + run) * itemsize)
         for o in itertools.product(*(range(0, n * s, s) for n, s in dims))

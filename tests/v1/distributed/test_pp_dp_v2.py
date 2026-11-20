@@ -9,7 +9,6 @@ regimes. Requires 4 GPUs (DP=2, PP=2, TP=1) on CUDA or ROCm.
 
 import asyncio
 import contextlib
-import os
 from contextlib import ExitStack
 
 import pytest
@@ -36,10 +35,6 @@ def _gpu_skip_reason() -> str | None:
 _GPU_SKIP = _gpu_skip_reason()
 
 pytestmark = [
-    pytest.mark.skipif(
-        os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "1") == "0",
-        reason="V2 model runner disabled via VLLM_USE_V2_MODEL_RUNNER=0",
-    ),
     pytest.mark.skipif(_GPU_SKIP is not None, reason=_GPU_SKIP or ""),
 ]
 

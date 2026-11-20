@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     cpu_fused_moe,
     cpu_fused_moe_int8,
     cpu_prepack_moe_weight,
@@ -683,6 +683,7 @@ def test_cpu_experts_int8_unaligned_intermediate_size(
         a1_scale=None,
         a2_scale=None,
         per_act_token_quant=True,
+        per_out_ch_quant=True,
     )
     experts = CPUExpertsInt8(moe_config, quant_config)
     experts.process_weights_after_loading(layer)

@@ -293,7 +293,7 @@ def test_sparse_mla_backend_reports_sink_support_for_current_hardware() -> None:
     assert ROCMAiterMLASparseBackend.supports_sink() == (get_cdna_version() in (3, 4))
 
 
-def test_sparse_mla_backend_rejects_dcp() -> None:
+def test_sparse_mla_backend_allows_dcp() -> None:
     from vllm.platforms.rocm import RocmPlatform
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -312,11 +312,11 @@ def test_sparse_mla_backend_rejects_dcp() -> None:
         use_dcp=True,
     )
 
-    with pytest.raises(ValueError, match="DCP not supported"):
-        RocmPlatform.get_attn_backend_cls(
-            selected_backend=AttentionBackendEnum.ROCM_AITER_MLA_SPARSE,
-            attn_selector_config=selector_config,
-        )
+    backend_cls = RocmPlatform.get_attn_backend_cls(
+        selected_backend=AttentionBackendEnum.ROCM_AITER_MLA_SPARSE,
+        attn_selector_config=selector_config,
+    )
+    assert backend_cls == AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
 
 @pytest.mark.parametrize("num_heads,block_size", [(8, 16), (20, 32)])
@@ -466,7 +466,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
     kv = torch.randn(2, 2, block_size, Q_HEAD_DIM, device="cuda").to(dtype)[:, 1]
     selected = torch.tensor([[1, 7, 18], [0, 3, 20]], dtype=torch.int32, device="cuda")
     sinks = torch.linspace(-3.0, 5.0, num_heads, device="cuda")
-    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl = ROCMAiterMLASparseImpl.__new__(ROCMAiterMLASparseImpl)
     impl.num_heads = num_heads
     impl.kv_lora_rank = V_HEAD_DIM
     impl.kv_cache_dtype = "auto"
