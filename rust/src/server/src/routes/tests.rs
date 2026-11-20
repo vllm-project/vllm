@@ -1504,8 +1504,8 @@ async fn scale_out_abort_requests_validates_body() {
         None {"request_ids": ["unknown"]} -> 200 OK 
         Some("text/plain") {"request_ids": "unknown"} -> 200 OK 
         Some("application/json") {} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: missing field `request_ids` at line 1 column 2","type":"Bad Request","param":null,"code":400}}
-        Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":null,"code":400}}
-        Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":null,"code":400}}
+        Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":"body.request_ids","code":400}}
+        Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":"body.request_ids","code":400}}
         Some("application/json") {"request_ids":  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: request_ids: EOF while parsing a value at line 1 column 16","type":"Bad Request","param":null,"code":400}}
         None  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: EOF while parsing a value at line 1 column 0","type":"Bad Request","param":null,"code":400}}"#]].assert_eq(&results.join("\n"));
     engine_task.abort_and_join().await;
