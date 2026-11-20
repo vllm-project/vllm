@@ -175,7 +175,9 @@ async def test_scale_out_reuses_token_counting_effort_probe():
         openai_serving_models=MagicMock(),
         tool_server=None,
     )
-    init_scale_out_state(state, MagicMock(), MagicMock(), None)
+    init_scale_out_state(
+        state, MagicMock(mm_tensor_refs_config=None), MagicMock(), None
+    )
     # Exercise conversion through both handlers without sampling or generation.
     state.serving_render.render_chat_request = renderer.render_chat
     fields = dict(

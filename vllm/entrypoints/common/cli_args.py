@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 
 import vllm.envs as envs
 from vllm.config import config
+from vllm.config.mm_tensor_refs import MMTensorRefsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
@@ -303,6 +304,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    mm_tensor_refs_config: MMTensorRefsConfig | None = None
+    """Enable `features.kwargs_refs` in `/inference/v1/generate`, which loads
+    processed multimodal tensors that clients upload to an S3-compatible store.
+    Requires `--enable-scale-out` or `--tokens-only`. Off by default. Example:
+    `'{"s3_allowed_uri_prefix": "s3://bucket/prefix"}'`."""
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
