@@ -660,11 +660,6 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         }
     )
 
-    # Recurrent depth (GLiDE): each block's last layer mapped to its first, and
-    # how many times the blocks run. Generation models have no blocks.
-    recurrent_blocks: dict[int, int] = {}
-    recurrent_passes: int = 1
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -716,35 +711,6 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def use_sequence_parallel(self) -> bool:
         return self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
 
-    def _repeat_block(
-        self,
-        block_input: torch.Tensor,
-        block_output: torch.Tensor,
-        first: int,
-        last: int,
-        positions: torch.Tensor,
-    ) -> torch.Tensor:
-        """Recurrent depth: damped Euler steps over layers `first..last`.
-
-        With `P` passes, `x_k = x_{k-1} + (G(x_{k-1}) - x_{k-1}) / P`, where
-        `G` is the block and `block_output` is `G(block_input)`.
-        """
-        step = 1.0 / self.recurrent_passes
-        x = block_input
-        for n in range(self.recurrent_passes):
-            if n > 0:
-                # The fused norms may add into their residual in place.
-                block_output, residual = x.clone(), None
-                for layer in islice(self.layers, first, last + 1):
-                    block_output, residual = layer(
-                        positions=positions,
-                        hidden_states=block_output,
-                        residual=residual,
-                    )
-                block_output = block_output + residual
-            x = torch.lerp(x.float(), block_output.float(), step).to(x.dtype)
-        return x
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -770,32 +736,15 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 residual = sequence_parallel_chunk(residual)
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        block_firsts = self.recurrent_blocks.values()
-        block_inputs: dict[int, torch.Tensor] = {}
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if layer_idx in block_firsts:
-                block_inputs[layer_idx] = (
-                    hidden_states.clone()
-                    if residual is None
-                    else hidden_states + residual
-                )
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            if (first := self.recurrent_blocks.get(layer_idx)) is not None:
-                hidden_states = self._repeat_block(
-                    block_inputs.pop(first),
-                    hidden_states + residual,
-                    first,
-                    layer_idx,
-                    positions,
-                )
-                residual = None
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
@@ -809,10 +758,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        if residual is None:
-            hidden_states = self.norm(hidden_states)
-        else:
-            hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]

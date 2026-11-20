@@ -275,14 +275,6 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
-        # Set by GlideForSequenceClassificationConfig.
-        recurrent_depth = getattr(config, "recurrent_depth", None)
-        if recurrent_depth:
-            self.recurrent_blocks = {
-                last: first for first, last in recurrent_depth["blocks"]
-            }
-            self.recurrent_passes = recurrent_depth["passes"]
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
         # shared expert into the extra fused slot only when AITER FSE is both
@@ -308,6 +300,8 @@ class Qwen3_5ForCausalLMBase(
     SupportsMRoPE,
     SupportsPP,
 ):
+    model_cls: ClassVar[type[Qwen3_5Model]] = Qwen3_5Model
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -343,7 +337,7 @@ class Qwen3_5ForCausalLMBase(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = Qwen3_5Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
@@ -476,6 +470,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     supports_multimodal_pruning = True
+    language_model_cls: ClassVar[type[Qwen3_5ForCausalLM]] = Qwen3_5ForCausalLM
 
     hf_to_vllm_mapper = (
         Qwen3VLForConditionalGeneration.hf_to_vllm_mapper
@@ -524,7 +519,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = Qwen3_5ForCausalLM(
+            self.language_model = self.language_model_cls(
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
