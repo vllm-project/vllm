@@ -4,7 +4,6 @@
 output gate, served as an embedding model (last token, normalized).
 Structured decisions read it with KananaVDecideStrategy."""
 
-from collections.abc import Iterable
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -33,7 +32,7 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import WeightsMapper, maybe_prefix
 from .vision import is_vit_use_data_parallel
 
 
@@ -205,6 +204,12 @@ else:
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class KananaVDecideModel(_KananaVDecideBase):
+    # The checkpoint's training-time similarity temperature is unused: the
+    # config's decision_temperature scales the cosines.
+    hf_to_vllm_mapper = Qwen3VLForConditionalGeneration.hf_to_vllm_mapper | (
+        WeightsMapper(orig_to_new_prefix={"similarity.": None})
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = self.config
@@ -224,9 +229,3 @@ class KananaVDecideModel(_KananaVDecideBase):
                     input_norm=build_mm_input_norm(self.model_config),
                     prefix=maybe_prefix(prefix, "visual"),
                 )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The checkpoint's training-time similarity temperature is unused:
-        # the config's decision_temperature scales the cosines.
-        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["similarity."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
