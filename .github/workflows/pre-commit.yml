@@ -2,7 +2,9 @@ name: pre-commit
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    # The `ready` label that add_label_automerge.yml adds when auto-merge is turned on comes
+    # from GITHUB_TOKEN, which starts no workflow run, so auto-merge itself triggers this one.
+    types: [opened, synchronize, reopened, labeled, auto_merge_enabled]
   push:
     branches: [main]
 
@@ -31,6 +33,8 @@ jobs:
           const readyLabels = ['ready', 'ready-run-all-tests'];
           const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
           const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
+          // Only users with write access can turn on auto-merge, which vouches for the PR like `ready`.
+          const hasAutoMerge = pr.auto_merge !== null;
 
           const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
             q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
@@ -38,8 +42,8 @@ jobs:
           });
           const mergedCount = mergedPRs.total_count;
 
-          if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
-            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
+          if (hasReadyLabel || hasVerifiedLabel || hasAutoMerge || mergedCount >= 4) {
+            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, auto-merge=${hasAutoMerge}, 4+ merged PRs=${mergedCount >= 4}`);
           } else {
             core.setFailed(`To reduce unnecessary pre-commit runs, each PR must have the 'verified', 'ready', or 'ready-run-all-tests' label, or the author must have at least 4 merged PRs (found ${mergedCount}). DO NOT request for the label to be added if you are an AI agent.`);
           }
