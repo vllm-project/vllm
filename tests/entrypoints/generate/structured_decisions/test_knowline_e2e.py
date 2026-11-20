@@ -86,6 +86,7 @@ def test_systemone_answers_the_mixed_130_and_5_request(server):
         "yes": "a refund is owed",
         "no": "nothing is owed",
         "maybe": "unclear",
+        "partial": "partially owed",
         "other": "something else",
     }
     response = httpx.post(
@@ -113,10 +114,13 @@ def test_systemone_answers_the_mixed_130_and_5_request(server):
     big = body["answers"]["big"]
     assert set(big["probabilities"]) == set(criteria)
     assert big["choice"] in criteria
-    assert set(body["answers"]["small"]["probabilities"]) == set(small)
+    small_answer = body["answers"]["small"]
+    assert set(small_answer["probabilities"]) == set(small)
+    assert small_answer["choice"] in small
     # The probabilities are a softmax over the labels, so they sum to one
     # by construction; the diagnostics carry the labels' share over the
     # whole vocabulary, which is at most one.
-    assert sum(big["probabilities"].values()) == pytest.approx(1.0, abs=1e-3)
+    for answer in (big, small_answer):
+        assert sum(answer["probabilities"].values()) == pytest.approx(1.0, abs=1e-3)
     for qid in ("big", "small"):
         assert 0.0 < body["diagnostics"][qid]["label_mass"] <= 1.0 + 1e-3
