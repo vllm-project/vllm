@@ -2805,6 +2805,8 @@ notes:
 
       Use the image `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. The
       generic `kimi-k31` ROCm image does not run this configuration on gfx942.
+      The nightly will once it has vllm-project/vllm#66769 and pins an AITER
+      that includes ROCm/aiter#7510 (no AITER release has it yet).
 
       MI325X is single-node TP8 with DCP8 (`a2a`) and `--max-num-seqs 64`.
       The default of 1024 does not start: it exceeds the KDA state slots.
