@@ -476,7 +476,7 @@ class VllmConfig:
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     num_hash_lookahead_tokens: int = Field(default=0, init=False)
-    """Tokens after each block covered by its hash; zero keeps legacy hashes."""
+    """Tokens after each block that its hash covers; 0 unless draft KV reads ahead."""
     watermark_config: WatermarkConfig | None = None
     """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
@@ -725,38 +725,33 @@ class VllmConfig:
         Mid-prefill the drafter consumes tokens the target model has not been
         scheduled for yet, so every component that has to keep them available
         must apply this margin: the scheduler, which never ends a chunk within
-        it and shifts encoder scheduling by it, and the KV cache manager, which
-        treats the trailing `this - 1` tokens as re-prefillable rather than
-        finalized. Consumers must read this property rather than re-deriving
-        their own per-method lookahead, so those components cannot drift apart.
+        it and shifts encoder scheduling by it, and the components that read
+        `num_reprefillable_tokens`. Consumers must read this property rather
+        than re-deriving their own per-method lookahead, so those components
+        cannot drift apart.
         """
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
         return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
+    @property
+    def num_reprefillable_tokens(self) -> int:
+        """Trailing computed tokens whose drafter KV is not final yet: of the
+        `num_prefill_lookahead_tokens` read past the prompt end, only the first
+        is sampled, so the rest are rewritten later."""
+        return max(0, self.num_prefill_lookahead_tokens - 1)
+
     def _resolve_num_hash_lookahead_tokens(self) -> int:
         """Resolve the hash lookahead after the relevant configs are finalized."""
-        speculative_config = self.speculative_config
+        if self.speculative_config is None:
+            return 0
         if (
-            speculative_config is None
-            or not speculative_config.use_eagle_block_drop()
-            or speculative_config.disable_lookahead_block_hashes
+            self.kv_transfer_config is None
+            and not self.cache_config.enable_prefix_caching
         ):
             return 0
-        kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is not None:
-            from vllm.distributed.kv_transfer.kv_connector.factory import (
-                KVConnectorFactory,
-            )
-
-            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
-            if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
-                return 0
-        elif not self.cache_config.enable_prefix_caching:
-            return 0
-        # The drafter's KV at a block's last position reads this far ahead.
-        return self.num_prefill_lookahead_tokens
+        return self.speculative_config.speculator_config.num_hash_lookahead_tokens
 
     @property
     def uniform_decode_query_len(self) -> int:
@@ -2322,24 +2317,15 @@ class VllmConfig:
         if (
             self.model_config is not None
             and self.model_config.attention_chunk_size is not None
+            and not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
         ):
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.uses_target_hidden_states
-            ):
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention + eagle.
-                need_disable_hybrid_kv_cache_manager = True
-            elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
-                logger.warning(
-                    "There is a latency regression when using chunked local"
-                    " attention with the hybrid KV cache manager. Disabling"
-                    " it, by default. To enable it, set the environment "
-                    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
-                )
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention.
-                need_disable_hybrid_kv_cache_manager = True
+            logger.warning(
+                "There is a latency regression when using chunked local"
+                " attention with the hybrid KV cache manager. Disabling"
+                " it, by default. To enable it, set the environment "
+                "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+            )
+            need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Auto-disable HMA only when the connector config does not support it.
