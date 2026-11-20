@@ -319,6 +319,7 @@ def test_shared_query_quant_preserves_projection(
         linear.return_bias = projection == "indexer"
         linear.gather_output = False
         linear.params_dtype = torch.bfloat16
+        linear.output_size_per_partition = output_size
         w, ws = mxfp8_e4m3_quantize(
             torch.randn(output_size, 1280, device=DEVICE, dtype=torch.bfloat16)
         )
