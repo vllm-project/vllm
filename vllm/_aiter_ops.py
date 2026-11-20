@@ -7,6 +7,7 @@ import importlib
 import itertools
 import os
 from collections.abc import Callable
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -2235,6 +2236,14 @@ def _mhc_delayed_pre_tail(
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
+# What RejectionSampler uses of aiter.ops.flydsl.rejection_sample.
+_FLYDSL_REJECTION_SAMPLER_API = (
+    "REJECTION_SAMPLE_NUM_SPEC",
+    "REJECTION_SAMPLE_VOCAB",
+    "flydsl_rejection_sample_standard",
+    "rejection_sample_standard_supported",
+)
+
 
 _AITER_SITUV2_ACT_ENV = {
     "a8w4": "AITER_SITUV2_A8W4",
@@ -4203,9 +4212,9 @@ class rocm_aiter_ops:
 
     @staticmethod
     @functools.cache
-    def _flydsl_rejection_sampler_module() -> Any | None:
+    def _flydsl_rejection_sampler_module() -> ModuleType | None:
         try:
-            return importlib.import_module("aiter.ops.flydsl.rejection_sample")
+            module = importlib.import_module("aiter.ops.flydsl.rejection_sample")
         except Exception as e:
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER is set, but the "
@@ -4214,16 +4223,34 @@ class rocm_aiter_ops:
                 e,
             )
             return None
+        missing = [
+            name for name in _FLYDSL_REJECTION_SAMPLER_API if not hasattr(module, name)
+        ]
+        if missing:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER is set, but this "
+                "AITER's FlyDSL rejection sampler lacks %s; using the Triton "
+                "rejection sampler.",
+                ", ".join(missing),
+            )
+            return None
+        return module
+
+    @classmethod
+    def is_flydsl_rejection_sampler_enabled(cls) -> bool:
+        """VLLM_ROCM_USE_AITER and VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER
+        are both on."""
+        return cls._AITER_ENABLED and cls._FLYDSL_REJECTION_SAMPLER
 
     @classmethod
     @if_aiter_supported
-    def flydsl_rejection_sampler(cls) -> Any | None:
+    def flydsl_rejection_sampler(cls) -> ModuleType | None:
         """The `aiter.ops.flydsl.rejection_sample` module if
         VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER is on, this is gfx950 and
-        it imports, else None."""
+        it imports with the API vLLM uses, else None."""
         from vllm.platforms.rocm import on_gfx950
 
-        if not (cls._AITER_ENABLED and cls._FLYDSL_REJECTION_SAMPLER and on_gfx950()):
+        if not (cls.is_flydsl_rejection_sampler_enabled() and on_gfx950()):
             return None
         return cls._flydsl_rejection_sampler_module()
 

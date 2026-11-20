@@ -82,6 +82,9 @@ def test_logits_processing_cache_matches_request_features(
     assert sampler.needs_logits_processing[3] == expected
     # Temperature alone only scales the logits, so it never leaves -inf behind.
     assert sampler.may_mask_logits[3] == may_mask
+    # Everything that may mask is also processing beyond temperature, and
+    # nothing else is.
+    assert sampler.needs_non_temperature_processing[3] == may_mask
 
 
 def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
@@ -90,6 +93,7 @@ def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
     sampler.add_request(3, SamplingParams())
 
     assert not sampler.needs_logits_processing[3]
+    assert not sampler.needs_non_temperature_processing[3]
 
 
 class _GateProcessor(LogitsProcessor):

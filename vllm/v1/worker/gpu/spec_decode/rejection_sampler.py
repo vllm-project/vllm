@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from collections.abc import Iterable, Iterator
 from types import ModuleType
 from typing import Any
@@ -196,35 +197,93 @@ class RejectionSampler:
 
     def _init_flydsl_rejection_sampler(self, device: torch.device) -> ModuleType | None:
         """The AITER FlyDSL rejection sampler, if enabled and this config's
-        verification can use it: the standard or synthetic method with no
-        watermark, FLy window, adaptive verification, fp64 Gumbel, sampling
-        mask, processed logprobs or trace replay. Which steps it takes is
-        decided per call.
-        """
+        verification can use it (see `_flydsl_unsupported_reason`). Which steps
+        it takes is decided per call."""
         if not current_platform.is_rocm():
             return None
         from vllm._aiter_ops import rocm_aiter_ops
 
-        flydsl = rocm_aiter_ops.flydsl_rejection_sampler()
-        sampler = self.sampler
-        if (
-            flydsl is None
-            or self.num_speculative_steps != flydsl.REJECTION_SAMPLE_NUM_SPEC
-            or sampler.sampling_states.vocab_size != flydsl.REJECTION_SAMPLE_VOCAB
-            or self.use_block_verification
-            or self.fly_window_size > 0
-            or self.watermark_key is not None
-            or self.enable_adaptive_verification
-            or sampler.use_fp64_gumbel
-            or sampler.return_sampling_mask
-            or sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
-            or sampler.trace_replay_state is not None
-        ):
+        if not rocm_aiter_ops.is_flydsl_rejection_sampler_enabled():
             return None
-        # Compiles the kernels and allocates the workspace before any capture.
-        flydsl.warmup_rejection_sample_standard(device)
+        reason = self._flydsl_unsupported_reason()
+        flydsl = None
+        if reason is None:
+            # Logs why if the op is missing.
+            flydsl = rocm_aiter_ops.flydsl_rejection_sampler()
+            if flydsl is None:
+                return None
+            if self.num_speculative_steps != flydsl.REJECTION_SAMPLE_NUM_SPEC:
+                reason = (
+                    f"{self.num_speculative_steps} speculative tokens "
+                    f"(it takes {flydsl.REJECTION_SAMPLE_NUM_SPEC})"
+                )
+            elif self.sampler.sampling_states.vocab_size != (
+                flydsl.REJECTION_SAMPLE_VOCAB
+            ):
+                reason = (
+                    f"vocabulary {self.sampler.sampling_states.vocab_size} "
+                    f"(it takes {flydsl.REJECTION_SAMPLE_VOCAB})"
+                )
+        if reason is not None:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER is set, but the AITER "
+                "FlyDSL rejection sampler does not support %s; using the Triton "
+                "rejection sampler.",
+                reason,
+            )
+            return None
+        assert flydsl is not None
+        self._warmup_flydsl_rejection_sampler(flydsl, device)
         logger.info_once("Using the AITER FlyDSL rejection sampler.")
         return flydsl
+
+    def _flydsl_unsupported_reason(self) -> str | None:
+        """Why this config's verification cannot use the AITER FlyDSL
+        rejection sampler, or None. It takes the standard and synthetic methods
+        without FLy (including the synthetic FLy cost overlay), watermarking,
+        adaptive verification, fp64 Gumbel noise, sampling masks, processed
+        logprobs or trace replay, on gfx950."""
+        from vllm.platforms.rocm import on_gfx950
+
+        sampler = self.sampler
+        for unsupported, reason in (
+            (not on_gfx950(), "this GPU (gfx950 only)"),
+            (self.use_block_verification, "block verification"),
+            (self.fly_window_size > 0, "FLy verification"),
+            (self.watermark_key is not None, "watermarking"),
+            (self.enable_adaptive_verification, "adaptive verification"),
+            (sampler.use_fp64_gumbel, "fp64 Gumbel noise"),
+            (sampler.return_sampling_mask, "sampling masks"),
+            (
+                sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES,
+                f"logprobs mode {sampler.logprobs_mode}",
+            ),
+            (sampler.trace_replay_state is not None, "trace replay"),
+        ):
+            if unsupported:
+                return reason
+        return None
+
+    def _warmup_flydsl_rejection_sampler(
+        self, flydsl: ModuleType, device: torch.device
+    ) -> None:
+        """Compile the one kernel variant verification can reach (bf16 target
+        rows; ratio test or synthetic) and allocate the op's per-device
+        workspace, before any CUDA graph capture."""
+        rows = self.num_speculative_steps + 1
+        vocab_size = self.sampler.sampling_states.vocab_size
+        zeros = functools.partial(torch.zeros, device=device)
+        flydsl.flydsl_rejection_sample_standard(
+            zeros((rows, vocab_size), dtype=torch.bfloat16),
+            zeros((1, self.num_speculative_steps, vocab_size), dtype=torch.bfloat16),
+            zeros(rows, dtype=torch.int64),
+            zeros(rows, dtype=torch.int64),
+            zeros(1, dtype=torch.int32),
+            zeros(1, dtype=torch.float32),
+            zeros(1, dtype=torch.int64),
+            synthetic_rates=self.synthetic_conditional_rates,
+        )
+        torch.accelerator.synchronize()
 
     def _flydsl_rejection_sample(
         self,
@@ -234,23 +293,27 @@ class RejectionSampler:
         pos: torch.Tensor,
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
+        cu_num_logits_np: np.ndarray | None,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """`(sampled, num_sampled)` from the AITER FlyDSL rejection sampler, or
         None if it does not take this step.
 
-        The kernel divides the raw bf16 logits by the temperature itself, so it
+        The kernel scales the raw bf16 logits by 1 / temperature itself, so it
         takes only steps whose requests need no other logits processing. It
         also needs the replicated draft logits and every request to verify all
-        its drafts: `logits` must hold `num_reqs * (num_speculative_steps + 1)`
-        rows, and no request has more. The checks read host state only.
+        its drafts (`num_speculative_steps + 1` logits rows each, checked on
+        `cu_num_logits_np`). The checks read host state only.
         """
         flydsl = self.flydsl_rejection_sampler
         assert flydsl is not None
+        num_rows = self.num_speculative_steps + 1
         if (
             logits.dtype != torch.bfloat16
             or draft_logits is None
             or draft_logits.row_mapping is not None
-            or np.any(self.sampler.may_mask_logits[idx_mapping_np])
+            or cu_num_logits_np is None
+            or np.any(np.diff(cu_num_logits_np) != num_rows)
+            or np.any(self.sampler.needs_non_temperature_processing[idx_mapping_np])
             or not flydsl.rejection_sample_standard_supported(
                 logits,
                 draft_logits.values,
@@ -354,10 +417,17 @@ class RejectionSampler:
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
+        cu_num_logits_np: np.ndarray | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.flydsl_rejection_sampler is not None:
             flydsl_sampled = self._flydsl_rejection_sample(
-                logits, draft_logits, draft_sampled, pos, idx_mapping, idx_mapping_np
+                logits,
+                draft_logits,
+                draft_sampled,
+                pos,
+                idx_mapping,
+                idx_mapping_np,
+                cu_num_logits_np,
             )
             if flydsl_sampled is not None:
                 return logits, *flydsl_sampled
@@ -461,6 +531,7 @@ class RejectionSampler:
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
                 input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
+                chunk_cu_num_logits_np,
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
