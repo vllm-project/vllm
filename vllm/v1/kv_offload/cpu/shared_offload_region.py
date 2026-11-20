@@ -6,6 +6,7 @@ import errno
 import functools
 import mmap
 import os
+import shutil
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
@@ -18,6 +19,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.logger import init_logger
+from vllm.utils.host_memory import exclude_from_core_dump
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
@@ -60,7 +62,32 @@ def _libc_mmap() -> Callable[..., int | None]:
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
-    mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+    try:
+        mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+    except OSError as e:
+        # A full tmpfs makes MADV_POPULATE_WRITE fail with EFAULT ("Bad
+        # address"), which does not point at the cause. The error stays an
+        # OSError so callers' own handlers still apply (not every mapping is
+        # in /dev/shm). Every other errno is re-raised unchanged; EINVAL
+        # selects the per-page fallback.
+        if e.errno != errno.EFAULT:
+            raise
+        space = ""
+        with contextlib.suppress(OSError):
+            if os.path.isdir(SHM_PATH):
+                usage = shutil.disk_usage(SHM_PATH)
+                space = (
+                    f" (now {usage.free / (1 << 30):.2f} GiB free of "
+                    f"{usage.total / (1 << 30):.2f} GiB)"
+                )
+        raise OSError(
+            errno.EFAULT,
+            "Pre-faulting the mapping failed with EFAULT, most likely because "
+            f"the memory backing it ran out. If it is in {SHM_PATH}{space}, "
+            f"note that {SHM_PATH} is shared by every process that uses it, "
+            "including other data-parallel engines; increase its capacity or "
+            "reduce the host buffer size",
+        ) from e
 
 
 def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
@@ -88,6 +115,15 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
+@functools.cache
+def _libc_madvise() -> Callable[[int, int, int], int]:
+    # Called through ctypes, so the GIL is released while pages fault in.
+    madvise_fn = ctypes.CDLL(None, use_errno=True).madvise
+    madvise_fn.argtypes = [c_void_p, c_size_t, c_int]
+    madvise_fn.restype = c_int
+    return madvise_fn
+
+
 class SharedOffloadRegion:
     """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
@@ -110,7 +146,10 @@ class SharedOffloadRegion:
     also waits for all shards to finish pre-faulting before returning.
     `num_segments` splits backing files beneath the contiguous mapping.
     `populate=False` skips pre-faulting, for a mapper whose peers pre-fault
-    every page.
+    every page or that calls prefault() later.
+
+    `private=True` declares that no peer maps this file: it takes no barrier
+    and the path is unlinked as soon as this worker has mapped it.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -127,9 +166,11 @@ class SharedOffloadRegion:
         creator_memory_check: Callable[[int], None] | None = None,
         populate_shard: tuple[int, int] | None = None,
         num_segments: int = 1,
+        private: bool = False,
         populate: bool = True,
         mmap_path: str | None = None,
     ) -> None:
+        assert not private or (barrier is None and populate_shard is None)
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -222,6 +263,10 @@ class SharedOffloadRegion:
                 finally:
                     os.close(reservation)
                 self._map_segments()
+            exclude_from_core_dump(self.mmap_obj)
+            if private and self._creator:
+                self._unlink()
+                self._creator = False
             if barrier is not None:
                 barriers_remaining -= 1
                 barrier()
@@ -316,6 +361,35 @@ class SharedOffloadRegion:
         for path, _, _ in self._segments:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
+
+    def prefault_ranges(
+        self, shard: tuple[int, int] | None = None
+    ) -> list[tuple[int, int]]:
+        """Ranges a deferred pre-fault covers: this rank's slots, or the whole
+        region, which `shard=(index, count)` walks from that share onwards."""
+        if shard is not None:
+            # Workers that share every byte each pin the whole region, so each
+            # maps all of it first: a page pinned before it is mapped is faulted
+            # inside the registration call. Starting on its own share spreads
+            # the first allocation of the pages across the files.
+            index, count = shard
+            share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
+            start = min(index * share, self.total_size_bytes)
+            return [(start, self.total_size_bytes - start), (0, start)]
+        if self.rank is not None:
+            return list(self.iter_worker_slot_ranges())
+        return [(0, self.total_size_bytes)]
+
+    def prefault(self, offset: int, length: int) -> None:
+        """Pre-fault a range without holding the GIL."""
+        addr = self._base.data_ptr() + offset
+        if _libc_madvise()(addr, length, _MADV_POPULATE_WRITE) == 0:
+            return
+        err = ctypes.get_errno()
+        if err != errno.EINVAL:
+            raise OSError(err, os.strerror(err))
+        assert self.mmap_obj is not None
+        _fallback_populate_write(self.mmap_obj, offset, length)
 
     def iter_worker_slot_ranges(self) -> Iterator[tuple[int, int]]:
         """Yield this worker's slots as page-aligned (offset, length) ranges."""
