@@ -186,10 +186,7 @@ def _unwrapped(name: str) -> str:
 
 def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) -> None:
     """Raise unless the update loaded every parameter cold start loaded, except
-    those level 2 sleep preserves because the update does not rewrite them.
-    `load_weights` reports parameter names, whatever checkpoint names fed
-    them (fused or per-expert), modulo LoRA wrapping; a tied parameter counts
-    under either name."""
+    those level 2 sleep preserves; names match modulo LoRA wrapping and ties."""
     loaded = model.__dict__.pop("_loaded_params", None)
     required = model.__dict__.get("_required_params")
     if loaded is None or required is None:  # the model does not report loads
@@ -198,15 +195,15 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         model._required_params = loaded
         return
     preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
-    params = {
-        _unwrapped(n): p for n, p in model.named_parameters(remove_duplicate=False)
-    }
-    delivered = {params.get(n, n) for n in map(_unwrapped, loaded)}
+    named = model.named_parameters(remove_duplicate=False)
+    params = {_unwrapped(n): (n, p) for n, p in named}
+    delivered = {params.get(n, (n, n))[1] for n in map(_unwrapped, loaded)}
+    # sleep matches preserve patterns against live (LoRA-wrapped) names
+    live = (params.get(n, (n, n)) for n in map(_unwrapped, required))
     missing = sorted(
-        n
-        for n in map(_unwrapped, required)
-        if params.get(n, n) not in delivered
-        and not any(fnmatchcase(n, p) for p in preserved)
+        name
+        for name, p in live
+        if p not in delivered and not any(fnmatchcase(name, g) for g in preserved)
     )
     if missing:
         raise RuntimeError(
