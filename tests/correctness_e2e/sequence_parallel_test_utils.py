@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared infrastructure for e2e correctness tests of model-level sequence
-parallelism (`--enable-sequence-parallel`) and its fused comm+GEMM kernels
-(`--enable-async-tp`) against a plain TP baseline.
+parallelism (`--sp-config '{"enable": true}'`) and its fused GEMM+collective
+kernels (`"fuse_gemm_comms": true`) against a plain TP baseline.
 
 Each model's own `test_sequence_parallel.py` (e.g.
 `tests/models/qwen3/test_sequence_parallel.py`) defines its model list and
 calls `run_tp_sp_generation_test` from a parametrized test.
 """
 
+import json
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
@@ -23,7 +24,7 @@ from ..utils import compare_all_settings
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
-    enable_async_tp: bool
+    fuse_gemm_comms: bool
 
 
 class SPTestOptions(NamedTuple):
@@ -54,8 +55,8 @@ class SPTestSettings:
         # ``build_sp_args``) since the fused kernels rely on symmetric
         # memory, whose CUDA graph behavior isn't the concern of this test.
         parallel_setups = [
-            ParallelSetup(tp_size=tp_base, pp_size=pp_base, enable_async_tp=async_tp)
-            for async_tp in [False, True]
+            ParallelSetup(tp_size=tp_base, pp_size=pp_base, fuse_gemm_comms=fuse)
+            for fuse in [False, True]
         ]
         return SPTestSettings(
             parallel_setups=parallel_setups,
@@ -81,7 +82,7 @@ def build_sp_args(
     test_options: SPTestOptions,
     num_gpus_available: int,
 ) -> tuple[list[str], list[str]] | None:
-    tp_size, pp_size, enable_async_tp = parallel_setup
+    tp_size, pp_size, fuse_gemm_comms = parallel_setup
 
     if num_gpus_available < tp_size * pp_size:
         return None
@@ -130,14 +131,8 @@ def build_sp_args(
         "mp",
     ]
 
-    tp_sp_args = [
-        *tp_args,
-        "--enable-sequence-parallel",
-        "--sequence-parallel-min-tokens",
-        "0",
-    ]
-    if enable_async_tp:
-        tp_sp_args.append("--enable-async-tp")
+    sp_config = {"enable": True, "threshold": 0, "fuse_gemm_comms": fuse_gemm_comms}
+    tp_sp_args = [*tp_args, "--sp-config", json.dumps(sp_config)]
 
     return tp_args, tp_sp_args
 
@@ -170,7 +165,7 @@ def run_tp_sp_generation_test(
     settings: SPTestSettings,
     num_gpus_available: int,
 ) -> None:
-    """Compare `--enable-sequence-parallel`/`--enable-async-tp` text
+    """Compare `--sp-config` (with and without `fuse_gemm_comms`) text
     generation against a plain TP baseline for every parallel setup in
     `settings`."""
     comparisons = []

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for Qwen3Model's sequence-parallel (+ async-TP) support:
+"""Tests for Qwen3Model's sequence-parallel (+ fused GEMM-collective) support:
 
 - Unit tests for the `mark_sp_region` boundaries set up in `__init__`
   and the shard/gather done around `forward`.
-- `test_tp_sp_generation`: e2e correctness of `--enable-sequence-parallel`
-  / `--enable-async-tp` generation against a plain TP baseline, in bf16, via
+- `test_tp_sp_generation`: e2e correctness of `--sp-config` generation
+  (with and without `fuse_gemm_comms`) against a plain TP baseline, in bf16, via
   `tests.correctness_e2e.sequence_parallel_test_utils`.
 """
 
@@ -21,7 +21,7 @@ from tests.correctness_e2e.sequence_parallel_test_utils import (
 )
 from tests.models.registry import _HfExamplesInfo
 from tests.utils import create_new_process_for_each_test
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, SequenceParallelConfig, VllmConfig
 from vllm.models.qwen3.nvidia import model as qwen3_model
 from vllm.models.qwen3.xpu import model as qwen3_xpu_model
 
@@ -82,7 +82,7 @@ def test_wires_mark_sp_region_per_layer_boundary(monkeypatch: pytest.MonkeyPatch
         lambda entry_after, exit_before, pc: calls.append((entry_after, exit_before)),
     )
     parallel_config = ParallelConfig(
-        tensor_parallel_size=2, enable_sequence_parallel=True
+        tensor_parallel_size=2, sp_config=SequenceParallelConfig(enable=True)
     )
     _, layers = _make_model(monkeypatch, parallel_config, num_layers=2)
 
@@ -103,7 +103,7 @@ def test_skips_mark_sp_region_when_sequence_parallel_disabled(
     calls = []
     monkeypatch.setattr(qwen3_model, "mark_sp_region", lambda *a, **k: calls.append(a))
     parallel_config = ParallelConfig(
-        tensor_parallel_size=2, enable_sequence_parallel=False
+        tensor_parallel_size=2, sp_config=SequenceParallelConfig(enable=False)
     )
     _make_model(monkeypatch, parallel_config)
 
@@ -115,7 +115,7 @@ def test_rejects_sequence_parallel_with_pipeline_parallelism(
 ):
     monkeypatch.setattr(qwen3_model, "mark_sp_region", lambda *a, **k: None)
     parallel_config = ParallelConfig(
-        tensor_parallel_size=2, enable_sequence_parallel=True
+        tensor_parallel_size=2, sp_config=SequenceParallelConfig(enable=True)
     )
     with pytest.raises(AssertionError, match="pipeline parallelism"):
         _make_model(monkeypatch, parallel_config, pp_world_size=2)
@@ -124,7 +124,7 @@ def test_rejects_sequence_parallel_with_pipeline_parallelism(
 def test_forward_skips_shard_gather_when_sp_inactive(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(qwen3_model, "mark_sp_region", lambda *a, **k: None)
     parallel_config = ParallelConfig(
-        tensor_parallel_size=2, enable_sequence_parallel=True
+        tensor_parallel_size=2, sp_config=SequenceParallelConfig(enable=True)
     )
     model, _ = _make_model(monkeypatch, parallel_config)
 
@@ -148,7 +148,7 @@ def test_forward_shards_embeds_and_gathers_single_output_when_sp_active(
     monkeypatch: pytest.MonkeyPatch,
 ):
     parallel_config = ParallelConfig(
-        tensor_parallel_size=2, enable_sequence_parallel=True
+        tensor_parallel_size=2, sp_config=SequenceParallelConfig(enable=True)
     )
     monkeypatch.setattr(qwen3_model, "mark_sp_region", lambda *a, **k: None)
     model, _ = _make_model(monkeypatch, parallel_config)
@@ -190,7 +190,7 @@ def test_forward_gathers_every_aux_hidden_state_when_sp_active(
     monkeypatch: pytest.MonkeyPatch,
 ):
     parallel_config = ParallelConfig(
-        tensor_parallel_size=2, enable_sequence_parallel=True
+        tensor_parallel_size=2, sp_config=SequenceParallelConfig(enable=True)
     )
     monkeypatch.setattr(qwen3_model, "mark_sp_region", lambda *a, **k: None)
     model, _ = _make_model(monkeypatch, parallel_config)
