@@ -480,3 +480,19 @@ async def test_pooling_endpoint_with_chunked_processing(
         torch.tensor(embeddings.data[0].embedding),
         atol=1e-6,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_truncate_prompt_tokens_above_max_model_len(
+    client_with_chunked_processing: openai.AsyncOpenAI, model_name: str
+):
+    """With chunked processing, truncation is bounded by max_embed_len rather
+    than max_model_len, as it already is for truncate_prompt_tokens=-1."""
+    embedding_response = await client_with_chunked_processing.embeddings.create(
+        model=model_name,
+        input=[LONG_TEXT_1500_WORDS],
+        extra_body={"truncate_prompt_tokens": 600},
+    )
+
+    assert embedding_response.usage.prompt_tokens == 600

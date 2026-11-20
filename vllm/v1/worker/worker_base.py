@@ -111,6 +111,10 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Assign the Mamba block size resolved by the core."""
+        self.vllm_config.cache_config.mamba_block_size = mamba_block_size
+
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
         backends = get_current_attn_backends(self.vllm_config)
