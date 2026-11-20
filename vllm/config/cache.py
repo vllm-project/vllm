@@ -404,8 +404,8 @@ class CacheConfig:
     the total buffer size summed across all TP ranks. By default, this is set
     to None, which means no KV offloading is enabled. When set, vLLM will
     enable KV cache offloading to CPU using the kv_offloading_backend. By
-    default on CUDA and XPU, this buffer is kept in `/dev/shm`, so `/dev/shm`
-    must have room for it."""
+    default on NVIDIA (CUDA) and Intel (XPU) GPUs, this buffer is kept in
+    `/dev/shm`, so `/dev/shm` must have room for it."""
 
     kv_offloading_backend: KVOffloadingBackend = "native"
     """The backend to use for KV cache offloading. Supported backends include
