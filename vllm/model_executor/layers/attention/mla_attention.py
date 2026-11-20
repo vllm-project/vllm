@@ -294,6 +294,7 @@ from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackend,
     get_mla_prefill_backend,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     get_dcp_local_seq_lens,
@@ -319,6 +320,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVQuantMode,
     MLAAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -661,6 +663,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # reference CPU MLA backend calls it but isn't perf-critical. Skip
         # the packed-kernel dispatch either way.
         kv_b_proj._cpu_skip_gemm_dispatch = True
+        # Selects the LoRA wrapper that adds adapters to the absorbed BMMs.
+        kv_b_proj.is_mla_kv_b_proj = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -792,6 +796,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
+        self.is_aiter_triton_bf16_bmm_enabled = rocm_aiter_ops.is_mla_enabled()
         # Replaces the bf16 W_UK bmm, the q concat + fp8 quant and the head
         # padding, so only the torch.bmm path qualifies.
         self.is_aiter_fused_decode_query_enabled = (
@@ -1142,13 +1147,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_key is not None
             and self.prefill_backend is not None
             and self.prefill_backend.supports_quant_output(quant_key)
-            and (
-                not self.impl.is_sparse
-                or attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-                <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
-            )
             and attn_metadata is not None
             and attn_metadata.prefill is not None
+            and (
+                not self.impl.is_sparse
+                or attn_metadata.prefill.route  # type: ignore[attr-defined]
+                is SparseMLAPrefillRoute.DENSE_MHA
+            )
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
         )
@@ -1173,6 +1178,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
+            has_mla_lora = hasattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora")
+            use_fused_v_up_proj = self.W_UV_dcp is not None and not has_mla_lora
             mqa_output_slice = output[:num_mqa_tokens]
             if mqa_q_prepared is not None:
                 mqa_q = mqa_q_prepared[:num_mqa_tokens]
@@ -1227,7 +1234,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Under PCP+DCP the prefill rows attended over the gathered KV,
                 # so only the decode rows carry an LSE and take part in the merge.
                 num_merge_rows = lse.shape[0]
-                if self.W_UV_dcp is not None:
+                if use_fused_v_up_proj:
                     assert self.dcp_manager.v_up_proj_combine is not None
                     self.dcp_manager.v_up_proj_combine(
                         attn_out,
@@ -1255,7 +1262,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection, unless the DCP merge already applied it
-            if self.W_UV_dcp is None:
+            if not use_fused_v_up_proj:
                 self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
@@ -1345,7 +1352,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _fused_decode_query_heads(self, attn_metadata: Any) -> int | None:
         # The impl picks the decode path per batch, so this stays per step.
-        if not self.is_aiter_fused_decode_query_enabled:
+        # The fused query kernel cannot add kv_b_proj adapters.
+        if not self.is_aiter_fused_decode_query_enabled or hasattr(
+            self.kv_b_proj, "apply_mla_absorbed_kv_b_lora"
+        ):
             return None
         return self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
 
@@ -1444,6 +1454,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
         if fused_q_heads is None:
+            self._apply_lora_projection(
+                mqa_q_nope, mqa_ql_nope[..., : self.kv_lora_rank], is_query=True
+            )
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
@@ -1470,33 +1483,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return mqa_q
 
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
-        if self.hisparse_cache is not None:
-            return False
-        # ShardQ steps' top-k are compact per rank and run through forward_mqa.
-        if getattr(attn_metadata, "shardq", None) is not None:
-            return False
         prefill = attn_metadata.prefill
-        if prefill is None:
-            return False
-        use_masked_mha = (
-            self.prefill_backend is not None
-            and self.impl.masked_mha_available  # type: ignore[attr-defined]
-            and self.impl.dcp_world_size <= 1
-            and _use_masked_mha(
-                backend_name=self.attn_backend.get_name(),
-                tensor_parallel_size=(
-                    self._vllm_config.parallel_config.tensor_parallel_size
-                ),
-                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                query_len=prefill.max_query_len,
-                seq_len=attn_metadata.prefill_max_seq_len,  # type: ignore[attr-defined]
-                has_context=prefill.chunked_context is not None,
-            )
-            and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
-        )
-        return (prefill.use_dense_mha or use_masked_mha) and not (
-            self._vllm_config.attention_config.sparse_mla_force_mqa
+        return (
+            prefill is not None
+            and prefill.route is not SparseMLAPrefillRoute.SPARSE_MQA  # type: ignore[attr-defined]
         )
 
     def process_weights_after_loading(self) -> None:
@@ -1666,14 +1656,32 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
+            cache_role=(
+                SparseCacheRole.SPARSE if self.topk_buffer_width is not None else None
+            ),
             topk_buffer_width=self.topk_buffer_width,
             is_index_group_leader=self.indexer is not None,
         )
         return FullAttentionManager.layer_config(spec)
 
+    def _apply_lora_projection(
+        self, x: torch.Tensor, out: torch.Tensor, *, is_query: bool
+    ) -> None:
+        """Add kv_b_proj adapters to the absorbed, head-major MLA projection."""
+        apply_lora = getattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora", None)
+        if apply_lora is not None:
+            apply_lora(
+                x,
+                out,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                is_query=is_query,
+                gather_dcp=is_query and self.dcp_q_replicate,
+            )
+
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        lora_input = x
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
@@ -1691,6 +1699,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
+        elif (
+            self.is_aiter_triton_bf16_bmm_enabled
+            and rocm_aiter_ops.is_triton_bf16_bmm_tuned(
+                x.shape[0], x.shape[1], self.v_head_dim, self.kv_lora_rank
+            )
+        ):
+            # Same product as the torch.bmm fallback; the kernel takes W as (N, V, L).
+            rocm_aiter_ops.triton_bf16_bmm(
+                x, self.W_UV.transpose(1, 2), out.transpose(0, 1)
+            )
         elif self.is_amx_bmm_enabled:
             # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
             # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
@@ -1704,6 +1722,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+        self._apply_lora_projection(lora_input, out, is_query=False)
 
 
 def unified_mla_kv_cache_update(
@@ -1957,7 +1977,6 @@ class MLACommonPrefillMetadata:
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
     query_lens_cpu: torch.Tensor | None = None
-    use_dense_mha: bool = False
     topk_mask_workspace: torch.Tensor | None = None
 
 
@@ -2053,127 +2072,6 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
         qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
         v_head_dim=hf_text_config.v_head_dim,
     )
-
-
-_MaskedMHARanges = tuple[tuple[int, int], ...]
-
-_MASKED_MHA_THRESHOLDS: dict[
-    tuple[int, int],
-    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
-] = {
-    (192, 128): {
-        "FLASHMLA_SPARSE": {
-            1: (((2048, 1536), (4096, 4096)), None),
-            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
-            4: (
-                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
-                None,
-            ),
-            8: (
-                (
-                    (2048, 512),
-                    (4096, 512),
-                    (8192, 1024),
-                    (16384, 2048),
-                    (32768, 16384),
-                ),
-                None,
-            ),
-        },
-        "FLASHINFER_MLA_SPARSE": {
-            8: (
-                (
-                    (2048, 512),
-                    (4096, 1024),
-                    (8192, 1024),
-                    (16384, 2048),
-                    (32768, 32768),
-                ),
-                None,
-            ),
-        },
-    },
-    (256, 256): {
-        "FLASHMLA_SPARSE": {
-            1: (((8 * 1024, 0),), ()),
-            2: (
-                ((20 * 1024, 0),),
-                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
-            ),
-            4: (
-                ((48 * 1024, 0),),
-                (
-                    (8 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (24 * 1024, 16 * 1024),
-                    (34 * 1024, 32 * 1024),
-                ),
-            ),
-            8: (
-                ((112 * 1024, 0),),
-                (
-                    (8 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (32 * 1024, 16 * 1024),
-                    (48 * 1024, 32 * 1024),
-                ),
-            ),
-        },
-        "FLASHINFER_MLA_SPARSE": {
-            4: (
-                ((36 * 1024, 0),),
-                (
-                    (12 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (24 * 1024, 16 * 1024),
-                    (28 * 1024, 24 * 1024),
-                ),
-            ),
-            8: (
-                ((64 * 1024, 0),),
-                (
-                    (20 * 1024, 4 * 1024),
-                    (24 * 1024, 8 * 1024),
-                    (32 * 1024, 16 * 1024),
-                    (48 * 1024, 32 * 1024),
-                    (56 * 1024, 40 * 1024),
-                    (64 * 1024, 48 * 1024),
-                    (72 * 1024, 56 * 1024),
-                ),
-            ),
-        },
-    },
-}
-
-
-def _use_masked_mha(
-    *,
-    backend_name: str,
-    tensor_parallel_size: int,
-    qk_head_dim: int,
-    v_head_dim: int,
-    query_len: int,
-    seq_len: int,
-    has_context: bool,
-) -> bool:
-    if backend_name == "FLASH_ATTN_MLA_SPARSE_FA4":
-        # Its prefill batches run on FlashInfer's kernel, so it shares those rows.
-        backend_name = "FLASHINFER_MLA_SPARSE"
-    thresholds = (
-        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
-        .get(backend_name, {})
-        .get(tensor_parallel_size)
-    )
-    if thresholds is None:
-        return False
-    pure_prefill_ranges, context_ranges = thresholds
-    ranges = pure_prefill_ranges
-    if has_context and context_ranges is not None:
-        ranges = context_ranges
-    for max_seq_len, min_query_len in ranges:
-        if seq_len <= max_seq_len:
-            return query_len >= min_query_len
-    return False
 
 
 @functools.cache
@@ -2781,7 +2679,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
+            self.reorder_batch_threshold,
+            supports_spec_decode,
+            supports_dcp_with_varlen
+            or (
+                self.non_causal_multi_token_decode
+                and self.supports_non_causal_multi_token_dcp
+            ),
         )
 
         if self.query_len_support == QueryLenSupport.SINGLE_ONLY:

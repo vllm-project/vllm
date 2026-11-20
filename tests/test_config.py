@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
 from tests.v1.spec_decode.utils import fake_speculative_config
+from vllm import LLM
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     AttentionConfig,
@@ -43,6 +44,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
     WatermarkConfig,
+    replace,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -62,8 +64,25 @@ from vllm.transformers_utils.config import (
     try_get_dense_modules,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroup
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import (
+    Eagle3SpeculatorConfig,
+    EagleSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.config import (
+    MultiModuleMTPSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -512,33 +531,49 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
             )
 
 
-@pytest.mark.parametrize(
-    "kv_transfer_config",
-    [
-        KVTransferConfig(
-            kv_connector="NixlConnector",
-            kv_role="kv_both",
+@pytest.fixture(
+    params=[
+        *(
+            KVTransferConfig(kv_connector=connector, kv_role="kv_both")
+            for connector in ("NixlConnector", "NixlPullConnector")
         ),
-        KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "connectors": [
-                    {
-                        "kv_connector": "NixlConnector",
-                        "kv_role": "kv_both",
-                    },
-                    {
-                        "kv_connector": "OffloadingConnector",
-                        "kv_role": "kv_both",
-                    },
-                ]
-            },
+        *(
+            KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {
+                            "kv_connector": connector,
+                            "kv_role": "kv_both",
+                        },
+                        {
+                            "kv_connector": "OffloadingConnector",
+                            "kv_role": "kv_both",
+                        },
+                    ]
+                },
+            )
+            for connector in ("NixlConnector", "NixlPullConnector")
         ),
     ],
 )
-def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
-    caplog, disable_log_dedup, kv_transfer_config
+def nixl_kv_transfer_config(request):
+    return request.param
+
+
+@pytest.mark.parametrize(
+    "connector_name", ["NixlConnector", "NixlPullConnector", "NixlPushConnector"]
+)
+def test_nixl_connector_aliases(nixl_kv_transfer_config, connector_name):
+    assert nixl_kv_transfer_config.has_connector(connector_name) == (
+        connector_name != "NixlPushConnector"
+    )
+
+
+@pytest.mark.parametrize("explicit_interleave", [None, 1, 8, 3, 32])
+def test_pd_dcp_interleave_size_respects_explicit_settings(
+    caplog, disable_log_dedup, nixl_kv_transfer_config, explicit_interleave
 ):
     config = VllmConfig(
         cache_config=CacheConfig(block_size=16),
@@ -546,18 +581,46 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
         parallel_config=ParallelConfig(
             tensor_parallel_size=2,
             decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=3,
+            cp_kv_cache_interleave_size=(
+                explicit_interleave if explicit_interleave is not None else 1
+            ),
+            _allow_auto_resolve_cp_interleave_size=explicit_interleave is None,
             distributed_executor_backend="mp",
         ),
-        kv_transfer_config=kv_transfer_config,
+        kv_transfer_config=nixl_kv_transfer_config,
     )
 
-    kv_cache_groups = [SimpleNamespace(block_size=16)]
+    kv_cache_groups = [
+        KVCacheGroup(
+            kv_cache_specs={
+                "layer.0": AttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.float16,
+                )
+            },
+            manager_config=FullAttentionManager.config(),
+            block_size=16,
+        )
+    ]
     with caplog.at_level(logging.INFO):
         config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
-    assert config.parallel_config.cp_kv_cache_interleave_size == 16
-    assert "automatically adjusted from 3 to block_size 16" in caplog.text
+    assert config.parallel_config.cp_kv_cache_interleave_size == (
+        16 if explicit_interleave is None else explicit_interleave
+    )
+    if explicit_interleave is None:
+        assert "automatically adjusted from 1 to block_size 16" in caplog.text
+    else:
+        assert "automatically adjusted" not in caplog.text
+
+    # Same order as the engine core: validate after the interleave is resolved.
+    if explicit_interleave in (3, 32):
+        with pytest.raises(AssertionError, match="divisible by"):
+            config.validate_block_size()
+    else:
+        config.validate_block_size()
 
 
 def test_kv_offloading_does_not_adjust_dcp_interleave_size():
@@ -641,21 +704,18 @@ def test_nixl_dcp_check_skipped_for_submodel_config():
     assert submodel_config.model_config.use_mla is False
 
 
-def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
-    # Pretend the model has a single KV head so the DCP feasibility checks
-    # pass and the MLA-only assert is what actually fires.
-    monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
+@pytest.mark.parametrize("connector", ["NixlConnector", "NixlPullConnector"])
+def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(connector):
+    """Reject unsupported NIXL DCP settings before loading model weights."""
     with pytest.raises(ValidationError, match="only supported for MLA models"):
-        VllmConfig(
-            model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
-            device_config=DeviceConfig(device="cpu"),
-            parallel_config=ParallelConfig(
-                tensor_parallel_size=2,
-                decode_context_parallel_size=2,
-                distributed_executor_backend="mp",
-            ),
+        LLM(
+            model="bigcode/tiny_starcoder_py",
+            max_model_len=2048,
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            distributed_executor_backend="mp",
             kv_transfer_config=KVTransferConfig(
-                kv_connector="NixlConnector",
+                kv_connector=connector,
                 kv_role="kv_both",
             ),
         )
@@ -1427,10 +1487,51 @@ def test_batch_sharded_sampling_rejects_return_sampling_mask():
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=True),
         speculative_config=None,
+        lora_config=None,
     )
 
     with pytest.raises(ValueError, match="sampling masks"):
         VllmConfig._validate_batch_sharded_sampling(config)
+
+
+@pytest.mark.parametrize(
+    "target_modules",
+    [None, ["lm_head"], ["language_model.lm_head"]],
+)
+def test_batch_sharded_sampling_rejects_lora(target_modules):
+    """compute_logits_local() skips the TP logits gather, which cannot apply
+    the lm_head LoRA delta; the combination must fail at startup instead of
+    raising NotImplementedError at the first sampling step."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
+        speculative_config=None,
+        lora_config=SimpleNamespace(target_modules=target_modules),
+    )
+
+    with pytest.raises(ValueError, match="LoRA"):
+        VllmConfig._validate_batch_sharded_sampling(config)
+
+
+@pytest.mark.parametrize("target_modules", [["o_proj"], ["language_model.o_proj"]])
+def test_batch_sharded_sampling_allows_lora_without_lm_head_target(target_modules):
+    """LoRA restricted to modules other than lm_head never wraps the logits
+    processor, so batch-sharded sampling still works and must not be
+    rejected."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
+        speculative_config=None,
+        lora_config=SimpleNamespace(target_modules=target_modules),
+    )
+
+    VllmConfig._validate_batch_sharded_sampling(config)
 
 
 @pytest.mark.skip_global_cleanup
@@ -1561,6 +1662,35 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("pp", "depth", "expected"), [(1, 2, 2), (1, 6, 6), (2, 2, 3), (2, 4, 5)]
+)
+def test_async_scheduling_depth_sets_concurrent_batches(pp, depth, expected):
+    """Async scheduling keeps `async_scheduling_depth` steps in flight, plus one
+    per extra pipeline stage; the default depth 2 keeps the previous count."""
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            async_scheduling=True,
+            async_scheduling_depth=depth,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=pp,
+            distributed_executor_backend="mp",
+            nnodes=pp,
+        ),
+    )
+    assert cfg.max_concurrent_batches == expected
+
+
+def test_async_scheduling_depth_below_two_is_rejected():
+    with pytest.raises(ValidationError):
+        SchedulerConfig(
+            max_model_len=8192, is_encoder_decoder=False, async_scheduling_depth=1
+        )
 
 
 def test_data_parallel_rpc_port_has_fixed_default():
@@ -1867,7 +1997,8 @@ _MOE_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 # The fixture pretends to be a CUDA host, so FP8 quantization setup calls a CUDA
 # op that ROCm builds lack and leaves vllm.models half-imported for later tests.
 _SKIP_FP8_ON_ROCM = pytest.mark.skipif(
-    current_platform.is_rocm(), reason="FP8 setup needs CUDA ops"
+    current_platform.is_rocm() or current_platform.is_xpu(),
+    reason="FP8 setup needs CUDA ops",
 )
 
 
@@ -2155,7 +2286,8 @@ _PEER_GROUP = {
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "requires cpu_offload=False"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
         (_PEER_GROUP, {"data_parallel_size": 8}, "cannot hold an engine of 8"),
@@ -2179,7 +2311,7 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
         ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
     ],
 )
-def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supported):
+def test_engram_peer_group_requires_pool_support(architecture, layer_field, supported):
     """Qwen4Exp's tables ignore peer groups, so they would not be split."""
     model = cast(
         ModelConfig,
@@ -2189,7 +2321,8 @@ def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supp
         ),
     )
     config = EngramConfig(**_PEER_GROUP)
-    with nullcontext() if supported else pytest.raises(ValueError, match="V4.1"):
+    rejects = pytest.raises(ValueError, match="pool support")
+    with nullcontext() if supported else rejects:
         config.verify_model_config(model)
 
 
@@ -4084,7 +4217,8 @@ def test_is_chunked_prefill_supported(
     reason: str,
     caplog_vllm,
 ):
-    model_config = ModelConfig(model_id, trust_remote_code=True)
+    trust_remote_code = model_id == "internlm/internlm2-1_8b-reward"
+    model_config = ModelConfig(model_id, trust_remote_code=trust_remote_code)
     assert model_config.attn_type == expected_attn_type
     with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_chunked_prefill_supported == expected_result
@@ -4203,11 +4337,35 @@ def test_is_prefix_caching_supported(
     reason: str,
     caplog_vllm,
 ):
-    model_config = ModelConfig(model_id, trust_remote_code=True)
+    trust_remote_code = model_id == "internlm/internlm2-1_8b-reward"
+    model_config = ModelConfig(model_id, trust_remote_code=trust_remote_code)
     assert model_config.attn_type == expected_attn_type
     with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_prefix_caching_supported == expected_result
     assert reason in caplog_vllm.text
+
+
+def test_replace_keeps_compile_factors_with_blocked_fp8_weights(tmp_path):
+    """Caches keyed by the compile factors (the FlashInfer autotune cache,
+    compiled graphs) must resolve to the same entry before and after replace()."""
+    from transformers import LlamaConfig
+
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(str(tmp_path)),
+        quant_config=Fp8Config(weight_block_size=[128, 128]),
+    )
+    assert config.compilation_config.custom_ops.count("+quant_fp8") == 1
+    before = config.compile_factors()
+
+    copied = replace(config, cache_config=replace(config.cache_config))
+
+    assert copied.compilation_config.custom_ops.count("+quant_fp8") == 1
+    assert copied.compile_factors() == before
+    # replace() shares the compilation config with the original.
+    assert config.compile_factors() == before
 
 
 @pytest.mark.parametrize(
@@ -4227,6 +4385,23 @@ def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: boo
         compilation_config=CompilationConfig(backend=backend, custom_ops=custom_ops)
     )
     assert config.compilation_config.is_custom_op_enabled("fused_layernorm") is expected
+
+
+@pytest.mark.parametrize(
+    ("custom_ops", "expected"),
+    [
+        ([], ["+quant_fp8"]),
+        (["+quant_fp8"], ["+quant_fp8"]),
+        (["-quant_fp8"], ["-quant_fp8"]),
+    ],
+)
+def test_enable_custom_op_by_default_is_idempotent(
+    custom_ops: list[str], expected: list[str]
+):
+    config = CompilationConfig(custom_ops=custom_ops)
+    config.enable_custom_op_by_default("quant_fp8")
+    config.enable_custom_op_by_default("quant_fp8")
+    assert config.custom_ops == expected
 
 
 def test_vllm_config_defaults_are_none():
@@ -4763,9 +4938,7 @@ def test_renderer_num_workers_with_mm_cache():
 
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
-    target_model_config = ModelConfig(
-        "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
-    )
+    target_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
     speculative_config = SpeculativeConfig(
         model="vllm-project/EAGLE-LLaMA3-Instruct-8B",
         num_speculative_tokens=1,
@@ -4791,28 +4964,57 @@ def test_draft_sample_method_probabilistic_is_accepted():
 
 
 @pytest.mark.parametrize(
-    ("method", "drops_block"),
-    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+    ("speculator_config_cls", "num_hash_lookahead_tokens"),
+    [
+        (EagleSpeculatorConfig, 1),
+        (Eagle3SpeculatorConfig, 1),
+        (MTPSpeculatorConfig, 1),
+        (MultiModuleMTPSpeculatorConfig, 3),
+        (Gemma4MTPSpeculatorConfig, 0),
+        (DFlashSpeculatorConfig, 0),
+        (DSparkSpeculatorConfig, 0),
+        (DFlash2SpeculatorConfig, 0),
+        (DSpineSpeculatorConfig, 0),
+        (XPressSpeculatorConfig, 0),
+        (LiLiCorrSpeculatorConfig, 0),
+        (DFlySpeculatorConfig, 0),
+        (NgramSpeculatorConfig, 0),
+    ],
 )
-@pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
-def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
-    method: str,
-    drops_block: bool,
-    disable_eagle_block_drop: bool,
+def test_draft_kv_lookahead_dependency(
+    speculator_config_cls: type, num_hash_lookahead_tokens: int
 ):
-    # Start from an ngram config to avoid loading model metadata: these predicates
-    # depend only on the speculative method and the new switch.
-    speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=3,
-        disable_eagle_block_drop=disable_eagle_block_drop,
+    """Hashes look ahead as far as the drafter's own KV reads."""
+    spec = SimpleNamespace(num_speculative_tokens=3)
+    assert (
+        speculator_config_cls(spec).num_hash_lookahead_tokens
+        == num_hash_lookahead_tokens
     )
-    speculative_config.method = method
 
-    assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is (
-        drops_block and not disable_eagle_block_drop
+
+@pytest.mark.parametrize("model_type", ["gemma4_assistant", "gemma4_unified_assistant"])
+def test_gemma4_assistant_needs_no_hash_lookahead(model_type):
+    # The Gemma-4 MTP drafter reads the target's KV and writes none of its own.
+    from transformers import PreTrainedConfig
+
+    hf_config = PreTrainedConfig(architectures=["Gemma4AssistantForCausalLM"])
+    hf_config.model_type = model_type
+    hf_config = SpeculativeConfig.hf_config_override(hf_config)
+    assert hf_config.architectures == ["Gemma4MTPModel"]
+    speculative_config = SpeculativeConfig(method="ngram", num_speculative_tokens=3)
+    speculative_config.method = "mtp"
+    # Gemma4MTPModel declares Gemma4MTPSpeculatorConfig.
+    speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=hf_config,
+        speculator_config_class=(
+            f"{Gemma4MTPSpeculatorConfig.__module__}."
+            f"{Gemma4MTPSpeculatorConfig.__qualname__}"
+        ),
     )
+
+    assert speculative_config.use_gemma4_mtp()
+    assert speculative_config.use_eagle()
+    assert speculative_config.speculator_config.num_hash_lookahead_tokens == 0
 
 
 def test_draft_sample_method_gumbel_is_rejected():
@@ -5069,6 +5271,17 @@ def test_watermark_key_must_fit_in_64_bits():
         WatermarkConfig(key=2**64)
 
 
+def test_watermark_validation_errors_do_not_quote_the_key(tmp_path):
+    """Validation errors end up in logs; the input they would quote holds the key."""
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("42")
+
+    for kwargs in ({"key": 2**64}, {"key": 987654321, "key_file": str(key_file)}):
+        with pytest.raises(ValidationError) as error:
+            WatermarkConfig(**kwargs)
+        assert str(kwargs["key"]) not in str(error.value)
+
+
 @pytest.mark.parametrize("alpha", [-0.1, 1.1])
 def test_watermark_alpha_must_be_a_probability(alpha):
     with pytest.raises(ValidationError):
@@ -5088,6 +5301,30 @@ def test_watermark_key_is_excluded_from_serialization():
     )
 
     assert "key" not in serialized
+
+
+def test_watermark_key_and_key_file_are_exclusive(tmp_path):
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("42")
+
+    with pytest.raises(ValidationError, match="either key or key_file"):
+        WatermarkConfig(key=42, key_file=str(key_file))
+
+
+@pytest.mark.parametrize("content", ["not-a-key", "-5", "+1000", "1_000", str(2**64)])
+def test_invalid_watermark_key_file_is_rejected_without_quoting_it(tmp_path, content):
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text(content)
+
+    with pytest.raises(ValidationError, match="decimal integer") as error:
+        WatermarkConfig(key_file=str(key_file))
+
+    assert content not in str(error.value).replace(str(key_file), "")
+
+
+def test_missing_watermark_key_file_is_rejected(tmp_path):
+    with pytest.raises(ValidationError, match="Cannot read watermark key file"):
+        WatermarkConfig(key_file=str(tmp_path / "missing"))
 
 
 @patch("vllm.config.ModelConfig")
@@ -5281,6 +5518,52 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
 
     with priority.set_priority():
         assert ir.ops.gelu_and_mul_sparse.get_priority() == expected
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
+@pytest.mark.parametrize(
+    ("custom_ops", "pass_config", "triton_rope", "expected"),
+    [
+        # Unfused RoPE stays on Inductor codegen when compiling.
+        ([], PassConfig(), True, ["native"]),
+        # The custom op or a RoPE fusion keeps unfused RoPE on a kernel.
+        (["+rotary_embedding"], PassConfig(), False, ["vllm_c", "native"]),
+        (
+            [],
+            PassConfig(enable_qk_norm_rope_fusion=True),
+            False,
+            ["vllm_c", "native"],
+        ),
+        # AITER Triton RoPE comes first only when its env gate is on (ROCm).
+        (["+rotary_embedding"], PassConfig(), True, ["aiter", "vllm_c", "native"]),
+    ],
+)
+def test_rotary_embedding_platform_priority(
+    custom_ops, pass_config, triton_rope, expected, monkeypatch
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            backend="inductor",
+            custom_ops=custom_ops,
+            pass_config=pass_config,
+        )
+    )
+    try:
+        with monkeypatch.context() as m:
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            m.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "1" if triton_rope else "0")
+            rocm_aiter_ops.refresh_env_variables()
+            if not (current_platform.is_rocm() and rocm_aiter_ops.is_enabled()):
+                expected = [p for p in expected if p != "aiter"]
+            priority = current_platform.get_default_ir_op_priority(config)
+    finally:
+        # rocm_aiter_ops caches env values; re-read them once env is restored.
+        rocm_aiter_ops.refresh_env_variables()
+    assert priority.rotary_embedding == expected
+    assert priority.rotary_embedding_query_only == [p for p in expected if p != "aiter"]
 
 
 def test_ir_op_priority_str():
