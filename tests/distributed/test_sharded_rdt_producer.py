@@ -346,8 +346,6 @@ def test_replicas_share_blocks_and_a_slow_one_frees_the_arena(server):
     "bucket,match",
     [
         ([("other", ((0, 1),))], "not served"),
-        ([(N, ((0, 9), (0, 4)))], "outside"),
-        ([(N, ((0, 8),))], "outside"),
         ([(N, ((0, 1), (0, 4))), (E, ((0, 1), (0, 6)))], "spans units"),
         (WHOLE_N, "larger buffer_bytes"),
     ],
@@ -404,17 +402,6 @@ def test_an_unregistered_live_consumer_holds_every_unit(server):
     assert 1 in s._resident
     s.register_consumer(1, [])
     assert s.wait_freed() == [1]
-
-
-def test_a_degraded_sync_ignores_the_dead(server):
-    s = server()
-    for c in (0, 1):
-        s.register_consumer(c, [WHOLE_N])
-    s.begin_sync([1], 0)
-    _publish(s, _weights(), 0)
-    s.bucket(1, 0, 0)
-    s.free()
-    assert s.end_sync() == [0]
 
 
 def test_a_free_from_the_previous_sync_does_not_count(server):

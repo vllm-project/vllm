@@ -522,14 +522,14 @@ class _RDTProducerServer:
     # ---------------- consumer-facing ----------------
 
     def register_consumer(self, consumer_id: int, buckets: list[WireBucket]) -> None:
-        """Record the buckets `consumer_id` pulls from here, in pull order.
-        Replaces an earlier registration (a re-planned consumer).
+        """Record the buckets `consumer_id` pulls from here, in pull order,
+        replacing its earlier registration. A re-plan to other buckets is
+        refused while the same worker of another deployment holds the old ones.
 
         Raises:
-            ValueError: a bucket names a tensor this rank does not serve, a
-                box outside its tensor, or tensors of two units, or is larger
-                than the arena; or the same worker of another deployment
-                registered other buckets.
+            ValueError: a bucket names a tensor this rank does not serve, spans
+                two units or is larger than the arena; or the same worker of
+                another deployment registered other buckets.
 
         """
         served: list[_ServedBucket] = []
@@ -541,11 +541,7 @@ class _RDTProducerServer:
                         f"consumer {consumer_id} bucket {i}: {name!r} is not "
                         "served by this trainer rank"
                     )
-                dtype, shape = self._served[name]
-                if len(box) != len(shape) or any(
-                    not 0 <= a < b <= n for (a, b), n in zip(box, shape)
-                ):
-                    raise ValueError(f"{name!r}: box {box} is outside {shape}")
+                dtype, _ = self._served[name]
                 pieces.append((name, box_slices(box)))
                 boxes.append(box)
                 dtypes.append(dtype)
@@ -743,9 +739,11 @@ class _RDTProducerServer:
         of box (words, bytes, strided runs), and wait for the copies."""
         assert self._arena is not None
         flat = self._arena[offset : offset + spec.nbytes]
+        if ready is not None:
+            # on the host: a stream wait would make an import's free (which
+            # syncs this stream) wait on the trainer's gather
+            ready.synchronize()
         with self._pack_lock:
-            if ready is not None:
-                torch.cuda.current_stream(self._device_index).wait_event(ready)
             src = sources.get(seq)
             if src is None or src.gen != gen:
                 src = sources[seq] = _sources(

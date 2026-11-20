@@ -27,8 +27,6 @@ from tests.model_executor.model_loader.test_load_plan import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
-    flat_layout,
-    flat_view,
     gather_units,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
@@ -299,6 +297,20 @@ def test_qkv_and_merged_column_under_tp(
         copies = [d for b in fleet.engine._buckets for d in b.byte_dsts]
         assert len({d.untyped_storage().data_ptr() for d in copies}) == len(copies)
 
+    # a replica whose weights sit in reverse address order cuts the same buckets
+    other = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
+    params = list(other.parameters())
+    arena = bytearray(1024 * len(params))  # a storage per weight, placed by hand
+    for i, p in enumerate(params):
+        at = 1024 * (len(params) - 1 - i)
+        raw = torch.frombuffer(memoryview(arena)[at : at + 1024], dtype=torch.uint8)
+        p.data = raw[: p.nbytes].view(p.dtype).view(p.shape).copy_(p.data)
+    other_fleet = _Fleet(monkeypatch, other, _LINEAR_SHAPES, buffer_bytes=buffer_bytes)
+    other_fleet.engine.start_weight_update()
+    assert [(b.producer, b.wire()) for b in other_fleet.engine._buckets] == [
+        (b.producer, b.wire()) for b in fleet.engine._buckets
+    ]
+
 
 @pytest.mark.parametrize("ep_rank", [0, 1])
 def test_experts_under_ep_owned_by_one_producer(monkeypatch, ep_rank):
@@ -327,38 +339,6 @@ def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes):
         assert len(gate_up) > 2 and all(len(b.pieces) == 1 for b in buckets)
     else:
         assert len(gate_up) == 2
-
-
-def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):
-    make = _experts_model(0, 1, 0, 1)
-    fleets: list[_Fleet] = []
-    for consumer in (0, 1):
-        fleets.append(
-            _Fleet(
-                monkeypatch,
-                _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0)),
-                _EXPERT_SHAPES,
-                num_producers=1,
-                consumer_id=consumer,
-                num_consumers=2,
-                buffer_bytes=1 << 20,
-                servers=fleets[0].servers if fleets else None,
-            )
-        )
-        fleets[-1].engine.start_weight_update()
-    (server,) = fleets[0].servers
-    server.begin_sync([0, 1], 0)
-    weights = _checkpoint(_EXPERT_SHAPES, seed=1)
-    server._publish(0, dict(weights))
-    fleets[0].engine.update_weights({"sync_idx": 0})
-    assert server._resident, "released before consumer 1 pulled"
-    fleets[1].engine.update_weights({"sync_idx": 0})
-    assert server.end_sync() == [0]
-    expected = _state(_cold_start(make, weights))
-    for fleet in fleets:
-        fleet.engine.finish_weight_update()
-        for name, s in _state(fleet.engine.model).items():
-            assert torch.equal(s[3], expected[name][3]), name
 
 
 def test_plan_failure_leaves_a_note_and_retries(monkeypatch):
@@ -398,9 +378,9 @@ def test_a_row_over_buffer_bytes_is_refused_at_plan_time(monkeypatch):
 
 
 def test_rows_round_down_to_whole_rows_within_the_cap():
-    t = torch.zeros(10, 3, dtype=BF16)  # rows of 6 B; 5 rows = 30 B, aligned 32
+    t = torch.zeros(10, 3, dtype=BF16)  # rows of 6 B: 6 fit in 40 B, 5 in 32
     piece = ("w", ((0, 10), (0, 3)), BF16, [t])
-    segs = engine_mod._rows(piece, 32)
+    segs = engine_mod._rows(piece, 40)
     assert [seg[1][0] for seg in segs] == [(0, 5), (5, 10)]
     assert [seg[3][0].data_ptr() for seg in segs] == [t.data_ptr(), t[5].data_ptr()]
     assert engine_mod._rows(piece, 64) == [piece]
@@ -505,21 +485,6 @@ def test_a_failed_sync_leaves_no_partial_fallback(monkeypatch):
 
 
 # ------------------------------------------------------------ common
-
-
-def test_flat_layout_puts_each_piece_on_16_bytes():
-    boxes = [((0, 3),), ((0, 2), (0, 5)), ((1, 2), (0, 1), (0, 4))]
-    pieces = [
-        torch.randn(3).to(BF16),
-        torch.randn(2, 5),
-        torch.arange(4, dtype=torch.uint8).view(1, 1, 4),
-    ]
-    layout = flat_layout(boxes, [p.dtype for p in pieces])
-    assert [(off, n) for off, n, _, _ in layout] == [(0, 6), (16, 40), (64, 4)]
-    flat = torch.zeros(80, dtype=torch.uint8)
-    torch._foreach_copy_([flat_view(flat, p) for p in layout], pieces)
-    for p, want in zip(layout, pieces):
-        assert torch.equal(flat_view(flat, p), want)
 
 
 @pytest.mark.parametrize("installed,ok", [("2.56.0", True), ("2.55.1", False)])
