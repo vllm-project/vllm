@@ -399,6 +399,8 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # Whether the last release stopped for lack of KV blocks or preempted.
+        self.prefill_kv_stopped = False
         if self.scheduler_config.prefill_hold_ttft_target is not None:
             from vllm.v1.core.sched import dp_prefill_hold
 
@@ -1043,6 +1045,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
+        stopped_on_kv = bool(preempted_reqs)
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
@@ -1514,6 +1517,7 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    stopped_on_kv = True
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -1670,6 +1674,8 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+        if not defer_prefills:
+            self.prefill_kv_stopped = stopped_on_kv
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -3090,7 +3096,19 @@ class Scheduler(SchedulerInterface):
             len(self.finished_recving_kv_req_ids),
             self.max_num_active_reqs,
             self.kv_cache_manager.get_num_cached_tokens,
+            self.kv_cache_manager.block_pool.get_num_free_blocks()
+            - self._inflight_prefill_reserved_blocks()
+            if self.prefill_kv_stopped
+            else None,
+            self._num_blocks_to_admit,
         )
+
+    def _num_blocks_to_admit(self, request: Request) -> int:
+        """Roughly the KV blocks a waiting request needs to be admitted: those
+        of its full sequence it lacks, less its local prefix hit's share."""
+        blocks = self._request_remaining_blocks(request)
+        hit = self.kv_cache_manager.get_num_cached_tokens(request)
+        return blocks - blocks * hit // max(request.num_tokens, 1)
 
     def _startable_waiting(self) -> Iterator[Request]:
         """Waiting requests that can start now, in the order `schedule` admits

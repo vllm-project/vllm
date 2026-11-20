@@ -244,8 +244,9 @@ class SchedulerConfig:
     grouping prefills across ranks, predicted from the recent arrival rate and
     an online fit of measured step times, outweighs the TTFT added. A request
     is held only while it can still meet the target given the releases it
-    needs. Requires data parallelism on a MoE model, and cannot be combined
-    with `prefill_schedule_interval`."""
+    needs, timed from the last release when that one ran out of KV blocks.
+    Requires data parallelism on a MoE model, and cannot be combined with
+    `prefill_schedule_interval`."""
 
     prefill_hold_alpha: float = Field(default=1.0, gt=0)
     """How much one second of TTFT per waiting request weighs against one

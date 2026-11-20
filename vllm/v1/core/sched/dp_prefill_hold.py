@@ -15,7 +15,9 @@ engine core's state sync, and every rank runs the same deterministic
 - Bound the hold per request: a request of age `a` with `k` releases still
   ahead of it may be held `(T - a - (k - 1) * e) / k - t_mix` more, where `e`
   is the time held so far, `t_mix` is the mixed step time and `T` is the TTFT
-  target. A request older than `T` releases every step.
+  target. A request older than `T` releases every step. After a release stops
+  for lack of KV blocks, only the queue ahead of the first request that does
+  not fit counts, and its ages start at that release.
 - Step costs come from an online least-squares fit of measured step times,
   with no latency model. Until the fit is pinned down, it releases.
 """
@@ -181,6 +183,9 @@ class PrefillQueueState(NamedTuple):
     num_loaded: int
     max_active_reqs: int
     num_cached_tokens: Callable[["Request"], int]
+    # Free KV blocks if the last release stopped for lack of them, else None.
+    kv_free_blocks: int | None
+    num_blocks_needed: Callable[["Request"], int]
 
     @property
     def scan_key(self) -> tuple[int, int, int]:
@@ -331,6 +336,8 @@ class PrefillHold:
         """Scans the prefill queue ahead of the next `local_row`. The engine
         core calls this while the GPU runs a step, off the critical path."""
         state = self._queue_state()
+        if state.kv_free_blocks is not None:
+            return  # blocks the step frees change the scan; scan at the sync
         at = time.monotonic()
         self._scan = (
             self._scan_queue(state, at, self._held(at))
@@ -411,6 +418,8 @@ class PrefillHold:
             queue_tokens += remaining
             k = -(-queue_tokens // budget)
             age = wall - arrival
+            if state.kv_free_blocks is not None:
+                age = min(age, held)  # it could start only since that release
             slack = min(slack, (target - age - (k - 1) * min(held, age)) / k)
             if slack <= 0:
                 # Releases whatever the rest of the queue is.
@@ -428,7 +437,12 @@ class PrefillHold:
                 yield req.arrival_time, remaining, req.num_computed_tokens
         cached_tokens = self._cached_tokens
         probe = state.num_cached_tokens
+        free = state.kv_free_blocks
         for req in state.waiting():
+            if free is not None:
+                free -= state.num_blocks_needed(req)
+                if free < 0:  # admission stops here too
+                    return
             # A request holding KV blocks, such as a finished async KV load,
             # resumes from them.
             cached = req.num_computed_tokens or cached_tokens.get(req.request_id)

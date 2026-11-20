@@ -376,6 +376,61 @@ def test_rank_without_a_free_slot_is_blocked():
     assert row[dph._BLOCKED] == 1 and row[dph._X] == 0
 
 
+def _kv_stopped_scheduler(ttft_target: float = T):
+    """A hold scheduler with a running decode that leaves too few free KV
+    blocks for a 300-token request, and the decode."""
+    scheduler, hold = _hold_scheduler(
+        ttft_target, num_blocks=30, block_size=16, max_model_len=1024
+    )
+    (dec,) = create_requests(num_requests=1, num_tokens=200, req_ids=["d"])
+    scheduler.add_request(dec)
+    _finish_step(scheduler, scheduler.schedule())
+    return scheduler, hold, dec
+
+
+def test_queue_scan_stops_where_kv_runs_out():
+    """Once a release stops for lack of KV blocks, the rank offers only what
+    admission could take: its queue ends at the first request that does not
+    fit, as admission does."""
+    scheduler, hold, dec = _kv_stopped_scheduler()
+    (big,) = create_requests(num_requests=1, num_tokens=300, req_ids=["b"])
+    (small,) = create_requests(num_requests=1, num_tokens=16, req_ids=["s"])
+    scheduler.add_request(big)
+    scheduler.add_request(small)
+    assert hold.local_row()[dph._QUEUED] == 2
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens.keys() == {"d"}
+    assert scheduler.prefill_kv_stopped
+    row = hold.local_row()
+    assert row[dph._WORK] == 1
+    assert row[dph._X] == 0 and row[dph._QUEUED] == 0
+
+    scheduler.finish_requests(dec.request_id, RequestStatus.FINISHED_ABORTED)
+    row = hold.local_row()
+    assert row[dph._X] == 316 and row[dph._QUEUED] == 2
+
+
+def test_waits_count_from_a_release_that_stopped_on_kv(monkeypatch):
+    """A request waiting behind a release that stopped for lack of KV blocks
+    could not start before it, so its age does not force a release: the hold
+    may add up to the target to its wait from then on."""
+    clock = _Clock()
+    monkeypatch.setattr(dph, "time", clock)
+    scheduler, hold, dec = _kv_stopped_scheduler(10.0)
+    (big,) = create_requests(num_requests=1, num_tokens=300, req_ids=["b"])
+    big.arrival_time = clock.wall - 20.0
+    scheduler.add_request(big)
+    assert hold.local_row()[dph._SLACK] == pytest.approx(-10.0)
+
+    scheduler.schedule()
+    scheduler.finish_requests(dec.request_id, RequestStatus.FINISHED_ABORTED)
+    assert hold.local_row()[dph._SLACK] == pytest.approx(10.0)
+    # Held for 0.5 s since that release.
+    hold._hold_start, hold._clock = 0.0, 0.5
+    assert hold.local_row()[dph._SLACK] == pytest.approx(9.5)
+
+
 def test_finished_kv_load_is_queued_work():
     """A request whose async KV load finished waits in `kv_holding_waiting`,
     and the hold defers it like any other. Until it is released, it is queued
