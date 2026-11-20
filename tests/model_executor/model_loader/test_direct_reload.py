@@ -36,7 +36,6 @@ from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     direct_reload_enabled,
     finish_direct_reload,
-    layerwise_draft,
     record_checkpoint_layout,
     reloads_directly,
     track_loaded_params,
@@ -777,7 +776,7 @@ def test_direct_reload_enabled(monkeypatch, overrides, expected):
     assert direct_reload_enabled() is expected
 
 
-def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
+def test_auto_refused_model_reloads_layerwise(monkeypatch):
     from vllm.model_executor.model_loader.reload import lifecycle
 
     monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
@@ -796,13 +795,4 @@ def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
     start_reload(target)
     finish_reload(target, _MODEL_CONFIG, _DEVICE)
     assert calls == ["init", "finalize"]
-    # a draft of a layerwise target reloads layerwise without its own checks,
-    # even under VLLM_RELOAD_MODE=direct
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    with _DEVICE:
-        draft = _ToyModel()
-    draft.proj.shared_expert_online_loader = SimpleNamespace(finalize=lambda m: None)
-    with layerwise_draft():
-        process_weights_after_loading(draft, _MODEL_CONFIG, _DEVICE)
-    assert not reloads_directly(draft)
     assert reloads_directly(_cold_start(_checkpoint()))

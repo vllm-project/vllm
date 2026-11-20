@@ -23,8 +23,6 @@ owner's `begin`.
 """
 
 from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from fnmatch import fnmatchcase
 
 import torch
@@ -46,7 +44,6 @@ __all__ = [
     "direct_reload_enabled",
     "direct_reload_refusal",
     "finish_direct_reload",
-    "layerwise_draft",
     "loadable_tensors",
     "mark_loaded",
     "record_checkpoint_layout",
@@ -69,9 +66,6 @@ _LOADER_ATTRS = (
     "packed_factor",
     "pack_factor",
 )
-
-
-_LAYERWISE_DRAFT: ContextVar[bool] = ContextVar("layerwise_draft", default=False)
 
 
 def direct_reload_refusal(config: VllmConfig) -> str | None:
@@ -122,21 +116,7 @@ def direct_reload_enabled() -> bool:
         if reason:
             _log_layerwise(reason)
             return False
-    if _LAYERWISE_DRAFT.get():
-        _log_layerwise("a draft whose target reloads layerwise")
-        return False
     return True
-
-
-@contextmanager
-def layerwise_draft() -> Iterator[None]:
-    """Load a draft whose target reloads layerwise: the draft does too, as they
-    may share tensors."""
-    token = _LAYERWISE_DRAFT.set(True)
-    try:
-        yield
-    finally:
-        _LAYERWISE_DRAFT.reset(token)
 
 
 def _log_layerwise(reason: str) -> None:

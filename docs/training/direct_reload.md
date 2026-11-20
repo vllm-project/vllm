@@ -63,8 +63,5 @@ arrives, and an update that delivers only one of them fails at finish.
 - Pre-processed weights (weight cache), with a log even under
   `VLLM_RELOAD_MODE=direct`.
 
-A draft model reloads layerwise whenever its target does, with a log and
-never an error.
-
 The NCCL weight transfer load plan (`use_load_plan`) requires direct reload and
 refuses online quantization.
