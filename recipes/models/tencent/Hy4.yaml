@@ -204,5 +204,4 @@ guide: |
   - [BF16 checkpoint](https://huggingface.co/tencent/Hy4)
   - [FP8 checkpoint](https://huggingface.co/tencent/Hy4-FP8)
   - [GitHub: Tencent-Hunyuan/Hy4](https://github.com/Tencent-Hunyuan/Hy4)
-  - [vLLM support PR](https://github.com/vllm-project/vllm/pull/68296)
   - [AngelSpec, the DFly2 training toolkit](https://github.com/Tencent/AngelSpec)
