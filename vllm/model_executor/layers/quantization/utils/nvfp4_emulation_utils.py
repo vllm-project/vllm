@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = [
     "break_fp4_bytes",
+    "dequantize_nvfp4_linear_weight",
     "dequantize_nvfp4_moe_weights",
     "dequantize_to_dtype",
     "nvfp4_gathered_bias",
@@ -632,6 +633,42 @@ def dequantize_to_dtype(
     out = out.reshape(*out.shape[:-2], -1)
 
     return out.to(dtype)
+
+
+def dequantize_nvfp4_linear_weight(
+    weight: torch.Tensor,
+    block_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    partition_widths: list[int],
+    dtype: torch.dtype,
+    group_size: int,
+    *,
+    invert_global_scales: bool,
+) -> torch.Tensor:
+    """Dequantize packed NVFP4 linear weights with per-partition scales."""
+    input_size = weight.shape[1] * 2
+    result = torch.empty(
+        (weight.shape[0], input_size), dtype=dtype, device=weight.device
+    )
+    # Limit temporary FP32 allocations in the PyTorch dequantization fallback.
+    chunk_rows = max(1, 16 * 1024 * 1024 // input_size)
+    offset = 0
+    for partition, width in enumerate(partition_widths):
+        scale = global_scale[partition]
+        if invert_global_scales:
+            scale = scale.reciprocal()
+        for start in range(offset, offset + width, chunk_rows):
+            rows = slice(start, min(start + chunk_rows, offset + width))
+            result[rows] = dequantize_to_dtype(
+                weight[rows].contiguous(),
+                block_scale[rows].contiguous(),
+                scale,
+                dtype,
+                block_size=group_size,
+                swizzle=False,
+            )
+        offset += width
+    return result
 
 
 def _dequantize_nvfp4_moe_experts(

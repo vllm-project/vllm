@@ -44,6 +44,7 @@ impl RendererSelection {
     pub const HF_LITERAL: &str = "hf";
     pub const INKLING_LITERAL: &str = "inkling";
     pub const INKLING_MODEL_TYPE: &str = "inkling_mm_model";
+    pub const INKLING2_MODEL_TYPE: &str = "inkling2";
     pub const KIMI_K3_LITERAL: &str = "kimi_k3";
     pub const KIMI_K31_MODEL_TYPE: &str = "kimi_k31";
     pub const GLM5_NEXT_LITERAL: &str = "glm5_next";
@@ -57,7 +58,7 @@ impl RendererSelection {
                 Self::DEEPSEEK_V4_LITERAL => Self::DeepSeekV4,
                 Self::DEEPSEEK_V41_LITERAL => Self::DeepSeekV41,
                 Self::GPT_OSS_MODEL_TYPE => Self::Harmony,
-                Self::INKLING_MODEL_TYPE => Self::Inkling,
+                Self::INKLING_MODEL_TYPE | Self::INKLING2_MODEL_TYPE => Self::Inkling,
                 Self::KIMI_K3_LITERAL | Self::KIMI_K31_MODEL_TYPE => Self::KimiK3,
                 Self::GLM5_NEXT_LITERAL => Self::Glm5Next,
                 _ => Self::Hf,
