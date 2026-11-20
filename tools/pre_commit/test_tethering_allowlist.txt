@@ -186,5 +186,3 @@ tests/transformers_utils/test_repo_utils.py  # CI jobs disabled pending locked c
 tests/transformers_utils/test_speculators_dspark_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_speculators_override.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_utils.py  # CI jobs disabled pending locked cmake installation
-
-tests/v1/ec_connector/integration/test_cross_encoder_store_ssd.py  # Requires four GPUs, local VL weights, and a dedicated SSD-enabled Mooncake Store
