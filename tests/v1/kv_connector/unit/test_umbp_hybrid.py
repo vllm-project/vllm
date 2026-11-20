@@ -56,6 +56,7 @@ from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     FullAttentionManager,
+    MambaManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
@@ -63,6 +64,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
 )
@@ -228,7 +230,9 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
 
 
 @pytest.mark.parametrize("dcp_size", [1, 2, 8])
-def test_unsharded_draft_keeps_replay_window(dcp_size):
+@pytest.mark.parametrize("partial_hits", [False, True])
+@pytest.mark.parametrize("length", [2047, 9215, 10191, 16383, 32511])
+def test_unsharded_draft_keeps_replay_window(dcp_size, partial_hits, length):
     """Target DCP must not change the draft pages retained before a checkpoint."""
     config = VllmConfig(
         cache_config=CacheConfig(
@@ -240,7 +244,9 @@ def test_unsharded_draft_keeps_replay_window(dcp_size):
             distributed_executor_backend="mp",
         ),
         kv_transfer_config=KVTransferConfig(
-            kv_connector="UMBPStoreConnector", kv_role="kv_both"
+            kv_connector="UMBPStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"enable_partial_hash_hits": partial_hits},
         ),
     )
     target = AttentionSpec(
@@ -256,6 +262,7 @@ def test_unsharded_draft_keeps_replay_window(dcp_size):
         dtype=torch.float16,
         dcp_sharded=False,
     )
+    state = MambaSpec(block_size=1152, shapes=((4,),), dtypes=(torch.float32,))
     cache = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
@@ -267,6 +274,12 @@ def test_unsharded_draft_keeps_replay_window(dcp_size):
                 dcp_sharded=True,
             ),
             KVCacheGroup(
+                {"state": state},
+                MambaManager.config(enable_prefix_caching=True),
+                state.block_size,
+                dcp_sharded=False,
+            ),
+            KVCacheGroup(
                 {"draft": draft},
                 SlidingWindowManager.config(sliding_window=2048),
                 draft.block_size,
@@ -276,12 +289,18 @@ def test_unsharded_draft_keeps_replay_window(dcp_size):
         prefix_cache_retention_interval=0,
     )
     scheduler = UMBPStoreConnectorScheduler(config, cache, None, None)
-    request = Request("replay", [42] * 10191, SamplingParams(max_tokens=8), None)
+    request = Request("replay", [42] * length, SamplingParams(max_tokens=8), None)
     try:
-        mask = scheduler._store_mask(request, 1, range(8))
         assert scheduler.block_size == 9216
-        # The 2048-token window ending at 9216 spans draft pages 6 and 7.
-        assert mask is not None and mask[6] and mask[7], mask
+        assert scheduler._lookup_coordinator is not None
+        assert scheduler._lookup_coordinator.enable_partial_hash_hits == partial_hits
+        unit = 128 if partial_hits else 9216
+        boundary = (length - 1) // unit * unit
+        first = max(0, boundary - 2047) // 1152
+        end = boundary // 1152
+        # Positional stores must retain full pages before the handed-off tail.
+        mask = scheduler._store_mask(request, 2, range(length // 1152))
+        assert mask is None or all(mask[index] for index in range(first, end)), mask
     finally:
         scheduler.close()
 
@@ -928,7 +947,6 @@ def test_hybrid_boundary_restores_every_byte(socket_dir, device, request_state):
             SlidingWindowManager.layer_config(
                 uniform_spec(config.kv_cache_groups[0]), sliding_window=32
             ),
-            is_eagle_group=True,
         )
     )
     groups = config.kv_cache_groups

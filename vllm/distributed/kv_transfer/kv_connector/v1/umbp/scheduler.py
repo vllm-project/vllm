@@ -1554,10 +1554,17 @@ class UMBPStoreConnectorScheduler:
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
+        # Fine-grained restore needs the full SWA pages before its partial tail.
+        alignment_tokens = self.block_size
+        if (
+            self._lookup_coordinator is not None
+            and self._lookup_coordinator.enable_partial_hash_hits
+        ):
+            alignment_tokens = self.hash_block_size
         mask = group.manager_cls.reachable_block_mask(
             start_block=indices.start,
             end_block=indices.stop,
-            alignment_tokens=self.block_size,
+            alignment_tokens=alignment_tokens,
             block_size=group.block_size,
             manager_config=group.manager_config,
             retention_interval=self._retention_interval,
