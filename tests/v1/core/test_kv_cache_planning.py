@@ -46,7 +46,7 @@ from vllm.v1.core.kv_cache_planning import (
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
 )
-from vllm.v1.core.sched.utils import (
+from vllm.v1.core.sched.prompt_embeds_budget import (
     prompt_embeds_budget_rows,
     prompt_embeds_row_bytes,
 )

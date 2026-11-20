@@ -2,36 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
-
-import torch
 
 from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
-
-if TYPE_CHECKING:
-    from vllm.config import SchedulerConfig, VllmConfig
-
-
-def prompt_embeds_budget_rows(
-    max_model_len: int, scheduler_config: "SchedulerConfig"
-) -> int:
-    """`prompt_embeds` rows the workers may hold at once, summed over the
-    requests whose prompts are not computed yet: one max-length prompt still
-    being prefilled plus a full step of new prompts."""
-    return max_model_len + scheduler_config.max_num_batched_tokens
-
-
-def prompt_embeds_row_bytes(vllm_config: "VllmConfig") -> int:
-    """GPU memory of one `prompt_embeds` row, or 0 without prompt embeds.
-
-    Leaves out the 1-byte `prompt_is_token_ids` flag the workers also hold per
-    row of a mixed prompt."""
-    model_config = vllm_config.model_config
-    if not model_config.enable_prompt_embeds:
-        return 0
-    assert isinstance(model_config.dtype, torch.dtype)
-    return model_config.get_inputs_embeds_size() * model_config.dtype.itemsize
 
 
 def _has_repeating_pattern(

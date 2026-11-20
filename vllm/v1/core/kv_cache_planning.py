@@ -22,7 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
     update_kv_cache_capacity,
 )
-from vllm.v1.core.sched.utils import prompt_embeds_row_bytes
+from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_row_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,

@@ -20,10 +20,11 @@ class PromptEmbedsState:
     single triton kernel overlay all scheduled prompt-embeds rows onto
     `inputs_embeds` each step, with no python loops or per-request H2D copies.
 
-    A request's embeddings are dropped after the step that computes its last
-    prompt position; a request rolled back below it is re-sent. The scheduler admits
-    requests so that the rows held here stay within `max_model_len`, which
-    memory profiling reserves.
+    A request is sent only the embeddings of positions not computed yet, and
+    they are dropped after the step that computes its last prompt position; a
+    request rolled back below them is re-sent. The scheduler admits requests so
+    that the rows held here stay within `max_num_rows`, which KV cache planning
+    sets memory aside for.
     """
 
     def __init__(

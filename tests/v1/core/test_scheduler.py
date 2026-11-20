@@ -618,7 +618,7 @@ def test_prompt_embeds_admission_waits_for_gpu_budget():
         max_model_len=64, max_num_batched_tokens=64, enable_prompt_embeds=True
     )
     # Budget as if prompts could not hold more rows than they compute.
-    scheduler.max_num_prompt_embeds_tokens = 64
+    scheduler.prompt_embeds_budget.max_num_rows = 64
     scheduler.add_request(_prompt_embeds_request("a", 40))
     scheduler.add_request(_prompt_embeds_request("b", 40))
     scheduler.add_request(create_requests(1, num_tokens=10, req_ids=["c"])[0])
@@ -650,7 +650,7 @@ def test_prompt_embeds_waiting_request_is_not_starved():
         max_model_len=64, max_num_batched_tokens=64, enable_prompt_embeds=True
     )
     # Budget as if prompts could not hold more rows than they compute.
-    scheduler.max_num_prompt_embeds_tokens = 64
+    scheduler.prompt_embeds_budget.max_num_rows = 64
     scheduler.add_request(_prompt_embeds_request("a", 40))
     scheduler.add_request(_prompt_embeds_request("b", 60))
     scheduler.add_request(_prompt_embeds_request("c", 16))
@@ -670,7 +670,7 @@ def test_prompt_embeds_budget_counts_only_uncached_rows():
         max_model_len=64, enable_prompt_embeds=True, enable_prefix_caching=True
     )
     # Budget as if prompts could not hold more rows than they compute.
-    scheduler.max_num_prompt_embeds_tokens = 64
+    scheduler.prompt_embeds_budget.max_num_rows = 64
     init_none_hash(sha256)
     block_hasher = get_request_block_hasher(16, sha256)
     shared = torch.randn(40, 8)
@@ -707,7 +707,7 @@ def test_prompt_embeds_budget_released_on_preemption():
         max_model_len=64, max_num_batched_tokens=16, enable_prompt_embeds=True
     )
     # Budget as if prompts could not hold more rows than they compute.
-    scheduler.max_num_prompt_embeds_tokens = 64
+    scheduler.prompt_embeds_budget.max_num_rows = 64
     request = _prompt_embeds_request("a", 40)
     scheduler.add_request(request)
     scheduler.add_request(_prompt_embeds_request("b", 40))

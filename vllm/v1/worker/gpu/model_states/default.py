@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.core.sched.utils import prompt_embeds_budget_rows
+from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_budget_rows
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
