@@ -4,13 +4,11 @@ from vllm.config import SpeculativeConfig
 
 
 def needs_mtp_hidden_buffer(spec_config: SpeculativeConfig | None) -> bool:
-    """Whether the drafter reads the target's pre-hc_head residual buffer.
-
-    DSpark drafts from the target's aux hidden states, so it skips the
-    (max_num_batched_tokens, hc_mult * hidden_size) buffer.
+    """Whether the drafter reads the target's pre-hc_head residual buffer, which
+    stands in for its final hidden states (aux-state drafters like DSpark don't).
     """
     return (
         spec_config is not None
-        and (spec_config.use_eagle() or spec_config.uses_draft_model())
-        and not spec_config.use_dspark()
+        and spec_config.uses_target_hidden_states
+        and not spec_config.uses_aux_hidden_states
     )
