@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
     convert_flashinfer_moe_output,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
 from vllm.models.muse_spark.nvidia.ops.mnnvl_fusions import (
     maybe_create_moe_finalize_all_reduce,
@@ -54,18 +55,17 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
             )
 
     def finalize_weights(self) -> None:
-        if self._transformed_l1 is not None:
-            return
         super().finalize_weights()
         if self.is_nvfp4:
             # Preserve MegaMoE's per-expert scales. TRT follows its existing
             # static-activation recipe, with one maximum per local expert bank.
             a13 = self.w13_input_scale.max().float().reshape(1)
             a2 = self.w2_input_scale.max().float().reshape(1)
-            self._input_global_scale = a13.reciprocal()
-            self._g1_gate = (a13 * self.w13_weight_scale_2[:, 0]).contiguous()
-            self._g1_up = (a13 * self.w13_weight_scale_2[:, 1] / a2).contiguous()
-            self._g2_scale = (a2 * self.w2_weight_scale_2).contiguous()
+            s13, s2 = self.w13_weight_scale_2, self.w2_weight_scale_2
+            refill_derived(self, "_input_global_scale", a13.reciprocal())
+            refill_derived(self, "_g1_gate", (a13 * s13[:, 0]).contiguous())
+            refill_derived(self, "_g1_up", (a13 * s13[:, 1] / a2).contiguous())
+            refill_derived(self, "_g2_scale", (a2 * s2).contiguous())
 
     def use_trtllm(self, num_tokens: int, sp_active: bool) -> bool:
         return (

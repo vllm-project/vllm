@@ -196,7 +196,8 @@ def _rel(actual: torch.Tensor, expected: torch.Tensor) -> float:
 def test_megamoe_bf16_nvfp4_shared_buffer(
     tokens, default_vllm_config, dist_init, workspace_init, monkeypatch
 ):
-    """Alternating formats must preserve BF16 results, also in CUDA graphs."""
+    """Alternating formats must preserve BF16 results, also in CUDA graphs and
+    after a weight reload into the captured storage."""
     pytest.importorskip("deep_gemm")
     config = VllmConfig(parallel_config=ParallelConfig())
     monkeypatch.setattr(
@@ -250,15 +251,22 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
         weights = weights.softmax(-1)
         ids = ids.int()
         ids[::3, -1] = -1
-        expected = torch.zeros_like(x, dtype=torch.float32)
-        for expert in range(experts):
-            token, slot = (ids == expert).nonzero(as_tuple=True)
-            gate, up = (x[token].float() @ w1[expert].float().T).bfloat16().chunk(2, -1)
-            act = (F.silu(gate.float()) * up.float()).bfloat16()
-            rows = (act.float() @ w2[expert].float().T).bfloat16()
-            scaled = rows.float() * bf16._norm_gamma
-            result = scaled * torch.rsqrt(scaled.square().mean(-1, keepdim=True) + 1e-8)
-            expected.index_add_(0, token, result * weights[token, slot, None])
+
+        def reference(w1, w2):
+            expected = torch.zeros_like(x, dtype=torch.float32)
+            gamma = norm.weight.float() + norm.gain_center
+            for expert in range(experts):
+                token, slot = (ids == expert).nonzero(as_tuple=True)
+                h = (x[token].float() @ w1[expert].float().T).bfloat16()
+                gate, up = h.chunk(2, -1)
+                act = (F.silu(gate.float()) * up.float()).bfloat16()
+                rows = (act.float() @ w2[expert].float().T).bfloat16()
+                scaled = rows.float() * gamma
+                rms = torch.rsqrt(scaled.square().mean(-1, keepdim=True) + 1e-8)
+                expected.index_add_(0, token, scaled * rms * weights[token, slot, None])
+            return expected
+
+        expected = reference(w1, w2)
         for _ in range(2):
             torch.testing.assert_close(nvfp4(x, weights, ids), torch.zeros_like(x))
             actual = bf16(x, weights, ids)
@@ -271,6 +279,14 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
             graph.replay()
             torch.testing.assert_close(fp4_actual, torch.zeros_like(x))
             torch.testing.assert_close(actual.float(), expected, atol=0.04, rtol=0.02)
+        # A reload writes into the same storage and refills the derived gamma.
+        w1, w2 = w1.roll(1, 0), w2.roll(1, 0) * 2
+        norm.weight.copy_(norm.weight.flip(0))
+        bf16.load_weights([("w13_weight", w1), ("w2_weight", w2)])
+        bf16.finalize_weights()
+        graph.replay()
+        expected = reference(w1, w2)
+        torch.testing.assert_close(actual.float(), expected, atol=0.04, rtol=0.02)
 
 
 # At hidden 4096 the block size switches at 512K and 2M elements: 128/129 and
