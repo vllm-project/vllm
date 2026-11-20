@@ -78,6 +78,8 @@ steps:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/cpu/
   - vllm/v1/worker/gpu/spec_decode/
+  - vllm/distributed/pp_transport/
+  - vllm/model_executor/models/interfaces.py
   - vllm/v1/attention/backends/cpu_attn.py
   - vllm/config/speculative.py
   - vllm/models/qwen3_5/

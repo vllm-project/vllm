@@ -207,6 +207,7 @@ channel and is separate from the `PPTransport` communication-backend interface.
 
 ```python
 from vllm.distributed import get_tp_group
+from vllm.distributed.pp_transport.fields import PPTransportField
 from vllm.distributed.pp_transport.schema import (
     PPTransportSchema,
     PPTransportTensorSpec,
@@ -214,10 +215,10 @@ from vllm.distributed.pp_transport.schema import (
 
 self.pp_transport_schema = PPTransportSchema(
     {
-        "hidden_states": PPTransportTensorSpec(
+        PPTransportField.HIDDEN_STATES: PPTransportTensorSpec(
             (hidden_size,), sequence_parallel=True
         ),
-        "residual": PPTransportTensorSpec((hidden_size,)),
+        PPTransportField.RESIDUAL: PPTransportTensorSpec((hidden_size,)),
     },
     tp_size=get_tp_group().world_size,
 )
@@ -230,6 +231,38 @@ Expose `pp_transport_schema` on the top-level model. Non-last stages return
 their output fields in the existing `IntermediateTensors` container.
 The token count includes the runner's padding. Shapes exclude the token
 dimension; an explicit `dtype` overrides the runner's requested dtype.
+
+### Selecting and inspecting fields
+
+`PPTransportField` provides common names for model initialization:
+
+| Field | Tensor-dict name |
+| --- | --- |
+| `PPTransportField.HIDDEN_STATES` | `hidden_states` |
+| `PPTransportField.RESIDUAL` | `residual` |
+| `PPTransportField.POSITIONS` | `pp_positions` |
+| `PPTransportField.aux_hidden_state(i)` | `aux_hidden_states_i` |
+
+Choose fields by using enum members as schema keys. Indexed aux fields use
+the naming helper; custom model and downstream fields can use string keys.
+Enum keys are normalized to plain strings when registered, preserving existing
+tensor-dict wire names.
+
+The schema exposes `recv_specs` and `send_specs` as read-only live mappings
+from field names to `PPTransportTensorSpec`. Each direction describes its own
+shape, optional dtype and SP layout:
+
+```python
+for name, spec in self.pp_transport_schema.recv_specs.items():
+    print(name, spec.shape, spec.dtype, spec.sequence_parallel)
+```
+
+Use `register_tensor()` to change the declarations. The mappings include only
+explicitly registered fields, not legacy fields handled by the full-layout
+fallback. A declaration does not filter the model's outputs: the model still
+chooses which tensors to return in `IntermediateTensors`.
+
+### Layouts and compatibility
 
 Full tensors retain TP slice-send/all-gather. A field marked
 `sequence_parallel=True` has `ceil(num_global_tokens / tp_size)` local rows and

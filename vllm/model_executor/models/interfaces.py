@@ -34,6 +34,10 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import TypeIs
 
+from vllm.distributed.pp_transport.fields import (
+    AUX_HIDDEN_STATES_PREFIX,
+    PPTransportField,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interfaces_base import VllmModel
@@ -1628,7 +1632,7 @@ class EagleModelMixin:
     end_layer: int
     aux_hidden_state_layers: tuple[int, ...] = ()
     supports_aux_hidden_states_over_pp: ClassVar[bool] = False
-    AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
+    AUX_HIDDEN_STATE_KEY: ClassVar[str] = AUX_HIDDEN_STATES_PREFIX
     _aux_slot_base_cached: int = 0
     # The previous PP stage takes the aux hidden state at its last layer,
     # which is this stage's start_layer.
@@ -1707,8 +1711,13 @@ class EagleModelMixin:
         )
         key = self.AUX_HIDDEN_STATE_KEY
         return (
-            tuple(f"{key}{i}" for i in range(base)),
-            tuple(f"{key}{i}" for i in range(base, end)),
+            tuple(
+                PPTransportField.aux_hidden_state(i, prefix=key) for i in range(base)
+            ),
+            tuple(
+                PPTransportField.aux_hidden_state(i, prefix=key)
+                for i in range(base, end)
+            ),
         )
 
     def collect_remote_aux_hidden_states(
