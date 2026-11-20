@@ -774,3 +774,22 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding, Supports
             inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors,
         )
+
+
+class GteForSequenceClassification(GteNewForSequenceClassification):
+    """`GteNewForSequenceClassification` for LoRA adapters trained on the native
+    Transformers GTE (`model_type: gte`), whose split `q/k/v_proj` and
+    `gate/up_proj` pack into the fused layers. Checkpoint weights load as for
+    `GteNewForSequenceClassification`."""
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "up_gate_proj": ["up_proj", "gate_proj"],
+    }
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".self_attn.o_proj": ".attn.out_proj",
+            ".self_attn.": ".attn.",
+        },
+        orig_to_new_prefix={"gte.layers.": "new.encoder.layers."},
+    )
