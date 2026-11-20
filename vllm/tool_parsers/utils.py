@@ -12,6 +12,7 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+import regex as re
 from openai.types.responses import (
     CustomTool,
     FunctionTool,
@@ -642,6 +643,36 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     )
 
 
+# Characters that can end a run of plain string-literal text.
+_STRING_BODY_STOP_RE = {
+    "'": re.compile(r"[\\']"),
+    '"': re.compile(r'[\\"]'),
+}
+_CTRL_CHAR_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\x00": "\\x00"}
+_STRING_BODY_CTRL_STOP_RE = {
+    "'": re.compile(r"[\\'\n\r\t\x00]"),
+    '"': re.compile(r'[\\"\n\r\t\x00]'),
+}
+_QUOTE_RE = re.compile(r"['\"]")
+
+
+def _find_string_end(text: str, start: int, quote: str) -> int:
+    """Return the index of the quote that closes a string literal.
+
+    `start` is the index just after the opening `quote`. A backslash
+    escapes the character after it. Returns -1 when the string is still open.
+    """
+    pattern = _STRING_BODY_STOP_RE[quote]
+    index = start
+    while True:
+        match = pattern.search(text, index)
+        if match is None:
+            return -1
+        if match.group() == quote:
+            return match.start()
+        index = match.start() + 2
+
+
 def escape_ctrl_chars_in_strings(text: str) -> str:
     """Escape literal control chars inside string literals of pythonic text.
 
@@ -661,30 +692,32 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     quote: str | None = None
     index, length = 0, len(text)
     while index < length:
-        char = text[index]
         if quote is None:
-            if char in {"'", '"'}:
-                quote = char
-            out.append(char)
-        elif char == "\\" and index + 1 < length:
-            out.append(char)
-            out.append(text[index + 1])
-            index += 2
+            match = _QUOTE_RE.search(text, index)
+            if match is None:
+                out.append(text[index:])
+                break
+            quote = match.group()
+            out.append(text[index : match.end()])
+            index = match.end()
             continue
-        elif char == quote:
+        match = _STRING_BODY_CTRL_STOP_RE[quote].search(text, index)
+        if match is None:
+            out.append(text[index:])
+            break
+        pos = match.start()
+        char = match.group()
+        out.append(text[index:pos])
+        if char == "\\":
+            out.append(text[pos : pos + 2])
+            index = pos + 2
+            continue
+        if char == quote:
             quote = None
             out.append(char)
-        elif char == "\n":
-            out.append("\\n")
-        elif char == "\r":
-            out.append("\\r")
-        elif char == "\t":
-            out.append("\\t")
-        elif char == "\x00":
-            out.append("\\x00")
         else:
-            out.append(char)
-        index += 1
+            out.append(_CTRL_CHAR_ESCAPES[char])
+        index = pos + 1
     return "".join(out)
 
 
@@ -712,14 +745,13 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
     while index < length:
         char = text[index]
         if quote is not None:
-            out.append(char)
-            if char == "\\" and index + 1 < length:
-                out.append(text[index + 1])
-                index += 2
-                continue
-            if char == quote:
-                quote = None
-            index += 1
+            end = _find_string_end(text, index, quote)
+            if end == -1:
+                out.append(text[index:])
+                break
+            out.append(text[index : end + 1])
+            quote = None
+            index = end + 1
             continue
         if char in {"'", '"'}:
             quote = char
@@ -792,14 +824,13 @@ def normalize_leading_zero_ints(text: str) -> str:
     while index < length:
         char = text[index]
         if quote is not None:
-            out.append(char)
-            if char == "\\" and index + 1 < length:
-                out.append(text[index + 1])
-                index += 2
-                continue
-            if char == quote:
-                quote = None
-            index += 1
+            end = _find_string_end(text, index, quote)
+            if end == -1:
+                out.append(text[index:])
+                break
+            out.append(text[index : end + 1])
+            quote = None
+            index = end + 1
             continue
         if char in {"'", '"'}:
             quote = char
@@ -941,16 +972,7 @@ def contains_broken_string_literal(text: str) -> bool:
         if char not in {"'", '"'}:
             index += 1
             continue
-        j = index + 1
-        close = -1
-        while j < len(text):
-            if text[j] == "\\":
-                j += 2
-                continue
-            if text[j] == char:
-                close = j
-                break
-            j += 1
+        close = _find_string_end(text, index + 1, char)
         if close == -1:
             return False
         k = close + 1
@@ -979,6 +1001,9 @@ def _is_escaped(text: str, index: int) -> bool:
     return backslashes % 2 == 1
 
 
+_PYTHON_STRUCTURE_CHARS_RE = re.compile(r"""[\[\](){}'"]""")
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
@@ -996,15 +1021,26 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
 
     """
     bracket_stack: list[str] = []
-    for index, char in enumerate(text):
+    index = 0
+    while True:
         # Inside a string literal only an unescaped matching quote is
         # significant; brackets are literal text. Without this guard a bracket
         # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
         # stack and the whole tool call is rejected as mismatched.
         if bracket_stack and bracket_stack[-1] in {"'", '"'}:
-            if char == bracket_stack[-1] and not _is_escaped(text, index):
+            index = text.find(bracket_stack[-1], index)
+            if index == -1:
+                break
+            if not _is_escaped(text, index):
                 bracket_stack.pop()
+            index += 1
             continue
+        # Outside string literals only brackets and quotes are significant.
+        match = _PYTHON_STRUCTURE_CHARS_RE.search(text, index)
+        if match is None:
+            break
+        index = match.end()
+        char = match.group()
         if char in {"[", "(", "{"}:
             bracket_stack.append(char)
         elif char == "]":
