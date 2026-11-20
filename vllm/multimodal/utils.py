@@ -4,7 +4,7 @@
 import bisect
 import mimetypes
 from collections import defaultdict
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import replace
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
@@ -117,6 +117,22 @@ def encode_video_url(
         )
 
     return f"data:{mimetype};base64,{video_b64}"
+
+
+def get_load_audio_from_video(kwargs: Mapping[str, object] | None) -> bool | None:
+    """Whether each video's audio track is loaded and fused into the video, or
+    `None` if the processor kwargs don't say.
+
+    `load_audio_from_video` is the name Transformers uses for this processor
+    setting, replacing the deprecated `use_audio_in_video`, which is still read as a
+    fallback until vLLM moves to the new name everywhere.
+    """
+    if not kwargs:
+        return None
+    for name in ("load_audio_from_video", "use_audio_in_video"):
+        if (value := kwargs.get(name)) is not None:
+            return bool(value)
+    return None
 
 
 def get_mm_features_in_window(
