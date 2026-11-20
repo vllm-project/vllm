@@ -25,7 +25,6 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
     CrossEncoderIOProcessor,
     JinaRankingIOProcessor,
     LateInteractionIOProcessor,
-    _apply_post_tokenization_to_token_type_ids,
 )
 from vllm.entrypoints.pooling.scoring.types import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
@@ -36,7 +35,7 @@ from vllm.entrypoints.pooling.types import (
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
-from vllm.renderers import TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers import TokenizerLike
@@ -103,11 +102,16 @@ def llm_reranker_processor(tmp_path, scoring_tokenizer):
 def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     llm_reranker_processor: CrossEncoderIOProcessor,
 ):
-    encode_kwargs = {"add_special_tokens": True}
+    tok_params = TokenizeParams(max_total_tokens=32).with_kwargs(
+        add_special_tokens=True
+    )
+    chat_params = ChatParams()
 
-    _, uncapped = llm_reranker_processor.get_score_prompt("a", "bc", encode_kwargs)
-    _, nonbinding = llm_reranker_processor.get_score_prompt(
-        "a", "bc", encode_kwargs, max_tokens_per_doc=10
+    _, uncapped = llm_reranker_processor._get_score_prompt(
+        "a", "bc", tok_params, chat_params
+    )
+    _, nonbinding = llm_reranker_processor._get_score_prompt(
+        "a", "bc", tok_params, chat_params, max_tokens_per_doc=10
     )
 
     expected = [1, 3, 5, 6, 2]
@@ -148,11 +152,11 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     )
     factory, _ = processor.get_request_factory_offline(ctx)
     (request,) = factory()
-    text, prompt = processor.get_score_prompt(
+    text, prompt = processor._get_score_prompt(
         request["data_1"],
         request["data_2"],
-        request["tok_params"].get_encode_kwargs(),
-        chat_template=request["chat_template"],
+        request["tok_params"],
+        request["chat_params"],
     )
 
     assert text == expected
@@ -179,8 +183,7 @@ def test_truncation_keeps_jinavl_score_token(
         ScoringRenderParams(
             data_1="a",
             data_2="bc bc bc bc",
-            chat_template=None,
-            chat_template_content_format="string",
+            chat_params=ChatParams(chat_template_content_format="string"),
             max_tokens_per_query=0,
             max_tokens_per_doc=0,
             tok_params=TokenizeParams(
@@ -230,7 +233,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
         prompt,
     )
     assert "prompt_token_ids" in processed_prompt
-    token_type_ids = _apply_post_tokenization_to_token_type_ids(
+    token_type_ids = CrossEncoderIOProcessor._apply_post_tokenization_to_token_type_ids(
         tokenizer, tok_params, token_type_ids
     )
 
@@ -255,7 +258,7 @@ def test_token_type_padding_uses_the_tokenizer_pad_type():
         truncation_side="right",
     )
 
-    token_type_ids = _apply_post_tokenization_to_token_type_ids(
+    token_type_ids = CrossEncoderIOProcessor._apply_post_tokenization_to_token_type_ids(
         tokenizer, tok_params, [0, 0, 0, 1, 1]
     )
 
@@ -382,6 +385,10 @@ def multimodal_reranker_processor(tmp_path, request, scoring_tokenizer):
         renderer.shutdown()
 
 
+def _multimodal_tok_params() -> TokenizeParams:
+    return TokenizeParams(max_total_tokens=64)
+
+
 @pytest.mark.parametrize(
     "multimodal_reranker_processor", ["mistral3", "qwen3_vl"], indirect=True
 )
@@ -398,8 +405,12 @@ def test_scoring_template_keeps_images_distinct_from_literal_placeholder_text(
             "uuid": "document-image",
         },
     ]
-    prompt, inputs = processor.get_score_prompt(
-        "a", document, {}, chat_template=_BLOCK_TEMPLATE
+    chat_params = ChatParams(
+        chat_template=_BLOCK_TEMPLATE,
+        chat_template_content_format="openai",
+    )
+    prompt, inputs = processor._get_score_prompt(
+        "a", document, _multimodal_tok_params(), chat_params
     )
     expected = "query:adocument:literal [literal IMG][IMG]"
     assert prompt == expected
@@ -427,11 +438,15 @@ def test_scoring_text_limits_share_budget_across_blocks_and_keep_images(
         },
         last_text,
     ]
-    prompt, inputs = processor.get_score_prompt(
+    chat_params = ChatParams(
+        chat_template=_BLOCK_TEMPLATE,
+        chat_template_content_format="openai",
+    )
+    prompt, inputs = processor._get_score_prompt(
         "a bc",
         document,
-        {},
-        chat_template=_BLOCK_TEMPLATE,
+        _multimodal_tok_params(),
+        chat_params,
         max_tokens_per_query=1,
         max_tokens_per_doc=doc_limit,
     )
@@ -444,12 +459,20 @@ def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
     multimodal_reranker_processor,
 ):
     # This tokenizer splits "abc" into three tokens, but "a" and "bc" into one each.
+    chat_params = ChatParams(
+        chat_template=_BLOCK_TEMPLATE,
+        chat_template_content_format="openai",
+    )
     for document in (
         "abc",
         [{"type": "text", "text": "a"}, {"type": "text", "text": "bc"}],
     ):
-        prompt, _ = multimodal_reranker_processor.get_score_prompt(
-            "a", document, {}, chat_template=_BLOCK_TEMPLATE, max_tokens_per_doc=2
+        prompt, _ = multimodal_reranker_processor._get_score_prompt(
+            "a",
+            document,
+            _multimodal_tok_params(),
+            chat_params,
+            max_tokens_per_doc=2,
         )
         assert prompt == "query:adocument:ab"
 
@@ -459,7 +482,11 @@ def test_string_scoring_templates_keep_model_placeholders(
     multimodal_reranker_processor,
 ):
     processor = multimodal_reranker_processor
-    prompt, _ = processor.get_score_prompt(
+    chat_params = ChatParams(
+        chat_template="{{ messages[0].content + messages[1].content }}",
+        chat_template_content_format="string",
+    )
+    prompt, _ = processor._get_score_prompt(
         "a",
         [
             {
@@ -467,9 +494,8 @@ def test_string_scoring_templates_keep_model_placeholders(
                 "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2)))},
             }
         ],
-        {},
-        chat_template="{{ messages[0].content + messages[1].content }}",
-        chat_template_content_format="string",
+        _multimodal_tok_params(),
+        chat_params,
     )
     assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
 
@@ -477,7 +503,13 @@ def test_string_scoring_templates_keep_model_placeholders(
 def test_scoring_detects_structured_content_with_saved_template(
     multimodal_reranker_processor,
 ):
-    prompt, _ = multimodal_reranker_processor.get_score_prompt(
-        "a", "bc", {}, chat_template_content_format="auto"
+    processor = multimodal_reranker_processor
+    chat_params = processor._prepare_chat_params(
+        ChatParams(chat_template=processor.saved_chat_template)
+    )
+    assert chat_params.chat_template_content_format == "openai"
+
+    prompt, _ = processor._get_score_prompt(
+        "a", "bc", _multimodal_tok_params(), chat_params
     )
     assert prompt == "query:adocument:bc"

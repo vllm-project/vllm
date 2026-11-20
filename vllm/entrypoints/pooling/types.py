@@ -12,7 +12,7 @@ from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import LateChunkingMetadata
-from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -20,6 +20,7 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
 
+from ...exceptions import VLLMValidationError
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -145,18 +146,94 @@ class OfflineInputsContext:
     add_special_tokens: bool | None = None
     tokenization_kwargs: dict[str, Any] | None = None
 
+    # chat_template_kwargs:
+    # Tri-state: `None` means "not specified" and falls back to default
+    add_generation_prompt: bool | None = False
+    continue_final_message: bool | None = False
+    chat_template_kwargs: dict[str, Any] | None = None
+
+    chat_template: str | None = None
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+
+    # mm_kwargs:
+    skip_mm_cache: bool = False
+    cache_salt: str | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+
     def build_tok_params(
         self,
         default_tok_params: TokenizeParams,
     ) -> TokenizeParams:
-        # User-provided `tokenization_kwargs` still wins over the default.
-        tok_kwargs: dict[str, Any] = {}
+        # Priority:
+        # explicit `add_special_tokens` > `tokenization_kwargs` > per-path default.
+        tok_kwargs: dict[str, Any] = dict(self.tokenization_kwargs or {})
         if self.add_special_tokens is not None:
             tok_kwargs["add_special_tokens"] = self.add_special_tokens
-        tok_kwargs.update(self.tokenization_kwargs or {})
         if not tok_kwargs:
             return default_tok_params
         return default_tok_params.with_kwargs(**tok_kwargs)
+
+    def build_chat_params(
+        self,
+        params: PoolingParams,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ):
+        content_format = (
+            self.chat_template_content_format
+            if self.chat_template_content_format != "auto"
+            else default_template_content_format
+        )
+        return ChatParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=content_format,
+            chat_template_kwargs=self.build_chat_template_kwargs(params),
+            media_io_kwargs=self.media_io_kwargs,
+        )
+
+    def build_chat_template_kwargs(self, params: PoolingParams) -> dict[str, Any]:
+        # Priority: explicit add_generation_prompt / continue_final_message
+        #         > params.extra_kwargs["chat_template_kwargs"]
+        #         > self.chat_template_kwargs
+
+        extra_kwargs: dict[str, Any] = dict(params.extra_kwargs or {})
+        merged = dict(
+            merge_kwargs(
+                extra_kwargs.get("chat_template_kwargs"),
+                self.chat_template_kwargs,
+            )
+            or {}
+        )
+
+        if self.add_generation_prompt is not None:
+            merged["add_generation_prompt"] = self.add_generation_prompt
+        if self.continue_final_message is not None:
+            merged["continue_final_message"] = self.continue_final_message
+
+        if merged.get("add_generation_prompt") and merged.get("continue_final_message"):
+            raise VLLMValidationError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True."
+            )
+        return merged
+
+    def build_engine_prompt_extras(self, params: PoolingParams):
+        # Priority: explicit mm_processor_kwargs / cache_salt
+        #         > params.extra_kwargs["chat_template_kwargs"]
+        prompt_extras: dict[str, Any] = dict(params.extra_kwargs or {})
+        merged = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt")
+            if (v := prompt_extras.get(k)) is not None
+        }
+        if self.mm_processor_kwargs is not None:
+            merged["mm_processor_kwargs"] = self.mm_processor_kwargs
+
+        if self.cache_salt is not None:
+            merged["cache_salt"] = self.cache_salt
+
+        return merged
 
 
 @dataclass(slots=True)
@@ -168,9 +245,7 @@ class OfflineEncodeInputsContext(OfflineInputsContext):
 @dataclass(slots=True)
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
-    chat_template: str | None
     pooling_params: PoolingParams
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
 
 
 @dataclass(slots=True)
@@ -198,28 +273,30 @@ class OfflineOutputsContext:
 class RenderParams(TypedDict):
     tok_params: TokenizeParams
     prompt_extras: dict[str, Any] | None
-    skip_mm_cache: bool
 
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
-    late_chunking: NotRequired[LateChunkingSlot]
+
+    # mm_kwargs:
+    skip_mm_cache: bool
 
 
 class EncodeCMPLRenderParams(RenderParams):
     prompts: DictPrompt
+    late_chunking: NotRequired[LateChunkingSlot]
 
 
 class EncodeChatRenderParams(RenderParams):
     conversations: list["ChatCompletionMessageParam"]
     chat_params: ChatParams
+    late_chunking: NotRequired[LateChunkingSlot]
 
 
 class ScoringRenderParams(RenderParams):
     data_1: ScoreData
     data_2: ScoreData
-    chat_template: str | None
-    chat_template_content_format: ChatTemplateContentFormatOption
+    chat_params: ChatParams
     max_tokens_per_query: int
     max_tokens_per_doc: int
 

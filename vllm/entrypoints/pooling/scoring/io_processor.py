@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from functools import cached_property
 from typing import Any, TypeAlias, cast
 
@@ -10,11 +11,8 @@ import torch.nn.functional as F
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import TokenizeParams, merge_kwargs
-from vllm.renderers.chat_utils import (
-    ChatTemplateContentFormat,
-    ChatTemplateContentFormatOption,
-)
+from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers.chat_utils import ChatTemplateContentFormat
 from vllm.renderers.hf import (
     resolve_chat_template,
     resolve_chat_template_content_format,
@@ -65,45 +63,6 @@ from .utils import (
 logger = init_logger(__name__)
 
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
-
-
-def _apply_post_tokenization_to_token_type_ids(
-    tokenizer: Any,
-    tok_params: TokenizeParams,
-    token_type_ids: list[int],
-) -> list[int]:
-    # Must stay in the same order as `TokenizeParams._validate_tokens`, which
-    # truncates before padding. These ids are parallel to the prompt tokens
-    # and locate the query/document boundary for the cross-encoder; applying
-    # the two steps in a different order silently misplaces that boundary.
-    max_length = tok_params.truncate_prompt_tokens
-    if max_length is not None and max_length < 0:
-        max_length = tok_params.max_input_tokens
-
-    if max_length is not None and max_length < len(token_type_ids):
-        if max_length == 0:
-            token_type_ids = token_type_ids[:0]
-        else:
-            side = tok_params.truncation_side or (
-                tokenizer.truncation_side if tokenizer is not None else None
-            )
-            token_type_ids = (
-                token_type_ids[-max_length:]
-                if side == "left"
-                else token_type_ids[:max_length]
-            )
-
-    pad_length = tok_params.pad_prompt_tokens
-    if pad_length is not None and pad_length < 0:
-        pad_length = tok_params.max_input_tokens
-
-    if pad_length is not None and pad_length > len(token_type_ids):
-        pad_token_type_id = getattr(tokenizer, "pad_token_type_id", 0) or 0
-        token_type_ids = token_type_ids + [pad_token_type_id] * (
-            pad_length - len(token_type_ids)
-        )
-
-    return token_type_ids
 
 
 class ScoringIOProcessor(PoolingIOProcessor):
@@ -539,6 +498,52 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             )
         return template, saved_kwargs
 
+    def _default_chat_template(self) -> str | None:
+        """Template priority from processor side: CLI > Sentence Transformers.
+
+        The per-request template still overrides this at the context level.
+        """
+        return self.chat_template or self.saved_chat_template
+
+    def _prepare_chat_params(self, chat_params: ChatParams) -> ChatParams:
+        """Fold processor-level defaults into the request's `ChatParams`.
+
+        1. When we fall back to the Sentence Transformers declared template,
+           its declared kwargs must be merged in. Request-level kwargs win.
+        2. Resolve the `"auto"` content format against the actual template,
+           so downstream parsing gets a concrete `"string"` / `"openai"`.
+        """
+        # 1. Merge ST declared kwargs, but only when we actually fell back to
+        #    the ST template (no CLI/request template overrides it).
+        if (
+            self.chat_template is None
+            and self.saved_chat_template is not None
+            and chat_params.chat_template == self.saved_chat_template
+        ):
+            chat_params = chat_params.with_defaults(
+                default_chat_template_kwargs=self.saved_chat_template_kwargs,
+            )
+
+        # 2. Resolve "auto" only when a template is actually applied. If no
+        #    template is set, leave it as-is; the renderer falls back to
+        #    "string" content, matching the pre-refactor behavior.
+        if (
+            chat_params.chat_template is not None
+            and chat_params.chat_template_content_format == "auto"
+        ):
+            content_format = resolve_chat_template_content_format(
+                chat_params.chat_template,
+                tools=None,
+                given_format="auto",
+                tokenizer=self.tokenizer,
+                model_config=self.model_config,
+            )
+            chat_params = replace(
+                chat_params, chat_template_content_format=content_format
+            )
+
+        return chat_params
+
     #######################################
     # online APIs
 
@@ -564,6 +569,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         chat_tok_params = request.build_tok_params(
             self.model_config, self.renderer.default_chat_tok_params
         )
+        chat_params = request.build_chat_params(
+            default_template=self._default_chat_template(),
+            default_template_content_format=self.chat_template_content_format,
+        )
+        chat_params = self._prepare_chat_params(chat_params)
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -572,18 +582,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             ScoringRenderParams(
                 data_1=data_1[i],
                 data_2=data_2[i],
-                tok_params=chat_tok_params
-                if isinstance(data_1[i], list)
-                else cmpl_tok_params,
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                max_tokens_per_query=max_tokens_per_query,
-                max_tokens_per_doc=max_tokens_per_doc,
-                prompt_extras=ctx.prompt_extras,
-                skip_mm_cache=False,
                 params=ctx.pooling_params,
                 lora_requests=seq_lora_requests[i],
                 priorities=seq_priority[i],
+                tok_params=chat_tok_params
+                if isinstance(data_1[i], list)
+                else cmpl_tok_params,
+                chat_params=chat_params,
+                max_tokens_per_query=max_tokens_per_query,
+                max_tokens_per_doc=max_tokens_per_doc,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=request.skip_mm_cache,
             )
             for i in range(num_requests)
         ]
@@ -611,47 +620,36 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
-
-        prompt_extras = ctx.pooling_params.extra_kwargs
+        chat_params = ctx.build_chat_params(
+            ctx.pooling_params,
+            default_template=self._default_chat_template(),
+            default_template_content_format=self.chat_template_content_format,
+        )
+        chat_params = self._prepare_chat_params(chat_params)
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+        prompt_extras = ctx.build_engine_prompt_extras(ctx.pooling_params)
 
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
-                    chat_template=(
-                        self.chat_template
-                        if ctx.chat_template is None
-                        else ctx.chat_template
-                    ),
-                    chat_template_content_format=ctx.chat_template_content_format,
-                    max_tokens_per_query=max_tokens_per_query,
-                    max_tokens_per_doc=max_tokens_per_doc,
-                    tok_params=chat_tok_params
-                    if isinstance(data_1[i], list)
-                    else cmpl_tok_params,
-                    prompt_extras=prompt_extras,
-                    skip_mm_cache=False,
                     params=ctx.pooling_params,
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
+                    tok_params=chat_tok_params
+                    if isinstance(data_1[i], list)
+                    else cmpl_tok_params,
+                    chat_params=chat_params,
+                    max_tokens_per_query=max_tokens_per_query,
+                    max_tokens_per_doc=max_tokens_per_doc,
+                    prompt_extras=prompt_extras,
+                    skip_mm_cache=ctx.skip_mm_cache,
                 )
 
         return request_factory, num_requests
-
-    #######################################
-    # helpers
-
-    @cached_property
-    def num_post_process_tokens(self) -> int:
-        if self.model is None:
-            return 0
-        probe = TokensPrompt(prompt_token_ids=[])
-        self.model.post_process_tokens(probe)
-        return len(probe["prompt_token_ids"])
 
     def render(
         self,
@@ -664,29 +662,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 f"Unsupported render_params type {render_params.__class__.__name__}"
             )
         render_params = cast(ScoringRenderParams, render_params)
-
         arrival_time = time.time()
 
-        tok_params = render_params["tok_params"]
-        params = render_params["params"]
-        prompt_extras = render_params["prompt_extras"]
+        tok_params = self._reserve_post_process_tokens(render_params["tok_params"])
 
-        # Leave room for the tokens that post_process_tokens appends after
-        # truncation (e.g. the JinaVL score token), so the limits count them.
-        if self.num_post_process_tokens:
-            tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
-
-        _, engine_prompt = self.get_score_prompt(
+        _, engine_prompt = self._get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
-            encode_kwargs=tok_params.get_encode_kwargs(),
-            chat_template=render_params["chat_template"],
-            chat_template_content_format=render_params["chat_template_content_format"],
+            tok_params=tok_params,
+            chat_params=render_params["chat_params"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
-            chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
-            if prompt_extras
-            else None,
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
@@ -694,29 +680,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if self.model is not None:
             self.model.post_process_tokens(engine_prompt)
 
-        if token_type_ids := engine_prompt.pop("token_type_ids", None):
-            params = params.clone()
-            compressed = compress_token_type_ids(
-                _apply_post_tokenization_to_token_type_ids(
-                    self.tokenizer, tok_params, token_type_ids
-                )
-            )
-            params.extra_kwargs = {
-                **(params.extra_kwargs or {}),
-                "compressed_token_type_ids": compressed,
-            }
-
-        engine_prompt_extras = (
-            {
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := prompt_extras.get(k)) is not None
-            }
-            if prompt_extras
-            else None
+        params = self._maybe_compress_token_type_ids(
+            engine_prompt, render_params["params"], tok_params
         )
 
-        if engine_prompt_extras:
+        if engine_prompt_extras := render_params["prompt_extras"]:
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
             target_prompt.update(engine_prompt_extras)
 
@@ -729,40 +697,104 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             priorities=render_params["priorities"],
         )
 
-    def get_score_prompt(
+    #######################################
+    # helpers
+
+    @cached_property
+    def num_post_process_tokens(self) -> int:
+        if self.model is None:
+            return 0
+        probe = TokensPrompt(prompt_token_ids=[])
+        self.model.post_process_tokens(probe)
+        return len(probe["prompt_token_ids"])
+
+    def _reserve_post_process_tokens(
+        self, tok_params: TokenizeParams
+    ) -> TokenizeParams:
+        # Leave room for the tokens that post_process_tokens appends after
+        # truncation (e.g. the JinaVL score token), so the limits count them.
+        if not self.num_post_process_tokens:
+            return tok_params
+        return reserve_tokens(tok_params, self.num_post_process_tokens)
+
+    def _maybe_compress_token_type_ids(
+        self,
+        engine_prompt: TokensPrompt,
+        params: PoolingParams,
+        tok_params: TokenizeParams,
+    ) -> PoolingParams:
+        if token_type_ids := engine_prompt.pop("token_type_ids", None):
+            params = params.clone()
+            compressed = compress_token_type_ids(
+                self._apply_post_tokenization_to_token_type_ids(
+                    self.tokenizer, tok_params, token_type_ids
+                )
+            )
+            params.extra_kwargs = {
+                **(params.extra_kwargs or {}),
+                "compressed_token_type_ids": compressed,
+            }
+        return params
+
+    @staticmethod
+    def _apply_post_tokenization_to_token_type_ids(
+        tokenizer: Any,
+        tok_params: TokenizeParams,
+        token_type_ids: list[int],
+    ) -> list[int]:
+        # Must stay in the same order as `TokenizeParams._validate_tokens`, which
+        # truncates before padding. These ids are parallel to the prompt tokens
+        # and locate the query/document boundary for the cross-encoder; applying
+        # the two steps in a different order silently misplaces that boundary.
+        max_length = tok_params.truncate_prompt_tokens
+        if max_length is not None and max_length < 0:
+            max_length = tok_params.max_input_tokens
+
+        if max_length is not None and max_length < len(token_type_ids):
+            if max_length == 0:
+                token_type_ids = token_type_ids[:0]
+            else:
+                side = tok_params.truncation_side or (
+                    tokenizer.truncation_side if tokenizer is not None else None
+                )
+                token_type_ids = (
+                    token_type_ids[-max_length:]
+                    if side == "left"
+                    else token_type_ids[:max_length]
+                )
+
+        pad_length = tok_params.pad_prompt_tokens
+        if pad_length is not None and pad_length < 0:
+            pad_length = tok_params.max_input_tokens
+
+        if pad_length is not None and pad_length > len(token_type_ids):
+            pad_token_type_id = getattr(tokenizer, "pad_token_type_id", 0) or 0
+            token_type_ids = token_type_ids + [pad_token_type_id] * (
+                pad_length - len(token_type_ids)
+            )
+
+        return token_type_ids
+
+    def _get_score_prompt(
         self,
         data_1: ScoreData,
         data_2: ScoreData,
-        encode_kwargs: dict[str, Any],
-        chat_template: str | None = None,
+        tok_params: TokenizeParams,
+        chat_params: ChatParams,
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
-        chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
-    ):
+    ) -> tuple[str, TokensPrompt]:
         model_config = self.model_config
         tokenizer = self.tokenizer
+        encode_kwargs = tok_params.get_encode_kwargs()
 
-        if chat_template is None and self.saved_chat_template is not None:
-            chat_template = self.saved_chat_template
-            chat_template_kwargs = merge_kwargs(
-                self.saved_chat_template_kwargs, chat_template_kwargs
-            )
+        chat_template = chat_params.chat_template
+        chat_template_kwargs = chat_params.chat_template_kwargs
 
-        given_format = chat_template_content_format or self.chat_template_content_format
-        content_format: ChatTemplateContentFormat = "string"
-        if chat_template is not None:
-            content_format = (
-                resolve_chat_template_content_format(
-                    chat_template,
-                    tools=None,
-                    given_format=given_format,
-                    tokenizer=tokenizer,
-                    model_config=model_config,
-                )
-                if given_format == "auto"
-                else given_format
-            )
+        content_format = chat_params.chat_template_content_format
+        if content_format == "auto":
+            content_format = "string"
+        content_format = cast(ChatTemplateContentFormat, content_format)
 
         conversation, mm_data, mm_uuids = parse_score_messages(
             data_1, data_2, model_config, content_format
