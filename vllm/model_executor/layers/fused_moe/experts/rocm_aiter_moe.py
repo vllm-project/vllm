@@ -241,14 +241,14 @@ def aiter_moe_pads(
     so it is passed undoubled; doubling it here as well masks live
     intermediate rows.
 
-    Where AITER doubles it (v0.1.24.post1):
+    Where AITER doubles it (v0.1.28.post1):
     - CK-Tile stage 1, aiter/fused_moe.py:
       `n_pad_zeros=intermediate_pad // 64 * 64 * (2 if use_g1u1 else 1)`.
     - FlyDSL stage 1 takes `inter_dim_pad` unchanged and doubles it in the
       kernel, aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage_common.py:
       `inter_dim_pad_total = 2 * inter_dim_pad` is subtracted from the fused
-      gate/up width. Stage 2 masks the K tail with the undoubled value
-      (`base_k < inter_dim - inter_dim_pad`).
+      gate/up width. Stage 2 skips the padded K tail with the undoubled value
+      (`pad_ku_skip_s2 = min(k_unroll, inter_dim_pad // K_per_ku_s2)`).
     So both stage 1 kernels expect the undoubled pad. Recheck these lines on an
     AITER bump.
     """

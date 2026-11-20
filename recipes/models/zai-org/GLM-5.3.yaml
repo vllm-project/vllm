@@ -127,8 +127,6 @@ variants:
           VLLM_ENGINE_READY_TIMEOUT_S: "900"
         extra_args:
           - "--trust-remote-code"
-          - "--gpu-memory-utilization"
-          - "0.97"
           - "--max-model-len"
           - "262144"
           - "--max-num-seqs"
@@ -420,7 +418,7 @@ guide: |
 
   ## Troubleshooting
 
-  - **FP8 performance:** DeepGEMM is required — install via `install_deepgemm.sh`.
+  - **FP8 performance:** DeepGEMM is required — it is bundled in vLLM wheels, so no separate install is needed.
 
   ## References
 

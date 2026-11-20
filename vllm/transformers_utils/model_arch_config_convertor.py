@@ -264,6 +264,8 @@ class ModelArchConfigConvertorBase:
                         quant_cfg["quant_method"] = "modelopt"
                     elif quant_algo_upper == "NVFP4":
                         quant_cfg["quant_method"] = "modelopt_fp4"
+                    elif quant_algo_upper == "INT8_PB_WO":
+                        quant_cfg["quant_method"] = "modelopt_int8"
                     elif quant_algo_upper == "MIXED_PRECISION":
                         quant_cfg["quant_method"] = "modelopt_mixed"
                     else:
@@ -312,13 +314,16 @@ class ModelArchConfigConvertorBase:
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
+            "mistral_large_4",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
             "hy_v4",
+            "hy_v4_flash",
             "hy_v4_mtp",
+            "hy_v4_dfly",
         ):
             # check is deepseek_v4 model
             if get_compress_ratios(self.hf_text_config):
@@ -360,6 +365,7 @@ class ModelArchConfigConvertorBase:
             "molmo2",
             "moondream3",
             "paligemma",
+            "shieldgemma2",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
@@ -637,6 +643,8 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
                 )
+            elif getattr(hf_config, "modeling_overrides", None) is not None:
+                hf_config.architectures = ["Qwen3_5ForSlotDecision"]
         elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
             # Decision 3.0 checkpoints are a bare backbone plus a code readout
             # described by decision_config.json.
@@ -868,8 +876,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
-    "RefinedWeb": FalconModelArchConfigConvertor,
-    "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,

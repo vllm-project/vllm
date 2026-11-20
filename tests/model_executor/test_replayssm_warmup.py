@@ -7,12 +7,13 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout, MambaSpec
 from vllm.v1.worker.utils import allocate_kv_cache
 
 PREFILL_KWARGS = {
@@ -150,8 +151,8 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
     kv_config = get_kv_cache_config_from_groups(
         config,
         [
-            KVCacheGroupSpec(["layers.0.mixer", "layers.1.mixer"], spec),
-            KVCacheGroupSpec(["layers.2.mixer"], spec),
+            new_kv_cache_group(["layers.0.mixer", "layers.1.mixer"], spec),
+            new_kv_cache_group(["layers.2.mixer"], spec),
         ],
         5 * (2 * spec.page_size_bytes + 16),
     )

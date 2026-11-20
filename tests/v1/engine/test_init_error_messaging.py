@@ -4,8 +4,9 @@
 import pytest
 import torch
 
+from tests.v1.core.utils import full_layer
 from vllm.v1.core.kv_cache_planning import check_enough_kv_cache_memory
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 def test_kv_cache_oom_no_memory():
@@ -13,13 +14,13 @@ def test_kv_cache_oom_no_memory():
 
     config = MagicMock()
     config.model_config.max_model_len = 2048
+    config.cache_config.enable_extensible_kv_cache = False
 
     spec = {
-        "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype=torch.float16,
+        "layer_0": full_layer(
+            AttentionSpec(
+                block_size=16, num_kv_heads=8, head_size=128, dtype=torch.float16
+            )
         )
     }
 
@@ -36,6 +37,8 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
     config.parallel_config.tensor_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
     config.parallel_config.decode_context_parallel_size = 1
+    config.cache_config.enable_extensible_kv_cache = True
+    config.cache_config.resolved_gpu_memory_utilization = 0.9
 
     monkeypatch.setattr(
         "vllm.v1.core.kv_cache_planning.max_memory_usage_bytes",
@@ -43,13 +46,13 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
     )
 
     spec = {
-        "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype=torch.float16,
+        "layer_0": full_layer(
+            AttentionSpec(
+                block_size=16, num_kv_heads=8, head_size=128, dtype=torch.float16
+            )
         )
     }
 
-    with pytest.raises(ValueError):
+    # An explicit utilization below 1.0, not the device, limits the cache.
+    with pytest.raises(ValueError, match=r"within `gpu_memory_utilization`=0\.9"):
         check_enough_kv_cache_memory(config, spec, 1024**3)  # 1 GiB

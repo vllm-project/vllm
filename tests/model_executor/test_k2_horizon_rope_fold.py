@@ -326,7 +326,6 @@ def _make_hf_config(
     return SimpleNamespace(
         hidden_size=hidden_size,
         max_position_embeddings=4096,
-        dual_chunk_attention_config=None,
         mlp_only_layers=[],
         num_experts=0,  # dense layer: avoids the MoE path
         decoder_sparse_step=1,
@@ -630,7 +629,6 @@ def test_is_rope_weights_folding_supported(default_vllm_config):
     dense = SimpleNamespace(quant_method=UnquantizedLinearMethod())
     quantized = SimpleNamespace(quant_method=object())
 
-    assert is_rope_weights_folding_supported(dense, None) is True
-    assert is_rope_weights_folding_supported(quantized, None) is False
-    assert is_rope_weights_folding_supported(dense, {"chunk_size": 8}) is False
-    assert is_rope_weights_folding_supported(SimpleNamespace(), None) is False
+    assert is_rope_weights_folding_supported(dense) is True
+    assert is_rope_weights_folding_supported(quantized) is False
+    assert is_rope_weights_folding_supported(SimpleNamespace()) is False

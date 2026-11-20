@@ -10,8 +10,9 @@ pub use vllm_parser::reasoning::{
     DeepSeekV4ReasoningParser, DeepSeekV41ReasoningParser, Ernie45ReasoningParser,
     Glm45ReasoningParser, Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
     MiMoReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
-    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
-    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
+    MistralReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
+    ReasoningError, ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser,
+    Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -32,6 +33,7 @@ pub mod names {
     pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
+    pub const MISTRAL: &str = "mistral";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
     pub const QWEN3: &str = "qwen3";
     pub const SEED_OSS: &str = "seed_oss";
@@ -76,6 +78,7 @@ impl ReasoningParserFactory {
             .register_parser::<MiMoReasoningParser>(names::MIMO)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
+            .register_parser::<MistralReasoningParser>(names::MISTRAL)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
             .register_parser::<SeedOssReasoningParser>(names::SEED_OSS)

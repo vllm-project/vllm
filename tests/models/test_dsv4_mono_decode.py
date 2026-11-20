@@ -371,3 +371,89 @@ def test_hca_key_table_is_vllms_c128a_width(monkeypatch):
     layer = _decoder_layer(compress_ratio=md.HCA, indexer=None)
     mono = md.MonoDecodeLayer.create(layer, _config(max_model_len=1_000_000))
     assert mono is not None and mono.hca_width == 7936
+
+
+def _loaded_layer():
+    """A decoder layer as `prepare` reads it, every E8M0 source scale one
+    128 x 128 block."""
+    t = torch.zeros(1)
+
+    def scale():
+        return torch.ones(1, 1, dtype=torch.uint8)
+
+    def lin():
+        return SimpleNamespace(weight=t, weight_scale_inv=scale())
+
+    attn = SimpleNamespace(
+        prefix="model.layers.5.attn",
+        fused_wqa_wkv=SimpleNamespace(weight=t),
+        _wqa_wkv_scale=scale(),
+        q_norm=SimpleNamespace(weight=t),
+        kv_norm=SimpleNamespace(weight=t),
+        wq_b=lin(),
+        wo_a=lin(),
+        wo_b=SimpleNamespace(weight=t),
+        _wo_b_scale=scale(),
+        attn_sink=t,
+        rotary_emb=SimpleNamespace(cos_sin_cache=t),
+        compress_ratio=md.CSA,
+    )
+    experts = SimpleNamespace(
+        w13_weight=t, w13_weight_scale=t, w2_weight=t, w2_weight_scale=t
+    )
+    ffn = SimpleNamespace(
+        experts=SimpleNamespace(routed_experts=experts),
+        shared_experts=SimpleNamespace(
+            gate_up_proj=SimpleNamespace(weight=t),
+            _gateup_scale=scale(),
+            down_proj=lin(),
+        ),
+        gate=SimpleNamespace(weight=t, e_score_correction_bias=t),
+    )
+    hc = {f"hc_{s}_{p}": t for s in ("attn", "ffn") for p in ("fn", "scale", "base")}
+    norms = dict(attn_norm=lin(), ffn_norm=lin())
+    return SimpleNamespace(attn=attn, ffn=ffn, **hc, **norms)
+
+
+def test_weight_update_refills_the_derived_scales_in_place(monkeypatch):
+    """Every post-load finalization (a runtime weight update's too) re-derives
+    the kernels' 32 x 32 scales into the tensors captured graphs read."""
+    _deployment(monkeypatch)
+    runner = sys.modules["vllm.models.deepseek_v4.amd.mono.runner"]
+
+    class _Weights(SimpleNamespace):
+        def check(self, d):
+            pass
+
+    runner.AttnWeights = runner.MonoLayerWeights = _Weights  # type: ignore[attr-defined]
+    monkeypatch.setattr(md, "_mono_runner", lambda *args: None)
+    layer, mono = _loaded_layer(), md.MonoDecodeLayer(HCA_WIDTH)
+
+    def scales():
+        w = mono.weights(layer)
+        a = w.attn
+        return [
+            a.wqkv_scale,
+            a.wq_b_scale,
+            a.wo_a_scale,
+            a.wo_b_scale,
+            w.sgu_s,
+            w.sw2_s,
+        ]
+
+    mono.prepare(layer)
+    before = scales()
+    a, sh = layer.attn, layer.ffn.shared_experts
+    for src in (
+        a._wqa_wkv_scale,
+        a.wq_b.weight_scale_inv,
+        a.wo_a.weight_scale_inv,
+        a._wo_b_scale,
+        sh._gateup_scale,
+        sh.down_proj.weight_scale_inv,
+    ):
+        src.fill_(7)
+    mono.prepare(layer)
+    after = scales()
+    assert [s.data_ptr() for s in after] == [s.data_ptr() for s in before]
+    assert all(s.shape == (4, 4) and bool((s == 7).all()) for s in after)
