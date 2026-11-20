@@ -330,6 +330,48 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         )
 
 
+class AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel(
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel
+):
+    """hipBLASLt per-token FP8 for linears requantized from a checkpoint on CDNA3.
+
+    Refuses K that is not a multiple of 64, where hipBLASLt returns wrong values.
+    """
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "requires ROCm."
+        # vllm.platforms.rocm imports only on ROCm.
+        from vllm.platforms.rocm import get_cdna_version
+
+        if get_cdna_version() != 3:
+            return False, "requires CDNA3 (gfx942)."
+        if not rocm_aiter_ops.is_linear_enabled():
+            return False, (
+                "requires setting `VLLM_ROCM_USE_AITER=1` and "
+                "`VLLM_ROCM_USE_AITER_LINEAR=1`."
+            )
+        try:
+            import aiter  # noqa: F401
+        except Exception:
+            return False, "requires aiter library to be installed."
+
+        if not hasattr(aiter, "hipb_mm"):
+            return False, "requires aiter hipb_mm support."
+
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        ok, reason = super().can_implement(c)
+        if ok and c.weight_shape[1] % 64 != 0:
+            return False, f"requires K divisible by 64, received K={c.weight_shape[1]}."
+        return ok, reason
+
+
 class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(

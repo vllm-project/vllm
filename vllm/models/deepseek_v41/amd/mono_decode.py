@@ -252,16 +252,28 @@ def _copy_linear_at_load(linear) -> None:
     after vLLM has processed its weights at load. By default
     (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD) vLLM dequantizes them to bf16
     there, and the copy re-encodes them as the gfx942 kernels read them.
-    Weights that stay e4m3 are copied as they are."""
+    Weights that stay e4m3 are copied as they are. An online method that
+    requantizes the checkpoint (`--quantization-config`) replaces its
+    weights, so those are copied before it runs."""
     qm = linear.quant_method
     original = qm.process_weights_after_loading
 
     def process_weights_after_loading(layer):
-        out = original(layer)
-        if layer is linear:
-            from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
+        if layer is not linear:
+            return original(layer)
+        from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
 
+        if getattr(qm, "requantization_source", None) is None:
+            out = original(layer)
             _keep_copies(layer, linear_copy(layer.weight, layer.weight_scale))
+            return out
+        # The layerwise loader requantizes each layer as it loads, and the
+        # model loader calls this again at the end; the first copies stay.
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return original(layer)
+        copies = linear_copy(layer.weight, layer.weight_scale)
+        out = original(layer)
+        _keep_copies(layer, copies)
         return out
 
     qm.process_weights_after_loading = process_weights_after_loading

@@ -24,6 +24,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
 )
@@ -480,12 +483,19 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         )
 
         if self.activation_quant_key is not None:
+            force_kernel = None
+            if (
+                self.requantization_source is not None
+                and AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel.is_supported()[0]
+            ):
+                force_kernel = AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel
             self.fp8_linear = init_fp8_linear_kernel(
                 activation_quant_key=self.activation_quant_key,
                 weight_quant_key=self.weight_quant_key,
                 weight_shape=layer.weight.shape,
                 input_dtype=self.input_dtype,
                 out_dtype=self.out_dtype,
+                force_kernel=force_kernel,
                 module_name=self.__class__.__name__,
             )
             # PTPC requires per-token activation FP8; Marlin and Humming FP8

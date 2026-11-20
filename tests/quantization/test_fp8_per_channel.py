@@ -144,3 +144,82 @@ def test_gfx942_moe_weight_quant_avoids_dynamic_per_token_op(monkeypatch) -> Non
     assert torch.equal(got_w2_scale, expected_w2_scale)
     assert torch.equal(got_w2, expected_w2)
     assert layer._already_called_process_weights_after_loading
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm.")
+@pytest.mark.parametrize(
+    "cdna, linear, supported",
+    [(3, True, True), (4, True, False), (3, False, False)],
+    ids=["cdna3", "cdna4", "no-aiter-linear"],
+)
+def test_requant_hipbmm_kernel_needs_only_aiter_linear_on_cdna3(
+    monkeypatch, cdna, linear, supported
+) -> None:
+    """The requantized linears take hipBLASLt on CDNA3 with AITER linear alone:
+    `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM` would also turn on online tuning."""
+    import vllm.platforms.rocm as rocm
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+        AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel as Kernel,
+    )
+
+    monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(rocm_aiter_ops, "is_linear_enabled", lambda: linear)
+    monkeypatch.setattr(rocm_aiter_ops, "is_linear_hipbmm_enabled", lambda: False)
+    assert Kernel.is_supported()[0] is supported
+
+
+@pytest.mark.parametrize("k, ok", [(576, True), (528, False)])
+def test_requant_hipbmm_kernel_refuses_k_not_divisible_by_64(k, ok) -> None:
+    """K not divisible by 64 is refused: hipBLASLt returns wrong values there."""
+    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+        AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+        AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+    )
+
+    c = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticChannelSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(512, k),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+    assert AiterHipbMMPerTokenFp8ScaledMMLinearKernel.can_implement(c)[0]
+    assert AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel.can_implement(c)[0] is ok
+
+
+@pytest.mark.parametrize(
+    "source, supported",
+    [(True, True), (True, False), (False, True)],
+    ids=["requant-supported", "requant-unsupported", "no-requant"],
+)
+def test_ptpc_linear_forces_hipbmm_only_when_requantizing(source, supported) -> None:
+    """Only a linear requantized from its checkpoint asks for the requant
+    hipBLASLt kernel, and only where that kernel is supported."""
+    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+        AiterHipbMMRequantPerTokenFp8ScaledMMLinearKernel as Kernel,
+    )
+    from vllm.model_executor.layers.quantization.online import fp8
+
+    method = object.__new__(Fp8PtpcOnlineLinearMethod)
+    method.requantization_source = object() if source else None
+    method.activation_quant_key = Fp8PtpcOnlineLinearMethod.activation_quant_key
+    method.input_dtype = method.out_dtype = torch.bfloat16
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.empty(64, 128), requires_grad=False)
+    with (
+        mock.patch.object(
+            method, "create_requantization_source_weights", return_value=True
+        ),
+        mock.patch.object(Kernel, "is_supported", return_value=(supported, None)),
+        mock.patch.object(fp8, "init_fp8_linear_kernel") as init,
+    ):
+        method.create_weights(layer, 128, [64], 128, 64, torch.bfloat16)
+    want = Kernel if source and supported else None
+    assert init.call_args.kwargs["force_kernel"] is want
