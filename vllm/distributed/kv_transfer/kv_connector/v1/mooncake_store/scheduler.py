@@ -779,15 +779,13 @@ class MooncakeStoreScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Record failed loads and drop the block references of store jobs
         every rank has finished."""
-        # A request aborted mid-load is cleaned up before its failure arrives;
-        # skip it so the entry is not leaked.
+        # Every load error is reported per request in failed_recving, so the
+        # block-level invalid_block_ids are not needed here. A request aborted
+        # mid-load is cleaned up before its failure arrives; skip it so the
+        # entry is not leaked.
         self._load_failed_req_ids |= (
             connector_output.failed_recving & self._unfinished_request_ids
         )
-        if invalid_block_ids := connector_output.invalid_block_ids:
-            for req_id, (_, req_block_ids) in self._unfinished_requests.items():
-                if any(invalid_block_ids.intersection(ids) for ids in req_block_ids):
-                    self._load_failed_req_ids.add(req_id)
 
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):

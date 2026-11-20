@@ -1244,8 +1244,7 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
     assert "req-0" not in scheduler.load_specs
 
 
-@pytest.mark.parametrize("report", ["failed_recving", "invalid_block_ids"])
-def test_failed_load_skips_store_lookup_until_finished(report):
+def test_failed_load_skips_store_lookup_until_finished():
     # A store whose lookup keeps hitting while the GET keeps failing must not
     # make the request reload forever; it recomputes locally instead.
     scheduler = _make_bare_scheduler()
@@ -1253,13 +1252,9 @@ def test_failed_load_skips_store_lookup_until_finished(report):
     scheduler.client = _StubLookupClient(hit_tokens=32)
     request = _make_admission_request()
     assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
-    scheduler._unfinished_requests[request.request_id] = (request, ([3, 4],))
-
-    if report == "failed_recving":
-        output = KVConnectorOutput(failed_recving={request.request_id})
-    else:
-        output = KVConnectorOutput(invalid_block_ids={4})
-    scheduler.update_connector_output(output)
+    scheduler.update_connector_output(
+        KVConnectorOutput(failed_recving={request.request_id})
+    )
 
     num_lookups = len(scheduler.client.num_tokens)
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
