@@ -876,6 +876,9 @@ class DeepseekV4MoE(nn.Module):
         if (
             events is None
             or hidden_states.shape[0] > envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            # FusedEPMoE keeps every CU busy waiting on its peers, so nothing
+            # may run beside it.
+            or self.experts.uses_fused_ep_moe(hidden_states.shape[0])
         ):
             return self._forward_mega_moe_routed(
                 hidden_states, input_ids

@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
+    VLLM_ROCM_USE_AITER_FUSED_EP_MOE: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1454,6 +1455,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
     "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
+    ),
+    # With --moe-backend aiter_mega_moe, run each MoE layer that AITER's
+    # FusedEPMoE supports (DeepSeek-V4.1-Flash: hidden 5120, intermediate 2304,
+    # top 6, 2/4/8 EP ranks, no fused shared expert; gfx950 with 256 CUs) as
+    # one persistent launch when every DP rank has at most 768 tokens (512 when
+    # MegaMoEV2 has its large-input route), and on MegaMoEV2 otherwise. Needs
+    # an AITER with aiter.ops.flydsl.fused_ep_moe. Disabled by default.
+    "VLLM_ROCM_USE_AITER_FUSED_EP_MOE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSED_EP_MOE", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
