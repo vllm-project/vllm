@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -21,8 +22,82 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
+from vllm.models.inkling.common.weight_loading import load_expert_scales
 
 from .utils import make_dummy_moe_config
+
+
+@pytest.mark.parametrize(
+    "slots,expected_ids",
+    [
+        ({1: 1, 2: 2, 3: 3}, [-1, 1, 2, 3, -1]),
+        ({1: 0, 3: 2, 5: 4}, [1, -1, 3, -1, 5]),
+        ({1: 3, 2: 2, 3: 1}, [-1, 3, 2, 1, -1]),
+        ({}, [-1, -1, -1, -1, -1]),
+    ],
+)
+@pytest.mark.parametrize("layout", ["scalar", "column", "pair", "channel"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_inkling_scale_partition_preserves_unowned_slots(
+    slots, expected_ids, layout, dtype
+):
+    """Local scales follow the expert map, including sparse or reordered slots."""
+    values = torch.tensor([2, 3, 5, 7, 11, 13], dtype=dtype)
+    checkpoint = {
+        "scalar": values,
+        "column": values[:, None],
+        "pair": torch.stack((values, values + 20), dim=1),
+        "channel": torch.stack((values, values + 20, values + 40), dim=1)[:, :, None],
+    }[layout]
+    shape = (5, 3, 1) if layout == "channel" else (5, 2)
+    param = torch.nn.Parameter(torch.full(shape, -99.0), requires_grad=False)
+    expected = torch.tensor(
+        [
+            [-99.0] * shape[1]
+            if expert == -1
+            else [
+                float(values[expert])
+                + (20 * column if layout in ("pair", "channel") else 0)
+                for column in range(shape[1])
+            ]
+            for expert in expected_ids
+        ]
+    ).reshape(shape)
+    load_expert_scales(param, checkpoint, slots)
+    assert torch.equal(param, expected)
+
+
+@pytest.mark.parametrize(
+    "checkpoint,expected_row",
+    [
+        (torch.tensor(7), [7, 7]),
+        (torch.tensor([7]), [7, 7]),
+        (torch.tensor([[7]]), [7, 7]),
+        (torch.tensor([17, 23]), [17, 23]),
+        (torch.tensor([[17, 23]]), [17, 23]),
+    ],
+)
+def test_weight_shape_loader_keeps_scalar_broadcast(
+    default_vllm_config, checkpoint, expected_row
+):
+    """The public loader supports scalar metadata and a two-value weight shape."""
+    config = make_dummy_moe_config(num_experts=3, hidden_dim=128, intermediate_size=128)
+    manager = ExpertMapManager(
+        max_num_batched_tokens=config.max_num_tokens,
+        top_k=1,
+        global_num_experts=3,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=config.moe_parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+    layer = RoutedExperts("experts", torch.bfloat16, config, None, manager)
+    param = torch.nn.Parameter(torch.full((3, 2), -99), requires_grad=False)
+    assert layer.weight_loader(
+        param, checkpoint, "w2_weight_shape", "w2", 1, return_success=True
+    )
+    assert torch.equal(param, torch.tensor([[-99, -99], expected_row, [-99, -99]]))
 
 
 class TestGetHiddenDim:
