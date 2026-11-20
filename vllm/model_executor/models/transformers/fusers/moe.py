@@ -402,11 +402,15 @@ class MoEBlockFuser:
         """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE."""
         hf_gate = getattr(moe_block, self.gate_name)
         num_experts, hidden_size = hf_gate.weight.shape
+        router_dtype = out_dtype or self.router_dtype
+        # Store the weight in the dtype the router computes in, so a checkpoint
+        # that keeps it in fp32 is not rounded to the activation dtype
         gate = GateLinear(
             hidden_size,
             num_experts,
             bias=False,
-            out_dtype=out_dtype or self.router_dtype,
+            out_dtype=router_dtype,
+            params_dtype=router_dtype,
             prefix=maybe_prefix(prefix, self.gate_name),
         )
         if (bias := getattr(hf_gate, "e_score_correction_bias", None)) is not None:

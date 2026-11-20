@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.models.transformers.fusers import MoEBlockFuser
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .test_linear import GLUMLP
 
@@ -614,3 +615,17 @@ def test_moe_fuser_looks_through_casts_and_identity(block_cls):
         fuser = MoEBlockFuser.match(block_cls(), "experts")
     assert fuser is not None
     assert fuser.shared_name == "shared_expert"
+
+
+def test_moe_fuser_gate_keeps_fp32_router_weight(dist_init):
+    """A router that computes in fp32 keeps its weight in fp32 when rebuilt, so a
+    checkpoint storing it in fp32 (Sarvam-30B) is not rounded to the activation
+    dtype, as native vLLM models do with `params_dtype`."""
+    with torch.device("meta"):
+        block = MoEBlock(Fp32Router)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert fuser is not None
+    with set_default_torch_dtype(torch.bfloat16):
+        gate = fuser.gate(block, "model.layers.0.mlp")
+    assert gate.weight.dtype == torch.float32
+    assert gate.out_dtype == torch.float32
