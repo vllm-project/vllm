@@ -58,7 +58,7 @@ def resolve_hisparse_specs(
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheLayerConfig]:
     """Resolve sparse source and indexer block sizes, derive resident and hot
-    caches, and fit align-mode Mamba blocks to the resulting attention blocks."""
+    caches, and fit prefix-caching Mamba blocks to the resulting attention blocks."""
     sparse_layers = get_hisparse_source_layers(layer_configs)
     if not sparse_layers:
         return layer_configs
@@ -124,7 +124,7 @@ def fit_mamba_blocks_to_attention(
     layer_configs: dict[str, KVCacheLayerConfig],
     layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheLayerConfig]:
-    """Shrink align-mode Mamba blocks that would grow the scheduler block.
+    """Shrink prefix-caching Mamba blocks that would grow the scheduler block.
 
     Mamba blocks start at `cache_config.block_size`, which resized attention
     specs may no longer use. Rebuilds the Mamba specs at the largest size up to
@@ -133,7 +133,7 @@ def fit_mamba_blocks_to_attention(
     if not any(isinstance(lc.spec, MambaSpec) for lc in layer_configs.values()):
         return layer_configs
     cache_config = vllm_config.cache_config
-    if cache_config.mamba_cache_mode != "align":
+    if not cache_config.enable_prefix_caching:
         return layer_configs
     attn_block_sizes = [
         lc.spec.block_size
