@@ -9,6 +9,10 @@ import torch.nn as nn
 
 import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -20,7 +24,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -103,9 +107,13 @@ class WorkerBase:
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
+
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Assign the Mamba block size resolved by the core."""
+        self.vllm_config.cache_config.mamba_block_size = mamba_block_size
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
@@ -148,9 +156,15 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def notify_kv_cache_ready(self) -> None:
+        """Finish startup device work before notifying the worker connector."""
+        if has_kv_transfer_group():
+            self.synchronize_device()
+            get_kv_transfer_group().on_kv_cache_ready()
+
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
-        ``torch.accelerator`` must override with their own wait."""
+        `torch.accelerator` must override with their own wait."""
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 

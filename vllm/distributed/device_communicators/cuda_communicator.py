@@ -313,7 +313,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def _log_all_reduce_backend_selection(self) -> None:
         """Log the all-reduce backends that are active for this group.
 
-        The dispatch chain in ``all_reduce`` tries backends in this order and
+        The dispatch chain in `all_reduce` tries backends in this order and
         falls through to the next one if the current backend rejects the
         input (size/dtype gates) or is disabled. The list of "enabled"
         backends below is the subset of potential backends that may be
@@ -552,7 +552,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
+        if pynccl_comm is None or pynccl_comm.disabled:
+            # Fall back when pynccl is unavailable, e.g. an old NCCL version.
+            return super().reduce_scatter(input_, dim)
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -723,9 +725,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         """Persistent, pre-registered NCCL symmetric-memory scratch buffer.
 
         Allocating a fresh symm tensor per collective pays the
-        ``nccl_symm_mem_context`` snapshot + window-registration scan on every
+        `nccl_symm_mem_context` snapshot + window-registration scan on every
         call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead,
-        each ``(role, shape[1:], dtype, device)`` keeps a geometric high-water
+        each `(role, shape[1:], dtype, device)` keeps a geometric high-water
         allocation and returns a leading slice. Superseded allocations remain
         referenced because a captured CUDA graph may still use their pointers;
         geometric growth bounds their total capacity to less than twice the

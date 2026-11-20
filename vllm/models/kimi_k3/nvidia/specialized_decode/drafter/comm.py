@@ -9,24 +9,24 @@ previous buffer) and two NCCL ring all-gathers (the column-parallel context
 projection and the vocab-parallel lm_head logits: 16-20 us each plus a
 [TP, M, N / TP] -> [M, N] copy). Every one of them moves a few KB to 1.3 MB.
 
-Here they are one kernel each over symmetric Lamport buffers (``common.mailbox``:
+Here they are one kernel each over symmetric Lamport buffers (`common.mailbox`:
 a 16 B fragment is published once none of its 32-bit words is the sentinel):
 
-- ``ArNorm`` (one 8-CTA cluster per row, 112 threads x 8 columns each): the rank's
+- `ArNorm` (one 8-CTA cluster per row, 112 threads x 8 columns each): the rank's
   partial row is
   multicast into slot [rank] of every rank's [TP, cap, 7168] mailbox (one
-  ``multimem.st`` reaches every GPU), the TP slots are polled, summed in FP32 in
+  `multimem.st` reaches every GPU), the TP slots are polled, summed in FP32 in
   rank order 0 .. TP-1 and rounded once to BF16 (flashinfer's deterministic
   one-shot order), the residual is added (one BF16 rounding) and the RMSNorm of the
-  new residual follows (FP32 sum of squares, vllm_c's ``rsqrt(sum / 7168 + eps)``,
-  ``x * rstd * w`` rounded once). The reader re-arms its slots. Layer parity: the
+  new residual follows (FP32 sum of squares, vllm_c's `rsqrt(sum / 7168 + eps)`,
+  `x * rstd * w` rounded once). The reader re-arms its slots. Layer parity: the
   call sites alternate between two mailboxes, so a rank can never write a mailbox
   its peer has not read yet (two uses of one mailbox are separated by a use of the
   other, which needs this rank's push, made after its re-arm).
-- ``Gather``: every rank's [M, S] shard multicast into the [cap, TP * S] row of every
-  rank (rank r's at columns r S ..), polled; ``copy``: copied to a dense output and
+- `Gather`: every rank's [M, S] shard multicast into the [cap, TP * S] row of every
+  rank (rank r's at columns r S ..), polled; `copy`: copied to a dense output and
   re-armed, else left in place for a reader that re-arms it (the DCP query mailbox,
-  re-armed by ``DcpValue``).
+  re-armed by `DcpValue`).
 
 Exactness: the reductions keep every operand at stock precision (BF16 partials,
 FP32 accumulation, one BF16 rounding; only the order may differ from flashinfer's
@@ -86,7 +86,7 @@ CONTEXT_ROWS_CAP = 80
 
 @cute.jit
 def clean(word):
-    """``word`` unless it is the sentinel pair (+0, -0), then (+0, +0)."""
+    """`word` unless it is the sentinel pair (+0, -0), then (+0, +0)."""
     result = Uint32(word)
     if result == Uint32(PAIR_SENT):
         result = Uint32(0)
@@ -95,7 +95,7 @@ def clean(word):
 
 @asm()
 def store_peer_float(pointer, value, peer):
-    """DSMEM store of an FP32 ``value`` into cluster CTA ``peer``'s ``pointer``."""
+    """DSMEM store of an FP32 `value` into cluster CTA `peer`'s `pointer`."""
     code = "{ .reg .b32 dst; mapa.shared::cluster.u32 dst,$0,$2; "
     code += "st.shared::cluster.f32 [dst],$1; }"
     return code, "r,f,r,~{memory}", (pointer, Float32(value), Int32(peer))
@@ -107,7 +107,7 @@ class ArNorm:
     address, rank, eps, stream). One cluster of 8 CTAs per row, CTA c owning columns
     896 c .. + 895 (thread t < 112: one 16 B fragment): the pushes and polls spread
     over 8 SMs, the row's sum of squares is the 8 CTA sums exchanged through
-    distributed shared memory, added in CTA order. ``residual`` False: the new
+    distributed shared memory, added in CTA order. `residual` False: the new
     residual is the all-reduced row itself (the embedding: residual = AR(x))."""
 
     def __init__(self, tp, residual):
@@ -208,7 +208,7 @@ class Gather:
     (CTAs per row, M): each CTA multicasts its share of the row's shard fragments,
     then polls its share of the gathered row (all pushes precede every poll and the
     grid is at most a few CTAs per SM, so each CTA a poll waits on is resident or
-    done). ``copy``: the row is copied to ``out`` and re-armed (``out`` is unused
+    done). `copy`: the row is copied to `out` and re-armed (`out` is unused
     otherwise)."""
 
     def __init__(self, tp, words, sentinel, copy, clean):
@@ -304,7 +304,7 @@ class LamportRows:
 
 
 class DrafterComm:
-    """The drafter's TP all-reduces and gathers over ``group`` (the TP device group):
+    """The drafter's TP all-reduces and gathers over `group` (the TP device group):
     two parities of the [TP, ROWS_CAP, 7168] all-reduce mailbox, the context-
     projection gather row [CONTEXT_ROWS_CAP, 7168] and the lm_head logits row
     [ROWS_CAP, vocab_padded] (BF16). Built at model load, before the KV-cache memory
@@ -329,7 +329,7 @@ class DrafterComm:
     # -- all-reduce + residual + RMSNorm -----------------------------------------
 
     def ar_norm(self, x, residual, norm, parity):
-        """``fused_allreduce_rms_norm(x, residual, norm)`` (``residual`` None: the
+        """`fused_allreduce_rms_norm(x, residual, norm)` (`residual` None: the
         new residual is AR(x)); None when this shape is not served."""
         rows = x.shape[0]
         if (

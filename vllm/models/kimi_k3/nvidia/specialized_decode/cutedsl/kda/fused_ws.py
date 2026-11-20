@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Persistent warp-specialized fused replay verify (KdaFusedWS): KdaFused's math
 (deferred RecoverSSM: the replay of the pending accepted tokens, the checkpoint
-write and the chunked verify, see ``fused``) on KdaWS's schedule.
+write and the chunked verify, see `fused`) on KdaWS's schedule.
 
-One CTA per SM walks every ``ctas``-th (request, head) item (strided, see kernel):
+One CTA per SM walks every `ctas`-th (request, head) item (strided, see kernel):
 
 - two **prep warpgroups** (thread c = channel c; warpgroup w takes items w, w + 2,
   ...) stream each item in (projection rows and conv window by cp.async, the
@@ -107,7 +107,7 @@ def shared_bytes(tokens, rq, conv_dim_first, window, conv_size):
 
 
 class KdaFusedWS:
-    """KdaFused's operands and semantics on ``ctas`` persistent CTAs."""
+    """KdaFused's operands and semantics on `ctas` persistent CTAs."""
 
     strided = True  # item order (see kernel)
     registers = (SCAN_REGISTERS, PREP_REGISTERS)
@@ -226,7 +226,7 @@ class KdaFusedWS:
 
     @cute.jit
     def decay(self, a, raw_g, dt, lower_bound):
-        """``a`` = exp(A_log)."""
+        """`a` = exp(A_log)."""
         gate = lower_bound * triton_sigmoid(a * (raw_g + dt))
         return triton_exp(gate)
 

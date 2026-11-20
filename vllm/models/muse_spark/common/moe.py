@@ -139,7 +139,7 @@ class MuseSparkMoEConfig(FusedMoEConfig):
 class MuseSparkConsolidatedRoutedExperts(RoutedExperts):
     """RoutedExperts that load the consolidated (all-experts-stacked) tensors.
 
-    Vendor subclasses supply ``_get_quant_method``.
+    Vendor subclasses supply `_get_quant_method`.
     """
 
     def load_weights(

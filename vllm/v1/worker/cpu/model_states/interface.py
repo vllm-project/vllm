@@ -111,7 +111,7 @@ class ModelState(ABC):
         num_computed_tokens: torch.Tensor,
     ) -> None:
         """Hook run on real batches before the forward pass (after block tables
-        are gathered). Used by mamba "align" prefix caching to pre-copy state
+        are gathered). Used by mamba prefix caching to pre-copy state
         across block boundaries. No-op by default."""
         return None
 
@@ -122,7 +122,7 @@ class ModelState(ABC):
         input_batch: InputBatch,
         req_states: CPURequestState,
     ) -> torch.Tensor | None:
-        """Prepare the ``inputs_embeds`` tensor for the current forward pass."""
+        """Prepare the `inputs_embeds` tensor for the current forward pass."""
         raise NotImplementedError
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:

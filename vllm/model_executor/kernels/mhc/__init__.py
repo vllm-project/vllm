@@ -8,6 +8,10 @@ from .aiter import (
     mhc_pre_delayed_aiter,
 )
 from .cpu import hc_head_fused_cpu, mhc_post_cpu, mhc_pre_cpu
+from .flashinfer_mega import (
+    mega_mhc_supported,
+    mhc_fused_post_pre_flashinfer_mega,
+)
 from .tilelang import (
     mhc_fused_post_pre_tilelang,
     mhc_post_tilelang,
@@ -25,6 +29,8 @@ __all__ = [
     "mhc_pre_cpu",
     "mhc_post_cpu",
     "hc_head_fused_cpu",
+    "mhc_fused_post_pre_flashinfer_mega",
+    "mega_mhc_supported",
     "mhc_pre_tilelang",
     "mhc_post_tilelang",
     "mhc_fused_post_pre_tilelang",

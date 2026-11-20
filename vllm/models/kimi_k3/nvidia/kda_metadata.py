@@ -3,11 +3,11 @@
 """Kimi-K3 specialization of GDN attention metadata.
 
 The request classification and cudagraph staging intentionally mirror
-``GDNAttentionMetadataBuilder``. Kimi-K3 builds the metadata required by its
+`GDNAttentionMetadataBuilder`. Kimi-K3 builds the metadata required by its
 prefill KDA kernel internally, so this builder omits the shared FLA chunk
 metadata construction.
 
-For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
+For Kimi-K3 speculative decoding, `--use-replayssm` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
@@ -127,7 +127,7 @@ def stage_spec_decode_metadata(
     num_spec_decodes: int,
 ) -> None:
     """Stage speculative-decode metadata into CUDA-graph buffers."""
-    assert state_indices.is_cuda
+    assert state_indices.device.type == current_platform.device_type
     assert state_indices.ndim == 2
     batch_size, num_state_slots = staged_state_indices.shape
     BLOCK_ROWS = 32
@@ -154,14 +154,14 @@ def stage_spec_decode_metadata(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class KDARecoverSSMAlignMetadata:
     block_table: torch.Tensor
     num_computed_tokens: torch.Tensor
     block_size: int
 
 
-@dataclass
+@dataclass(slots=True)
 class KDARecoverSSMCommitMetadata:
     state_indices: torch.Tensor
     query_start_loc: torch.Tensor
@@ -284,12 +284,12 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        # Equivalent PyTorch "align" path:
+        # Equivalent PyTorch path with prefix caching:
         #   start = ((seq_lens - 1) // block_size).clamp_(min=0)
         #   offsets = torch.arange(1 + num_speculative_blocks, dtype=torch.int32)
         #   indices = (start[:, None] + offsets).to(torch.int64)
         #   block_table_tensor = torch.gather(block_table, 1, indices)
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+        if self.vllm_config.cache_config.enable_prefix_caching:
             assert self.mamba_aligned_state_indices is not None, (
                 "Aligned Mamba state indices must be precomputed"
             )
@@ -579,7 +579,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
-            if self.kv_cache_spec.mamba_cache_mode == "align":
+            if self.vllm_config.cache_config.enable_prefix_caching:
                 align = KDARecoverSSMAlignMetadata(
                     block_table=m.block_table_tensor,
                     num_computed_tokens=m.compute_num_computed_tokens(),

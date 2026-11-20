@@ -54,7 +54,7 @@ def test_op_is_registered():
 def _hip_prefill(**kwargs):
     """The HIP backend's prefill entry point, as the model layer calls it.
 
-    ``forward_hip`` falls back to Triton on an unsupported call, which would
+    `forward_hip` falls back to Triton on an unsupported call, which would
     make every comparison against Triton pass by construction.
     """
     assert is_hip_gdn_supported(kwargs["q"], kwargs["v"], kwargs["cu_seqlens"])
@@ -160,7 +160,7 @@ def test_matches_triton_chain(gqa_ratio, seq_lens):
 
 @torch.inference_mode()
 def test_none_initial_state_matches_zeros():
-    """``initial_state=None`` must behave like an explicit zero state."""
+    """`initial_state=None` must behave like an explicit zero state."""
     q, k, v, g, beta, initial_state, cu_seqlens = _make_inputs(
         [300, 64], num_k_heads=8, gqa_ratio=2
     )
@@ -357,7 +357,7 @@ def test_initial_state_dtypes(state_dtype):
 
 @torch.inference_mode()
 def test_core_attn_out_aliasing():
-    """``out`` is a view into a caller-owned buffer; it must not overrun it."""
+    """`out` is a view into a caller-owned buffer; it must not overrun it."""
     q, k, v, g, beta, initial_state, cu_seqlens = _make_inputs(
         [300], num_k_heads=8, gqa_ratio=2
     )

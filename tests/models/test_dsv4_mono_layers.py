@@ -1,26 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4-Pro mono decode path through the real model: a five-layer
-DeepSeek-V4-Pro at TP8 on CDNA4, served with ``--monokernel`` on and off on
+DeepSeek-V4-Pro at TP8 on CDNA4, served with `--monokernel` on and off on
 the same random weights: every decoder layer's outputs at every decode step
-must match. Unlike ``test_dsv4_mono_numerics.py``, which checks the kernels
+must match. Unlike `test_dsv4_mono_numerics.py`, which checks the kernels
 against vLLM's ops one stage at a time, this runs
-``DeepseekV4DecoderLayer.forward`` in the engine -- the model's hook, the
+`DeepseekV4DecoderLayer.forward` in the engine -- the model's hook, the
 per-step path choice, the weights taken off the layer, the metadata, the
 compressor and the indexer's top-k -- so a change to the decoder layer that
 the kernels do not follow fails here. Scope: eager steps of one token a
 request; speculative decoding's multi-token rows and graph replays are not
 covered.
 
-The checkpoint's own first five layers (``compress_ratios`` 128, 128, 4, 128,
-4; ``num_hash_layers`` 3) hold every variant the kernels build, each taking the
+The checkpoint's own first five layers (`compress_ratios` 128, 128, 4, 128,
+4; `num_hash_layers` 3) hold every variant the kernels build, each taking the
 whole layer (K1 + K2):
 - 0: hash-routed HCA, the first layer (K1 takes the embedding, no fold)
 - 1: hash-routed HCA
 - 2: hash-routed CSA (vLLM's indexer between K1 and K2)
 - 3: bias-routed HCA
 - 4: bias-routed CSA
-A 32K ``max_model_len`` builds the HCA kernels 256 keys wide; the prompts
+A 32K `max_model_len` builds the HCA kernels 256 keys wide; the prompts
 (under 8.3K) keep vLLM's c128a decode table at its 128-wide floor, so the
 kernels read a table narrower than they are built for.
 """
@@ -33,6 +33,7 @@ import torch
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 TP = 8
@@ -94,6 +95,16 @@ def _fill(name: str, t: torch.Tensor) -> None:
         t.copy_(randn(0.02))
 
 
+def _host_reads(hook):
+    """The probes copy activations to the host inside the checked step."""
+
+    def wrapper(*args, **kwargs):
+        with gpu_sync_allowed():
+            return hook(*args, **kwargs)
+
+    return wrapper
+
+
 @register_model_loader(LOAD_FORMAT)
 class RandomWeightLoader(DummyModelLoader):
     """Dummy loading with weights in the checkpoint's ranges, before post-load
@@ -123,7 +134,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class MonoProbe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def _decoder_layers(self) -> dict:
@@ -143,7 +154,7 @@ class MonoProbe:
         mono path takes), keyed by (layer, prompt length, position): a
         request's step and row can differ between engines, its prompt length
         and position cannot.
-        ``lens``: the prompt lengths, more than ``STEPS`` apart; a row's
+        `lens`: the prompt lengths, more than `STEPS` apart; a row's
         request is the longest prompt not past its position."""
         from vllm.forward_context import get_forward_context
 
@@ -197,10 +208,10 @@ class MonoProbe:
             )
 
         for i, layer in self._decoder_layers().items():
-            layer.register_forward_hook(hook(i), with_kwargs=True)
+            layer.register_forward_hook(_host_reads(hook(i)), with_kwargs=True)
             layer.register_forward_pre_hook(pos_hook, with_kwargs=True)
             gap = gap_hook(i, layer)
-            layer.ffn.register_forward_pre_hook(gap, with_kwargs=True)
+            layer.ffn.register_forward_pre_hook(_host_reads(gap), with_kwargs=True)
 
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]
@@ -221,10 +232,10 @@ class MonoProbe:
 
 
 def _decode(vllm_runner, monkeypatch, mono: bool, prompts, path: str):
-    """Greedy decode of ``prompts`` with the mono path on or off: (each
+    """Greedy decode of `prompts` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
     for the decode tokens of decode-only steps, and vLLM's routing margins,
-    saved under ``path``."""
+    saved under `path`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
