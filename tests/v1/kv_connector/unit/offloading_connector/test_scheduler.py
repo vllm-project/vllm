@@ -92,12 +92,15 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    HiSparseSourceManager,
     SlidingWindowManager,
 )
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheGroup,
+    KVCacheGroupRole,
 )
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
@@ -5066,6 +5069,79 @@ def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
     else:
         assert b_block.block_hash != block_hash
         assert jobs <= (metadata.jobs_to_flush or set())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_hisparse_host_block_id_does_not_flush_gpu_store(async_scheduling):
+    """A host-pool ID matching a pending GPU store is not a GPU reuse."""
+    config = create_vllm_config(
+        block_size=4,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "offload_prompt_only": False,
+        },
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    spec = AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["host"],
+                spec,
+                manager_config=HiSparseSourceManager.config(),
+                host_resident=True,
+            ),
+            make_kv_cache_group(
+                ["indexer"], spec, role=KVCacheGroupRole.HISPARSE_INDEXER
+            ),
+        ],
+        hisparse_host_num_blocks=2,
+    )
+    scheduler = create_scheduler(
+        config, kv_cache_config=kv_cache_config, hash_block_size=4
+    )
+    get_hisparse_coordinator(scheduler.kv_cache_manager)
+    offloading = scheduler.connector.scheduler
+    manager = offloading.manager
+    assert isinstance(manager, CPUOffloadingManager)
+
+    request_a = create_request(
+        request_id=1, num_tokens=4, common_prefix_len=4, block_size=4
+    )
+    scheduler.add_request(request_a)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    jobs = set(metadata.store_jobs)
+    assert jobs
+    a_blocks = scheduler.kv_cache_manager.get_blocks(request_a.request_id).blocks
+    host_block_id = a_blocks[0][0].block_id
+    gpu_block_id = a_blocks[1][0].block_id
+    assert a_blocks[0][0].pool() is not a_blocks[1][0].pool()
+    assert host_block_id == gpu_block_id
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+
+    scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    assert jobs <= offloading._block_id_to_pending_jobs[gpu_block_id]
+
+    request_b = create_request(
+        request_id=2, num_tokens=4, common_prefix_len=0, block_size=4
+    )
+    scheduler.add_request(request_b)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    b_blocks = scheduler.kv_cache_manager.get_blocks(request_b.request_id).blocks
+    assert b_blocks[0][0].block_id == gpu_block_id
+    assert b_blocks[1][0].block_id != gpu_block_id
+    assert not (metadata.jobs_to_flush or set()) & jobs
 
 
 @pytest.mark.cpu_test

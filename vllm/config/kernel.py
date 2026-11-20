@@ -326,7 +326,8 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
-    requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
+    requests, with bf16 MoE activations instead of the checkpoint's MXFP4;
+    MiniMax-M3 at TP4 on MI355X, including its 7-token DSpark draft). A
     deployment that cannot run it is refused at startup.
 
     Same switch as `--additional-config '{"decode_backend":
@@ -341,7 +342,8 @@ class KernelConfig:
     - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
       activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
-    - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
+    - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels with MXFP4, MXFP8,
+      NVFP4 or BF16 experts on SM100, or MXFP4 or 128x128 block-FP8 on SM90
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
