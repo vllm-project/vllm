@@ -1032,6 +1032,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             is_sender=init_info.is_sender,
             init_info=init_info,
         )
+        engine._apply_pause_config(init_info)
 
         # The VMM-based expandable_segments allocator makes IPC storage opens ~9x
         # slower on both export and rebuild, and CUDA-IPC publish is this engine's
@@ -1310,23 +1311,22 @@ class ShardedRDTTrainerWeightTransferEngine(
             )
             return
 
-        self.client.start_weight_update()
-
         from vllm.distributed.weight_transfer.sharded_rdt_engine import (
             ShardedRDTWeightTransferUpdateInfo,
         )
 
         update = asdict(ShardedRDTWeightTransferUpdateInfo(sync_idx=self._sync_idx))
-        with ThreadPoolExecutor(max_workers=1) as exe:
-            # The workers block inside update_weights until they've pulled every
-            # group, so it runs concurrently with the gather/publish loop.
-            future = exe.submit(self.client.update_weights, update)
-            self._run_gather_loop(
-                update_future=future, live_count=live_count, live_ids=live_ids
-            )
-            future.result()  # surface inference-side errors
-
-        self.client.finish_weight_update()
+        with self._pause_for_update():
+            self.client.start_weight_update()
+            with ThreadPoolExecutor(max_workers=1) as exe:
+                # The workers block inside update_weights until they've pulled
+                # every group, so it runs concurrently with the gather loop.
+                future = exe.submit(self.client.update_weights, update)
+                self._run_gather_loop(
+                    update_future=future, live_count=live_count, live_ids=live_ids
+                )
+                future.result()  # surface inference-side errors
+            self.client.finish_weight_update()
 
     def _run_gather_loop(
         self, update_future, live_count: int, live_ids: list[int] | None = None

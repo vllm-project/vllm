@@ -1131,6 +1131,15 @@ def _m2n_trainer_send(
         def finish_weight_update(self, weight_version=None):
             pass
 
+        def pause_generation(self, mode="keep", clear_cache=True):
+            pass
+
+        def resume_generation(self):
+            pass
+
+        def stage_weights(self, update_info):
+            pass
+
     class Tiny(torch.nn.Module):
         def __init__(self):
             super().__init__()

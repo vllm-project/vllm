@@ -302,6 +302,7 @@ class SparseNCCLTrainerWeightTransferEngine(
         source: WeightSource | None = None,
     ) -> Self:
         engine = cls(client=client, source=source, is_sender=init_info.is_sender)
+        engine._apply_pause_config(init_info)
         if not engine.is_sender:
             return engine
 
@@ -325,9 +326,10 @@ class SparseNCCLTrainerWeightTransferEngine(
         if not patches:
             return
 
-        self.client.start_weight_update()
-        self._broadcast_chunk(patches)
-        self.client.finish_weight_update()
+        with self._pause_for_update():
+            self.client.start_weight_update()
+            self._broadcast_chunk(patches)
+            self.client.finish_weight_update()
 
     def send_weight_chunk(
         self, patches: Iterable[SparseWeightPatch] | None = None

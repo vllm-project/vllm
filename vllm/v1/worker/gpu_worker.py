@@ -7,6 +7,7 @@ import gc
 import os
 import time
 from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
@@ -78,6 +79,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.staging import mark_staging_thread
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -267,6 +269,9 @@ class Worker(WorkerBase):
         # Update targets (is_draft) whose weights may be incomplete.
         self._incomplete_weight_updates: set[bool] = set()
         self._weight_update_is_draft = False
+        # `stage_weights` runs on one background thread; the latest call wins.
+        self._staging_executor: ThreadPoolExecutor | None = None
+        self._staging_future: Future | None = None
         # Set by the engine while a pause has emptied the KV cache.
         self._kv_cache_reclaimable = False
         # Keeps the KV cache lent to the active weight update until it ends.
@@ -1721,8 +1726,64 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 "Cannot release a trainer connection during a weight update"
             )
+        if (future := self._staging_future) is not None:
+            self._staging_future = None
+            future.exception()  # wait; a dropped stage's error no longer matters
         if self.weight_transfer_engine is not None:
             self.weight_transfer_engine.shutdown()
+
+    def stage_weights(self, update_info: dict | list[dict]) -> None:
+        """Start the engine's `stage_weights` on a background thread and return.
+
+        It runs while the engine serves; `start_weight_update` waits for it. A
+        later call overwrites the earlier staged version.
+        """
+        self._check_weight_transfer_engine()
+        engine = self.weight_transfer_engine
+        assert engine is not None
+        if self._weight_update_active:
+            raise RuntimeError(
+                "stage_weights cannot be called during a weight update; call it "
+                "before start_weight_update"
+            )
+        typed_update_info = engine.parse_update_info(
+            self._local_update_info(update_info)
+        )
+        if not engine.supports_staging:
+            return
+        if self._staging_executor is None:
+            device_index = self.device.index if self.device is not None else None
+
+            def init_thread() -> None:
+                # The CUDA device is per thread.
+                if device_index is not None:
+                    torch.accelerator.set_device_index(device_index)
+                mark_staging_thread()
+
+            self._staging_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="vllm-stage-weights",
+                initializer=init_thread,
+            )
+        self._staging_future = self._staging_executor.submit(
+            engine.stage_weights, typed_update_info
+        )
+
+    def staging_done(self) -> bool:
+        """Whether the last `stage_weights` finished; raises its error, once."""
+        future = self._staging_future
+        if future is None:
+            return True
+        if not future.done():
+            return False
+        self._staging_future = None
+        future.result()
+        return True
+
+    def _wait_for_staging(self) -> None:
+        if (future := self._staging_future) is not None:
+            self._staging_future = None
+            future.result()
 
     def has_incomplete_weight_update(self) -> bool:
         return bool(self._incomplete_weight_updates)
@@ -1747,6 +1808,8 @@ class Worker(WorkerBase):
     def _start_weight_update(self, is_draft: bool = False) -> None:
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
+        # The apply may assume staged data is ready.
+        self._wait_for_staging()
 
         if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
             raise RuntimeError(
@@ -1823,18 +1886,21 @@ class Worker(WorkerBase):
 
         with set_current_vllm_config(self.vllm_config):
             try:
-                if isinstance(update_info, list):
-                    parallel_config = self.vllm_config.parallel_config
-                    local_update_info = update_info[
-                        parallel_config.data_parallel_index * parallel_config.world_size
-                        + self.rank
-                    ]
-                else:
-                    local_update_info = update_info
-                self.weight_transfer_engine.update_weights(local_update_info)
+                self.weight_transfer_engine.update_weights(
+                    self._local_update_info(update_info)
+                )
             except BaseException:
                 self._end_weight_update(refresh=False)
                 raise
+
+    def _local_update_info(self, update_info: dict | list[dict]) -> dict:
+        """This worker's entry of a list indexed by global worker rank."""
+        if not isinstance(update_info, list):
+            return update_info
+        parallel_config = self.vllm_config.parallel_config
+        return update_info[
+            parallel_config.data_parallel_index * parallel_config.world_size + self.rank
+        ]
 
     def _end_weight_update(self, refresh: bool) -> None:
         assert self.weight_transfer_engine is not None
@@ -1884,6 +1950,8 @@ class Worker(WorkerBase):
         if self.profiler is not None:
             self.profiler.shutdown()
 
+        if staging_executor := getattr(self, "_staging_executor", None):
+            staging_executor.shutdown(wait=False, cancel_futures=True)
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 

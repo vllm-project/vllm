@@ -299,6 +299,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
         )
+        engine._apply_pause_config(init_info)
         # IPC needs no data-plane rendezvous. The sender ships the must-agree
         # `packed` flag so the worker decodes exactly as this trainer encodes.
         if engine.is_sender:
@@ -308,13 +309,14 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     def send_weights(self) -> None:
         assert self.source is not None
         source = self.source
-        if self.is_sender:
-            self.client.start_weight_update()
-        # Unpacked returns strong refs to its IPC-shared copies; they must stay
-        # alive across `finish_weight_update` too.
-        weight_refs = self._send(source)
-        if self.is_sender:
-            self.client.finish_weight_update()
+        with self._pause_for_update():
+            if self.is_sender:
+                self.client.start_weight_update()
+            # Unpacked returns strong refs to its IPC-shared copies; they must
+            # stay alive across `finish_weight_update` too.
+            weight_refs = self._send(source)
+            if self.is_sender:
+                self.client.finish_weight_update()
         self._post_send_sync()
         del weight_refs
 

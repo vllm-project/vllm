@@ -329,6 +329,10 @@ class EngineClient(ABC):
         """Release the trainer connection without shutting down inference."""
         raise NotImplementedError
 
+    async def stage_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """Stage the next version while serving; returns when staging is done."""
+        raise NotImplementedError
+
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
         raise NotImplementedError

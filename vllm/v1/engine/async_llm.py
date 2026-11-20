@@ -78,6 +78,8 @@ from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
+_STAGING_POLL_INTERVAL_S = 0.5
+
 
 class InputStreamError(Exception):
     """Wrapper for errors from the input stream generator.
@@ -1438,6 +1440,21 @@ class AsyncLLM(EngineClient):
     async def shutdown_weight_transfer_engine(self) -> None:
         """Release the trainer connection without shutting down inference."""
         await self.collective_rpc("shutdown_weight_transfer_engine")
+
+    async def stage_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """Stage the next version on every worker while the engine keeps serving.
+
+        Returns once all workers have finished staging.
+        """
+        await self.engine_core.stage_weights_async(request.update_info)
+        await self._wait_for_staging()
+
+    async def _wait_for_staging(self) -> None:
+        # Workers can't hold an RPC reply open without stalling execute_model,
+        # so poll a status RPC. Each poll costs a step of async-scheduling
+        # overlap, hence the long interval. Swap here for a completion signal.
+        while not await self.engine_core.staging_done_async():
+            await asyncio.sleep(_STAGING_POLL_INTERVAL_S)
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""

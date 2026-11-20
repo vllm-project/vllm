@@ -380,6 +380,12 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def stage_weights_async(self, update_info: Any) -> None:
+        raise NotImplementedError
+
+    async def staging_done_async(self) -> bool:
+        raise NotImplementedError
+
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
@@ -1488,6 +1494,19 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def stage_weights_async(self, update_info: Any) -> None:
+        # Every engine, as the status poll checks every engine.
+        await self.call_utility_all_async(
+            "collective_rpc", "stage_weights", None, (), {"update_info": update_info}
+        )
+
+    async def staging_done_async(self) -> bool:
+        """Whether every worker of every engine finished `stage_weights`."""
+        per_engine = await self.call_utility_all_async(
+            "collective_rpc", "staging_done", None, (), None
+        )
+        return all(all(workers) for workers in per_engine)
 
     async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
         per_engine = await self.call_utility_all_async("compute_weight_checksums")

@@ -9,6 +9,7 @@ from vllm.config import ModelConfig
 
 from .direct import begin_direct_reload, finish_direct_reload, reloads_directly
 from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
+from .staging import check_not_staging
 
 __all__ = ["finish_reload", "start_reload", "weight_update_active"]
 
@@ -26,6 +27,7 @@ def weight_update_active() -> bool:
 def start_reload(model: torch.nn.Module) -> None:
     """Begin a weight update in the configured mode."""
     global _weight_update_active
+    check_not_staging("start_reload")
     if reloads_directly(model):
         begin_direct_reload(model)
     else:

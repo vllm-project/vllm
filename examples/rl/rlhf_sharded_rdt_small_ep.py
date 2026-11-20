@@ -64,8 +64,6 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from rdt_vllm_serve import (
     http_generate,
     launch_vllm_serve,
-    pause_generation,
-    resume_generation,
     shutdown_server,
     wait_for_server,
 )
@@ -252,11 +250,10 @@ def main():
         )
         print(f"[sync] engine setup (incl. bake) took {time.perf_counter() - t0:.2f}s")
 
-        pause_generation(VLLM_ENDPOINT)
+        # send_weights pauses and resumes generation around the apply.
         t0 = time.perf_counter()
         ray.get([w.sync_weights.remote() for w in workers])
         print(f"[sync] iter 0 took {time.perf_counter() - t0:.3f}s")
-        resume_generation(VLLM_ENDPOINT)
 
         after = http_generate(VLLM_ENDPOINT, MODEL_NAME, PROMPTS)
         print("[generate] AFTER sync (the trainer's weights):")
@@ -264,11 +261,9 @@ def main():
             print(f"  {p!r} -> {t!r}")
 
         # Sync again; replay must be stable, so generation must not move.
-        pause_generation(VLLM_ENDPOINT)
         t0 = time.perf_counter()
         ray.get([w.sync_weights.remote() for w in workers])
         print(f"[sync] iter 1 took {time.perf_counter() - t0:.3f}s")
-        resume_generation(VLLM_ENDPOINT)
         again = http_generate(VLLM_ENDPOINT, MODEL_NAME, PROMPTS)
 
         # Greedy decoding, so both comparisons are exact.

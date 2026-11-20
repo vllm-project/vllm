@@ -998,6 +998,15 @@ def trainer_send_from_source(
         def finish_weight_update(self, weight_version=None):
             pass
 
+        def pause_generation(self, mode="keep", clear_cache=True):
+            pass
+
+        def resume_generation(self):
+            pass
+
+        def stage_weights(self, update_info):
+            pass
+
     engine = WeightTransferTrainerFactory.trainer_init(
         NCCLTrainerInitInfo(
             master_address=master_address,
@@ -1088,6 +1097,15 @@ def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
 
         def finish_weight_update(self):
             self.order.append("finish")
+
+        def pause_generation(self, mode="keep", clear_cache=True):
+            pass
+
+        def resume_generation(self):
+            pass
+
+        def stage_weights(self, update_info):
+            pass
 
     monkeypatch.setattr(torch.cuda, "current_stream", lambda *_, **__: None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -1871,6 +1889,30 @@ class RecordingClient:
     def finish_weight_update(self, weight_version: str | None = None) -> None:
         self.order.append("finish")
 
+    # Pauses are tracked apart from `order`, which records the update lifecycle.
+    paused = False
+
+    def pause_generation(self, mode="keep", clear_cache=True) -> None:
+        self.paused = True
+
+    def resume_generation(self) -> None:
+        self.paused = False
+
+    def stage_weights(self, update_info: dict) -> None:
+        self.order.append("stage")
+
+
+class PausingRecordingClient(RecordingClient):
+    """A RecordingClient that also records pauses in `order`."""
+
+    def pause_generation(self, mode="keep", clear_cache=True) -> None:
+        self.order.append(f"pause:{mode}")
+        super().pause_generation(mode, clear_cache)
+
+    def resume_generation(self) -> None:
+        self.order.append("resume")
+        super().resume_generation()
+
 
 def _module_with(*pairs):
     """A tiny nn.Module exposing the given (name, tensor) pairs as parameters,
@@ -1898,6 +1940,27 @@ class TestTrainerClients:
     def test_recording_client_is_protocol(self):
         assert isinstance(RecordingClient(), VLLMWeightSyncClient)
 
+    def test_clients_forward_pause_mode(self, monkeypatch):
+        """The server defaults to `abort`, so the mode must reach it."""
+        captured: dict = {}
+
+        def fake_post(self, path, json=None, params=None):
+            captured.update(path=path, params=params)
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        HTTPVLLMWeightSyncClient("http://x").pause_generation("keep", False)
+        assert captured == {
+            "path": "pause",
+            "params": {"mode": "keep", "clear_cache": "false"},
+        }
+
+        monkeypatch.setattr(ray, "get", lambda refs: refs)
+        handle = MagicMock()
+        RayVLLMWeightSyncClient(handle).pause_generation("wait")
+        handle.pause_generation.remote.assert_called_once_with(
+            mode="wait", clear_cache=True
+        )
+
     def test_http_client_is_protocol(self):
         assert isinstance(
             HTTPVLLMWeightSyncClient("http://localhost:8000"), VLLMWeightSyncClient
@@ -1923,6 +1986,10 @@ class TestTrainerClients:
         (update_req,), _ = handle.update_weights.remote.call_args
         assert isinstance(update_req, WeightTransferUpdateRequest)
         assert update_req.update_info == {"names": ["w"]}
+
+        client.stage_weights({"names": ["w"]})
+        (stage_req,), _ = handle.stage_weights.remote.call_args
+        assert isinstance(stage_req, WeightTransferUpdateRequest)
 
         client.finish_weight_update("step-42")
         handle.finish_weight_update.remote.assert_called_once_with()
@@ -1975,6 +2042,53 @@ class TestTrainerClients:
 
         client.shutdown_weight_transfer_engine()
         assert captured == {"path": "shutdown_weight_transfer_engine", "json": None}
+
+
+class TestTrainerManagedPause:
+    """`send_weights` pauses only around the apply (`_pause_for_update`)."""
+
+    class _Engine(TrainerWeightTransferEngine):
+        @classmethod
+        def trainer_init(cls, init_info, *, client, source=None):
+            engine = cls(client=client)
+            engine._apply_pause_config(init_info)
+            return engine
+
+        def send_weights(self):
+            with self._pause_for_update():
+                self.client.start_weight_update()
+                self.client.update_weights({"names": []})
+                self.client.finish_weight_update()
+
+    def _engine(self, client):
+        return self._Engine.trainer_init(TrainerInitInfo(rank=0), client=client)
+
+    def test_pauses_around_apply(self):
+        client = PausingRecordingClient()
+        self._engine(client).send_weights()
+        assert client.order == ["pause:keep", "start", "update", "finish", "resume"]
+        assert not client.paused
+
+    def test_failed_update_stays_paused(self):
+        class FailingUpdate(PausingRecordingClient):
+            fail = True
+
+            def update_weights(self, update_info):
+                if self.fail:
+                    raise RuntimeError("boom")
+
+        client = FailingUpdate()
+        engine = self._engine(client)
+        with pytest.raises(RuntimeError, match="boom"):
+            engine.send_weights()
+        assert client.paused
+        assert "resume" not in client.order
+
+        # A successful retry pauses again and resumes.
+        client.fail = False
+        engine.send_weights()
+        assert client.order.count("pause:keep") == 2
+        assert not client.paused
 
 
 class TestModuleSource:
@@ -2147,7 +2261,7 @@ class TestTrainerFactory:
         try:
             WeightTransferTrainerFactory.register_engine("dummy", _DummyTrainerEngine)
             engine = WeightTransferTrainerFactory.trainer_init(
-                MagicMock(backend="dummy"),  # backend read from the init info
+                MagicMock(backend="dummy", pause_mode="keep"),  # read from init info
                 client=RecordingClient(),
                 source=ModuleSource(_module_with(("w", torch.zeros(2)))),
             )

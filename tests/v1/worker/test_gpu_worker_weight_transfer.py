@@ -7,6 +7,7 @@ delegates to the configured weight transfer engine and tracks whether an update
 session is active. These tests verify that delegation and the session guard.
 """
 
+import threading
 from contextlib import ExitStack
 
 import pytest
@@ -15,6 +16,7 @@ import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.model_executor.model_loader.reload import start_reload
 from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import Worker
@@ -88,7 +90,65 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker._kv_cache_reclaimable = False
     worker._weight_update_kv_cache_loan = ExitStack()
     worker.model_runner = _RecordingModelRunner()
+    worker.device = torch.device("cpu")
+    worker._staging_executor = None
+    worker._staging_future = None
     return worker
+
+
+class _StagingEngine(_RecordingEngine):
+    supports_staging = True
+
+    def __init__(self):
+        super().__init__()
+        self.release = threading.Event()
+        self.staged: list[dict] = []
+
+    def parse_update_info(self, update_info: dict) -> dict:
+        return update_info
+
+    def stage_weights(self, update_info: dict) -> None:
+        assert self.release.wait(10)
+        if update_info.get("fail"):
+            raise ValueError("stage failed")
+        if update_info.get("touch_live_model"):
+            start_reload(nn.Module())
+        self.staged.append(update_info)
+
+
+def test_start_waits_for_staging_and_reraises_its_error():
+    engine = _StagingEngine()
+    worker = _make_worker(engine)
+
+    worker.stage_weights({"v": 1})
+    assert not worker.staging_done()
+    engine.release.set()
+    worker.start_weight_update()
+    assert engine.staged == [{"v": 1}]
+    worker.finish_weight_update()
+
+    worker.stage_weights({"fail": True})
+    with pytest.raises(ValueError, match="stage failed"):
+        worker.start_weight_update()
+    # The error is reported once; the next update proceeds unstaged.
+    worker.start_weight_update()
+    assert worker._weight_update_active
+
+
+def test_staging_rejected_inside_update_and_on_live_model():
+    engine = _StagingEngine()
+    engine.release.set()
+    worker = _make_worker(engine)
+
+    worker.start_weight_update()
+    with pytest.raises(RuntimeError, match="during a weight update"):
+        worker.stage_weights({"v": 1})
+    worker.finish_weight_update()
+
+    worker.stage_weights({"touch_live_model": True})
+    with pytest.raises(RuntimeError, match="cannot run in stage_weights"):
+        while not worker.staging_done():
+            pass
 
 
 def test_reload_weights_sets_current_config():

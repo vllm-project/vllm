@@ -120,16 +120,6 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
     return results
 
 
-def pause_generation(base_url: str) -> None:
-    """Pause generation via HTTP endpoint."""
-    requests.post(f"{base_url}/pause", timeout=60).raise_for_status()
-
-
-def resume_generation(base_url: str) -> None:
-    """Resume generation via HTTP endpoint."""
-    requests.post(f"{base_url}/resume", timeout=60).raise_for_status()
-
-
 def get_world_size(base_url: str) -> int:
     """Get the number of inference workers from the vLLM server."""
     response = requests.get(f"{base_url}/get_world_size", timeout=10)
@@ -188,15 +178,11 @@ def main():
             source=ModuleSource(train_model),
         )
 
-        pause_generation(BASE_URL)
-
-        # Drives start_weight_update / update_weights / finish_weight_update,
-        # concurrent with the NCCL broadcast.
+        # Pauses generation, drives start / update / finish concurrent with the
+        # NCCL broadcast, then resumes.
         print("[sync] Broadcasting weights via NCCL...")
         engine.send_weights()
         print("[sync] Weight broadcast complete.")
-
-        resume_generation(BASE_URL)
 
         # Generate with the synced weights — expect sensible output.
         outputs_updated = generate_completions(client, MODEL_NAME, PROMPTS)
