@@ -1174,7 +1174,12 @@ class EplbState:
         self.drain_async()
         self.async_worker_stop.set()
         self.rearrange_event.record()
-        self.async_worker.join()
+        self.async_worker.join(timeout=5)
+        if self.async_worker.is_alive():
+            logger.warning(
+                "Async EPLB worker did not stop within 5 seconds; "
+                "continuing shutdown while the worker is still running."
+            )
         self.async_worker = None
 
     def drain_async(self) -> None:
