@@ -51,7 +51,6 @@ class PoolingBaseServing(ABC, BaseServing):
         self.engine_client = engine_client
         self.renderer = engine_client.renderer
         self.vllm_config = engine_client.vllm_config
-        self.max_model_len = self.model_config.max_model_len
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
         self.chat_template_config = chat_template_config
@@ -71,7 +70,8 @@ class PoolingBaseServing(ABC, BaseServing):
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
         await self._preprocessing(io_processor, ctx)
-        await self._prepare_generators(ctx)
+        generators = await self._prepare_generators(ctx)
+        ctx.result_generator = merge_async_iterators(*generators)
         await self._collect_batch(ctx)
         return await self._postprocessing_async(io_processor, ctx)
 
@@ -136,13 +136,12 @@ class PoolingBaseServing(ABC, BaseServing):
             prompt_extras=prompt_extras,
         )
 
-        self._validate_request(ctx)
         return ctx
 
     async def _prepare_generators(
         self,
         ctx: PoolingServeContext,
-    ):
+    ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         if ctx.engine_inputs is None:
             raise ValueError("Engine inputs not available")
 
@@ -183,7 +182,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
             generators.append(generator)
 
-        ctx.result_generator = merge_async_iterators(*generators)
+        return generators
 
     async def _collect_batch(
         self,
@@ -236,21 +235,6 @@ class PoolingBaseServing(ABC, BaseServing):
                 and load_result.error.code == HTTPStatus.BAD_REQUEST.value
             ):
                 raise ValueError(load_result.error.message)
-        return None
-
-    def _validate_request(self, ctx: PoolingServeContext) -> None:
-        truncate_prompt_tokens = getattr(ctx.request, "truncate_prompt_tokens", None)
-
-        if (
-            truncate_prompt_tokens is not None
-            and truncate_prompt_tokens > self.max_model_len
-        ):
-            raise ValueError(
-                "truncate_prompt_tokens value is "
-                "greater than max_model_len."
-                " Please request a smaller truncation size."
-            )
-
         return None
 
 

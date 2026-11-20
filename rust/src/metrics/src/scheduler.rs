@@ -125,12 +125,13 @@ pub type MooncakeOperationHistogramFamily =
     Family<MooncakeOperationLabels, Histogram, fn() -> Histogram>;
 pub type MooncakeOperationCounterFamily = Family<MooncakeOperationLabels, U64Counter>;
 
-/// Labels for per-operation UMBP store connector telemetry.
+/// Labels for per-operation UMBP store connector telemetry. `operation` is
+/// dynamic, as in [`MooncakeOperationLabels`].
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct UmbpOperationLabels {
     pub model_name: String,
     pub engine: u32,
-    pub operation: &'static str,
+    pub operation: String,
 }
 
 /// Family type alias for the UMBP connector telemetry, exposed so
