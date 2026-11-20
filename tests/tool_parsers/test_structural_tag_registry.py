@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from openai.types.responses import CustomTool, ToolChoiceFunction
+from openai.types.responses import CustomTool, ToolChoiceCustom, ToolChoiceFunction
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from xgrammar import Grammar, StructuralTag
 from xgrammar import get_model_structural_tag as get_xgrammar_builtin_structural_tag
@@ -108,6 +108,56 @@ def test_supported_structural_tag_models_include_vllm_builtins():
         XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
     )
     assert "hermes" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+
+
+@pytest.mark.parametrize("choice", ["auto", "required", "named"])
+@pytest.mark.parametrize(
+    "syntax,definition,payload",
+    [
+        ("lark", 'start: "(" start ")" | "ok"', "((ok))"),
+        ("regex", "[A-Z]{2}[0-9]{2}", "AB12"),
+        ("lark", 'start: "\\n你好\\n"', "\n你好\n"),
+        ("lark", 'start: ""', ""),
+    ],
+)
+def test_qwen_custom_grammar_constrains_payload(choice, syntax, definition, payload):
+    tool = CustomTool(
+        type="custom",
+        name="emit",
+        format={"type": "grammar", "syntax": syntax, "definition": definition},
+    )
+    tag = get_model_structural_tag(
+        "qwen_3_coder",
+        [tool],
+        ToolChoiceCustom(type="custom", name="emit") if choice == "named" else choice,
+        reasoning=False,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    begin = "<tool_call>\n<function=emit>\n<parameter=input>\n"
+    end = "\n</parameter>\n</function>\n</tool_call>"
+    assert _is_grammar_accept_string(grammar, begin + payload + end)
+    assert not _is_grammar_accept_string(grammar, begin + "wrong" + end)
+    assert _is_grammar_accept_string(grammar, "A plain answer.") == (choice == "auto")
+
+
+def test_custom_grammar_rejects_unsupported_parser_and_invalid_definition():
+    tool = CustomTool(
+        type="custom",
+        name="emit",
+        format={"type": "grammar", "syntax": "lark", "definition": 'start: "ok"'},
+    )
+    with pytest.raises(VLLMValidationError, match="qwen3_coder"):
+        get_model_structural_tag("hermes", [tool], "auto", reasoning=False)
+    bad_tool = CustomTool(
+        type="custom",
+        name="emit",
+        format={"type": "grammar", "syntax": "lark", "definition": "not a grammar"},
+    )
+    with pytest.raises(VLLMValidationError, match="Invalid custom tool grammar"):
+        get_model_structural_tag(
+            "qwen_3_coder", [bad_tool], "required", reasoning=False
+        )
+    assert get_model_structural_tag("hermes", [tool], "none", reasoning=False) is None
 
 
 def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
@@ -2354,3 +2404,52 @@ def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
     assert grammar is not None
     assert _is_grammar_accept_string(grammar, call)
     assert not _is_grammar_accept_string(grammar, call * 2)
+
+
+@pytest.mark.parametrize("json_text", [True, False])
+def test_custom_grammar_cannot_be_bypassed_by_a_text_format(json_text):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import TokenizersBackend
+
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    request = ResponsesRequest(
+        input="hi",
+        tools=[
+            CustomTool(
+                type="custom",
+                name="emit",
+                format={
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": 'start: "ok"',
+                },
+            )
+        ],
+        **(
+            {"text": {"format": {"type": "json_object"}}}
+            if json_text
+            else {"structured_outputs": {"regex": ".*"}}
+        ),
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_coder", enable_auto_tools=True
+    )
+    assert parser_cls is not None
+    parser = parser_cls(tokenizer, request.tools)
+    if not json_text:
+        with pytest.raises(VLLMValidationError, match="JSON text formats"):
+            parser.adjust_request(request)
+        return
+    adjusted = parser.adjust_request(request)
+    assert adjusted.structured_outputs is not None
+    assert adjusted.structured_outputs.structural_tag is not None
+    grammar = Grammar.from_structural_tag(adjusted.structured_outputs.structural_tag)
+    assert _is_grammar_accept_string(grammar, '{"answer": 1}')
+    begin = "<tool_call>\n<function=emit>\n<parameter=input>\n"
+    end = "\n</parameter>\n</function>\n</tool_call>"
+    assert _is_grammar_accept_string(grammar, begin + "ok" + end)
+    assert not _is_grammar_accept_string(grammar, begin + "wrong" + end)

@@ -12,7 +12,6 @@ from vllm.entrypoints.openai.responses.protocol import (
     serialize_message,
     serialize_messages,
 )
-from vllm.exceptions import VLLMValidationError
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -111,13 +110,12 @@ def test_input_item_parsing_leaves_non_assistant_items_alone() -> None:
     assert request.input == [item]
 
 
-def test_custom_tool_grammar_format_rejected() -> None:
+def test_custom_tool_grammar_format_preserved_for_parser_validation() -> None:
     grammar = {"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'}
-    with pytest.raises(VLLMValidationError) as exc_info:
-        ResponsesRequest(
-            input="hi", tools=[{"type": "custom", "name": "emit", "format": grammar}]
-        )
-    assert exc_info.value.parameter == "tools"
+    request = ResponsesRequest(
+        input="hi", tools=[{"type": "custom", "name": "emit", "format": grammar}]
+    )
+    assert request.tools[0].format.model_dump() == grammar
 
     request = ResponsesRequest(
         input="hi",

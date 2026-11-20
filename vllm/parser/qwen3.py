@@ -18,10 +18,24 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
+from openai.types.responses import CustomTool
+from pydantic import BaseModel
+from xgrammar import StructuralTag
+from xgrammar.structural_tag import GrammarFormat, TagFormat
 
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -29,6 +43,12 @@ from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
     Transition,
+)
+from vllm.tool_parsers.utils import (
+    compile_custom_tool_grammar,
+    custom_tools_with_grammar,
+    partial_tag_overlap,
+    validate_custom_tool_input,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +68,45 @@ FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
 PARAM_START = "<parameter="
 PARAM_END = "</parameter>"
+
+
+def constrain_custom_tool_inputs(
+    tag: StructuralTag, tools: dict[str, CustomTool]
+) -> None:
+    """Constrain raw input inside the Qwen XML envelope, preserving payload newlines."""
+    pending = {
+        f"{TOOL_CALL_START}\n{FUNC_PREFIX}{name}>\n": tool
+        for name, tool in tools.items()
+    }
+
+    def visit(node: object) -> None:
+        if isinstance(node, TagFormat) and node.begin in pending:
+            tool = pending.pop(node.begin)
+            assert tool.format is not None and tool.format.type == "grammar"
+            grammar = compile_custom_tool_grammar(
+                tool.format.syntax, tool.format.definition
+            ).grammar
+            # The parser removes one wrapping newline on each side of a parameter.
+            node.content = TagFormat(
+                begin=f"{PARAM_START}input>\n",
+                content=GrammarFormat(grammar=str(grammar)),
+                end=f"\n{PARAM_END}",
+            )
+            return
+        if isinstance(node, BaseModel):
+            for name in type(node).model_fields:
+                visit(getattr(node, name))
+        elif isinstance(node, (list, tuple)):
+            for element in node:
+                visit(element)
+
+    visit(tag.format)
+    if pending:
+        raise VLLMValidationError(
+            "Cannot constrain custom tools in this Qwen tool-call format.",
+            parameter="tools",
+        )
+
 
 _PARAM_RE = re.compile(
     r"<\s*parameter\s*=\s*([^>]*)>"
@@ -381,6 +440,172 @@ class Qwen3Parser(ParserEngine):
             self._arg_value_extender = functools.partial(
                 _qwen3_arg_value_extender, closed=closed
             )
+        self._custom_grammar_tools = custom_tools_with_grammar(tools)
+        self._grammar_chunks: list[str] = []
+        self._grammar_token_ids: list[int] = []
+        self._grammar_initial_state: ParserState | None = None
+        self._grammar_probe = ""
+
+    def _single_pass_parse(
+        self,
+        text: str,
+        token_ids: Sequence[int],
+        initial_state: ParserState | None = None,
+    ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
+        if (
+            not self._custom_grammar_tools
+            or self.skip_tool_parsing
+            or self._suppress_tool_calls
+        ):
+            return super()._single_pass_parse(text, token_ids, initial_state)
+        match = re.search(r"<tool_call>\n<function=([^>\n]+)>\n", text)
+        if match is not None and match[1] not in self._custom_grammar_tools:
+            return super()._single_pass_parse(text, token_ids, initial_state)
+
+        start_id = self.vocab.get(TOOL_CALL_START)
+        prefix_ids = (
+            token_ids
+            if match is None
+            else (
+                token_ids[: token_ids.index(start_id)]
+                if start_id is not None and start_id in token_ids
+                else []
+            )
+        )
+        prefix = text if match is None else text[: match.start()]
+        self.skip_tool_parsing = True
+        try:
+            reasoning, content, plain = super()._single_pass_parse(
+                prefix, prefix_ids, initial_state
+            )
+        finally:
+            self.skip_tool_parsing = False
+        if match is None:
+            return reasoning, content, plain
+        begin = f"{PARAM_START}input>\n"
+        end = f"\n{PARAM_END}\n{FUNC_END}\n{TOOL_CALL_END}"
+        body = text[match.end() :]
+        calls = []
+        if body.startswith(begin) and body.endswith(end):
+            # Grammar tools stop after one call. The last delimiter belongs to the
+            # envelope; delimiter-looking text inside the payload remains data.
+            payload = body[len(begin) : -len(end)]
+            validate_custom_tool_input(self._custom_grammar_tools[match[1]], payload)
+            calls.append(
+                ToolCall(
+                    function=FunctionCall(
+                        name=match[1],
+                        arguments=json.dumps({"input": payload}, ensure_ascii=False),
+                    )
+                )
+            )
+        return (
+            reasoning,
+            content,
+            ExtractedToolCallInformation(
+                tools_called=bool(calls), tool_calls=calls, content=content
+            ),
+        )
+
+    def extract_tool_calls(
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ExtractedToolCallInformation:
+        if not self._custom_grammar_tools or request.tool_choice == "none":
+            return super().extract_tool_calls(model_output, request)
+        self._check_skip_tool_parsing(request)
+        return self._single_pass_parse(model_output, [])[2]
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> DeltaMessage | None:
+        if not self._custom_grammar_tools or request.tool_choice == "none":
+            return super().extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+                request,
+            )
+        self._grammar_initial_state = ParserState.CONTENT
+        if not self._grammar_chunks:
+            text = self._grammar_probe + delta_text
+            start = text.find(TOOL_CALL_START)
+            if start == -1:
+                overlap = partial_tag_overlap(text, TOOL_CALL_START)
+                self._grammar_probe = text[-overlap:] if overlap else ""
+                content = text[:-overlap] if overlap else text
+                return DeltaMessage(content=content) if content else None
+            self._grammar_probe = ""
+            self._grammar_chunks.append(text[start:])
+            self._grammar_token_ids.extend(delta_token_ids)
+            return DeltaMessage(content=text[:start]) if start else None
+        self._grammar_chunks.append(delta_text)
+        self._grammar_token_ids.extend(delta_token_ids)
+        return None
+
+    def parse_delta(
+        self,
+        delta_text: str,
+        delta_token_ids: list[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+        prompt_token_ids: list[int] | None = None,
+        *,
+        finished: bool,
+    ) -> DeltaMessage | None:
+        if not self._custom_grammar_tools or request.tool_choice == "none":
+            return super().parse_delta(
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids,
+                finished=finished,
+            )
+        self._grammar_chunks.append(delta_text)
+        self._grammar_token_ids.extend(delta_token_ids)
+        if prompt_token_ids is not None:
+            self.set_prompt_token_ids(prompt_token_ids)
+        delta = self.finish_streaming() if finished else None
+        if delta and not request.include_reasoning:
+            delta.reasoning = None
+        return delta
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        if not self._grammar_chunks:
+            if self._grammar_probe:
+                remaining_text, self._grammar_probe = self._grammar_probe, ""
+                return DeltaMessage(content=remaining_text)
+            return super().finish_streaming()
+        reasoning, content, result = self._single_pass_parse(
+            "".join(self._grammar_chunks),
+            self._grammar_token_ids,
+            self._grammar_initial_state,
+        )
+        self._grammar_chunks.clear()
+        self._grammar_token_ids.clear()
+        return DeltaMessage(
+            reasoning=reasoning,
+            content=content,
+            tool_calls=[
+                DeltaToolCall(
+                    index=index,
+                    id=call.id,
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name=call.function.name, arguments=call.function.arguments
+                    ),
+                )
+                for index, call in enumerate(result.tool_calls)
+            ],
+        )
 
     def extract_reasoning(
         self,
