@@ -109,6 +109,25 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+## Shared Memory (`/dev/shm`)
+
+With `CPUOffloadingSpec` on CUDA and XPU, and with `TieringOffloadingSpec` on
+any platform, the CPU tier is backed by files in `/dev/shm` rather than private
+process memory. A single-node engine needs up to `cpu_bytes_to_use` of free
+space there (`--kv-offloading-size` sets it in GiB), plus room for other users
+of `/dev/shm`; data-parallel engines on the same node each allocate their own
+tier. vLLM checks the free space at startup, before allocating the tier, and
+fails with an `Insufficient space in /dev/shm` error if the tier does not fit.
+
+Containers often get a small `/dev/shm`; Docker's default is 64 MiB. Raise it
+with `--shm-size`, or share the host's with `--ipc=host`. On Kubernetes, mount
+an `emptyDir` with `medium: Memory` at `/dev/shm`, as in the
+[Kubernetes examples](../deployment/k8s.md#deployment-with-gpus), and set its
+`sizeLimit` to fit the tier. Files in a memory-backed `/dev/shm` count toward
+the memory limit of the container that writes them, so raise that limit too;
+vLLM logs a warning at startup when less memory is left under the limit than
+the tier needs.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
