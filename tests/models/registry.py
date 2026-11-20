@@ -324,7 +324,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "GPTJForCausalLM": _HfExamplesInfo(
-        "vllm-project/slovak-gpt-j-405M", {"6b": "EleutherAI/gpt-j-6b"}
+        "vllm-project/slovak-gpt-j-405M",
+        {"6b": "EleutherAI/gpt-j-6b"},
+        min_transformers_version="5.24.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50965"
+        },
     ),
     "GPTNeoXForCausalLM": _HfExamplesInfo(
         "EleutherAI/pythia-70m", {"1b": "EleutherAI/pythia-1.4b"}
