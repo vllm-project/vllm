@@ -214,3 +214,8 @@ See the following links for examples:
 * [20059#issuecomment-3160858458](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3160858458)
 * [20059#issuecomment-3188735226](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3188735226)
 * [20059#issuecomment-3219888738](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3219888738)
+
+## Last-layer FFN pruning
+
+Optional prefill pruning of unused final-layer FFN rows is described in
+[Last-layer FFN row pruning](last_layer_ffn_pruning.md).

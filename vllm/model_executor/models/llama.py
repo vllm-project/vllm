@@ -41,6 +41,10 @@ from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.last_layer_ffn import (
+    apply_pruned_last_ffn,
+    restore_pruned_last_ffn,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -323,8 +327,10 @@ class LlamaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-
-        # Fully Connected
+        if getattr(self, "prune_last_ffn", False):
+            return apply_pruned_last_ffn(
+                hidden_states, residual, self.post_attention_layernorm, self.mlp
+            )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -391,6 +397,8 @@ class LlamaModel(nn.Module, EagleModelMixin):
             lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
+        if self.end_layer > self.start_layer:
+            self.layers[self.end_layer - 1].prune_last_ffn = True
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -448,6 +456,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = restore_pruned_last_ffn(hidden_states, positions.shape[-1])
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -489,6 +498,9 @@ class LlamaForCausalLM(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self._ffn_pruning_supported = (
+            config.model_type == "llama" and layer_type is LlamaDecoderLayer
+        )
 
         self.model = self._init_model(
             vllm_config=vllm_config,
@@ -516,6 +528,10 @@ class LlamaForCausalLM(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+
+    @property
+    def supports_last_layer_ffn_pruning(self):
+        return self._ffn_pruning_supported
 
     def _init_model(
         self,
