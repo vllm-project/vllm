@@ -23,7 +23,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
+    TritonKDACheckpointSpec,
+    get_triton_kda_checkpoint_buffer,
     kda_prefill_checkpoint_alignment,
+    reserve_triton_kda_checkpoint_buffer,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
@@ -771,7 +774,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     self.local_num_heads,
                     self.spec_query_len,
                     self.conv1d.weight.device,
-                    align=self.cache_config.mamba_cache_mode == "align",
+                    align=self.cache_config.enable_prefix_caching,
                 )
         decode_conv1d_weight = None
         if (
@@ -824,7 +827,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = (
             None
         )
-        self._triton_checkpoint_spec: tuple[tuple[int, ...], torch.dtype] | None = None
+        self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
         self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
         if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
             self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
@@ -851,9 +854,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 self.model_config.dtype,
             )
         elif self.kda_prefill_backend == "triton":
-            N = vllm_config.scheduler_config.max_num_seqs
-            H, D = self.local_num_heads, self.head_dim
-            self._triton_checkpoint_spec = ((N, H, D, D), self.get_state_dtype()[1])
+            self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
+                self.get_state_dtype()[1],
+            )
 
         # Profiling skips attention, so reserve its runtime layout before the
         # KV cache is sized. Layers share the manager's grow-only allocation.
@@ -865,10 +871,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             elif self._flashinfer_kda_output_spec is not None:
                 current_workspace_manager().get_simultaneous(
                     self._flashinfer_kda_output_spec
-                )
-            elif self._triton_checkpoint_spec is not None:
-                current_workspace_manager().get_simultaneous(
-                    self._triton_checkpoint_spec
                 )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
@@ -1464,16 +1466,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         seq_order=m.flashinfer_prefill_seq_order,
                     )
                 else:
-                    checkpoint_state = checkpoint_offsets = None
-                    if checkpoint is not None:
-                        assert self._triton_checkpoint_spec is not None
-                        (checkpoint_state,) = (
-                            current_workspace_manager().get_simultaneous(
-                                self._triton_checkpoint_spec
-                            )
+                    checkpoint_state, checkpoint_offsets = (
+                        get_triton_kda_checkpoint_buffer(
+                            checkpoint,
+                            self._triton_checkpoint_spec,
+                            initial_state.shape[0],
                         )
-                        checkpoint_state = checkpoint_state[: initial_state.shape[0]]
-                        checkpoint_offsets = checkpoint.checkpoint_offsets
+                    )
                     (
                         core_attn_out_non_spec,
                         last_recurrent_state,

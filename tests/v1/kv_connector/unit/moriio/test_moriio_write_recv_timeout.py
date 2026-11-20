@@ -76,7 +76,7 @@ def _kv_cache_config(layout: str) -> KVCacheConfig:
                 ["layers.1.linear_attn"],
                 state,
                 MambaManager,
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             )
         )
     return KVCacheConfig(num_blocks=10000, kv_cache_tensors=[], kv_cache_groups=groups)
@@ -154,8 +154,6 @@ class _Engine:
         )
         config.kv_transfer_config.kv_load_failure_policy = policy
         kv_cache_config = _kv_cache_config(layout)
-        if layout.endswith("hybrid"):
-            config.cache_config.mamba_cache_mode = "align"
         self.scheduler = create_scheduler(config, kv_cache_config=kv_cache_config)
         self.num_groups = len(kv_cache_config.kv_cache_groups)
         connector = self.scheduler.connector.connector_scheduler

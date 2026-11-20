@@ -84,6 +84,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     get_layer_head_layout,
     get_layer_transfer_geometry,
     get_mamba_state_layout,
+    get_nvfp4_page_split,
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
@@ -798,8 +799,6 @@ class MoRIIOConnectorScheduler:
         # Failed on timeout; the scheduler holds their blocks until every worker
         # releases them (a late write_done), since RDMA may still write into them.
         self._write_recv_held: set[ReqId] = set()
-        # Timed out and finished; unmapped once their receive is settled.
-        self._write_recv_finished: set[ReqId] = set()
         self._write_recv_timeout = _positive_finite_timeout(
             "kv_connector_extra_config.write_recv_timeout",
             self.kv_transfer_config.kv_connector_extra_config.get(
@@ -867,6 +866,11 @@ class MoRIIOConnectorScheduler:
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
+        # WRITE consumer: requests whose producer push has not been reported
+        # in finished_recving yet, mapped to whether the request already
+        # finished (e.g. aborted). A finished one keeps its transfer_id mapping
+        # so the late write_done can still release its delayed-free blocks.
+        self._write_recvs_in_flight: dict[ReqId, bool] = {}
 
     def get_exchange_clipped_blocks(
         self,
@@ -1109,8 +1113,11 @@ class MoRIIOConnectorScheduler:
         if dp_local > 0 and pod_idx < len(hosts):
             remote_host = hosts[pod_idx]
         local_dp_rank = fold_local_rank(remote_dp_rank, dp_local)
-        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(local_dp_rank, tp_index)
+        peer_tp_size = get_moriio_peer_tp_size(params, self.tp_size)
+        for tp_index in range(peer_tp_size):
+            target_port = remote_notify_port + get_port_offset(
+                local_dp_rank, tp_index, peer_tp_size
+            )
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1164,6 +1171,13 @@ class MoRIIOConnectorScheduler:
         )
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
+        if (
+            not self.is_producer
+            and self.mode == MoRIIOMode.WRITE
+            and params.get("do_remote_prefill")
+            and num_external_tokens > 0
+        ):
+            self._write_recvs_in_flight.setdefault(request_id, False)
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
             local_block_ids: BlockIds = blocks.get_block_ids()
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -1427,9 +1441,10 @@ class MoRIIOConnectorScheduler:
                             _notify_host = _remote_hosts[_pod_idx]
                     # Every prefill TP rank needs the allocation; ports past
                     # the prefill TP size are not bound.
-                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
+                    peer_tp_size = get_moriio_peer_tp_size(_kvp, self.tp_size)
+                    for tp_index in range(peer_tp_size):
                         target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
+                            _remote_dp_rank_for_port, tp_index, peer_tp_size
                         )
 
                         self.send_notify_block(
@@ -1526,7 +1541,7 @@ class MoRIIOConnectorScheduler:
         self, req: "Request", block_ids: BlockIds, scheduler_output: SchedulerOutput
     ) -> BlockIds:
         if self._has_mamba:
-            # Align-mode state slots can move without appending a new block.
+            # Mamba state slots can move without appending a new block.
             # Resolve the authoritative table at the final prefill step.
             block_state = scheduler_output.kv_connector_block_state
             assert block_state is not None
@@ -1725,7 +1740,9 @@ class MoRIIOConnectorScheduler:
             if 0 <= pod < len(remote_hosts):
                 host = remote_hosts[pod]
         return host, port + get_port_offset(
-            fold_local_rank(remote_dp_rank, dp_local), 0
+            fold_local_rank(remote_dp_rank, dp_local),
+            0,
+            get_moriio_peer_tp_size(params, self.tp_size),
         )
 
     def _forget_write_recv(self, req_id: ReqId) -> None:
@@ -1819,24 +1836,32 @@ class MoRIIOConnectorScheduler:
         """
         request_id = request.request_id
         params = request.kv_transfer_params
-        # Consumer: can unmap transfer_id<->request_id immediately since done_recving
-        #   has fired at this point (i.e. KV has been transferred)
+        # Consumer: can unmap transfer_id<->request_id once done_recving has
+        #   fired (i.e. KV has been transferred). A WRITE request finished while
+        #   still waiting keeps the mapping: the scheduler holds its blocks until
+        #   finished_recving, which the worker can only report for a mapped
+        #   transfer_id. update_connector_output unmaps it then.
         # Producer: must keep the mapping until we get notification that blocks can
         #   be freed, which may be several scheduler steps later.
-        # A receive that timed out keeps its mapping, so its late write_done can
-        # release the blocks the scheduler holds for it; update_connector_output
-        # unmaps it once its receive is settled. A request finished before its
-        # deadline (an abort) stops its timer, as if it had none.
+        # A receive that timed out is still in flight, so it keeps its mapping
+        # too and its late write_done can release the blocks the scheduler holds
+        # for it. A request finished before its deadline (an abort) stops its
+        # timer, as if it had none.
         if not self.is_producer:
-            if (
-                self._write_recv_timer_enabled
-                and request_id in self._write_recv_timed_out
-            ):
-                self._write_recv_finished.add(request_id)
+            if self._write_recv_timer_enabled:
+                self._forget_write_recv(request_id)
+            transfer_id = params.get("transfer_id") if params else None
+            owner = (
+                self.transfer_id_to_request_id.get(transfer_id)
+                if transfer_id is not None
+                else None
+            )
+            if owner != request_id and owner in self._write_recvs_in_flight:
+                # Rejection cleanup must not unmap or release an active receive.
+                return False, None
+            if request_id in self._write_recvs_in_flight:
+                self._write_recvs_in_flight[request_id] = True
             else:
-                if self._write_recv_timer_enabled:
-                    self._forget_write_recv(request_id)
-                transfer_id = params.get("transfer_id") if params else None
                 self.unmap_request_id(request_id, transfer_id=transfer_id)
         logger.debug(
             "MoriioConnector request_finished, request_status=%s, "
@@ -1970,37 +1995,36 @@ class MoRIIOConnectorScheduler:
           deadline is a stale duplicate (e.g. a real ACK landing after the
           send was already reaped) and is dropped.
 
-        Consumers report finished_recving and unmap in request_finished. For
-        them this stops the WRITE receive timer, and handles a timed-out
-        receive (`write_recv_timeout`): the workers report it in
-        failed_recving and finished_recving, so the request fails; it is still
-        waiting, so the scheduler holds its blocks until finished_recving, which
-        is withheld here. A late write_done is then reported by each worker in
+        Consumers report finished_recving. They unmap in request_finished,
+        except for a WRITE request that finished while still waiting, which is
+        unmapped here once its finished_recving arrives. This also stops the
+        WRITE receive timer, and handles a timed-out receive
+        (`write_recv_timeout`): the workers report it in failed_recving and
+        finished_recving, so the request fails; it is still waiting, so the
+        scheduler holds its blocks until finished_recving, which is withheld
+        here. A late write_done is then reported by each worker in
         finished_sending, and passed on as the finished_recving that frees them.
         """
         if not self.is_producer:
-            if not self._write_recv_timer_enabled:
-                return
-            recving = set(connector_output.finished_recving or ())
-            for req_id in recving:
-                self._forget_write_recv(req_id)
-            reported = recving & self._write_recv_timed_out
-            self._write_recv_timed_out -= reported
-            held = reported & set(connector_output.failed_recving or ())
-            self._write_recv_held |= held
-            # A release in the step of the hold is final too: the worker saw the
-            # write end (e.g. a write_failed with the timeout).
-            released = (
-                set(connector_output.finished_sending or ()) & self._write_recv_held
-            )
-            self._write_recv_held -= released
-            # Settled: a request already finished gives up the mapping it kept.
-            settled = (reported - held) | released
-            for req_id in settled & (self._write_recv_finished | released):
-                self.unmap_request_id(req_id)
-            self._write_recv_finished -= settled
-            connector_output.finished_recving = (recving - held) | released
-            connector_output.finished_sending = set()
+            if self._write_recv_timer_enabled:
+                recving = set(connector_output.finished_recving or ())
+                for req_id in recving:
+                    self._forget_write_recv(req_id)
+                reported = recving & self._write_recv_timed_out
+                self._write_recv_timed_out -= reported
+                held = reported & set(connector_output.failed_recving or ())
+                self._write_recv_held |= held
+                # A release in the step of the hold is final too: the worker saw
+                # the write end (e.g. a write_failed with the timeout).
+                released = (
+                    set(connector_output.finished_sending or ()) & self._write_recv_held
+                )
+                self._write_recv_held -= released
+                connector_output.finished_recving = (recving - held) | released
+                connector_output.finished_sending = set()
+            for req_id in connector_output.finished_recving or ():
+                if self._write_recvs_in_flight.pop(req_id, False):
+                    self.unmap_request_id(req_id)
             return
 
         incoming = set(connector_output.finished_sending or ())
@@ -3912,12 +3936,18 @@ class MoRIIOConnectorWorker:
         self, remote_tp_size: int | None, layer_name: str | None = None
     ) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
+        # An MLA-style cache in a non-MLA model (e.g. MiniMax-M3's indexer
+        # keys) has no KV heads: it is identical on every TP rank, so it is
+        # copied whole like an MLA latent rather than sliced by head.
+        is_mla = self.use_mla or (
+            layer_name is not None and self._is_mla_cache_layer(layer_name)
+        )
         return compute_write_tp_mapping(
             self.tp_rank,
             self.world_size,
             remote_tp_size or self.world_size,
-            1 if self.use_mla else self._layer_total_num_kv_heads(layer_name),
-            self.use_mla,
+            1 if is_mla else self._layer_total_num_kv_heads(layer_name),
+            is_mla,
             self._has_mamba,
         )
 
@@ -4208,6 +4238,8 @@ class MoRIIOConnectorWorker:
             merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
                 local, remote, sizes, assume_sorted=False
             ),
+            # A packed NVFP4 page's head slots are not per-head rows.
+            nvfp4_split=get_nvfp4_page_split(self.layer_to_spec.get(layer_name)),
         )
         return self._apply_layer_mr_offsets(
             layer_name, offsets, remote_moriio_meta, remote_engine_id
