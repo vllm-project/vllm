@@ -50,8 +50,7 @@ from vllm.utils.async_utils import make_async
 from vllm.utils.math_utils import round_up
 from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN, prefix_lm_salt
 
-from . import knowline
-from . import slot_prompt
+from . import knowline, slot_prompt
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -240,7 +239,9 @@ class ReadStrategy(ABC):
             tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
             # The warm's one-token output is discarded; detokenizing it
             # would decode the shared prefix on the event loop.
-            SamplingParams(max_tokens=1, temperature=0.0, extra_args=extra_args, detokenize=False),
+            SamplingParams(
+                max_tokens=1, temperature=0.0, extra_args=extra_args, detokenize=False
+            ),
             f"{request_id}-prefix",
             lora_request=lora_request,
             trace_headers=trace_headers,
@@ -430,7 +431,6 @@ class NextTokenStrategy(ReadStrategy):
             ctx.engine_client.model_config, engine_input
         ).token_ids
         return engine_input, list(prompt_ids or [])
-
 
     async def _prompts(
         self,
@@ -1649,7 +1649,6 @@ class SlotLMStrategy(NextTokenStrategy):
         ]
 
 
-
 class KnowLineStrategy(ReadStrategy):
     """KnowLine decision models: a Qwen3.5-MoE checkpoint post-trained to
     answer a decision as the first token after a literal `Answer:`. The
@@ -1825,6 +1824,7 @@ class KnowLineStrategy(ReadStrategy):
         read.cached_tokens = result.num_cached_tokens or 0
         read.cache_write_tokens = result.num_cache_creation_tokens or 0
         return read
+
 
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "ClefFlashForJointSchema": ClefFlashStrategy,
