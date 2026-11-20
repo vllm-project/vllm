@@ -570,11 +570,15 @@ def _view_of_large_storage() -> bytes:
 class TestCompressedStorageLimit:
     """`torch.load` inflates compressed storages in full before returning."""
 
+    @pytest.mark.parametrize("as_str", [False, True])
     def test_prompt_embeds_rejects_view_of_large_storage(
-        self, model_config, compressed_decode_limit
+        self, model_config, compressed_decode_limit, as_str
     ):
+        encoded = _view_of_large_storage()
+        payload = encoded.decode() if as_str else encoded
+
         with pytest.raises(VLLMValidationError, match="VLLM_MAX_EMBED_DECODE_BYTES"):
-            safe_load_prompt_embeds(model_config, _view_of_large_storage())
+            safe_load_prompt_embeds(model_config, payload)
 
     @pytest.mark.parametrize("io_cls,parameter", EMBEDDING_MEDIA_IO)
     def test_media_io_rejects_view_of_large_storage(

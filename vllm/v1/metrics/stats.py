@@ -203,7 +203,8 @@ class SchedulerIterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
-    elapsed_ms: float
+    # GPU time, measured by the output worker; None where it does not time.
+    elapsed_ms: float | None = None
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
@@ -228,6 +229,8 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # waiting requests not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
+    # requests preempted since the previous stats, counted at preemption time
+    num_preempted_reqs: int = 0
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
@@ -236,7 +239,9 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    iteration_details: SchedulerIterationDetails | None = None
+    # Iterations to report: timed on the GPU by the output worker, or untimed
+    # from EngineCore.
+    iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -496,7 +501,6 @@ class IterationStats:
         self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
-        self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
@@ -596,7 +600,6 @@ class IterationStats:
                     req_stats.scheduled_ts = event.timestamp
                 lora_states.request_running(req_id, lora_name)
             elif event.type == EngineCoreEventType.PREEMPTED:
-                self.num_preempted_reqs += 1
                 req_stats.num_preemptions += 1
                 lora_states.request_waiting(req_id, lora_name)
 
