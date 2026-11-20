@@ -274,3 +274,197 @@ def test_mega_moe_routing_matches_reference(
         atol=1e-4,
     )
     torch.testing.assert_close(out, 5 * x)
+
+
+class _RouterGate(torch.nn.Module):
+    """GateLinear's role in the MoE: fp32 logits of a bf16 gate. Counts calls,
+    which only the GEMM + top-k router path makes."""
+
+    def __init__(self, num_experts, hidden, device):
+        super().__init__()
+        self.weight = (torch.randn(num_experts, hidden, device=device) * 0.02).to(
+            torch.bfloat16
+        )
+        self.e_score_correction_bias = torch.randn(num_experts, device=device) * 0.1
+        self.tid2eid = None
+        self.bias_vl = None
+        self.calls = 0
+
+    def forward(self, x):
+        self.calls += 1
+        return x.float() @ self.weight.float().t(), None
+
+
+def _make_routing_moe(gate, top_k, experts=None):
+    moe = DeepseekV4MoE.__new__(DeepseekV4MoE)
+    torch.nn.Module.__init__(moe)
+    moe.gate = gate
+    moe.experts = experts
+    moe.use_mega_moe = True
+    moe.text_only = True
+    moe.scoring_func = "sqrtsoftplus"
+    moe.n_activated_experts = top_k
+    moe.renormalize = True
+    moe.routed_scaling_factor = 1.5
+    moe.image_sentinel_lo = 0
+    return moe
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "case, served",
+    [
+        ("eligible", True),
+        ("not_mega_moe", False),
+        ("hash_routing", False),
+        ("no_bias", False),
+        ("bias_vl_with_images", False),
+        ("bias_vl_text_only", True),
+    ],
+)
+def test_flydsl_router_layer_eligibility(monkeypatch, case, served):
+    """Only sqrtsoftplus, biased, non-hash MegaMoE layers get the FlyDSL gate;
+    `bias_vl` is only ignored where no image input can reach the router."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_flydsl_router_enabled", lambda: True)
+    monkeypatch.setattr(
+        rocm_aiter_ops, "prepare_flydsl_router", lambda gate, bias, k: gate.flip(0)
+    )
+    moe = _make_routing_moe(_RouterGate(8, 32, "cpu"), top_k=2)
+    if case == "not_mega_moe":
+        moe.use_mega_moe = False
+    elif case == "hash_routing":
+        moe.gate.tid2eid = torch.zeros(4, 2, dtype=torch.int32)
+    elif case == "no_bias":
+        moe.gate.e_score_correction_bias = None
+    elif case.startswith("bias_vl"):
+        moe.gate.bias_vl = torch.zeros(8)
+        moe.image_sentinel_lo = 129264
+        moe.text_only = case == "bias_vl_text_only"
+    moe.process_weights_after_loading()
+    if served:
+        torch.testing.assert_close(moe.flydsl_router_gate, moe.gate.weight.flip(0))
+    else:
+        assert moe.flydsl_router_gate is None
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"VLLM_ROCM_USE_AITER": "1"},
+        {"VLLM_ROCM_USE_AITER": "0", "VLLM_ROCM_USE_AITER_FLYDSL_ROUTER": "1"},
+        {
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_FLYDSL_ROUTER": "1",
+            "VLLM_BATCH_INVARIANT": "1",
+        },
+    ],
+)
+def test_flydsl_router_stays_off(monkeypatch, env):
+    """Off by default, with AITER off, and under batch invariance (its k-split
+    depends on the row count)."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        assert not rocm_aiter_ops.is_flydsl_router_enabled()
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.fixture
+def flydsl_router(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_ROUTER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    if not rocm_aiter_ops.is_flydsl_router_enabled():
+        pytest.skip("needs gfx950 and an AITER with the FlyDSL MoE router")
+    # DeepSeek-V4.1-Flash router: hidden 5120, 384 experts, top-6.
+    torch.manual_seed(0)
+    moe = _make_routing_moe(_RouterGate(384, 5120, "cuda"), top_k=6)
+    moe.process_weights_after_loading()
+    assert moe.flydsl_router_gate is not None
+    yield moe
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
+def _route(moe, x, use_flydsl):
+    captured = {}
+
+    def experts(x, topk_weights, topk_ids):
+        captured["weights"], captured["ids"] = topk_weights, topk_ids
+        return x
+
+    gate_shuffled = moe.flydsl_router_gate
+    moe.experts = experts
+    if not use_flydsl:
+        moe.flydsl_router_gate = None
+    moe.gate.calls = 0
+    moe._forward_mega_moe_routed(x, None)
+    moe.flydsl_router_gate = gate_shuffled
+    return captured["weights"], captured["ids"], moe.gate.calls
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+@pytest.mark.parametrize("num_tokens", [1, 37, 768, 769])
+def test_flydsl_router_matches_gemm_topk_router(flydsl_router, num_tokens):
+    """The FlyDSL router serves up to 768 rows with the routing of GateLinear +
+    `fused_topk_bias`, padding rows included; larger batches fall back."""
+    from vllm.config import VllmConfig
+    from vllm.forward_context import set_forward_context
+
+    moe = flydsl_router
+    x = torch.randn(num_tokens, 5120, device="cuda", dtype=torch.bfloat16)
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    is_padding[3::4] = True
+    with set_forward_context(None, VllmConfig(), is_padding=is_padding):
+        ref_weights, ref_ids, _ = _route(moe, x, use_flydsl=False)
+        weights, ids, gate_calls = _route(moe, x, use_flydsl=True)
+
+    assert gate_calls == (num_tokens > 768)
+    assert ids.dtype == torch.int32 and weights.dtype == torch.float32
+    assert torch.all(ids[is_padding] == -1) and torch.all(weights[is_padding] == 0)
+    # Logits differ in the last fp32 bits (k-split order): skip rows whose 6th
+    # and 7th candidates are that close.
+    logits, _ = moe.gate(x)
+    biased = torch.nn.functional.softplus(logits).sqrt()
+    biased += moe.gate.e_score_correction_bias
+    top7 = biased.topk(7, dim=-1).values
+    rows = ~is_padding & (top7[:, 5] - top7[:, 6] > 1e-4)
+    assert rows.sum() >= rows.numel() // 2
+    order, ref_order = ids[rows].sort(-1).indices, ref_ids[rows].sort(-1).indices
+    torch.testing.assert_close(
+        ids[rows].gather(1, order), ref_ids[rows].gather(1, ref_order)
+    )
+    torch.testing.assert_close(
+        weights[rows].gather(1, order),
+        ref_weights[rows].gather(1, ref_order),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+def test_flydsl_router_graph_replay(flydsl_router):
+    """Captured once, the FlyDSL router replays on new inputs as it runs
+    eagerly (bitwise; the kernel has a fixed summation order)."""
+    moe = flydsl_router
+    x = torch.randn(64, 5120, device="cuda", dtype=torch.bfloat16)
+    _route(moe, x, use_flydsl=True)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_weights, graph_ids, gate_calls = _route(moe, x, use_flydsl=True)
+    assert gate_calls == 0
+    for _ in range(2):
+        x.copy_(torch.randn_like(x))
+        graph.replay()
+        weights, ids, _ = _route(moe, x, use_flydsl=True)
+        assert torch.equal(graph_ids, ids) and torch.equal(graph_weights, weights)
