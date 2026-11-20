@@ -3,6 +3,8 @@
 """Begin and complete a checkpoint-format weight update in the reload mode
 the model's cold start fixed."""
 
+import math
+
 import torch
 
 from vllm.config import ModelConfig
@@ -23,9 +25,52 @@ def weight_update_active() -> bool:
     return _weight_update_active
 
 
+def _kv_scales(model: torch.nn.Module) -> dict[str, tuple[float, float, float]]:
+    """Host q/k/v scales of the attention layers with a quantized KV cache."""
+    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+
+    return {
+        name: (module._q_scale_float, module._k_scale_float, module._v_scale_float)
+        for name, module in model.named_modules()
+        if (impl := getattr(module, "impl", None)) is not None
+        and is_quantized_kv_cache(getattr(impl, "kv_cache_dtype", "auto"))
+    }
+
+
+def _check_frozen_kv_scales(model: torch.nn.Module) -> None:
+    """Refuse an update that changed KV-cache scales a decode kernel keeps from
+    startup (see `AttentionImplBase.frozen_kv_scales`)."""
+    from vllm.config import get_current_vllm_config
+
+    startup = model.__dict__.get("_startup_kv_scales", {})
+    mode = get_current_vllm_config().compilation_config.cudagraph_mode
+    for name, scales in _kv_scales(model).items():
+        impl = model.get_submodule(name).impl
+        frozen = impl.frozen_kv_scales
+        # Layerwise reload rounds scales to the model dtype; ignore that.
+        if name not in startup or all(
+            math.isclose(a, b, rel_tol=1e-2) for a, b in zip(scales, startup[name])
+        ):
+            continue
+        if frozen == "always" or (
+            frozen == "full_graph" and mode.has_full_cudagraphs()
+        ):
+            where = " in FULL CUDA graphs" if frozen == "full_graph" else ""
+            raise RuntimeError(
+                f"This weight update changed the FP8 KV-cache scales of {name} "
+                f"(q/k/v {startup[name]} -> {scales}), but {type(impl).__name__} "
+                f"decode keeps the scales it had at startup{where}. Restart the "
+                "engine on the new checkpoint, or start it with cudagraph_mode="
+                "PIECEWISE or with weight_transfer_config set (some backends "
+                "then read device-side scales)."
+            )
+
+
 def start_reload(model: torch.nn.Module) -> None:
     """Begin a weight update in the configured mode."""
     global _weight_update_active
+    # The KV scales FULL CUDA graphs captured at startup, kept across updates.
+    model.__dict__.setdefault("_startup_kv_scales", _kv_scales(model))
     if reloads_directly(model):
         begin_direct_reload(model)
     else:
@@ -43,3 +88,4 @@ def finish_reload(
         finish_direct_reload(model, model_config, device)
     else:
         finalize_layerwise_reload(model, model_config)
+    _check_frozen_kv_scales(model)

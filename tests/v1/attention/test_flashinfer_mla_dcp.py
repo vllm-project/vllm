@@ -44,7 +44,7 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
 
     impl = MagicMock()
     impl.host_bmm_scales.return_value = (1.0, 1.0)
-    impl._bmm1_scale_device = None
+    impl.bmm_scales.return_value = (1.0, 1.0)
     impl.need_to_return_lse_for_decode = True
     impl.dcp_world_size = 1
     impl.dcp_rank = 0
@@ -93,7 +93,7 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal, query_l
 
     impl = MagicMock()
     impl.host_bmm_scales.return_value = (1.0, 1.0)
-    impl._bmm1_scale_device = None
+    impl.bmm_scales.return_value = (1.0, 1.0)
     impl.need_to_return_lse_for_decode = True
     impl.num_heads = 6
     impl.qk_nope_head_dim = 128

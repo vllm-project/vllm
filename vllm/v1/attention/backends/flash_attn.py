@@ -1275,6 +1275,8 @@ class FlashAttentionImpl(AttentionImpl):
             and scale.numel() == 1
             and scale_float == 1.0
         ):
+            # FULL CUDA graphs then keep the implicit 1.0.
+            self.frozen_kv_scales = "full_graph"
             return None
         # A (1, 1) expanded view (one sequence, one KV head per rank) counts
         # as contiguous, so FA4 skips its copy and its CuTe layout check then

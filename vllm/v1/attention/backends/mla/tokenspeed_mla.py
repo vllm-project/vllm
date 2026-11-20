@@ -172,6 +172,8 @@ class TokenspeedMLABackend(MLACommonBackend):
 
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    # The decode kernel takes host q/k/v scales.
+    frozen_kv_scales = "full_graph"
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True

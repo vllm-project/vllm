@@ -22,7 +22,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.model_executor.utils import refill_derived
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -30,7 +29,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -252,6 +250,7 @@ class FlashInferMLABackend(MLACommonBackend):
 
 
 class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
+    takes_device_bmm_scales = True
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     # DCP is the only path that consumes LSE. It uses monolithic CuTeDSL,
@@ -302,15 +301,6 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        # fp32 device bmm scales, refilled in place after each load, let FULL
-        # CUDA graphs on trtllm-gen follow a weight update. FlashInfer adds a
-        # `bmm1 * log2e` op per call for them, so only when updates are enabled.
-        self._use_device_bmm_scales = (
-            is_quantized_kv_cache(kv_cache_dtype)
-            and get_current_vllm_config().weight_transfer_config is not None
-        )
-        self._bmm1_scale_device: torch.Tensor | None = None
-        self._bmm2_scale_device: torch.Tensor | None = None
         # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
         # counter buffer (see _get_multi_ctas_kv_counter_buffer). Captured here
         # (config is in scope during construction) so the byte size can be
@@ -321,16 +311,6 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             _sched.max_num_batched_tokens or _sched.max_num_seqs
         )
         self._mla_counter_bytes: int | None = None
-
-    def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
-        if not self._use_device_bmm_scales:
-            return
-        device = layer._k_scale.device
-        for name, value in zip(
-            ("_bmm1_scale_device", "_bmm2_scale_device"), self.host_bmm_scales(layer)
-        ):
-            new = torch.full((1,), value, dtype=torch.float32, device=device)
-            refill_derived(self, name, new)
 
     def forward_mqa(
         self,
@@ -432,14 +412,12 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             extra_kwargs["max_q_len"] = max_q_len
         bmm1_scale: float | torch.Tensor
         bmm2_scale: float | torch.Tensor
-        if decode_backend is None and self._bmm1_scale_device is not None:
-            # auto resolves to trtllm-gen here: it is the only MLA decode
-            # backend that takes tensor scales (cute-dsl rejects them).
-            assert self._bmm2_scale_device is not None
-            bmm1_scale = self._bmm1_scale_device
-            bmm2_scale = self._bmm2_scale_device
+        if decode_backend is None:
+            # auto resolves to trtllm-gen, which takes tensor scales.
+            bmm1_scale, bmm2_scale = self.bmm_scales(layer)
         else:
-            # Host floats follow a reload only outside FULL CUDA graphs.
+            # cute-dsl rejects tensor scales.
+            self.frozen_kv_scales = "full_graph"
             bmm1_scale, bmm2_scale = self.host_bmm_scales(layer)
         if decode_backend:
             extra_kwargs["backend"] = decode_backend

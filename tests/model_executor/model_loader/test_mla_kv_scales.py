@@ -121,3 +121,35 @@ def test_flashinfer_mla_decode_follows_kv_scale_reload(
     check_logprobs_close(
         outputs_0_lst=cold, outputs_1_lst=reloaded, name_0="cold", name_1="reloaded"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FlashInfer MLA runs on SM100",
+)
+def test_update_refused_when_full_graphs_keep_kv_scales(
+    vllm_runner, monkeypatch, kv_scale_checkpoint
+):
+    """Without weight_transfer_config, FlashInfer MLA decode passes host scales
+    that FULL CUDA graphs keep from startup, so an update that changes them is
+    refused, and a retry is refused too."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    with vllm_runner(
+        kv_scale_checkpoint,
+        load_format="dummy",
+        kv_cache_dtype="fp8",
+        attention_config={"backend": "FLASHINFER_MLA"},
+        block_size=64,
+        max_model_len=64,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        for _ in range(2):
+            with pytest.raises(Exception, match="KV-cache scales"):
+                llm.collective_rpc(
+                    "reload_weights", kwargs={"weights_path": kv_scale_checkpoint}
+                )

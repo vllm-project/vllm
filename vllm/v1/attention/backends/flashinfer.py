@@ -3,6 +3,7 @@
 """Attention layer with FlashInfer."""
 
 import inspect
+import math
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -72,6 +74,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -111,6 +114,7 @@ FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
+LOG2E = math.log2(math.e)
 logger = init_logger(__name__)
 
 # The mm-prefix (PrefixLM) prefill wrapper evaluates causal OR per-request
@@ -2301,6 +2305,15 @@ class FlashInferImpl(AttentionImpl):
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
         self.o_sf_scale: float | None = None
+        # fp32 decode scales for an FP8 KV cache, refilled in place after each
+        # load so FULL CUDA graphs follow a weight update: bmm1 * log2e for a
+        # BF16 / FP8 query, bmm2, then bmm1 for a BF16 / FP8 query (XQA).
+        self._decode_scales: torch.Tensor | None = None
+        # XQA derives its kernel scales from tensor ones with extra ops, so it
+        # takes them only when weight updates are enabled.
+        self._xqa_device_scales = (
+            vllm_config is not None and vllm_config.weight_transfer_config is not None
+        )
 
         # Allocated eagerly to stay out of CUDA-graph capture; DCP all-gathers
         # the decode query over heads.
@@ -2373,6 +2386,19 @@ class FlashInferImpl(AttentionImpl):
             self.sinks.copy_(source_sinks)
 
     # Only an FP8 query was quantized with the layer's q scale.
+    def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
+        if not self.kv_cache_dtype.startswith("fp8"):
+            return
+        bmm1 = self.scale * layer._k_scale_float
+        bmm1_fp8_q = bmm1 * layer._q_scale_float
+        scales = (bmm1 * LOG2E, bmm1_fp8_q * LOG2E, layer._v_scale_float)
+        new = torch.tensor(
+            (*scales, bmm1, bmm1_fp8_q),
+            dtype=torch.float32,
+            device=layer._k_scale.device,
+        )
+        refill_derived(self, "_decode_scales", new)
+
     def get_q_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype) -> float:
         if q_data_type in (torch.float8_e4m3fn, torch.float8_e5m2):
             return layer._q_scale_float
@@ -2862,6 +2888,8 @@ class FlashInferImpl(AttentionImpl):
             )
 
             if not decode_with_flashinfer_trtllm_api:
+                # FA2 decode takes host q/k/v scales.
+                self.frozen_kv_scales = "full_graph"
                 assert isinstance(attn_metadata.decode, FIDecode)
                 decode_wrapper = attn_metadata.decode.wrapper
                 assert decode_wrapper is not None
@@ -2967,10 +2995,20 @@ class FlashInferImpl(AttentionImpl):
                     )
                     decode_query = canonicalize_singleton_dim_strides(decode_query)
 
+                fp8_q = int(attn_metadata.q_data_type_decode == FP8_DTYPE)
+                scales = self._decode_scales
                 if decode_with_xqa:
-                    xqa_bmm1_scale = self.get_xqa_bmm1_scale(
-                        layer, attn_metadata.q_data_type_decode
-                    )
+                    xqa_bmm1_scale: float | torch.Tensor
+                    xqa_bmm2_scale: float | torch.Tensor
+                    if scales is not None and self._xqa_device_scales:
+                        xqa_bmm1_scale = scales[3 + fp8_q : 4 + fp8_q]
+                        xqa_bmm2_scale = scales[2:3]
+                    else:
+                        self.frozen_kv_scales = "full_graph"
+                        xqa_bmm1_scale = self.get_xqa_bmm1_scale(
+                            layer, attn_metadata.q_data_type_decode
+                        )
+                        xqa_bmm2_scale = bmm2_scale
                     q_len_per_req: int | None = attn_metadata.decode.q_len_per_req
 
                     flashinfer_xqa_batch_decode_with_kv_cache(
@@ -2984,7 +3022,7 @@ class FlashInferImpl(AttentionImpl):
                         seq_lens=seq_lens_decode,
                         max_seq_len=attn_metadata.decode.max_seq_len,
                         bmm1_scale=xqa_bmm1_scale,
-                        bmm2_scale=bmm2_scale,
+                        bmm2_scale=xqa_bmm2_scale,
                         window_left=self.window_left,
                         out=output_padded[:decode_query_tokens],
                         sinks=self.sinks,
@@ -3040,6 +3078,13 @@ class FlashInferImpl(AttentionImpl):
                         device=decode_query.device,
                     )
 
+                bmm1_scale_log2 = None
+                if scales is not None and output_scale is None:
+                    bmm1_scale_log2 = scales[fp8_q : fp8_q + 1]
+                    bmm2_scale = scales[2:3]
+                else:
+                    # Host scales, or a fused output quant's host o_scale.
+                    self.frozen_kv_scales = "full_graph"
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=(
@@ -3050,6 +3095,7 @@ class FlashInferImpl(AttentionImpl):
                     seq_lens=seq_lens_decode,
                     max_seq_len=attn_metadata.decode.max_seq_len,
                     bmm1_scale=bmm1_scale,
+                    bmm1_scale_log2=bmm1_scale_log2,
                     bmm2_scale=bmm2_scale,
                     window_left=self.window_left,
                     sinks=self.sinks,

@@ -102,6 +102,8 @@ MAX_HEADS = 128
 
 
 class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    # Its q/k scale check runs on the host.
+    frozen_kv_scales = "full_graph"
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
 

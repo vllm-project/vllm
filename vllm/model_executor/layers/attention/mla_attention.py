@@ -265,7 +265,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import refill_derived, replace_parameter
 from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.flashinfer import has_flashinfer
@@ -1500,7 +1500,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
         # The KV-cache quant method has set this layer's scales by now.
-        cast(MLAAttentionImpl, self.impl).process_kv_scales_after_loading(self)
+        self.impl.process_kv_scales_after_loading(self)
 
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
@@ -3092,6 +3092,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """
 
     _use_flashinfer_concat_mla_k: bool
+    # Whether decode can read its bmm scales from device tensors.
+    takes_device_bmm_scales: ClassVar[bool] = False
+    _use_device_bmm_scales = False
+    _bmm_scales_device: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -3118,6 +3122,14 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        # fp32 device bmm scales, refilled in place after each load, let FULL
+        # CUDA graphs follow a weight update. FlashInfer adds a `bmm1 * log2e`
+        # op per call for them, so only when updates are enabled.
+        self._use_device_bmm_scales = (
+            self.takes_device_bmm_scales
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and get_current_vllm_config().weight_transfer_config is not None
+        )
 
     def host_bmm_scales(self, layer: AttentionLayer) -> tuple[float, float]:
         """Decode bmm1 (softmax) and bmm2 (output) scales from `layer`'s host
@@ -3128,6 +3140,25 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             bmm1_scale *= layer._q_scale_float * layer._k_scale_float
             bmm2_scale *= layer._k_scale_float
         return bmm1_scale, bmm2_scale
+
+    def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
+        if self._use_device_bmm_scales:
+            new = torch.tensor(
+                self.host_bmm_scales(layer),
+                dtype=torch.float32,
+                device=layer._k_scale.device,
+            )
+            refill_derived(self, "_bmm_scales_device", new)
+
+    def bmm_scales(
+        self, layer: AttentionLayer
+    ) -> tuple[float, float] | tuple[torch.Tensor, torch.Tensor]:
+        """Device bmm scales when set, else host floats that FULL CUDA graphs
+        keep from capture."""
+        if self._bmm_scales_device is not None:
+            return self._bmm_scales_device[0:1], self._bmm_scales_device[1:2]
+        self.frozen_kv_scales = "full_graph"
+        return self.host_bmm_scales(layer)
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor

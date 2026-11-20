@@ -788,6 +788,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     sparse attention computation.
     """
 
+    takes_device_bmm_scales = True
+
     use_prims_ts: bool = False
 
     can_return_lse_for_decode: bool = True
@@ -861,6 +863,9 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         vllm_config = get_current_vllm_config()
         self.use_prims_ts = use_prims_ts(vllm_config, kv_cache_dtype)
         if self.use_prims_ts:
+            # prims_ts takes host scales.
+            self._use_device_bmm_scales = False
+            self.frozen_kv_scales = "full_graph"
             # prims_ts returns natural-log LSE; (0, -inf) for rows without
             # entries, the DCP merge identity.
             self.lse_base_on_e = True
@@ -1058,6 +1063,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
+        bmm1_scale, bmm2_scale = self.bmm_scales(layer)
+
         kv_rows, _ = flat_kv_row_view(kv_cache.view(q.dtype), block_size)
         # Top-k indices address flat rows, so pages need not follow blocks and
         # the kernel reads rows past the last whole page.
@@ -1128,8 +1135,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 seq_lens=seq_lens[start:end],
                 max_seq_len=sparse_topk_capacity,
                 out=out[start:end].unsqueeze(1),
-                bmm1_scale=self.bmm1_scale,
-                bmm2_scale=self.bmm2_scale,
+                bmm1_scale=bmm1_scale,
+                bmm2_scale=bmm2_scale,
                 sparse_mla_top_k=sparse_topk_capacity,
                 return_lse=lse is not None,
                 **extra_kwargs,
