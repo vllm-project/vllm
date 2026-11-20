@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from typing import Any
+
 import pytest
 import pytest_asyncio
 import requests
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
@@ -24,6 +27,7 @@ def server():
         "--max-num-seqs",
         "128",
         "--enable-tokenizer-info-endpoint",
+        "--trust-request-chat-template",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -39,6 +43,54 @@ def tokenizer_name(model_name: str):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "template_name",
+    ["tool_chat_template_mistral.jinja", "tool_chat_template_mistral_parallel.jinja"],
+)
+@pytest.mark.parametrize(
+    "description",
+    [
+        'Read "report.txt".',
+        r"Read C:\reports\new.txt.",
+        "Read line one.\nThen line two.",
+        "Read résumé <报告>.",
+    ],
+    ids=["quotes", "backslashes", "newline", "unicode-html"],
+)
+async def test_tokenize_mistral_tool_descriptions(server, template_name, description):
+    tools: list[dict[str, Any]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": text,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name, text in [("read_file", description), ("list_files", "List files.")]
+    ]
+    response = requests.post(
+        server.url_for("tokenize"),
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Read the requested file."}],
+            "tools": tools,
+            "chat_template": (VLLM_PATH / "examples" / template_name).read_text(),
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    tokenizer = get_tokenizer(MODEL_NAME)
+    prompt = tokenizer.decode(response.json()["tokens"], skip_special_tokens=False)
+    tool_block = prompt.split("[AVAILABLE_TOOLS]", 1)[1]
+    rendered_tools = json.loads(tool_block.split("[/AVAILABLE_TOOLS]", 1)[0])
+    assert len(rendered_tools) == len(tools)
+    for actual, expected in zip(rendered_tools, tools):
+        for field in ("name", "description", "parameters"):
+            assert actual["function"][field] == expected["function"][field]
 
 
 @pytest.mark.asyncio
