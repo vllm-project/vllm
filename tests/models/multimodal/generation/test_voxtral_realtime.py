@@ -457,3 +457,51 @@ async def test_voxtral_realtime_generator_max_model_len(
     assert 0 < len(output_tokens) < max_model_len
     # The engine is still healthy after the session hit the cap.
     assert not async_engine.errored
+
+
+def _use_per_audio_log_mel_max(config):
+    if hasattr(config, "audio_config"):
+        config.audio_config.global_log_mel_max = None
+    return config
+
+
+@torch.inference_mode()
+def _check_dynamic_audio_graphs(worker):
+    manager = _audio_graph_manager(worker)
+    assert manager is not None and manager.is_captured(), (
+        "dynamic normalization must capture audio graphs"
+    )
+    model = manager.model
+    assert model.config.audio_config.global_log_mel_max is None
+    lengths = model.get_encoder_cudagraph_config().capture_axes[1]
+    torch.manual_seed(17)
+    for length in lengths:
+        quiet = torch.randn(length, device="cuda") * 1e-4
+        loud = torch.randn(length, device="cuda") * 0.5
+        silent = torch.zeros_like(quiet)
+        waveforms = [quiet, loud, silent]
+        compute = model.whisper_encoder.compute_whisper_melspec
+        expected = torch.stack([compute(audio) for audio in waveforms])
+        actual = compute(torch.stack(waveforms))
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+        assert torch.isfinite(actual).all()
+    _check_audio_graph_replay(worker)
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Audio graphs require CUDA")
+@create_new_process_for_each_test(method="spawn")
+def test_voxtral_realtime_dynamic_audio_graphs(vllm_runner, monkeypatch):
+    """Per-wave normalization must survive graph batching, fallback and replay."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    kwargs = {**ENGINE_CONFIG}
+    kwargs["model_name"] = kwargs.pop("model")
+    kwargs["enforce_eager"] = False
+    kwargs["hf_overrides"] = _use_per_audio_log_mel_max
+    kwargs["compilation_config"] = {
+        "cudagraph_mode": CUDAGraphMode.FULL_DECODE_ONLY,
+        "cudagraph_mm_encoder": True,
+        "cudagraph_capture_sizes": [4],
+    }
+    with vllm_runner(**kwargs) as model:
+        model.llm.collective_rpc(_check_dynamic_audio_graphs)
