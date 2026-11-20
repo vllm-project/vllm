@@ -6,8 +6,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    builder_id,
+    create_common_attn_metadata,
+)
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.hw_agnostic.attention import triton_attn as hw_triton_attn
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
 from vllm.v1.attention.backends.triton_attn_diffkv import (
@@ -131,8 +136,14 @@ def test_split_k_segment_rows_cover_verify_queries(
 @pytest.mark.parametrize(
     "kv_quant_mode", [KVQuantMode.NONE, KVQuantMode.INT4_PER_TOKEN_HEAD]
 )
+@pytest.mark.parametrize(
+    "builder_cls",
+    [TritonAttentionMetadataBuilder, hw_triton_attn.TritonAttentionMetadataBuilder],
+    ids=builder_id,
+)
 def test_split_k_scratch_rows_follow_speculative_config(
     monkeypatch,
+    builder_cls,
     num_speculative_tokens,
     parallel_drafting,
     max_num_seqs,
@@ -144,7 +155,7 @@ def test_split_k_scratch_rows_follow_speculative_config(
         rows = max_num_seqs
     builder, _ = _build(
         monkeypatch,
-        TritonAttentionMetadataBuilder,
+        builder_cls,
         (9, 0),
         1,
         [1],

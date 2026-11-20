@@ -137,7 +137,7 @@ def _hw_agnostic_attention_backend() -> "type[AttentionBackend]":
             "The hw-agnostic attention backend needs Triton, which is not usable "
             "on this platform. Unset VLLM_USE_HW_AGNOSTIC."
         )
-    from vllm.model_executor.hw_agnostic.v1.attention.backends.triton_attn import (
+    from vllm.model_executor.hw_agnostic.attention.triton_attn import (
         TritonAttentionBackend,
     )
 

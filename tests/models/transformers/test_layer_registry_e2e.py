@@ -40,7 +40,6 @@ def tiny_llama_path(tmp_path_factory):
 # Registered names of the layers the backend can
 # currently route to hw-agnostic implementations.
 _COVERED_LAYERS = ("rms_norm", "silu_and_mul")
-# Key under which `_layer_providers` reports the attention backend.
 _ATTN_BACKEND = "attn_backend"
 
 

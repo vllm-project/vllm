@@ -10,13 +10,9 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kFp8StaticTensorSym,
-)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -31,7 +27,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
     get_num_attention_heads_from_layers,
-    set_triton_ptr_range,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -147,11 +142,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
-        # On SM120, batches whose 16-segment decode grid under-fills the SMs use
-        # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
-        # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
-        # faster or within 6% at 2k, and 1.1-3.6x faster from 8k up.
-        self.max_seqs_64_segments = 0
         headdim_padded = next_power_of_2(self.headdim)
         max_query_len_3d = 1
         speculative_config = vllm_config.speculative_config
@@ -162,7 +152,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         ):
             num_speculative_tokens = speculative_config.num_speculative_tokens or 0
             query_len = 1 + num_speculative_tokens * (
-                2 if speculative_config.parallel_drafting else 1
+                2 if speculative_config.speculator_config.parallel_drafting else 1
             )
             max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
         # Scratch is indexed by query token, including verification tokens.
@@ -170,16 +160,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
         )
         max_num_tokens_3d = max_num_seqs_3d * max_query_len_3d
-        if self.max_seqs_64_segments > 0:
-            self.num_par_softmax_segments = 64
-            # build() reuses this scratch at 16 segments with proportionally more rows.
-            max_num_tokens_3d = max(
-                min(self.max_seqs_64_segments, max_num_seqs_3d) * max_query_len_3d,
-                cdiv(
-                    max_num_tokens_3d,
-                    self.num_par_softmax_segments // NUM_PAR_SOFTMAX_SEGMENTS,
-                ),
-            )
         self.softmax_segm_output = torch.empty(
             (
                 max_num_tokens_3d,
@@ -253,24 +233,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
         )
-        if self.max_seqs_64_segments > 0 and (
-            self.max_seqs_64_segments < seq_lens.shape[0]
-            or self.softmax_segm_max.shape[0] < num_actual_tokens
-        ):
-            # The 16-segment grid fills the SMs, or the 64-segment rows cannot
-            # hold every query token: same scratch, 16-segment layout.
-            segments = NUM_PAR_SOFTMAX_SEGMENTS
-            attn_metadata.num_par_softmax_segments = segments
-            attn_metadata.softmax_segm_output = self.softmax_segm_output.view(
-                -1, self.num_heads_q, segments, self.softmax_segm_output.shape[-1]
-            )
-            attn_metadata.softmax_segm_max = self.softmax_segm_max.view(
-                -1, self.num_heads_q, segments
-            )
-            attn_metadata.softmax_segm_expsum = self.softmax_segm_expsum.view(
-                -1, self.num_heads_q, segments
-            )
-
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None:
             attn_metadata.mm_prefix_range = mm_ranges
@@ -407,15 +369,15 @@ class TritonAttentionImpl(AttentionImpl):
         """Extract per-head scale views from the padded content dimension.
 
         The KV cache is packed as logical shape
-        ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
-        ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
-        ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
-        last ``pad`` elements of each half hold one float32 scale.  We create
-        strided float32 views over those bytes.  ``kv_cache`` must be the
+        `(num_blocks, nkv, block_size, 2 * (hs + pad))` where
+        `pad = sizeof(float32) / sizeof(cache_dtype)`.  The content dim holds
+        `[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]` per (head, slot); the
+        last `pad` elements of each half hold one float32 scale.  We create
+        strided float32 views over those bytes.  `kv_cache` must be the
         packed logical tensor (call before any transpose), but may have HND or
         NHD physical strides.
 
-        Scale shape: ``(num_blocks, block_size, num_kv_heads)``
+        Scale shape: `(num_blocks, block_size, num_kv_heads)`
         """
         if self._k_scale_cache is not None:
             return
@@ -466,11 +428,6 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=v_scale_off_f32,
         )
-        if self._set_kv_ptr_range:
-            set_triton_ptr_range(kv_cache, self._k_scale_cache, self._v_scale_cache)
-
-    def fused_output_quant_supported(self, quant_key: QuantKey):
-        return quant_key == kFp8StaticTensorSym
 
     def __init__(
         self,
@@ -545,13 +502,19 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
-        self.supports_quant_query_input = False
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            from vllm.v1.attention.ops.int4_per_token_head import init_rht_signs
 
-        self.use_td = False
-        self._set_kv_ptr_range = False
+            init_rht_signs(
+                head_size,
+                torch.device(
+                    current_platform.device_type,
+                    torch.accelerator.current_device_index(),
+                ),
+            )
 
     def forward(
         self,
@@ -626,7 +589,7 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache, value_cache = self._pth_key_value_caches(kv_cache)
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
-            q_descale = k_descale = v_descale = None
+            k_descale = v_descale = None
         # FP8 per-tensor / auto path (original flow).
         else:
             kv_cache = kv_cache.transpose(1, 2)
@@ -638,19 +601,9 @@ class TritonAttentionImpl(AttentionImpl):
             ):
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
-            if self._set_kv_ptr_range:
-                set_triton_ptr_range(kv_cache, key_cache, value_cache)
             descale_shape = (
                 attn_metadata.query_start_loc.shape[0] - 1,
                 key_cache.shape[2],
-            )
-            q_descale = (
-                layer._q_scale
-                if (
-                    self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
-                    and query.dtype == self.fp8_dtype
-                )
-                else None
             )
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
@@ -687,7 +640,7 @@ class TritonAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             block_table=block_table,
             softcap=self.logits_soft_cap,
-            q_descale=q_descale,
+            q_descale=None,
             k_descale=k_descale,
             v_descale=v_descale,
             seq_threshold_3D=seq_threshold_3D,
@@ -704,7 +657,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
-            use_td=self.use_td,
+            use_td=False,
             mm_prefix_clamp_sliding_window=getattr(
                 layer, "mm_prefix_clamp_sliding_window", False
             ),
@@ -722,8 +675,6 @@ class TritonAttentionImpl(AttentionImpl):
         if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-        if self._set_kv_ptr_range:
-            set_triton_ptr_range(kv_cache, key_cache, value_cache)
         return key_cache, value_cache
 
     def _forward_encoder_attention(
@@ -754,7 +705,8 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Use encoder-specific metadata for sequence information
         query_start_loc = attn_metadata.query_start_loc
-        seq_lens = attn_metadata.seq_lens
+        # No KV cache: K/V length is the query length, not seq_lens.
+        seq_lens = query_start_loc[1:] - query_start_loc[:-1]
         max_query_len = attn_metadata.max_query_len
 
         # Call flash attention directly on Q, K, V tensors
@@ -808,8 +760,6 @@ class TritonAttentionImpl(AttentionImpl):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-        if self._set_kv_ptr_range:
-            set_triton_ptr_range(kv_cache, key_cache, value_cache)
         triton_reshape_and_cache_flash(
             key,
             value,

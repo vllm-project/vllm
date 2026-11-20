@@ -6,8 +6,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    builder_id,
+    create_common_attn_metadata,
+)
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.hw_agnostic.attention import triton_attn as hw_triton_attn
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
 from vllm.v1.attention.backends.triton_attn_diffkv import (
@@ -73,7 +78,11 @@ def test_split_k_segments_follow_sm_occupancy(
     )
 
 
-TRITON_BUILDERS = [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder]
+TRITON_BUILDERS = [
+    TritonAttentionMetadataBuilder,
+    TritonAttentionDiffKVMetadataBuilder,
+    hw_triton_attn.TritonAttentionMetadataBuilder,
+]
 # A ROCm backend can only be imported with a ROCm build of torch.
 ROCM_DRAFT_UPDATE_BUILDERS: list[type] = []
 if current_platform.is_rocm():
@@ -115,6 +124,7 @@ def _draft_decode_batch(seq_lens: list[int]):
     "builder_cls,rswa_window",
     [(cls, rswa) for cls in TRITON_BUILDERS for rswa in (None, 64)]
     + [(cls, None) for cls in ROCM_DRAFT_UPDATE_BUILDERS],
+    ids=builder_id,
 )
 def test_draft_decode_update_flag_matches_build_writes(builder_cls, rswa_window):
     """The update is a no-op, so the builder may claim support only when
@@ -140,7 +150,9 @@ def test_draft_decode_update_flag_matches_build_writes(builder_cls, rswa_window)
     assert builder.supports_draft_decode_metadata_update is (rswa_window is None)
 
 
-@pytest.mark.parametrize("builder_cls", TRITON_BUILDERS + ROCM_DRAFT_UPDATE_BUILDERS)
+@pytest.mark.parametrize(
+    "builder_cls", TRITON_BUILDERS + ROCM_DRAFT_UPDATE_BUILDERS, ids=builder_id
+)
 def test_draft_decode_update_matches_fresh_build(builder_cls):
     """A replayed graph reads metadata built at capture; after an in-place
     update it must match a fresh build of the replayed batch."""
