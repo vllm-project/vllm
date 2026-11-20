@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
+from functools import cache
 
 import torch
 
@@ -31,6 +32,7 @@ HAS_TILELANG_MHC = _has_tilelang_mhc()
 HAS_AITER_MHC = is_aiter_found_and_supported()
 
 
+@cache
 def _has_aiter_mhc_fused() -> bool:
     if not HAS_AITER_MHC:
         return False
@@ -41,6 +43,7 @@ def _has_aiter_mhc_fused() -> bool:
     return callable(mhc_fused_post_pre)
 
 
+@cache
 def _aiter_mhc_op_accepts_norm(op_name: str) -> bool:
     if not HAS_AITER_MHC:
         return False
@@ -68,9 +71,6 @@ def _has_aiter_mhc_fused_post_pre_delayed_rms_norm() -> bool:
     return on_gfx950()
 
 
-HAS_AITER_MHC_FUSED = _has_aiter_mhc_fused()
-HAS_AITER_MHC_PRE_NORM = _aiter_mhc_op_accepts_norm("mhc_pre")
-HAS_AITER_MHC_FUSED_NORM = _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
 HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM = (
     _has_aiter_mhc_fused_post_pre_delayed_rms_norm()
 )
@@ -118,6 +118,10 @@ class MHCPreOp(CustomOp):
     @classmethod
     def enabled(cls) -> bool:
         return True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._aiter_supports_norm = _aiter_mhc_op_accepts_norm("mhc_pre")
 
     def forward_cuda(
         self,
@@ -167,7 +171,7 @@ class MHCPreOp(CustomOp):
         if _aiter_mhc_supported(
             residual,
             norm_weight,
-            supports_norm=HAS_AITER_MHC_PRE_NORM,
+            supports_norm=self._aiter_supports_norm,
         ):
             return torch.ops.vllm.mhc_pre_aiter(
                 residual,
@@ -796,6 +800,11 @@ class MHCFusedPostPreOp(CustomOp):
     def enabled(cls) -> bool:
         return True
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._use_aiter = _has_aiter_mhc_fused()
+        self._aiter_supports_norm = _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
+
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -853,10 +862,10 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if HAS_AITER_MHC_FUSED and _aiter_mhc_supported(
+        if self._use_aiter and _aiter_mhc_supported(
             residual,
             norm_weight,
-            supports_norm=HAS_AITER_MHC_FUSED_NORM,
+            supports_norm=self._aiter_supports_norm,
         ):
             return torch.ops.vllm.mhc_fused_post_pre_aiter(
                 x,
