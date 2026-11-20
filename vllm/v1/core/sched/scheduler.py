@@ -6,7 +6,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
@@ -41,6 +41,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.dp_prefill_hold import PrefillHold, PrefillQueueState
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -81,16 +82,13 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
 
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.dp_prefill_hold import PrefillHold, PrefillQueueState
-
 logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
     # Cross-DP prefill hold; replaces `throttle_prefills` when set. A class
     # default, so schedulers built without `__init__` (as tests do) have it.
-    prefill_hold: "PrefillHold | None" = None
+    prefill_hold: PrefillHold | None = None
 
     def __init__(
         self,
@@ -403,9 +401,7 @@ class Scheduler(SchedulerInterface):
         # slots, or preempted.
         self.prefill_kv_stopped = False
         if self.scheduler_config.prefill_hold_ttft_target is not None:
-            from vllm.v1.core.sched import dp_prefill_hold
-
-            self.prefill_hold = dp_prefill_hold.PrefillHold(
+            self.prefill_hold = PrefillHold(
                 self._prefill_queue_state,
                 self.scheduler_config.prefill_hold_ttft_target,
                 self.scheduler_config.prefill_hold_alpha,
@@ -3075,9 +3071,7 @@ class Scheduler(SchedulerInterface):
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.prefill_hold is not None:
-                self.prefill_hold.on_arrival(
-                    request, self.kv_cache_manager.get_num_cached_tokens
-                )
+                self.prefill_hold.on_arrival()
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3091,9 +3085,7 @@ class Scheduler(SchedulerInterface):
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
-    def _prefill_queue_state(self) -> "PrefillQueueState":
-        from vllm.v1.core.sched.dp_prefill_hold import PrefillQueueState
-
+    def _prefill_queue_state(self) -> PrefillQueueState:
         return PrefillQueueState(
             self.running,
             # HiSparse also tracks async KV loads parked in kv_holding_waiting.
@@ -3132,17 +3124,12 @@ class Scheduler(SchedulerInterface):
             self._can_start_waiting, itertools.chain(self.kv_holding_waiting, merged)
         )
 
-    @property
-    def shares_dp_row(self) -> bool:
-        return self.prefill_hold is not None
-
     def prepare_dp_row(self) -> None:
         if self.prefill_hold is not None:
             self.prefill_hold.prepare_row()
 
-    def dp_row(self) -> list[float]:
-        assert self.prefill_hold is not None
-        return self.prefill_hold.local_row()
+    def dp_row(self) -> list[float] | None:
+        return None if self.prefill_hold is None else self.prefill_hold.local_row()
 
     def update_from_dp_rows(self, rows: list[list[float]], idle: bool) -> None:
         assert self.prefill_hold is not None

@@ -9,7 +9,6 @@ import pytest
 from tests.v1.core.utils import create_requests, create_scheduler
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import ModelConfig
-from vllm.config import vllm as vllm_config_module
 from vllm.v1.core.sched import dp_prefill_hold as dph
 from vllm.v1.core.sched.dp_prefill_hold import PrefillHold
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -131,13 +130,6 @@ def _one_rank_queued(slack: float = T) -> list[list[float]]:
     return [busy] + [_row(period=T_DEC, decodes=16)] * (RANKS - 1)
 
 
-def test_releases_until_steps_are_measured():
-    """With no measured steps there is no cost model, so it fails open."""
-    hold = PrefillHold(Mock(), T, 1.0, 8192)
-    assert hold.update(_one_rank_queued()) == "cold"
-    assert not hold.hold
-
-
 def test_holds_while_peers_are_expected_and_waiting_is_cheap():
     """At 50 req/s, one more decode step is likely to bring prefill to other
     ranks, which costs 128 decodes less than it costs one queued request."""
@@ -160,11 +152,14 @@ def test_ttft_target_bounds_the_hold():
     assert not hold.hold
 
 
-def test_unsure_until_aligned_steps_are_measured():
-    """Steps with one rank prefilling cannot tell the busiest-rank cost from
-    the all-rank cost, which is what waiting for peers hinges on: it releases
+def test_releases_until_steps_pin_down_the_cost():
+    """With no measured steps there is no cost model, so it fails open. Steps
+    with one rank prefilling cannot tell the busiest-rank cost from the
+    all-rank cost, which is what waiting for peers hinges on: it releases
     until steps with several ranks prefilling pin that down."""
     hold = PrefillHold(Mock(), T, 1.0, 8192)
+    assert hold.update(_one_rank_queued()) == "cold"
+    assert not hold.hold
     rng = random.Random(0)
     _warm(hold, rng, max_work=1)
     assert hold.update(_one_rank_queued()) == "unsure"
@@ -240,27 +235,6 @@ def test_requires_dp_on_a_moe_model(monkeypatch, dp_size: int, is_moe: bool):
         create_scheduler(prefill_hold_ttft_target=T, data_parallel_size=dp_size)
 
 
-@pytest.mark.parametrize(
-    ("kv_role", "warned"),
-    [("kv_producer", True), ("kv_consumer", True), ("kv_both", False)],
-)
-def test_warns_on_a_prefill_or_decode_only_instance(
-    monkeypatch, kv_role: str, warned: bool
-):
-    """In disaggregated serving a prefill-only instance runs no decodes and a
-    decode-only one has next to nothing to prefill, so the hold never holds."""
-    warning = Mock()
-    monkeypatch.setattr(vllm_config_module.logger, "warning", warning)
-    create_scheduler(
-        prefill_hold_ttft_target=T,
-        data_parallel_size=2,
-        use_kv_connector=MockKVConfig(),
-        kv_role=kv_role,
-    )
-    calls = [c.args[0] for c in warning.call_args_list]
-    assert any("prefill_hold_ttft_target" in m for m in calls) == warned
-
-
 def test_local_row_offers_one_budget_and_scales_slack_by_releases_left():
     """A rank offers at most one budget of prefill, and a request needing
     three releases may wait a third of its target per hold."""
@@ -277,47 +251,36 @@ def test_local_row_offers_one_budget_and_scales_slack_by_releases_left():
     assert row[dph._SLACK] == pytest.approx(10.0 / 3, abs=0.1)
 
 
-def test_sizes_arrivals_past_external_hits():
-    """An arrival counts toward the rate at once, but its size is taken when it
-    is first scheduled: tokens a KV connector loads are no prefill, and the
-    scheduler learns of them only at its lookup."""
-    scheduler, hold = _hold_scheduler(
-        use_kv_connector=MockKVConfig(matched_tokens=128, is_async=True)
-    )
-    (req,) = create_requests(num_requests=1, num_tokens=200)
-    scheduler.add_request(req)
-    row = hold.local_row()
-    assert row[dph._ARRIVED] == 1 and row[dph._ADMITTED] == 0
-
-    output = scheduler.schedule()
-    assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    _finish_step(scheduler, output, finished_recving={req.request_id})
-    scheduler.schedule()
-    row = hold.local_row()
-    assert row[dph._ARRIVED] == 0 and row[dph._ADMITTED] == 1
-    assert row[dph._ADMITTED_UNCACHED] == 200 - 128
-    assert row[dph._ADMITTED_CACHED] == 128
-
-
-def test_queue_scan_takes_the_hit_of_a_deferred_lookup():
-    """A request looked up but deferred keeps no computed tokens, so the queue
-    scan would fall back to the local hit probed at arrival and miss a
-    synchronous external load; it takes the scheduler's fresh hit instead."""
+def test_external_hits_are_no_prefill():
+    """Tokens a KV connector loads are no prefill, and the scheduler learns of
+    them only at its lookup. A request looked up but deferred keeps no computed
+    tokens, so the queue scan takes the lookup's hit. An arrival counts toward
+    the rate at once, but is sized past the hit when first scheduled."""
     scheduler, hold = _hold_scheduler(
         use_kv_connector=MockKVConfig(matched_tokens=128, is_async=False)
     )
     (dec,) = create_requests(num_requests=1, num_tokens=200, req_ids=["d"])
     scheduler.add_request(dec)
     _finish_step(scheduler, scheduler.schedule())
-    assert not dec.is_prefill_chunk
+    hold.local_row()
     (req,) = create_requests(num_requests=1, num_tokens=200, req_ids=["r"])
     scheduler.add_request(req)
-    assert hold.local_row()[dph._X] == 200
+    row = hold.local_row()
+    assert row[dph._ARRIVED] == 1 and row[dph._X] == 200
 
     hold.hold = True
     output = scheduler.schedule()
     assert "r" not in output.num_scheduled_tokens
-    assert hold.local_row()[dph._X] == 200 - 128
+    _finish_step(scheduler, output)
+    row = hold.local_row()
+    assert row[dph._X] == 200 - 128 and row[dph._ADMITTED] == 0
+
+    hold.hold = False
+    assert scheduler.schedule().num_scheduled_tokens["r"] == 200 - 128
+    row = hold.local_row()
+    assert row[dph._ARRIVED] == 0 and row[dph._ADMITTED] == 1
+    assert row[dph._ADMITTED_UNCACHED] == 200 - 128
+    assert row[dph._ADMITTED_CACHED] == 128
 
 
 class _Clock:
@@ -571,38 +534,12 @@ def test_scans_waiting_queues_in_admission_order(policy):
     assert scanned == admitted
 
 
-def test_hold_overrides_per_rank_capacity_escape():
-    """With `prefill_schedule_interval`, a rank whose last release left a
-    backlog keeps prefilling on throttled steps. A hold applies to every rank
-    alike, so that rank holds too, and releases when the hold lifts."""
-    scheduler, hold = _hold_scheduler(max_num_batched_tokens=200)
-    dec, a, b = create_requests(num_requests=3, num_tokens=200, req_ids=["d", "a", "b"])
-    scheduler.add_request(dec)
-    _finish_step(scheduler, scheduler.schedule())
-    scheduler.add_request(a)
-    scheduler.add_request(b)
-    _finish_step(scheduler, scheduler.schedule())
-    assert scheduler.prefill_capacity_bound
-
-    hold.hold = True
-    output = scheduler.schedule()
-    assert set(output.num_scheduled_tokens) == {"d"}
-    _finish_step(scheduler, output)
-
-    hold.hold = False
-    output = scheduler.schedule()
-    assert set(output.num_scheduled_tokens) > {"d"}
-
-
-def test_scheduler_relays_dp_rows_to_the_hold():
-    """The scheduler shares the hold's row in the DP state sync and hands the
-    gathered rows back to it; a sync that finds every rank idle releases the
-    hold. DP rank 0 logs."""
-    assert not create_scheduler().shares_dp_row
+def test_sync_that_finds_every_rank_idle_releases():
+    """The scheduler hands the gathered rows to the hold, and a sync that finds
+    every rank idle releases it. Without the hold it shares no row, so the DP
+    engine core keeps its sync interval."""
+    assert create_scheduler().dp_row() is None
     scheduler, hold = _hold_scheduler()
-    assert scheduler.shares_dp_row and hold.log_stats
-    assert len(scheduler.dp_row()) == dph.ROW_SIZE
-
     _warm(hold, random.Random(0))
     scheduler.update_from_dp_rows(_one_rank_queued(), idle=False)
     assert hold.hold

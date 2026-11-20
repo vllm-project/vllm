@@ -280,20 +280,16 @@ class PrefillHold:
         self._pending.clear()
         self._done = None
 
-    def on_arrival(
-        self, request: "Request", num_cached_tokens: Callable[["Request"], int]
-    ) -> None:
+    def on_arrival(self) -> None:
         """Counts an arrival toward the rate. Its size is taken when it is first
         scheduled (`on_scheduled`): a KV connector's hit is unknown until the
-        scheduler looks the request up, so the local probe here only stands in
-        for the queue scan until then."""
-        self._cached_tokens[request.request_id] = num_cached_tokens(request)
+        scheduler looks the request up."""
         self._arrived += 1
 
     def on_lookup(self, request: "Request", num_computed_tokens: int) -> None:
         """Takes the prefix hit, local and external, the scheduler just looked
         up, for the queue scan: a request it defers or skips keeps no computed
-        tokens, which would leave the scan with the hit probed at arrival."""
+        tokens, which would leave the scan with only the local hit."""
         self._cached_tokens[request.request_id] = num_computed_tokens
 
     def on_scheduled(

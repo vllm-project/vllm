@@ -690,7 +690,7 @@ def _cadenced_dp_engine_core(
     core.step_counter = 0
     core.pending_pause = False
     core.ignore_start_dp_wave = False
-    core.scheduler = MagicMock(shares_dp_row=False)
+    core.scheduler = MagicMock(**{"dp_row.return_value": None})
     synced: list[int] = []
 
     def scripted_sync(dp_group, has_unfinished, pending_pause, row=None):
@@ -736,7 +736,6 @@ def test_dp_row_syncs_every_step(monkeypatch):
     """A scheduler that shares a DP row forces the all-reduce every step and
     gets every rank's row back each time; the wave's end reports idle."""
     core, _ = _cadenced_dp_engine_core(monkeypatch, [], dp_sync_interval=32)
-    core.scheduler.shares_dp_row = True
     core.scheduler.dp_row.return_value = [1.0, 2.0, 3.0]
     rows = [[4.0] * 3, [1.0, 2.0, 3.0]]
     results = [True, True, False]

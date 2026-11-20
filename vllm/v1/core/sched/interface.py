@@ -266,20 +266,16 @@ class SchedulerInterface(ABC):
         """Shutdown the scheduler."""
         raise NotImplementedError
 
-    @property
-    def shares_dp_row(self) -> bool:
-        """Whether the DP engine core (DP attention + EP) must all-gather
-        `dp_row()` every step, for scheduling that coordinates across ranks.
-        Fixed for the scheduler's life and the same on every rank."""
-        return False
-
     def prepare_dp_row(self) -> None:  # noqa: B027
         """Called while the GPU runs a step, before the engine core blocks on
         its output, to do `dp_row()`'s heavy work off the critical path."""
 
-    def dp_row(self) -> list[float]:
-        """This rank's row for the next DP state sync, if `shares_dp_row`."""
-        raise NotImplementedError
+    def dp_row(self) -> list[float] | None:
+        """This rank's row for the DP engine core (DP attention + EP) to
+        all-gather this step, for scheduling that coordinates across ranks.
+        A row forces a DP state sync, so a scheduler returns one on every step
+        and every rank, or never (None, the default)."""
+        return None
 
     def update_from_dp_rows(self, rows: list[list[float]], idle: bool) -> None:
         """Takes every rank's `dp_row()` in rank order after a DP state sync,

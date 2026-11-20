@@ -2621,12 +2621,6 @@ class DPEngineCoreProc(EngineCoreProc):
             tensor_queue=tensor_queue,
         )
 
-        if vllm_config.scheduler_config.prefill_hold_ttft_target is not None:
-            from vllm.v1.core.sched.scheduler import Scheduler
-
-            if not isinstance(self.scheduler, Scheduler):
-                raise ValueError("prefill_hold_ttft_target needs the v1 Scheduler.")
-
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
         parallel_config = vllm_config.parallel_config
@@ -2855,9 +2849,9 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        shares_row = self.scheduler.shares_dp_row
+        row = self.scheduler.dp_row()
         if (
-            not shares_row
+            row is None
             and self.step_counter != 1
             and self.step_counter % self.dp_sync_interval != 0
         ):
@@ -2868,7 +2862,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dp_group,
             has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,
-            row=self.scheduler.dp_row() if shares_row else None,
+            row=row,
         )
         if rows is not None:
             self.scheduler.update_from_dp_rows(rows, idle=not has_unfinished)
