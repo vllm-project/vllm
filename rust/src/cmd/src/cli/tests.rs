@@ -3286,7 +3286,7 @@ fn serve_args_accept_mm_processor_cache_shm() {
 }
 
 #[test]
-fn serve_args_mm_processor_cache_defaults_match_python() {
+fn serve_args_mm_processor_cache_numeric_defaults_match_python() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
 
     let Command::Serve(args) = cli.command else {
@@ -3308,6 +3308,8 @@ fn serve_args_mm_processor_cache_gb_zero_disables_cache() {
         "shm",
         "--mm-processor-cache-gb",
         "0",
+        "--data-parallel-size",
+        "2",
     ])
     .unwrap();
 
@@ -3315,6 +3317,39 @@ fn serve_args_mm_processor_cache_gb_zero_disables_cache() {
         panic!("expected serve args");
     };
     assert!(args.runtime.mm_shm_cache_config().is_none());
+    args.check_mm_shm_cache_support().unwrap();
+}
+
+#[test]
+fn serve_args_reject_negative_mm_processor_cache_gb() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-gb",
+        "-1",
+    ])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unexpected argument '-1'"));
+}
+
+#[test]
+fn serve_args_reject_mm_shm_options_without_shm_cache() {
+    for (flag, value) in [
+        ("--mm-processor-cache-gb", "8"),
+        ("--mm-shm-cache-max-object-size-mb", "64"),
+    ] {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value]).unwrap();
+
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        let error = args.check_mm_shm_cache_support().unwrap_err();
+        assert!(error.contains(flag), "{flag}: {error}");
+        assert!(error.contains("--mm-processor-cache-type shm"), "{error}");
+    }
 }
 
 #[test]
@@ -3355,6 +3390,31 @@ fn serve_args_mm_shm_cache_rejects_data_parallel_without_external_lb() {
     let error = args.check_mm_shm_cache_support().unwrap_err();
     assert!(error.contains("--data-parallel-size 1"), "{error}");
     assert!(error.contains("--data-parallel-external-lb"), "{error}");
+}
+
+#[test]
+fn serve_args_mm_shm_cache_accepts_external_data_parallel_lb() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "shm",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-external-lb",
+        "--data-parallel-rank",
+        "1",
+        "--data-parallel-rpc-port",
+        "5555",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    args.check_mm_shm_cache_support().unwrap();
+    topology(&args);
 }
 
 #[test]
@@ -3418,6 +3478,35 @@ fn frontend_args_json_rejects_mm_processor_cache_type() {
         For more information, try '--help'.
     "#]]
     .assert_eq(&error.to_string());
+}
+
+#[test]
+fn frontend_args_json_validates_mm_processor_cache_options() {
+    for (cache_args, expected) in [
+        (r#""mm_processor_cache_gb":-1"#, "must be non-negative"),
+        (r#""mm_processor_cache_gb":8"#, "--mm-processor-cache-gb"),
+        (
+            r#""mm_shm_cache_max_object_size_mb":64"#,
+            "--mm-shm-cache-max-object-size-mb",
+        ),
+    ] {
+        let args_json = format!(r#"{{"model_tag":"Qwen/Qwen3-0.6B",{cache_args}}}"#);
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "4",
+            "--output-listener-fd",
+            "5",
+            "--args-json",
+            &args_json,
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains(expected), "{args_json}: {error}");
+    }
 }
 
 #[test]

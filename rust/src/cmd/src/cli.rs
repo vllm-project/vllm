@@ -544,7 +544,7 @@ pub struct SharedRuntimeArgs {
     /// With `--mm-processor-cache-type shm` this is the exact size of the
     /// POSIX shared-memory ring buffer shared with the engine workers. Set to
     /// `0` to disable the cache completely (not recommended).
-    #[arg(long, default_value_t = 4.0, allow_negative_numbers = true)]
+    #[arg(long, default_value_t = 4.0)]
     #[serde(default = "default_mm_processor_cache_gb")]
     pub mm_processor_cache_gb: f64,
 
@@ -1036,11 +1036,35 @@ impl SharedRuntimeArgs {
         })
     }
 
+    fn validate_mm_processor_cache(&self) -> Result<(), String> {
+        if self.mm_processor_cache_gb < 0.0 {
+            return Err(format!(
+                "`--mm-processor-cache-gb` must be non-negative, got {}",
+                self.mm_processor_cache_gb
+            ));
+        }
+        if self.mm_processor_cache_type == Some(MmProcessorCacheType::Shm) {
+            return Ok(());
+        }
+        if self.mm_processor_cache_gb != default_mm_processor_cache_gb() {
+            return Err(
+                "`--mm-processor-cache-gb` requires `--mm-processor-cache-type shm`".to_string(),
+            );
+        }
+        if self.mm_shm_cache_max_object_size_mb != default_mm_shm_cache_max_object_size_mb() {
+            return Err(
+                "`--mm-shm-cache-max-object-size-mb` requires `--mm-processor-cache-type shm`"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     /// Whether the shm multi-modal processor cache is enabled.
     ///
     /// Mirrors the disable check in Python's `_get_cache_type`
-    /// (vllm/multimodal/cache/factories.py): a non-positive
-    /// `mm_processor_cache_gb` disables the cache entirely.
+    /// (vllm/multimodal/cache/factories.py): zero `mm_processor_cache_gb`
+    /// disables the cache entirely; negative values are rejected during validation.
     pub fn mm_shm_cache_enabled(&self) -> bool {
         self.mm_processor_cache_type == Some(MmProcessorCacheType::Shm)
             && self.mm_processor_cache_gb > 0.0
@@ -1534,6 +1558,7 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path.
     args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
+    args.validate_mm_processor_cache()?;
     args.unsupported.check()?;
     if args.mm_processor_cache_type.is_some() {
         return Err(
@@ -1644,16 +1669,16 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Validate that the requested shm multi-modal processor cache is
-    /// compatible with the managed-engine topology.
+    /// Validate the shared cache arguments and, when shm caching is enabled,
+    /// their compatibility with the managed-engine topology.
     ///
     /// Mirrors Python's IPC-support check in `_get_cache_type`
     /// (vllm/multimodal/cache/factories.py): shm caching requires a single
-    /// API process colocated with the engine. `--data-parallel-external-lb`
-    /// is not supported by the Rust frontend yet, so `data_parallel_size`
-    /// must be 1.
+    /// API process colocated with the engine. Data parallel deployments must
+    /// use external LB so each frontend serves only its colocated rank.
     pub fn check_mm_shm_cache_support(&self) -> Result<(), String> {
-        if self.runtime.mm_processor_cache_type != Some(MmProcessorCacheType::Shm) {
+        self.runtime.validate_mm_processor_cache()?;
+        if !self.runtime.mm_shm_cache_enabled() {
             return Ok(());
         }
         if self.headless {
@@ -1670,12 +1695,13 @@ impl ServeArgs {
                     .to_string(),
             );
         }
-        if self.managed_engine.data_parallel_size > 1 {
+        let external_lb = self.data_parallel_lb.data_parallel_external_lb
+            || self.data_parallel_lb.data_parallel_rank.is_some();
+        if self.managed_engine.data_parallel_size > 1 && !external_lb {
             return Err(format!(
                 "`--mm-processor-cache-type shm` requires IPC between the frontend and \
-                 engine processes, which is only supported with `--data-parallel-size 1` \
-                 (got {}); `--data-parallel-external-lb` is not supported by the Rust \
-                 frontend yet",
+                 engine processes, which requires `--data-parallel-size 1` or \
+                 `--data-parallel-external-lb` (got data parallel size {})",
                 self.managed_engine.data_parallel_size
             ));
         }

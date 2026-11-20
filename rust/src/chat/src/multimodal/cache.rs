@@ -22,13 +22,13 @@ use crate::error::Result;
 
 /// Vision processors whose preprocessing output depends on the per-request
 /// `VisionPreprocessingContext` (today: only Nemotron-H Omni's
-/// `token_budget`-driven dynamic resolution). Their per-request budget varies,
-/// so cache hits would be rare anyway: such processors bypass the processor
-/// cache entirely and always preprocess inline.
+/// `token_budget`-driven dynamic resolution). The cache key does not include
+/// the request budget, so reusing output across budgets would be incorrect:
+/// such processors bypass the processor cache entirely and preprocess inline.
 ///
 /// TODO: drop this name list once `llm-multimodal` exposes a capability flag
 /// on `VisionPreProcessor` for request-context sensitivity.
-pub(super) const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_omni"];
+const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_omni"];
 
 /// Whether a vision processor's output depends on the per-request
 /// preprocessing context, in which case its items bypass the SHM cache.
@@ -47,7 +47,7 @@ pub(super) fn is_budget_sensitive(support: &VisionModalitySupport) -> bool {
 /// - If the item is not in the cache, preprocess it, store the data in shared
 ///   memory, and shadow its prompt replacement.
 #[derive(Clone)]
-pub(crate) struct MmProcessorCache {
+pub(super) struct MmProcessorCache {
     shm: Arc<MmProcessorShmCache>,
     /// Prompt replacements of cached items, mirroring Python's `_p0_cache`.
     ///
@@ -60,7 +60,7 @@ pub(crate) struct MmProcessorCache {
 }
 
 impl MmProcessorCache {
-    pub(crate) fn new(shm: Arc<MmProcessorShmCache>) -> Self {
+    pub(super) fn new(shm: Arc<MmProcessorShmCache>) -> Self {
         Self {
             shm,
             shadow: Arc::new(Mutex::new(HashMap::new())),
@@ -151,80 +151,59 @@ impl<T: HashedMedia + ?Sized> HashedMedia for Arc<T> {
     }
 }
 
-/// The prepare driver as a method on an optional cache reference, so call
-/// sites read `self.mm_cache_for(modality).prepare_cached(...)`; `None`
-/// prepares everything inline.
+/// Prepare fetched media through an optional cache; `None` prepares everything
+/// inline.
 ///
 /// Fetched items are looked up by their cache key — the client UUID when
 /// supplied, otherwise the content hash — so only true misses reach `compute`.
 /// Computed misses are put into shm and shadowed. The result stays
 /// index-aligned with `sources` for placeholder expansion.
-pub(super) trait OptionalMmProcessorCache {
-    async fn prepare_cached<M, F>(
-        self,
-        sources: Vec<(M, Option<String>)>,
-        compute: F,
-    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
-    where
-        M: HashedMedia,
-        F: AsyncFnOnce(
-            Vec<(M, Option<String>)>,
-        ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>;
-}
-
-impl OptionalMmProcessorCache for Option<&MmProcessorCache> {
-    async fn prepare_cached<M, F>(
-        self,
-        sources: Vec<(M, Option<String>)>,
-        compute: F,
-    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
-    where
-        M: HashedMedia,
-        F: AsyncFnOnce(
-            Vec<(M, Option<String>)>,
-        ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
-    {
-        let cache = self;
-        let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
-            Vec::with_capacity(sources.len());
-        let mut pending = Vec::new();
-        let mut pending_keys = Vec::new();
-        for (media, uuid) in sources {
-            let key = match (cache, &uuid) {
-                (Some(_), Some(uuid)) => uuid.clone(),
-                _ => media.content_hash().to_owned(),
-            };
-            match cache.and_then(|cache| cache.lookup(&key, uuid.clone())) {
-                Some(hit) => slots.push(Some(hit)),
-                None => {
-                    slots.push(None);
-                    pending_keys.push(key);
-                    pending.push((media, uuid));
-                }
+pub(super) async fn prepare_cached<M, F>(
+    cache: Option<&MmProcessorCache>,
+    sources: Vec<(M, Option<String>)>,
+    compute: F,
+) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
+where
+    M: HashedMedia,
+    F: AsyncFnOnce(Vec<(M, Option<String>)>) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
+{
+    let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
+        Vec::with_capacity(sources.len());
+    let mut pending = Vec::new();
+    let mut pending_keys = Vec::new();
+    for (media, uuid) in sources {
+        let key = match (cache, &uuid) {
+            (Some(_), Some(uuid)) => uuid.clone(),
+            _ => media.content_hash().to_owned(),
+        };
+        match cache.and_then(|cache| cache.lookup(&key, uuid.clone())) {
+            Some(hit) => slots.push(Some(hit)),
+            None => {
+                slots.push(None);
+                pending_keys.push(key);
+                pending.push((media, uuid));
             }
         }
-
-        let mut misses = Vec::with_capacity(pending.len());
-        if !pending.is_empty() {
-            let (replacements, mut items) = compute(pending).await?;
-            for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
-                // UUID-keyed items report the UUID as `mm_hash` (Python
-                // parity: `hashes.append(uuid_item)`); for content-keyed
-                // items this is a no-op.
-                item.hash = key.clone();
-                item.data = match cache {
-                    Some(cache) => cache.put_or_inline_and_track(
-                        key,
-                        replacement,
-                        std::mem::take(&mut item.data),
-                    ),
-                    None => std::mem::take(&mut item.data),
-                };
-            }
-            misses = izip!(items, replacements).collect();
-        }
-        Ok(merge_slots(slots, misses))
     }
+
+    let mut misses = Vec::with_capacity(pending.len());
+    if !pending.is_empty() {
+        let (replacements, mut items) = compute(pending).await?;
+        for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
+            // UUID-keyed items report the UUID as `mm_hash` (Python
+            // parity: `hashes.append(uuid_item)`); for content-keyed
+            // items this is a no-op.
+            item.hash = key.clone();
+            item.data = match cache {
+                Some(cache) => {
+                    cache.put_or_inline_and_track(key, replacement, std::mem::take(&mut item.data))
+                }
+                None => std::mem::take(&mut item.data),
+            };
+        }
+        misses = izip!(items, replacements).collect();
+    }
+    Ok(merge_slots(slots, misses))
 }
 
 /// Reassemble per-modality replacements and items in request order from
@@ -252,33 +231,35 @@ fn merge_slots(
     (replacements, items)
 }
 
+/// 64x64 solid-color PNG.
 #[cfg(test)]
-pub(crate) mod tests {
+pub(super) const TEST_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwBfNaEYzmiH8OITBAtxm7fN1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWPHYBHsYBafyS08sAAAAASUVORK5CYII=";
+
+#[cfg(test)]
+pub(super) fn test_shm_cache() -> Arc<MmProcessorShmCache> {
+    let cache = MmProcessorShmCache::create(vllm_mm_cache::MmShmCacheConfig {
+        shm_name: vllm_mm_cache::MmShmCacheConfig::unique_shm_name(),
+        data_buffer_size: 16 * 1024 * 1024,
+        max_object_size: 4 * 1024 * 1024,
+    })
+    .expect("shm cache should be created");
+    cache.set_n_readers(1);
+    Arc::new(cache)
+}
+
+#[cfg(test)]
+pub(super) fn is_address_item(item: &MmKwargsItem) -> bool {
+    item.len() == 3
+        && item.contains_key("address")
+        && item.contains_key("monotonic_id")
+        && item.contains_key("signature")
+}
+
+#[cfg(test)]
+pub(super) mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmKwargValue, MmKwargsItem};
-    use vllm_mm_cache::{MmProcessorShmCache, MmShmCacheConfig};
 
     use super::*;
-
-    /// 64x64 solid-color PNG.
-    pub(crate) const TEST_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwBfNaEYzmiH8OITBAtxm7fN1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWPHYBHsYBafyS08sAAAAASUVORK5CYII=";
-
-    pub(crate) fn test_shm_cache() -> Arc<MmProcessorShmCache> {
-        let cache = MmProcessorShmCache::create(MmShmCacheConfig {
-            shm_name: MmShmCacheConfig::unique_shm_name(),
-            data_buffer_size: 16 * 1024 * 1024,
-            max_object_size: 4 * 1024 * 1024,
-        })
-        .expect("shm cache should be created");
-        cache.set_n_readers(1);
-        Arc::new(cache)
-    }
-
-    pub(crate) fn is_address_item(item: &MmKwargsItem) -> bool {
-        item.len() == 3
-            && item.contains_key("address")
-            && item.contains_key("monotonic_id")
-            && item.contains_key("signature")
-    }
 
     fn address_of(item: &MmKwargsItem) -> (i64, i64) {
         let get = |key: &str| match item[key].data {

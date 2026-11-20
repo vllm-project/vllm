@@ -1901,25 +1901,6 @@ where
     .await
 }
 
-/// Like [`test_admin_state_with_ready_and_engine_script`], but allows
-/// customizing the [`AppState`] before it is shared with the router.
-async fn test_admin_state_with_ready_engine_script_and<F>(
-    ready: EngineCoreReadyResponse,
-    script: F,
-    customize: impl FnOnce(AppState) -> AppState,
-) -> (Arc<AppState>, MockEngineTask)
-where
-    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
-{
-    test_admin_state_with_backend_and_engine_script(
-        ready,
-        Arc::new(FakeChatBackend::new()),
-        customize,
-        script,
-    )
-    .await
-}
-
 /// Like [`test_admin_state_with_ready_and_engine_script`], with the given chat
 /// backend and `configure` applied to the state before it is shared.
 async fn test_admin_state_with_backend_and_engine_script<F>(
@@ -10717,8 +10698,10 @@ async fn reset_mm_cache_route_clears_shm_processor_cache() {
     assert!(cache.is_cached("mm-hash-0"));
 
     let state_cache = cache.clone();
-    let (state, engine_task) = test_admin_state_with_ready_engine_script_and(
+    let (state, engine_task) = test_admin_state_with_backend_and_engine_script(
         default_ready_response(),
+        Arc::new(FakeChatBackend::new()),
+        move |state| state.with_mm_processor_cache(Some(state_cache)),
         |dealer, push| {
             boxed_test_future(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -10734,7 +10717,6 @@ async fn reset_mm_cache_route_clears_shm_processor_cache() {
                 send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
             })
         },
-        move |state| state.with_mm_processor_cache(Some(state_cache)),
     )
     .await;
     let mut app = build_router_with_gates(

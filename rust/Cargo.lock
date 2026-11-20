@@ -5847,7 +5847,6 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "thiserror 2.0.18",
- "thiserror-ext",
  "tracing",
  "uuid",
  "vllm-engine-core-client",

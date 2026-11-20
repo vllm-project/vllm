@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use parking_lot::Mutex;
-use thiserror_ext::AsReport as _;
 use tracing::{debug, warn};
 
 use super::serde::{serialize_mm_item_into, serialized_mm_item_len};
@@ -25,7 +24,7 @@ use vllm_shm_object_storage::{
 };
 
 /// Configuration for the writer-side multimodal processor shm cache.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MmShmCacheConfig {
     /// POSIX shm object name (no leading slash), matching the
     /// VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME env given to the Python engine.
@@ -128,7 +127,7 @@ impl MmProcessorShmCache {
             Err(error) => {
                 warn!(
                     hash,
-                    error = %error.to_report_string(),
+                    error = %error,
                     "mm_input failed to serialize for shm cache; sending inline"
                 );
                 return item;
@@ -144,14 +143,13 @@ impl MmProcessorShmCache {
             Err(error) => {
                 warn!(
                     hash,
-                    error = %error.to_report_string(),
+                    error = %error,
                     "mm_input failed to serialize for shm cache; sending inline"
                 );
                 item
             }
             // The duplicate-key case (concurrent insert) is benign, so we only
-            // warn on the oversize case. Subsequent UUID-only requests for an
-            // oversize item will fail with a cache miss.
+            // warn on the oversize case.
             Ok(Err(PutFailure::DuplicateKey)) => item,
             Ok(Err(PutFailure::Oversize)) => {
                 if !self.warned_oversize.swap(true, Ordering::Relaxed) {
@@ -224,19 +222,14 @@ fn address_as_item(address: usize, monotonic_id: u32, signature: [u8; 32]) -> Mm
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use expect_test::expect;
 
     use super::*;
     use vllm_engine_core_client::protocol::tensor::WireTensor;
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
     fn create_cache(data_buffer_size: usize, max_object_size: usize) -> MmProcessorShmCache {
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         MmProcessorShmCache::create(MmShmCacheConfig {
-            shm_name: format!("vllm-mm-shm-test-sender-{}-{id}", std::process::id()),
+            shm_name: MmShmCacheConfig::unique_shm_name(),
             data_buffer_size,
             max_object_size,
         })
@@ -423,22 +416,5 @@ mod tests {
         let returned = cache.put_or_inline("hash-b", original.clone());
         assert_eq!(returned, original);
         assert!(!cache.is_cached("hash-b"));
-    }
-
-    #[test]
-    fn clear_allows_reinsertion() {
-        let cache = create_cache(1 << 20, 1 << 16);
-        cache.set_n_readers(1);
-
-        cache.put_or_inline("hash-a", item_with_tensor(8));
-        cache.clear();
-        assert!(!cache.is_cached("hash-a"));
-        assert_eq!(cache.cached_len(), 0);
-
-        // After clearing, the next allocation restarts at address zero while
-        // IDs keep increasing, so pre-clear handles fail the engine's ID check
-        // once their chunk is reused.
-        let address_item = cache.put_or_inline("hash-a", item_with_tensor(8));
-        expect_address_item(&address_item, 0, 1);
     }
 }

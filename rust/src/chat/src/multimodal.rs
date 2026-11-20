@@ -40,7 +40,7 @@ use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
-pub(crate) mod cache;
+mod cache;
 mod expand;
 mod image;
 mod input;
@@ -433,7 +433,7 @@ struct PreparedMedia {
 }
 
 /// One media item's complete engine kwargs plus identity metadata.
-pub(super) struct PreparedItem {
+struct PreparedItem {
     data: MmKwargsItem,
     hash: String,
     uuid: Option<String>,
@@ -677,7 +677,10 @@ impl MultimodalModelInfo {
     ///
     /// With the cache set, repeated media skips preprocessing and ships its
     /// shm address to the engine instead of the full tensor payload.
-    pub fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorShmCache>>) -> Self {
+    pub(crate) fn with_mm_processor_cache(
+        mut self,
+        cache: Option<Arc<MmProcessorShmCache>>,
+    ) -> Self {
         self.mm_processor_cache = cache.map(MmProcessorCache::new);
         self
     }
@@ -686,11 +689,11 @@ impl MultimodalModelInfo {
     /// disabled or the modality bypasses it.
     ///
     /// Budget-sensitive image processors (see
-    /// [`cache::BUDGET_SENSITIVE_PROCESSORS`]) bypass the cache entirely:
-    /// their output depends on the per-request token budget, so cache hits
-    /// would be rare. Their items are always fetched and preprocessed inline.
-    /// Video and audio preprocessors take no request context and always use
-    /// the cache when enabled.
+    /// [`cache::BUDGET_SENSITIVE_PROCESSORS`]) bypass the cache entirely: the
+    /// cache key does not include the per-request token budget, so reusing
+    /// output across budgets would be incorrect. Their items are always
+    /// fetched and preprocessed inline. Video and audio preprocessors take no
+    /// request context and always use the cache when enabled.
     fn mm_cache_for(&self, modality: Modality) -> Option<&MmProcessorCache> {
         let cache = self.mm_processor_cache.as_ref()?;
         if modality == Modality::Image
@@ -735,9 +738,6 @@ impl MultimodalModelInfo {
 /// Text-only requests pass through unchanged as `Prompt::Text`. Multimodal
 /// requests are tokenized in chat, their media placeholders are expanded, and
 /// preprocessed media features are attached for engine-core transport.
-///
-/// `info` selects the multimodal pipeline: the tokenize path passes a
-/// cacheless copy so it never touches the SHM processor cache.
 pub(crate) async fn finalize_rendered_prompt(
     request: &ChatRequest,
     rendered: RenderedPrompt,
@@ -937,9 +937,6 @@ impl MultimodalModelInfo {
     /// this model's supported modalities and item-count limits.
     ///
     /// `prompt_len` must include all expanded multimodal placeholders.
-    ///
-    /// TODO: SHM processor-cache support for preprocessed inputs is future
-    /// work; this path always carries inline feature data.
     pub(crate) fn prepare_preprocessed(
         &self,
         mut features: MmFeatures,
@@ -1024,12 +1021,6 @@ impl MultimodalModelInfo {
     /// `prompt_token_ids` is mutated in place because placeholder expansion
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
-    ///
-    /// The SHM processor cache engagement is a property of `self`: paths that
-    /// never submit to the engine (`/tokenize`) run on a cacheless copy of
-    /// the model info, because no worker would read the shm chunks and cached
-    /// puts would leak writer references (Python uses a separate
-    /// processor-only cache for tokenize).
     ///
     /// `max_model_len`, when known, is the token budget image processors may
     /// size the prompt's images by, less its text tokens. The expanded
@@ -1282,7 +1273,7 @@ impl TokenResolver for TokenizerResolver {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use std::sync::Arc;
 
     use llm_multimodal::TokenId;
@@ -1290,6 +1281,10 @@ pub(crate) mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
+    use crate::ChatRequestProcessor;
+    use crate::backend::{ChatBackend, NewChatOutputProcessorOptions};
+    use crate::output::DynChatOutputProcessor;
+    use crate::renderer::{ChatRenderer, DynChatRenderer};
 
     pub(super) const LLAMA4_IMAGE_START_ID: u32 = 200088;
     pub(super) const LLAMA4_IMAGE_END_ID: u32 = 200089;
@@ -1298,7 +1293,7 @@ pub(crate) mod tests {
     pub(super) const LLAMA4_TILE_X_SEPARATOR_ID: u32 = 200093;
     pub(super) const LLAMA4_TILE_Y_SEPARATOR_ID: u32 = 200094;
 
-    pub(crate) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
+    pub(super) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
     pub(super) const QWEN3_VIDEO_PAD_ID: u32 = 151656;
 
     pub(super) const STEP3_IM_PATCH_ID: u32 = 151680;
@@ -1390,8 +1385,94 @@ pub(crate) mod tests {
         })
     }
 
-    pub(crate) fn qwen3_vl_info() -> MultimodalModelInfo {
+    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
         test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
+    }
+
+    /// Renderer producing one `<|image_pad|>` placeholder for the request's
+    /// single image part.
+    struct PadRenderer;
+
+    impl ChatRenderer for PadRenderer {
+        fn render(&self, _request: &ChatRequest) -> Result<RenderedPrompt> {
+            Ok(RenderedPrompt {
+                prompt: Prompt::Text("a<|image_pad|>b".to_string()),
+                media_order: None,
+                effective_template_kwargs: HashMap::new(),
+            })
+        }
+    }
+
+    struct MmTestBackend {
+        info: MultimodalModelInfo,
+    }
+
+    impl ChatBackend for MmTestBackend {
+        fn chat_renderer(&self) -> DynChatRenderer {
+            Arc::new(PadRenderer)
+        }
+
+        fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
+            Some(&self.info)
+        }
+
+        fn new_chat_output_processor(
+            &self,
+            _request: &mut ChatRequest,
+            _options: NewChatOutputProcessorOptions<'_>,
+        ) -> Result<DynChatOutputProcessor> {
+            Err(Error::ChatTemplate(
+                "test backend has no output processor".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_for_tokenization_bypasses_mm_processor_cache() {
+        use super::cache::{TEST_PNG_BASE64, is_address_item, test_shm_cache};
+
+        let cache = test_shm_cache();
+        let info = qwen3_vl_info().with_mm_processor_cache(Some(Arc::clone(&cache)));
+        let processor = ChatRequestProcessor::new(
+            Arc::new(MmTestBackend { info }),
+            Some(ModelDtype::Float32),
+            Some(4096),
+        );
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user(vec![
+                ChatContentPart::text("describe"),
+                ChatContentPart::ImageUrl {
+                    image_url: format!("data:image/png;base64,{TEST_PNG_BASE64}"),
+                    detail: None,
+                    uuid: None,
+                },
+            ])],
+            ..ChatRequest::for_test()
+        };
+
+        let text_request = processor
+            .prepare_for_tokenization(request)
+            .await
+            .expect("tokenize preparation should succeed");
+        let Prompt::TokenIds(token_ids) = &text_request.prompt else {
+            panic!("multimodal prompts are tokenized in chat");
+        };
+        assert_eq!(token_ids[0], u32::from(b'a'));
+        assert!(
+            token_ids.len() > 3,
+            "the image placeholder should be expanded"
+        );
+        let features = text_request.mm_features.as_ref().expect("mm features");
+        assert_eq!(features.len(), 1);
+        assert!(
+            !is_address_item(features[0].data.as_ref().expect("feature data")),
+            "tokenize must send inline feature data"
+        );
+        assert_eq!(
+            cache.cached_len(),
+            0,
+            "tokenize must not put into the shm cache"
+        );
     }
 
     pub(super) const GLM53_IMAGE_ID: u32 = 154854;

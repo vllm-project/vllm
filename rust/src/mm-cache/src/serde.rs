@@ -10,13 +10,12 @@
 //! `MsgpackDecoder(MultiModalKwargsItem, share_mem=False)`; only the serialize
 //! direction is needed here.
 
-use crate::error::{Error, Result, serialize_msgpack};
 use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
 
 /// Format marker prefixing the msgpack body, detected by
 /// `MsgpackSerde.deserialize`. Pickle protocol >= 2 streams always start with
 /// `\x80` (PROTO), so 0x01 is unambiguous against the legacy format.
-pub(crate) const MM_ITEM_FORMAT_MARKER: u8 = 0x01;
+const MM_ITEM_FORMAT_MARKER: u8 = 0x01;
 
 /// An `io::Write` that only counts bytes, used to size a shm chunk before
 /// serializing into it (no allocation or copying of tensor bytes).
@@ -41,20 +40,23 @@ impl std::io::Write for CountWriter {
 /// Exact serialized length of `[0x01][msgpack body]`, computed by a counting
 /// write pass. Unlike the ZMQ client path, tensors always stay inline in the
 /// body, so no auxiliary frames are needed.
-pub(crate) fn serialized_mm_item_len(item: &MmKwargsItem) -> Result<usize> {
+pub(crate) fn serialized_mm_item_len(
+    item: &MmKwargsItem,
+) -> Result<usize, rmp_serde::encode::Error> {
     let mut counter = CountWriter(0);
-    rmp_serde::encode::write_named(&mut counter, item)
-        .map_err(|error| serialize_msgpack!("{error}"))?;
+    rmp_serde::encode::write_named(&mut counter, item)?;
     Ok(1 + counter.0)
 }
 
 /// Serialize an item as `[0x01][msgpack body]` into `buf`, which must be
 /// exactly `serialized_mm_item_len(item)` bytes.
-pub(crate) fn serialize_mm_item_into(item: &MmKwargsItem, buf: &mut [u8]) -> Result<()> {
+pub(crate) fn serialize_mm_item_into(
+    item: &MmKwargsItem,
+    buf: &mut [u8],
+) -> Result<(), rmp_serde::encode::Error> {
     buf[0] = MM_ITEM_FORMAT_MARKER;
     let mut writer: &mut [u8] = &mut buf[1..];
-    rmp_serde::encode::write_named(&mut writer, item)
-        .map_err(|error| serialize_msgpack!("{error}"))?;
+    rmp_serde::encode::write_named(&mut writer, item)?;
     debug_assert!(writer.is_empty(), "counting pass sized the buffer exactly");
     Ok(())
 }
