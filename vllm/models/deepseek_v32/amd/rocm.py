@@ -341,9 +341,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
-        attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            q_for_attn, kv_cache, attn_metadata, self
-        )
+        attn_out = self._forward_mqa_cp(q_for_attn, kv_cache, attn_metadata)
 
         self._compute_uv_out(attn_out, output, num_actual)
         if self.use_pcp and num_actual < output.shape[0]:
