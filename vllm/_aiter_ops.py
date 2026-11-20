@@ -2336,6 +2336,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
+        VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER: Runs DeepSeek-V4.1's DSpark
+            Markov draft sampling with the FlyDSL kernel (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2413,6 +2415,7 @@ class rocm_aiter_ops:
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
     # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
+    _FLYDSL_MARKOV_SAMPLER = envs.VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2446,6 +2449,7 @@ class rocm_aiter_ops:
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
             envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
         )
+        cls._FLYDSL_MARKOV_SAMPLER = envs.VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -4194,6 +4198,32 @@ class rocm_aiter_ops:
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
+    @functools.cache
+    def _flydsl_markov_sampler_module() -> Any | None:
+        try:
+            return importlib.import_module("aiter.ops.flydsl.markov_chain_sample")
+        except Exception as e:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER is set, but the AITER "
+                "FlyDSL Markov sampler could not be imported (%s); using vLLM's "
+                "DSpark Markov sampling.",
+                e,
+            )
+            return None
+
+    @classmethod
+    @if_aiter_supported
+    def flydsl_markov_sampler(cls) -> Any | None:
+        """The `aiter.ops.flydsl.markov_chain_sample` module if
+        VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER is on, this is gfx950 and it
+        imports, else None."""
+        from vllm.platforms.rocm import on_gfx950
+
+        if not (cls._AITER_ENABLED and cls._FLYDSL_MARKOV_SAMPLER and on_gfx950()):
+            return None
+        return cls._flydsl_markov_sampler_module()
 
     @staticmethod
     @functools.cache

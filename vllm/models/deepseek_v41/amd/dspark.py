@@ -11,6 +11,7 @@ include the future query tokens in the top-k indices for each query token.
 """
 
 from collections.abc import Iterable
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -54,7 +55,7 @@ from .model import (
 )
 from .mono_decode import flush as mono_flush
 from .mono_decode import link_layers
-from .ops import draft_lm_head
+from .ops import aiter_markov, draft_lm_head
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
@@ -313,6 +314,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     draft_id_to_target_id = None
 
     packed_modules_mapping = DeepseekV41LLMForCausalLM.packed_modules_mapping
+    # The AITER Markov sampler op module, decided on the first draft step
+    # (_aiter_markov_sampler).
+    _aiter_markov: ModuleType | None = None
+    _aiter_markov_resolved = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -408,10 +413,60 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         --monokernel on gfx942 each Markov step is one launch
         (ops/fused_markov.py), and this returns True. For a step that the
         fused launches do not take, it returns False, having done nothing,
-        and the speculator runs its own loop."""
+        and the speculator runs its own loop. That loop asks
+        sample_markov_chain below, so the AITER sampler, when it is on, takes
+        precedence over the fused launches."""
+        if self._aiter_markov_sampler(speculator) is not None:
+            return False
         from .ops import fused_markov
 
         return fused_markov.sample_sequential(speculator, num_reqs, head_hidden)
+
+    def sample_markov_chain(
+        self,
+        speculator: "DSparkSpeculator",
+        base_logits: torch.Tensor,
+        prev: torch.Tensor,
+        idx_map: torch.Tensor,
+        sample_pos: torch.Tensor,
+        out_tokens: torch.Tensor,
+        *,
+        prev_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        """DSparkSpeculator._sample_markov_chain asks this first. With
+        VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER on gfx950, AITER's FlyDSL
+        kernel runs all draft steps in one launch (ops/aiter_markov.py) and
+        this returns empty `[rows, steps, 0]` Markov embeddings: the kernel
+        does not serve a confidence head, the only reader. Returns None,
+        having done nothing, when the speculator must run its own loop."""
+        flydsl = self._aiter_markov_sampler(speculator)
+        if flydsl is None or not aiter_markov.sample_markov_chain(
+            flydsl,
+            speculator,
+            self,
+            base_logits,
+            prev,
+            idx_map,
+            sample_pos,
+            out_tokens,
+            prev_indices,
+        ):
+            return None
+        return base_logits.new_empty(*base_logits.shape[:2], 0)
+
+    def _aiter_markov_sampler(
+        self, speculator: "DSparkSpeculator"
+    ) -> ModuleType | None:
+        """The AITER Markov sampler op module for this speculator, or None.
+        Decided on the first draft step, which runs eagerly (memory profiling)
+        before any CUDA graph capture."""
+        if not self._aiter_markov_resolved:
+            if torch.cuda.is_current_stream_capturing():
+                # Resolving compiles kernels and allocates their workspace.
+                return None
+            self._aiter_markov = aiter_markov.resolve(speculator, self)
+            self._aiter_markov_resolved = True
+        return self._aiter_markov
 
     # --- Weight loading ----------------------------------------------------
 

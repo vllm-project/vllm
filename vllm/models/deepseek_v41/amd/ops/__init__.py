@@ -11,7 +11,10 @@ attention metadata, `fused_markov` is DSpark's Markov sampling in one
 launch, and `draft_lm_head` keeps the DSpark draft's 5-row logits GEMM off
 wvSplitK. All of them run only when `enabled()` is true, except
 `swa_decode_meta` and `fused_markov`, which run when
-`monokernel_cdna3_or_4()` is true.
+`monokernel_cdna3_or_4()` is true. `aiter_markov` runs the Markov sampling
+with AITER's FlyDSL kernel on gfx950 when
+VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER is set, with or without
+--monokernel.
 """
 
 import functools
