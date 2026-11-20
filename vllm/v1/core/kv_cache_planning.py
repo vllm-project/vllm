@@ -1631,6 +1631,24 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
+def _layer_config_field_diff(
+    first: "KVCacheLayerConfig", second: "KVCacheLayerConfig"
+) -> dict[str, tuple[object, object]]:
+    """Fields that differ between two layer configs, as name -> (first, second).
+
+    Worker-local sizing can make the same layer disagree; a bare "the configs are
+    different" leaves the reader to guess which field moved, so name them.
+    """
+    fields = getattr(first, "__dataclass_fields__", None)
+    if fields is None:
+        return {"config": (first, second)}
+    return {
+        name: (getattr(first, name), getattr(second, name))
+        for name in fields
+        if getattr(first, name) != getattr(second, name)
+    }
+
+
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
@@ -1647,10 +1665,14 @@ def get_global_kv_cache_groups(
             if layer_name not in merged_layer_configs:
                 merged_layer_configs[layer_name] = layer_config
             else:
-                assert merged_layer_configs[layer_name] == layer_config, (
-                    "The KV cache configs for the same layer are different "
-                    "across workers. This is not supported yet."
-                )
+                existing = merged_layer_configs[layer_name]
+                if existing != layer_config:
+                    raise AssertionError(
+                        "The KV cache configs for the same layer are different "
+                        "across workers. This is not supported yet. "
+                        f"layer={layer_name!r}, differing fields="
+                        f"{_layer_config_field_diff(existing, layer_config)}"
+                    )
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every sliding window with how many extra tokens to retain in the window.
