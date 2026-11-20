@@ -1381,8 +1381,7 @@ def test_tokenspeed_mla_decode_contract(
     impl.qk_rope_head_dim = qk_rope_head_dim
     impl.num_heads = num_heads
     impl.scale = 1.0
-    impl.softmax_scale = 1.0
-    impl.output_scale = 1.0
+    impl.kv_cache_dtype = "fp8"
     impl._min_split_kv = min_split_kv
     impl._max_decode_tokens = num_decode_tokens
     workspace = torch.empty(1, dtype=torch.int8)
@@ -1550,8 +1549,7 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(
         impl.qk_rope_head_dim = qk_rope_head_dim
         impl.num_heads = num_heads
         impl.scale = head_size**-0.5
-        impl.softmax_scale = None
-        impl.output_scale = None
+        impl.kv_cache_dtype = "fp8"
         impl._min_split_kv = 1
         impl._max_decode_tokens = query.shape[1]
         metadata = SimpleNamespace(
