@@ -57,6 +57,33 @@ def test_mm_hasher_algorithm_invalid():
         MultiModalConfig(mm_hasher_algorithm="md5")
 
 
+def test_mm_shm_cache_buffer_name_default_is_unique_and_short(monkeypatch):
+    monkeypatch.delenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", raising=False)
+    names = [MultiModalConfig().mm_shm_cache_buffer_name for _ in range(2)]
+
+    assert names[0] != names[1]
+    assert all(name.startswith("vllm_mm_") and len(name) <= 30 for name in names)
+
+
+def test_mm_shm_cache_buffer_name_deprecated_env(monkeypatch, caplog_vllm):
+    monkeypatch.setenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "legacy_mm_buffer")
+
+    config = MultiModalConfig()
+
+    assert config.mm_shm_cache_buffer_name == "legacy_mm_buffer"
+    assert "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME" in caplog_vllm.text
+    assert "mm_shm_cache_buffer_name" in caplog_vllm.text
+    assert "v0.36.0" in caplog_vllm.text
+
+
+def test_mm_shm_cache_buffer_name_explicit_overrides_deprecated_env(monkeypatch):
+    monkeypatch.setenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "legacy_mm_buffer")
+
+    config = MultiModalConfig(mm_shm_cache_buffer_name="custom_mm_buffer")
+
+    assert config.mm_shm_cache_buffer_name == "custom_mm_buffer"
+
+
 def test_mm_encoder_attn_backend_hash_updates():
     base_hash = hash_config(MultiModalConfig())
     overridden_hash = hash_config(
