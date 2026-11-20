@@ -329,6 +329,13 @@ class Attention(nn.Module, AttentionLayerBase):
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
 
+        if (
+            cache_config is not None
+            and sliding_window is not None
+            and cache_config.sliding_window_cache_dtype is not None
+        ):
+            kv_cache_dtype = cache_config.sliding_window_cache_dtype
+
         # Skip quantization for specified layers
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
             from vllm.model_executor.models.utils import extract_layer_index

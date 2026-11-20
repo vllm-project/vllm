@@ -1384,6 +1384,11 @@ def test_daemon_reports_exported_weight_bytes():
         ("auto", ["1", "2"], ["kv_cache_dtype"]),
         ("fp8", ["1"], ["kv_cache_dtype_skip_layers"]),
         ("fp8", ["2", "1", "2"], []),
+        (
+            "nvfp4_swa_fp8",
+            ["1", "2"],
+            ["kv_cache_dtype", "sliding_window_cache_dtype"],
+        ),
     ],
 )
 def test_ipc_cache_key_tracks_kv_quantization(

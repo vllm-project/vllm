@@ -818,7 +818,10 @@ class Platform:
         # Phase 3: Align block/page sizes when multiple KV dtypes share the
         # block pool (e.g. nvfp4 primary + unquantized skip layers).
         # May override the user's --block-size.
-        if cache_config.kv_cache_dtype_skip_layers:
+        if (
+            cache_config.kv_cache_dtype_skip_layers
+            or cache_config.sliding_window_cache_dtype is not None
+        ):
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
         cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
 
@@ -912,6 +915,14 @@ class Platform:
         padded_pages: list[int] = []
         if cache_config.kv_cache_dtype_skip_layers:
             padded_pages.append(per_token_page_bytes(model_config.dtype, "auto"))
+        sliding_window_dtype = cache_config.sliding_window_cache_dtype
+        if sliding_window_dtype is not None:
+            padded_pages.append(
+                per_token_page_bytes(
+                    STR_DTYPE_TO_TORCH_DTYPE[sliding_window_dtype],
+                    sliding_window_dtype,
+                )
+            )
         # To add the first/last-N sibling:
         #   padded_pages.append(per_token_page_bytes(<sibling_dtype>, "auto"))
         if not padded_pages:
@@ -958,7 +969,12 @@ class Platform:
 
         # The shared page that every padded spec (and mamba) pads up to.
         shared_page = cache_config.block_size * primary_page
-        if cache_config.kv_cache_dtype_skip_layers:
+        # Sliding-window specs pad to `skip_page_size_padded` (see
+        # `Attention.get_kv_cache_config`), so it also covers their own dtype.
+        if (
+            cache_config.kv_cache_dtype_skip_layers
+            or cache_config.sliding_window_cache_dtype is not None
+        ):
             cache_config.skip_page_size_padded = shared_page
         # To add the first/last-N sibling:
         #   cache_config.sibling_page_size_padded = shared_page

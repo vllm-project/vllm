@@ -111,6 +111,34 @@ def test_cache_config_accepts_custom_dtype():
         CacheConfig(cache_dtype="not-a-dtype")
 
 
+@pytest.mark.parametrize(
+    ("recipe", "full_attention_dtype"),
+    [("nvfp4_swa_fp8", "nvfp4"), ("nvfp4_4over6_swa_fp8", "nvfp4_4over6")],
+)
+def test_cache_config_expands_kv_cache_dtype_recipe(recipe, full_attention_dtype):
+    """A recipe splits into full-attention and sliding-window dtypes, and
+    leaves layer-index skip layers alone."""
+    cache_config = CacheConfig(cache_dtype=recipe, kv_cache_dtype_skip_layers=["0"])
+    assert cache_config.cache_dtype == full_attention_dtype
+    assert cache_config.sliding_window_cache_dtype == "fp8"
+    assert cache_config.kv_cache_dtype_skip_layers == ["0"]
+
+
+def test_kv_cache_dtype_recipe_rejects_sliding_window_skip_layers():
+    """The recipe already sets the sliding-window dtype."""
+    with pytest.raises(ValueError, match="cannot be combined"):
+        CacheConfig(
+            cache_dtype="nvfp4_swa_fp8",
+            kv_cache_dtype_skip_layers=["sliding_window"],
+        )
+
+
+def test_sliding_window_cache_dtype_is_only_set_by_recipes():
+    assert CacheConfig(cache_dtype="nvfp4").sliding_window_cache_dtype is None
+    with pytest.raises(ValueError, match="sliding_window_cache_dtype"):
+        CacheConfig(sliding_window_cache_dtype="fp8")  # type: ignore[call-arg]
+
+
 def test_backend_sentinel_properties():
     """CUSTOM reads as quantized but matches no generic kernel mode."""
     mode = KVQuantMode.CUSTOM

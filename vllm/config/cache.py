@@ -65,6 +65,10 @@ CacheDType = Literal[
     "nvfp4",
     "nvfp4_4over6",
     "mxfp4_mla",
+    # Recipes expanded by `CacheConfig` into per-attention-type dtypes; see
+    # `KV_CACHE_DTYPE_RECIPES`.
+    "nvfp4_swa_fp8",
+    "nvfp4_4over6_swa_fp8",
 ]
 
 # Mutable mirror of the CacheDType Literal. Custom dtypes registered by
@@ -173,6 +177,15 @@ def is_known_kv_cache_dtype(name: str) -> bool:
     return name in KV_CACHE_DTYPES
 
 
+# `--kv-cache-dtype` recipes: name -> (full-attention dtype, sliding-window
+# dtype). The full-attention dtype must be the more compressed one, since
+# sliding-window pages are padded up to the full-attention page.
+KV_CACHE_DTYPE_RECIPES: dict[str, tuple[CacheDType, CacheDType]] = {
+    "nvfp4_swa_fp8": ("nvfp4", "fp8"),
+    "nvfp4_4over6_swa_fp8": ("nvfp4_4over6", "fp8"),
+}
+
+
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
@@ -255,6 +268,8 @@ class CacheConfig:
     to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
+    "nvfp4_swa_fp8" and "nvfp4_4over6_swa_fp8" store full-attention layers in
+    "nvfp4" / "nvfp4_4over6" and sliding-window layers in "fp8".
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
@@ -293,6 +308,10 @@ class CacheConfig:
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
+    sliding_window_cache_dtype: CacheDType | None = field(default=None, init=False)
+    """KV cache dtype of sliding-window layers; `None` follows `cache_dtype`.
+    Set only by the `KV_CACHE_DTYPE_RECIPES` recipes. Layers in
+    `kv_cache_dtype_skip_layers` keep the model dtype regardless."""
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
@@ -494,6 +513,28 @@ class CacheConfig:
             self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
             self.user_specified_block_size = True
+        return self
+
+    @model_validator(mode="after")
+    def _expand_kv_cache_dtype_recipe(self) -> "CacheConfig":
+        recipe = KV_CACHE_DTYPE_RECIPES.get(self.cache_dtype)
+        if recipe is None:
+            return self
+        if "sliding_window" in self.kv_cache_dtype_skip_layers:
+            raise ValueError(
+                f"--kv-cache-dtype {self.cache_dtype} sets the sliding-window "
+                "KV cache dtype; it cannot be combined with "
+                "--kv-cache-dtype-skip-layers sliding_window."
+            )
+        full_attention_dtype, sliding_window_dtype = recipe
+        # object.__setattr__ avoids re-triggering pydantic validation.
+        object.__setattr__(self, "cache_dtype", full_attention_dtype)
+        object.__setattr__(self, "sliding_window_cache_dtype", sliding_window_dtype)
+        logger.info(
+            "Expanded kv-cache recipe to cache_dtype=%s, sliding_window_cache_dtype=%s",
+            self.cache_dtype,
+            self.sliding_window_cache_dtype,
+        )
         return self
 
     @property

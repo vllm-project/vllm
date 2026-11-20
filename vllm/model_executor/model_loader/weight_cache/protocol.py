@@ -359,6 +359,7 @@ class WeightCacheKey:
     repacked), so weights processed for one backend are wrong for another."""
     linear_backend: str = "auto"
     linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
+    sliding_window_cache_dtype: str | None = None
 
     @classmethod
     def from_model_config(
@@ -414,6 +415,7 @@ class WeightCacheKey:
             kv_cache_dtype_skip_layers=tuple(
                 sorted(set(cache_config.kv_cache_dtype_skip_layers))
             ),
+            sliding_window_cache_dtype=cache_config.sliding_window_cache_dtype,
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,

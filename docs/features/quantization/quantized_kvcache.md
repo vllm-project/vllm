@@ -68,6 +68,22 @@ llm = LLM(
 )
 ```
 
+### NVFP4 Full Attention with FP8 Sliding Window
+
+For models that interleave full-attention and sliding-window layers, two `--kv-cache-dtype` recipes store full-attention layers in NVFP4 and sliding-window layers in FP8. They require SM100 GPUs with the FlashInfer TRT-LLM attention path, like NVFP4 KV cache on its own.
+
+```bash
+# Full-attention layers: nvfp4. Sliding-window layers: fp8.
+vllm serve <model> --kv-cache-dtype nvfp4_swa_fp8
+
+# Full-attention layers: nvfp4_4over6. Sliding-window layers: fp8.
+vllm serve <model> --kv-cache-dtype nvfp4_4over6_swa_fp8
+```
+
+Layers passed to `--kv-cache-dtype-skip-layers` keep the model's native dtype under a recipe. A recipe cannot be combined with `--kv-cache-dtype-skip-layers sliding_window`, since the recipe already sets the sliding-window dtype.
+
+All KV cache groups share one page size in bytes, so each FP8 sliding-window page holds as many tokens as fit in the NVFP4 full-attention page and is padded up to it. With the default block size, this costs about 11% of the sliding-window KV memory for 128-dim heads. An explicit `--block-size` smaller than the FP8 page at FlashInfer's smallest kernel block (16 tokens) is raised to fit it.
+
 ---
 
 ## Examples

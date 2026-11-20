@@ -123,6 +123,73 @@ def test_sliding_window_spec_unifies_without_padding(primary_block_size):
 
 
 @pytest.mark.parametrize(
+    ("block_size", "full_block_size", "sw_block_size"),
+    [
+        # 64 NVFP4 tokens already cover a 16-token FP8 page.
+        (None, 64, 32),
+        # 16 NVFP4 tokens (9216 B) do not; the full-attention block grows.
+        (16, 32, 16),
+    ],
+)
+def test_kv_cache_dtype_recipe_pads_sliding_window_to_full_page(
+    block_size, full_block_size, sw_block_size
+):
+    """Under nvfp4_swa_fp8, FP8 sliding-window pages pad up to the NVFP4
+    full-attention page, so both groups share one page size."""
+    from vllm.config import CacheConfig
+    from vllm.platforms.interface import Platform
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    backend = SimpleNamespace(
+        is_mla=lambda: False,
+        customize_spec=FlashInferBackend.customize_spec,
+        get_supported_kernel_block_sizes=lambda kv_cache_spec=None: [16, 32, 64],
+        get_supported_kernel_block_sizes_for_layers=lambda *_: [16, 32, 64],
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=CacheConfig(cache_dtype="nvfp4_swa_fp8", block_size=block_size),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            get_num_kv_heads=lambda parallel_config: 4,
+            get_head_size=lambda: 128,
+        ),
+        parallel_config=None,
+        speculative_config=None,
+    )
+    Platform._align_heterogeneous_kv_block_size(vllm_config, backend)
+    assert vllm_config.cache_config.block_size == full_block_size
+
+    sw_layer = SimpleNamespace(
+        attn_type=AttentionType.DECODER,
+        kv_cache_dtype="fp8",
+        kv_cache_torch_dtype=torch.float8_e4m3fn,
+        sliding_window=4096,
+        attn_backend=backend,
+        num_kv_heads=4,
+        head_size=128,
+        head_size_v=128,
+        layer_name="layer.1",
+        is_draft_layer=False,
+    )
+    sw_config = Attention.get_kv_cache_config(sw_layer, vllm_config)
+    assert sw_config is not None
+    full_spec = FlashInferBackend.customize_spec(
+        AttentionSpec(
+            block_size=full_block_size,
+            num_kv_heads=4,
+            head_size=128,
+            dtype=torch.uint8,
+            kv_quant_mode=get_kv_quant_mode("nvfp4"),
+        )
+    )
+    unified = unify_kv_cache_spec_page_size(
+        {"sw": sw_config, "full": FullAttentionManager.layer_config(full_spec)}
+    )
+    assert unified["sw"].spec.block_size == sw_block_size
+    assert unified["sw"].spec.page_size_bytes == full_spec.page_size_bytes
+
+
+@pytest.mark.parametrize(
     "signals,expected",
     [
         (dict(use_mla=False, has_sliding_window=False), "full"),

@@ -100,6 +100,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
+    get_kv_quant_mode,
     is_quantized_kv_cache,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -1242,7 +1243,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _resolve_cache_dtype(self) -> str:
         cache_dtype = self.cache_config.cache_dtype
-        if cache_dtype != "auto":
+        # A group whose quant mode differs from `cache_dtype` (e.g. FP8
+        # sliding-window layers under `nvfp4_swa_fp8`) takes its layers' dtype.
+        if (
+            cache_dtype != "auto"
+            and get_kv_quant_mode(cache_dtype) == self.kv_cache_spec.kv_quant_mode
+        ):
             return cache_dtype
 
         layer_cache_dtype = get_kv_cache_dtype_from_layers(
