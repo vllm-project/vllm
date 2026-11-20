@@ -442,6 +442,7 @@ async def test_derender_chat_metrics_passthrough(client):
     actual = response.json()["metrics"]
     assert set(actual) == {
         "time_to_first_token_ms",
+        "time_to_first_content_token_ms",
         "generation_time_ms",
         "queue_time_ms",
         "mean_itl_ms",
