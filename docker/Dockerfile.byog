@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Multi-stage BYOG image:
+#   Stage `byog-tools`: builds a self-contained Python 3.12.13 runtime + BYOG CLI
+#       and plugins in /opt/byog. Rebuild only when tools/byog/ changes.
+#   Stage `byog`: assembles /opt/byog onto an explicit VLLM_BASE_IMAGE (no :latest
+#       default) from the local `byog-tools` stage.
+#   Stage `byog-prebuilt`: assembles /opt/byog from a prebuilt `BYOG_TOOLS_IMAGE`
+#       onto `VLLM_BASE_IMAGE` for fast PR assembly without rebuilding tool deps.
+#
+# Example (fast PR assembly reusing prebuilt tools image):
+#   docker build -f docker/Dockerfile.byog --target byog-tools -t byog-tools:ci .
+#   docker build -f docker/Dockerfile.byog --target byog-prebuilt \
+#       --build-arg VLLM_BASE_IMAGE=public.ecr.aws/.../vllm-ci@sha256:... \
+#       --build-arg BYOG_TOOLS_IMAGE=byog-tools:ci \
+#       --build-arg VLLM_COMMIT=<git-sha> \
+#       -t byog:ci .
+
+ARG PYTHON_IMAGE=python:3.12.13-slim
+ARG PYTHON_VERSION=3.12.13
+ARG UV_VERSION=0.6.14
+ARG VLLM_BASE_IMAGE=vllm-base-image-must-be-set-via-build-arg
+ARG BYOG_TOOLS_IMAGE=byog-tools
+ARG VLLM_COMMIT=""
+
+#################### STAGE 1: PREBUILT BYOG-TOOLS ####################
+FROM ${PYTHON_IMAGE} AS byog-tools
+
+ARG PYTHON_VERSION
+ARG UV_VERSION
+
+ENV UV_PYTHON_INSTALL_DIR=/opt/byog/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+WORKDIR /opt/byog
+COPY tools/byog/requirements.lock /opt/byog/requirements.lock
+RUN uv python install "${PYTHON_VERSION}" && \
+    uv venv /opt/byog/venv --python "${PYTHON_VERSION}" && \
+    uv pip install --python /opt/byog/venv/bin/python --no-cache -r /opt/byog/requirements.lock
+
+COPY tools/byog /opt/byog/src/tools/byog
+COPY tests/byog /opt/byog/src/tests/byog
+
+RUN mkdir -p /opt/byog/bin && \
+    printf '%s\n' \
+      '#!/usr/bin/env bash' \
+      'set -euo pipefail' \
+      'export PYTHONPATH="/opt/byog/src${PYTHONPATH:+:$PYTHONPATH}"' \
+      'exec /opt/byog/venv/bin/python -m tools.byog "$@"' \
+      > /opt/byog/bin/byog && \
+    chmod +x /opt/byog/bin/byog && \
+    /opt/byog/venv/bin/python -c 'import hashlib, json, pathlib; p = pathlib.Path("/opt/byog/requirements.lock"); pathlib.Path("/opt/byog/build-manifest.json").write_text(json.dumps({"python_version": "'"${PYTHON_VERSION}"'", "uv_version": "'"${UV_VERSION}"'", "requirements_lock_sha256": hashlib.sha256(p.read_bytes()).hexdigest()}, indent=2, sort_keys=True) + "\n")'
+
+#################### STAGE 2A: ASSEMBLED FROM LOCAL TOOLS ####################
+FROM ${VLLM_BASE_IMAGE} AS byog
+
+ARG VLLM_BASE_IMAGE
+ARG VLLM_COMMIT
+
+ENV BYOG_IMAGE="${VLLM_BASE_IMAGE}" \
+    BYOG_VLLM_COMMIT="${VLLM_COMMIT}"
+
+COPY --from=byog-tools /opt/byog /opt/byog
+RUN ln -sf /opt/byog/bin/byog /usr/local/bin/byog
+
+ENTRYPOINT []
+CMD ["byog", "--help"]
+
+#################### STAGE 2B: ASSEMBLED FROM PREBUILT TOOLS IMAGE ####################
+FROM ${BYOG_TOOLS_IMAGE} AS prebuilt-tools
+
+FROM ${VLLM_BASE_IMAGE} AS byog-prebuilt
+
+ARG VLLM_BASE_IMAGE
+ARG VLLM_COMMIT
+
+ENV BYOG_IMAGE="${VLLM_BASE_IMAGE}" \
+    BYOG_VLLM_COMMIT="${VLLM_COMMIT}"
+
+COPY --from=prebuilt-tools /opt/byog /opt/byog
+RUN ln -sf /opt/byog/bin/byog /usr/local/bin/byog
+
+ENTRYPOINT []
+CMD ["byog", "--help"]

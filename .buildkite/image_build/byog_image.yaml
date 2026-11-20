@@ -1,0 +1,31 @@
+group: Abuild
+steps:
+  - label: ":docker: Build & Smoke Test BYOG Image (byog-tools + byog-prebuilt)"
+    key: byog-image-smoke
+    depends_on:
+      - image-build
+    timeout_in_minutes: 25
+    source_file_dependencies:
+      - tools/byog/
+      - tests/byog/
+      - docker/Dockerfile.byog
+      - .buildkite/image_build/byog_image.yaml
+    env:
+      DOCKER_BUILDKIT: "1"
+    commands:
+      - docker build -f docker/Dockerfile.byog --target byog-tools -t "byog-tools:${BUILDKITE_COMMIT}" .
+      - |
+        docker build -f docker/Dockerfile.byog --target byog-prebuilt \
+          --build-arg VLLM_BASE_IMAGE="$IMAGE_TAG" \
+          --build-arg BYOG_TOOLS_IMAGE="byog-tools:${BUILDKITE_COMMIT}" \
+          --build-arg VLLM_COMMIT="$BUILDKITE_COMMIT" \
+          -t "byog-smoke:${BUILDKITE_COMMIT}" .
+      - docker run --rm "byog-smoke:${BUILDKITE_COMMIT}" byog catalog list
+      - docker run --rm "byog-smoke:${BUILDKITE_COMMIT}" byog validate --spec /opt/byog/src/tests/byog/fixtures/smoke_gpu_spec.yaml
+      - docker run --rm "byog-smoke:${BUILDKITE_COMMIT}" cat /opt/byog/build-manifest.json
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
