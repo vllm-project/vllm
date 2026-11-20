@@ -48,6 +48,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    _Glm5NextMergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -57,7 +58,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
-from vllm.models.glm5next.common.kda import _Glm5NextMergedColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
