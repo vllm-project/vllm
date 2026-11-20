@@ -115,8 +115,9 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
                 "DFly draft and target must use the same MLA KV cache dtype; "
                 "omit speculative_config.kv_cache_dtype to inherit the target"
             )
-        if vllm_config.kv_transfer_config is not None:
-            raise ValueError("DFly does not support PD disaggregation")
+        kv_transfer = vllm_config.kv_transfer_config
+        if kv_transfer is not None and kv_transfer.kv_connector != "HiSparseConnector":
+            raise ValueError("DFly supports only the HiSparseConnector KV connector")
         if (
             vllm_config.lora_config is not None
             or vllm_config.parallel_config.use_ubatching
