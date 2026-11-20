@@ -59,6 +59,7 @@ CacheDType = Literal[
     "octave_k3v3",
     "octave_k3v3_compact",
     "ultraquant_4bit",
+    "kitty",
     "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",

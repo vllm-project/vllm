@@ -77,6 +77,11 @@ class AttentionConfig:
     Fixes the split count so grid dimensions are constant across captures,
     and buffers can be pre-allocated to avoid inflating the memory estimate."""
 
+    kitty_boost_ratio: float = Field(default=0.25, ge=0.0, le=1.0)
+    """Fraction of key channels that Kitty (`--kv-cache-dtype kitty`) stores
+    in 4 bits instead of 2 in each 128-token page, chosen per page and KV head
+    by mean absolute value. The boosted count is `int(head_size * ratio)`."""
+
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
