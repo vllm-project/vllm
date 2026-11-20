@@ -3,8 +3,8 @@
 """Daemon-to-daemon weight shard seeding (movers, the seedable, the peer loader)."""
 
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+    MOONCAKE_BACKEND,
     PEER_IPC_BACKEND,
-    RDMA_BACKEND,
     WeightMover,
     get_mover,
 )
@@ -20,7 +20,7 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
 
 __all__ = [
     "PEER_IPC_BACKEND",
-    "RDMA_BACKEND",
+    "MOONCAKE_BACKEND",
     "WeightMover",
     "WeightShardSeed",
     "build_manifest",

@@ -141,9 +141,7 @@ TEST_CASES = [
 ]
 
 # Global tokenizer initialization to avoid repeated loading
-tokenizer = AutoTokenizer.from_pretrained(
-    "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
-)
+tokenizer = AutoTokenizer.from_pretrained("tencent/Hunyuan-A13B-Instruct")
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)

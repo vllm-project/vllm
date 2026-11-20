@@ -9,6 +9,7 @@ from transformers import Llama4Config
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
@@ -54,3 +55,49 @@ def test_profiling(model_id: str, max_model_len: int):
     assert total_tokens == sum(
         placeholder.length for placeholder in mm_inputs["mm_placeholders"]["image"]
     )
+
+
+@pytest.mark.parametrize("model_id", ["meta-llama/Llama-Guard-4-12B"])
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [
+        {},
+        {"max_patches": 8},
+        {"images_kwargs": {"max_patches": 4}},
+    ],
+)
+@pytest.mark.parametrize("kwargs_on_init", [True, False])
+def test_processor_override(
+    image_assets: ImageTestAssets,
+    model_id: str,
+    mm_processor_kwargs: dict[str, object],
+    kwargs_on_init: bool,
+):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
+
+    prompt = processor.dummy_inputs.get_dummy_text({"image": 1}) + "Describe."
+    mm_data = {"image": [image_assets[0].pil_image.resize((1024, 768))]}
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    )
+
+    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    hf_processed_inputs = hf_processor(
+        text=prompt,
+        images=mm_data["image"],
+        **processor.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs),
+    )
+    assert processed_inputs["prompt_token_ids"] == hf_processed_inputs["input_ids"][0]
+
+    mm_kwargs = processed_inputs["mm_kwargs"].get_data()
+    patches_per_image = mm_kwargs["patches_per_image"]
+    assert isinstance(patches_per_image, torch.Tensor)
+    assert patches_per_image.sum() == len(mm_kwargs["pixel_values"])

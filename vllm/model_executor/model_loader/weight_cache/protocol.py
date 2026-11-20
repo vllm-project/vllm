@@ -83,7 +83,7 @@ class UnsupportedPlatformForIPCError(Exception):
 def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
-    Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
+    Only CUDA/ROCm tensors get a real IPC handle from `TensorEntry`; other
     platforms (e.g. XPU) would silently ship every tensor by value instead.
 
     Raises:
@@ -126,7 +126,7 @@ def check_ipc_quant_support(model: torch.nn.Module) -> None:
 
     Raises:
         UnsupportedQuantForIPCError: If any quant method does not declare
-            ``supports_pre_processed_weights``.
+            `supports_pre_processed_weights`.
 
     """
     for name, module in model.named_modules():
@@ -166,7 +166,7 @@ def get_socket_path(
     *,
     is_draft: bool = False,
 ) -> str:
-    """Socket path of a daemon group; ``is_draft=False`` is the target.
+    """Socket path of a daemon group; `is_draft=False` is the target.
 
     The GPU uuid is hashed to keep the name well under the AF_UNIX path
     limit (~108 bytes) even with the draft role suffix.
@@ -195,7 +195,7 @@ def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None
 def verify_private_dir(directory: str, strict_perms: bool = True) -> None:
     """Verify a directory is a real dir owned by us and not world/group readable.
 
-    When ``strict_perms`` is False the group/world permission bits are not
+    When `strict_perms` is False the group/world permission bits are not
     checked; this is used for directories the operator explicitly configured
     (they own the trust decision), while the auto-derived per-user directory is
     always checked strictly.
@@ -328,7 +328,7 @@ def hash_checkpoint(model: str) -> str | None:
     return hasher.hexdigest()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WeightCacheKey:
     """Fingerprint of the cached weights.
 
@@ -395,6 +395,9 @@ class WeightCacheKey:
         quant_config = getattr(hf_config, "quantization_config", None)
         checkpoint = hash_checkpoint(model_config.model) or model_config.model
         kernel_config = kernel_config or KernelConfig()
+        linear_backend_per_quant = tuple(
+            sorted((kernel_config.linear_backend_per_quant or {}).items())
+        )
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -422,9 +425,7 @@ class WeightCacheKey:
             expert_placement_strategy=expert_placement_strategy,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
-            linear_backend_per_quant=tuple(
-                sorted((kernel_config.linear_backend_per_quant or {}).items())
-            ),
+            linear_backend_per_quant=linear_backend_per_quant,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -439,7 +440,7 @@ TensorKind = Literal["param", "buffer"]
 """Whether a cached tensor is a model parameter or a buffer."""
 
 
-@dataclass
+@dataclass(slots=True)
 class TensorEntry:
     """A single cached tensor.
 
@@ -459,17 +460,15 @@ class TensorEntry:
             return cls(kind=kind, ipc_args=ipc_args)
         return cls(kind=kind, cpu_tensor=tensor.cpu())
 
-    def rebuild(self, device_index: int, *, retarget: bool = True) -> torch.Tensor:
+    def rebuild(self, device_index: int) -> torch.Tensor:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             return self.cpu_tensor
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
         # be retargeted to the local index since the daemon and the engine may
-        # have different CUDA_VISIBLE_DEVICES mappings. A seeding daemon
-        # instead leaves it at the source index while opening a peer handle.
-        if retarget:
-            args[6] = device_index
+        # have different CUDA_VISIBLE_DEVICES mappings.
+        args[6] = device_index
         return rebuild_cuda_tensor(*args)
 
 
@@ -485,7 +484,7 @@ class WeightCacheState(NamedTuple):
 
 
 def parse_seed_address(address: str) -> str | tuple[str, int]:
-    """Split a seed address into a Unix socket path or a ``(host, port)``."""
+    """Split a seed address into a Unix socket path or a `(host, port)`."""
     if "/" in address or ":" not in address:
         return os.path.expanduser(address)
     return split_host_port(address)
@@ -543,7 +542,7 @@ def recv_json(
     Args:
         sock: Connected socket.
         max_size: Largest payload accepted.
-        deadline: ``time.monotonic()`` by which the whole message must have
+        deadline: `time.monotonic()` by which the whole message must have
             arrived; a per-read timeout alone lets a peer trickle bytes
             forever.
 

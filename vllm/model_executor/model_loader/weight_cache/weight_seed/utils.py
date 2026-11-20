@@ -4,16 +4,17 @@
 
 import socket
 from collections.abc import Mapping
+from dataclasses import fields
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import torch
+from pydantic import TypeAdapter
 
 from vllm.config import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorKind,
     WeightCacheKey,
-    json_to_dataclass,
     parse_seed_address,
     recv_msg,
     send_msg,
@@ -34,23 +35,23 @@ _CONNECT_TIMEOUT_S = 5.0
 
 
 class WeightsSeedPayload(TypedDict):
-    """What a source daemon's ``weights`` resolve sends to a peer loader."""
+    """What a source daemon's `weights` resolve sends to a peer loader."""
 
     cache_config: dict[str, Any]
-    """``dataclass_to_json(WeightCacheKey)`` of the source's shard."""
+    """`asdict(WeightCacheKey)` of the source's shard."""
     model: str
     manifest: dict[str, Any]
-    """Storage manifest, as :func:`build_manifest` produces."""
+    """Storage manifest, as `build_manifest` produces."""
     aliases: dict[str, str]
     attrs: dict[str, bool]
     seed: dict[str, Any]
-    """Mover-specific transfer seed; ``seed["backend"]`` picks the mover."""
+    """Mover-specific transfer seed; `seed["backend"]` picks the mover."""
 
 
 def build_manifest(
     tensors: Mapping[str, torch.Tensor], kinds: Mapping[str, TensorKind]
 ) -> tuple[dict[str, Any], list[torch.UntypedStorage]]:
-    """Describe ``tensors`` as views over their unique storages."""
+    """Describe `tensors` as views over their unique storages."""
     storages: list[torch.UntypedStorage] = []
     index_by_storage: dict[tuple[torch.device, int], int] = {}
     views: dict[str, dict[str, Any]] = {}
@@ -146,64 +147,56 @@ def seed_mismatches(
     return mismatched
 
 
-def split_addresses(value: str | None) -> list[str]:
-    return [address.strip() for address in (value or "").split(",") if address.strip()]
+SeedAddress = str | tuple[str, int]
+
+
+def parse_seed_addresses(value: str | None) -> list[SeedAddress]:
+    return [
+        parse_seed_address(address)
+        for address in (value or "").split(",")
+        if address.strip()
+    ]
 
 
 def seed_address(
-    value: str | None,
+    addresses: list[SeedAddress],
     local_rank: int,
     global_rank: int,
     port_offset: int = 0,
+    *,
     world_size: int | None = None,
-) -> str | tuple[str, int] | None:
-    """Resolve one daemon's seed source address.
-
-    A comma-separated list of Unix socket paths names one per local GPU
-    (same-host peer_ipc copies). One or more ``host:base_port`` entries name
-    a remote replica's nodes in node order, with one entry per source node:
-    global rank ``g`` dials entry ``g // (world_size // N)`` at
-    ``port + port_offset + g``.
-    """
-    parsed = [parse_seed_address(address) for address in split_addresses(value)]
-    if not parsed:
+    node_rank: int = 0,
+    is_draft: bool = False,
+) -> SeedAddress | None:
+    """Resolve one daemon's rank-matched source socket or remote endpoint."""
+    if not addresses:
         return None
-    socket_paths = [address for address in parsed if isinstance(address, str)]
-    remote_hosts = [address for address in parsed if isinstance(address, tuple)]
-    if socket_paths and remote_hosts:
-        raise ValueError(
-            "--weight-cache-seed cannot mix Unix socket paths with host:port "
-            "entries; a same-host mirror takes socket paths only, and a "
-            "remote source takes one host:base_port per source node"
-        )
-    if socket_paths:
-        if len(socket_paths) == 1:
-            return socket_paths[0]
-        if local_rank >= len(socket_paths):
-            raise ValueError(
-                f"--weight-cache-seed has {len(socket_paths)} addresses but "
-                f"local GPU {local_rank} needs one; pass one address per "
-                "local GPU"
-            )
-        return socket_paths[local_rank]
-    if len(remote_hosts) > 1:
-        if world_size is None or world_size % len(remote_hosts) != 0:
+    address = addresses[0]
+    if isinstance(address, str):
+        address = addresses[local_rank]
+        assert isinstance(address, str)
+        if is_draft:
+            return f"{address.removesuffix('.sock')}_draft.sock"
+        return address
+    if len(addresses) > 1 and world_size is not None:
+        if world_size % len(addresses) != 0:
             raise ValueError(
                 "Multi-host --weight-cache-seed passes one host:base_port "
-                f"per source node, so its count ({len(remote_hosts)}) must "
+                f"per source node, so its count ({len(addresses)}) must "
                 f"divide the world size ({world_size})"
             )
-        ranks_per_node = world_size // len(remote_hosts)
-        host, port = remote_hosts[global_rank // ranks_per_node]
-    else:
-        host, port = remote_hosts[0]
+        ranks_per_node = world_size // len(addresses)
+        node_rank = global_rank // ranks_per_node
+    address = addresses[node_rank]
+    assert not isinstance(address, str)
+    host, port = address
     return host, port + port_offset + global_rank
 
 
 def _request_topology(
     address: tuple[str, int], token: str, *, hint: str = ""
 ) -> dict[str, Any] | None:
-    """One ``topology`` request; None only when the source predates the kind."""
+    """One `topology` request; None only when the source predates the kind."""
     transport = SeedTransport(seed_config=SeedConfig(source=address, token=token))
     response = transport.request({"kind": "topology"})
     host, port = address
@@ -243,7 +236,7 @@ def _parse_topology_ranks(
     is_draft: bool,
     address: tuple[str, int],
 ) -> dict[int, tuple[str, int]]:
-    """Validate one topology payload into a ``{rank: (host, port)}`` map."""
+    """Validate one topology payload into a `{rank: (host, port)}` map."""
     host, port = address
     label = "draft " if is_draft else ""
     source_world_size = payload.get("world_size")
@@ -305,13 +298,13 @@ def discover_seed_topology(
 ) -> dict[int, dict[int, tuple[str, int]]] | None:
     """Discover a source replica's per-rank daemon addresses.
 
-    Queries the ``topology`` seedable of the source at ``address`` (the
-    base ``host:base_port`` of a single-address ``--weight-cache-seed``)
-    and returns ``{group_index: {rank: (host, port)}}``: group 0 is the
-    target group, group 1 the speculative draft group when ``need_draft``.
-    Returns None when the source predates the ``topology`` kind, so the
+    Queries the `topology` seedable of the source at `address` (the
+    base `host:base_port` of a single-address `--weight-cache-seed`)
+    and returns `{group_index: {rank: (host, port)}}`: group 0 is the
+    target group, group 1 the speculative draft group when `need_draft`.
+    Returns None when the source predates the `topology` kind, so the
     caller can fall back to the single-host assumption of
-    :func:`seed_address`.
+    `seed_address`.
 
     Raises:
         RuntimeError: If the source is unreachable, rejects the token, or
@@ -358,13 +351,13 @@ def preflight_seed_sources(
 ) -> None:
     """Probe every resolved source daemon before any mirror daemon spawns.
 
-    Sends one ``topology`` request to each address in ``maps`` (as returned
-    by :func:`discover_seed_topology`) so a missing or misconfigured source
+    Sends one `topology` request to each address in `maps` (as returned
+    by `discover_seed_topology`) so a missing or misconfigured source
     daemon fails the launch up front instead of mid-seed.
 
     Raises:
         RuntimeError: If any source daemon is unreachable, rejects the
-            token, predates the ``topology`` kind, or reports a world size
+            token, predates the `topology` kind, or reports a world size
             or role inconsistent with this replica.
 
     """
@@ -408,7 +401,7 @@ def preflight_seed_sources(
 
 
 def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":
-    """Switch one daemon's config to the ``peer_cache`` load format."""
+    """Switch one daemon's config to the `peer_cache` load format."""
     extra = dict(config.load_config.model_loader_extra_config or {})
     extra["is_draft"] = is_draft
     return replace(
@@ -421,12 +414,11 @@ def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":
     )
 
 
-def mirror_device_indices(seed_value: str, num_local: int) -> list[int]:
+def mirror_device_indices(addresses: list[SeedAddress], num_local: int) -> list[int]:
     """A same-host mirror's GPU indices: the free ones past the source's."""
     source_uuids = set()
-    for address in split_addresses(seed_value):
+    for path in addresses:
         # The launcher only calls this for the all-Unix-socket form.
-        path = parse_seed_address(address)
         assert isinstance(path, str)
         verify_socket_owner(path, strict_perms=False)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -483,7 +475,13 @@ def validate_weights_payload(
     for key in ("aliases", "attrs"):
         if payload.get(key) is not None and not isinstance(payload[key], dict):
             raise ValueError(f"Seed daemon returned malformed {key}")
-    source_key = json_to_dataclass(WeightCacheKey, payload.get("cache_config"))
+    cache_config = payload.get("cache_config")
+    if not isinstance(cache_config, dict):
+        raise ValueError("Seed daemon returned a malformed cache key")
+    declared = {f.name for f in fields(WeightCacheKey)}
+    if unknown := set(cache_config) - declared:
+        raise ValueError(f"Unknown WeightCacheKey fields: {sorted(unknown)}")
+    source_key = TypeAdapter(WeightCacheKey).validate_python(cache_config)
     mismatched = seed_mismatches(expected_key, source_key, model, source_model)
     if mismatched:
         hint = (

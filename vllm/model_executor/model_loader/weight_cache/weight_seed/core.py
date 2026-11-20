@@ -16,27 +16,39 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     rebuild_tensors,
 )
 
-SeedBackend = Literal["peer_ipc", "rdma"]
+SeedBackend = Literal["peer_ipc", "mooncake"]
 
 PEER_IPC_BACKEND: SeedBackend = "peer_ipc"
-RDMA_BACKEND: SeedBackend = "rdma"
+MOONCAKE_BACKEND: SeedBackend = "mooncake"
 
 logger = init_logger(__name__)
 
 
 def parse_seed_backend(value: Any) -> SeedBackend:
     """Narrow a wire or config value to a known seed backend, or raise."""
-    if value in (PEER_IPC_BACKEND, RDMA_BACKEND):
+    if value in (PEER_IPC_BACKEND, MOONCAKE_BACKEND):
         return value
     raise ValueError(f"Unknown weight-cache seed backend {value!r}")
+
+
+def acknowledge_lease(transport: Any) -> None:
+    """Tell the source that this operation no longer needs its weights."""
+    if transport is None:
+        return
+    response = transport.request({"kind": "weights", "acknowledge": True})
+    if response is None:
+        raise RuntimeError("Could not acknowledge weight-cache copy")
+    if response.get("status") != "ok":
+        raise RuntimeError(
+            f"Source daemon rejected weight-cache acknowledgement: "
+            f"{response.get('message', response)}"
+        )
 
 
 class WeightMover(ABC):
     """One mover that copies weight storages from a source daemon."""
 
     name: SeedBackend
-    is_node_local: bool
-    """Whether the mover can only reach a peer on the same host."""
 
     @abstractmethod
     def prepare_seed(self, storages: list[torch.UntypedStorage]) -> dict[str, Any]:
@@ -81,17 +93,17 @@ class WeightMover(ABC):
 
 
 def get_mover(name: SeedBackend, *, device_index: int | None = None) -> WeightMover:
-    """The mover for a backend; ``device_index`` pins the peer_ipc device."""
+    """The mover for a backend; `device_index` pins the peer_ipc device."""
     if name == PEER_IPC_BACKEND:
         from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
             PeerIpcMover,
         )
 
         return PeerIpcMover(device_index)
-    if name == RDMA_BACKEND:
-        from vllm.model_executor.model_loader.weight_cache.weight_seed.rdma import (
-            RdmaMover,
+    if name == MOONCAKE_BACKEND:
+        from vllm.model_executor.model_loader.weight_cache.weight_seed.mooncake import (
+            MooncakeMover,
         )
 
-        return RdmaMover()
+        return MooncakeMover()
     raise ValueError(f"Unknown weight-cache seed backend {name!r}")

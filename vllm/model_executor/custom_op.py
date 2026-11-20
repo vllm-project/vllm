@@ -33,12 +33,12 @@ class PluggableLayer(nn.Module):
     """Base class for pluggable layers.
 
     A PluggableLayer is a *module-composing* abstraction: it may instantiate other
-    ``torch.nn.Module`` objects as sub-layers, and its functionality depends on
+    `torch.nn.Module` objects as sub-layers, and its functionality depends on
     these sub-layers following a generalized invocation sequence. Also, it is stateful
     and may hold parameters or buffers.
 
-    Unlike :class:`CustomOp`, PluggableLayer does NOT provide per-platform
-    ``forward_*`` dispatch. Instead, it supports out-of-tree (OOT) replacement
+    Unlike `CustomOp`, PluggableLayer does NOT provide per-platform
+    `forward_*` dispatch. Instead, it supports out-of-tree (OOT) replacement
     of the entire layer class at instantiation time, allowing customized
     initialization and submodule composition.
     """

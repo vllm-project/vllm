@@ -56,7 +56,7 @@ def chunk_max(rows: int) -> int:
 
 
 def block_sentinels(mx, visible, b, i32_init, i32_local):
-    """AITER's sentinels on block b of a row seeing ``visible`` tokens."""
+    """AITER's sentinels on block b of a row seeing `visible` tokens."""
     nb = ((visible < 0).select(fx.Int32(0), visible) + (BLK - 1)) // BLK
     return with_sentinels(mx, b, nb, i32_init, i32_local)
 
@@ -243,7 +243,7 @@ def compile_score_decode(rows: int, heads: int, buffered: bool = False):
 
         def load_tile(kr, ok, t):
             """Tile t of a page: this lane's 16 B of codes (token 16 t + col) and
-            its two group scales; no memory access when not ``ok``."""
+            its two group scales; no memory access when not `ok`."""
             c = Vec(
                 buffer_ops.buffer_load(
                     kr,

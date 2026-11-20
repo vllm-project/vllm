@@ -22,8 +22,8 @@ Tensor, expert, data and pipeline parallelism are supported.
 For multi-node tensor parallelism, run one launcher per node with a shared
 rendezvous so the global TP group forms across nodes (CUDA IPC handles are
 node-local, so each node serves only its local GPUs' shards). Reuse the same
-``--nnodes``/``--node-rank``/``--master-addr`` flags you pass the engine, plus a
-``--weight-cache-master-port`` distinct from the engine's ``--master-port``:
+`--nnodes`/`--node-rank`/`--master-addr` flags you pass the engine, plus a
+`--weight-cache-master-port` distinct from the engine's `--master-port`:
 
     # node 0 (8 local GPUs)
     vllm preload \\
@@ -36,17 +36,17 @@ node-local, so each node serves only its local GPUs' shards). Reuse the same
         --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \\
         --weight-cache-master-port 29600
 
-The global TP rank of local GPU ``i`` on node ``r`` is
-``r * (tp_size // nnodes) + i``, matching vLLM's contiguous per-node rank
+The global TP rank of local GPU `i` on node `r` is
+`r * (tp_size // nnodes) + i`, matching vLLM's contiguous per-node rank
 assignment, so each engine worker maps its shard from the daemon on its own
 node. With pipeline parallelism each node additionally runs one daemon per PP
-stage; the global rank is ``pp_rank * tp_size + tp_rank``.
+stage; the global rank is `pp_rank * tp_size + tp_rank`.
 
 For data parallelism (e.g. a TP1 x DP16 x EP decode fleet) run one launcher per
-node with the engine's DP placement flags. Local GPU ``i`` serves DP rank
-``start_rank + i // tp_size`` and TP rank ``i % tp_size``, and all
-``dp_size * tp_size`` daemons form one world group on
-``--data-parallel-address``/``--weight-cache-master-port`` so the expert
+node with the engine's DP placement flags. Local GPU `i` serves DP rank
+`start_rank + i // tp_size` and TP rank `i % tp_size`, and all
+`dp_size * tp_size` daemons form one world group on
+`--data-parallel-address`/`--weight-cache-master-port` so the expert
 shards are laid out exactly as in the engine:
 
     # node r (4 local GPUs)
@@ -57,9 +57,9 @@ shards are laid out exactly as in the engine:
         --weight-cache-master-port 29600
 
 Data parallelism also combines with multi-node tensor parallelism: pass both
-flag sets (``--nnodes``/``--node-rank``/``--master-addr`` and the DP flags with
-a reachable ``--data-parallel-address``). Each node then serves a contiguous
-block of the ``dp_size * tp_size`` global ranks, e.g. TP8 x DP2 on 4 nodes:
+flag sets (`--nnodes`/`--node-rank`/`--master-addr` and the DP flags with
+a reachable `--data-parallel-address`). Each node then serves a contiguous
+block of the `dp_size * tp_size` global ranks, e.g. TP8 x DP2 on 4 nodes:
 
     # node r (4 local GPUs)
     vllm preload \\
@@ -70,16 +70,17 @@ block of the ``dp_size * tp_size`` global ranks, e.g. TP8 x DP2 on 4 nodes:
 
 With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
 starts a draft daemon group that caches the draft model. It uses its own cache
-key, Unix sockets (``*_draft.sock``) and rendezvous port
-(``--weight-cache-draft-master-port``, default ``--weight-cache-master-port +
-1``), so each process serves exactly one model role. Other draft types are not
-cached and keep loading from disk in the engine.
+key, Unix sockets (`*_draft.sock`) and rendezvous port
+(`--weight-cache-draft-master-port`, default `--weight-cache-master-port +
+1`), so each process serves exactly one model role. Other draft types are not
+cached and keep loading from disk in the engine. With pipeline parallelism only
+the draft daemons of the last stage serve the draft model.
 
 Seeding a replica from another
 ==============================
 
 A second replica's daemons can seed their shards from a loaded replica
-with ``--weight-cache-seed``; see ``docs/features/preload.md``.
+with `--weight-cache-seed`; see `docs/features/preload.md`.
 """
 
 import contextlib
@@ -88,9 +89,10 @@ import gc
 import multiprocessing
 import os
 import select
+import signal
 import socket
-import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -107,6 +109,7 @@ from vllm.distributed import (
     ensure_model_parallel_initialized,
     get_world_group,
     init_distributed_environment,
+    single_pp_stage,
 )
 from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     destroy_fi_ar_workspace,
@@ -123,7 +126,6 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
-    hash_rope_parameters,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
@@ -142,14 +144,19 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     format_daemon_role,
     is_draft_model_cacheable,
 )
-from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-    FlashInferWarmupCache,
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+    CompileArtifactWarmupCache,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed import (
-    WeightShardSeed,
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+    FlashInferWarmupCache,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+    WEIGHT_COPY_LEASE_TIMEOUT_S,
+    WeightShardSeed,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.topology import (
     ReplicaTopology,
@@ -178,21 +185,21 @@ class WeightCacheDaemon:
         pp_rank: int = 0,
         seed_config: SeedConfig | None = None,
         device_index: int | None = None,
+        warmup_cache_stores: Iterable[str] = (),
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        self.warmup_caches = [FlashInferWarmupCache()]
-        self.weight_seed = WeightShardSeed(self)
         self.seed_config = seed_config or SeedConfig()
+        warmup_cache_stores = tuple(warmup_cache_stores)
+        self.warmup_caches: list[WarmupCache] = [
+            FlashInferWarmupCache(warmup_cache_stores),
+            CompileArtifactWarmupCache(warmup_cache_stores),
+        ]
+        self.weight_seed = WeightShardSeed(self)
         self.d2d = SeedTransport(
             [*self.warmup_caches, self.weight_seed], self.seed_config
         )
-        # Seed peers are served on their own thread; this serializes their
-        # reads of the state with the local socket's requests. Reentrant
-        # because the local "seed" command re-enters it through
-        # WeightShardSeed.resolve.
-        self._state_lock = threading.RLock()
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -240,6 +247,7 @@ class WeightCacheDaemon:
         self.socket_dir = socket_dir
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
+        self.serves_model = daemon_serves_model(is_draft, self.pp_rank, self.pp_size)
         self.model: torch.nn.Module | None = None
         # Engine watch connections, held open for the daemon's lifetime.
         self._watchers: list[socket.socket] = []
@@ -249,6 +257,9 @@ class WeightCacheDaemon:
         self.cache_key = build_weight_cache_key(
             vllm_config, self.model_config, is_draft=is_draft
         )
+        if is_draft:
+            # The engine builds the draft as the only pipeline stage.
+            self.cache_key = replace(self.cache_key, pp_size=1, pp_rank=0)
         # Registered late because it serves world_size and cache_key, assigned
         # after the SeedTransport was built; requests are answered by kind, so
         # seedable order does not matter.
@@ -263,7 +274,8 @@ class WeightCacheDaemon:
     def gather_listener_map(self) -> None:
         """Collect the group's dialable D2D endpoints into the topology seed.
 
-        Runs on the live world group between warmup and release_distributed.
+        Runs on the live world group before release_distributed. Every rank
+        participates, including draft PP ranks that do not serve a model.
         A daemon without a remote listener (Unix sockets only) has nothing
         to report.
         """
@@ -273,7 +285,7 @@ class WeightCacheDaemon:
         host, port = listen
         if host in ("0.0.0.0", "::"):
             # A wildcard binds every NIC; report the primary one, like the
-            # Mooncake session does (see weight_seed/rdma.py).
+            # Mooncake session does (see weight_seed/mooncake.py).
             host = get_ip()
         gathered: list[Any] = [None] * self.world_size
         torch.distributed.all_gather_object(
@@ -297,11 +309,17 @@ class WeightCacheDaemon:
             local_rank=self.device_index,
             backend=current_platform.dist_backend,
         )
+        if not self.serves_model:
+            # Model parallel groups are created collectively by every rank.
+            with set_current_vllm_config(self.vllm_config):
+                ensure_model_parallel_initialized(self.tp_size, self.pp_size)
+            return
+        for cache in self.warmup_caches:
+            cache.adopt_before_load(self, self.d2d)
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
-            self.model = self.get_model()
-        # In-place reloads use configs already normalized by model construction.
-        self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
+            with single_pp_stage() if self.is_draft else contextlib.nullcontext():
+                self.model = self.get_model()
         # Loading and post-processing leave freed transients in the caching
         # allocator; return them so engines sharing the GPU can use them.
         gc.collect()
@@ -373,12 +391,9 @@ class WeightCacheDaemon:
             payload = self.d2d.fetch(self.weight_seed, self)
             # The weights kind answers a payload or an error, never a miss.
             assert payload is not None
-            return loader.load_model(vllm_config, model_config, payload=payload)
-        if getattr(loader, "loads_pre_processed_weights", False):
-            # The loader fetches fully post-processed weights from a peer
-            # daemon and builds the model around them itself, handling
-            # dtype, device and post-processing internally.
-            return loader.load_model(vllm_config, model_config)
+            return loader.load_model(
+                vllm_config, model_config, payload=payload, transport=self.d2d
+            )
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = loader.create_model(vllm_config, model_config)
@@ -399,6 +414,12 @@ class WeightCacheDaemon:
                 so the launcher can report overall readiness.
 
         """
+
+        def _shutdown(signum, frame):
+            raise SystemExit(128 + signum)
+
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
         socket_path = self._socket_path
         ensure_private_socket_dir(
             os.path.dirname(socket_path), strict_perms=self.socket_dir is None
@@ -421,31 +442,51 @@ class WeightCacheDaemon:
         )
         if ready_callback is not None:
             ready_callback()
+
         try:
             while True:
                 conn, _ = server.accept()
-                with conn:
-                    try:
-                        verify_peer_is_owner(conn)
-                        with self._state_lock:
-                            self._handle_connection(conn)
-                    except (ConnectionError, EOFError):
-                        logger.warning("Client disconnected mid-request")
-                    except Exception as e:
-                        # Report the error back instead of just closing the
-                        # socket, but don't let it take the daemon down.
-                        logger.exception(
-                            "Error handling weight cache client; continuing"
-                        )
-                        with contextlib.suppress(OSError):
-                            send_msg(conn, {"status": "error", "message": str(e)})
+                self._serve_connection(conn)
+        finally:
+            self._shutdown(server, socket_path, lock_fd)
+
+    def _serve_connection(self, conn: socket.socket) -> None:
+        with conn:
+            try:
+                verify_peer_is_owner(conn)
+                self._handle_connection(conn)
+            except (ConnectionError, EOFError):
+                logger.warning("Client disconnected mid-request")
+            except Exception as e:
+                # Report the error back instead of just closing the
+                # socket, but don't let it take the daemon down.
+                logger.exception("Error handling weight cache client; continuing")
+                with contextlib.suppress(OSError):
+                    send_msg(conn, {"status": "error", "message": str(e)})
+
+    def _drain_shutdown_clients(self, server: socket.socket) -> None:
+        self.weight_seed.start_release()
+        deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
+        # Keep accepting local lease acknowledgements until the source
+        # registrations and weights are safe to tear down.
+        while self.weight_seed.active_copies and time.monotonic() < deadline:
+            try:
+                conn, _ = server.accept()
+            except TimeoutError:
+                continue
+            conn.settimeout(5.0)
+            self._serve_connection(conn)
+        self.weight_seed.finish_release()
+
+    def _shutdown(self, server: socket.socket, socket_path: str, lock_fd: int) -> None:
+        server.settimeout(0.5)
+        try:
+            self._drain_shutdown_clients(server)
         finally:
             server.close()
             for watcher in self._watchers:
                 watcher.close()
             self.d2d.close()
-            with self._state_lock:
-                self.weight_seed.release()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
@@ -475,10 +516,6 @@ class WeightCacheDaemon:
             self.socket_dir,
             is_draft=self.is_draft,
         )
-
-    @property
-    def has_weights(self) -> bool:
-        return self.model is not None
 
     def _export_state(self) -> tuple[dict[str, TensorEntry], dict[str, str], dict]:
         """Export this rank's tensors, aliases and flags for one client."""
@@ -514,8 +551,6 @@ class WeightCacheDaemon:
             # A same-host peer's D2D request; the pickle plane can carry the
             # peer_ipc seed's CUDA IPC handles, which JSON cannot.
             send_msg(conn, self.d2d.handle_request(request))
-        elif cmd == "release":
-            self._handle_release(conn)
         elif cmd == "watch":
             self._handle_watch(conn)
         else:
@@ -527,18 +562,9 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Missing cache_key"})
             return
         mismatched = self.cache_key.mismatched_fields(client_key)
-        if (
-            request.get("is_reload", False)
-            and "rope_parameters_hash" in mismatched
-            and client_key.rope_parameters_hash == self.loaded_rope_parameters_hash
-        ):
-            mismatched.remove("rope_parameters_hash")
         if mismatched:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
-            return
-        if not self.has_weights:
-            send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
         entries, aliases, attrs = self._export_state()
         send_msg(
@@ -583,18 +609,6 @@ class WeightCacheDaemon:
                 alive.append(watcher)
         self._watchers = alive
 
-    def _handle_release(self, conn: socket.socket) -> None:
-        # Unregister from the NIC before the memory goes back to the driver.
-        self.weight_seed.release()
-        self.model = None
-        torch.accelerator.empty_cache()
-        logger.info(
-            "Weight cache %s daemon rank %d released cached weights",
-            self.role,
-            self.global_rank,
-        )
-        send_msg(conn, {"status": "ok"})
-
 
 def _run_daemon(
     global_rank: int,
@@ -608,6 +622,7 @@ def _run_daemon(
     pp_rank: int = 0,
     seed_config: SeedConfig | None = None,
     device_index: int | None = None,
+    warmup_cache_stores: Iterable[str] = (),
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -623,11 +638,18 @@ def _run_daemon(
         pp_rank,
         seed_config=seed_config,
         device_index=device_index,
+        warmup_cache_stores=warmup_cache_stores,
     )
     daemon.load_model()
-    daemon.warmup()
-    # Gathered while the world group is still alive, before it is torn down.
+    # Every rank joins the topology gather before non-serving draft PP ranks exit.
     daemon.gather_listener_map()
+    if not daemon.serves_model:
+        daemon.release_distributed()
+        return
+    daemon.warmup()
+    # FlashInfer warmup has populated the compiler caches before the source
+    # listener becomes available to target daemons.
+    daemon.d2d.start_listener()
     daemon.release_distributed()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
@@ -637,13 +659,13 @@ def _run_daemon(
 def plan_local_ranks(
     parallel_config: ParallelConfig,
 ) -> list[tuple[int, int, int, int]]:
-    """``(local_rank, dp_rank, pp_rank, tp_rank)`` for every local daemon.
+    """`(local_rank, dp_rank, pp_rank, tp_rank)` for every local daemon.
 
-    Global ranks enumerate DP, PP, then TP: ``global = dp_rank * pp_size *
-    tp_size + pp_rank * tp_size + tp_rank``.
-    With ``--nnodes`` the engine hands each node a contiguous block of global
-    ranks, so node ``r`` serves ``node_rank * local + i``; without it a
-    launcher's block starts at ``--data-parallel-start-rank * tp_size``.
+    Global ranks enumerate DP, PP, then TP: `global = dp_rank * pp_size *
+    tp_size + pp_rank * tp_size + tp_rank`.
+    With `--nnodes` the engine hands each node a contiguous block of global
+    ranks, so node `r` serves `node_rank * local + i`; without it a
+    launcher's block starts at `--data-parallel-start-rank * tp_size`.
     """
     tp_size = parallel_config.tensor_parallel_size
     pp_size = parallel_config.pipeline_parallel_size
@@ -662,6 +684,15 @@ def plan_local_ranks(
         pp_rank, tp_rank = divmod(rank_in_dp, tp_size)
         placements.append((local_rank, dp_rank, pp_rank, tp_rank))
     return placements
+
+
+def daemon_serves_model(is_draft: bool, pp_rank: int, pp_size: int) -> bool:
+    """Whether the daemon at this placement loads and serves a model.
+
+    The engine runs the draft model only on the last pipeline stage. Draft
+    daemons on other stages join the group's rendezvous and then exit.
+    """
+    return not is_draft or pp_rank == pp_size - 1
 
 
 def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:

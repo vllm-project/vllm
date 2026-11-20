@@ -27,9 +27,10 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     build_weight_cache_key,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+    MOONCAKE_BACKEND,
     PEER_IPC_BACKEND,
-    RDMA_BACKEND,
     SeedBackend,
+    acknowledge_lease,
     get_mover,
     parse_seed_backend,
 )
@@ -78,7 +79,7 @@ class PeerModelLoader(BaseModelLoader):
         if backend is None and source is not None:
             # The address form already decides the mover: a Unix socket is
             # same-host CUDA IPC, a remote host:port pulls over Mooncake.
-            backend = PEER_IPC_BACKEND if isinstance(source, str) else RDMA_BACKEND
+            backend = PEER_IPC_BACKEND if isinstance(source, str) else MOONCAKE_BACKEND
         elif backend is not None:
             backend = parse_seed_backend(backend)
             if (
@@ -89,7 +90,7 @@ class PeerModelLoader(BaseModelLoader):
                 raise ValueError(
                     f"{PEER_IPC_BACKEND} copies through CUDA IPC, which "
                     "cannot cross hosts; a [host, port] source uses "
-                    f"{RDMA_BACKEND}"
+                    f"{MOONCAKE_BACKEND}"
                 )
         self.peer_backend: SeedBackend | None = backend
 
@@ -112,6 +113,7 @@ class PeerModelLoader(BaseModelLoader):
         prefix: str = "",
         *,
         payload: WeightsSeedPayload | None = None,
+        transport: SeedTransport | None = None,
     ) -> nn.Module:
         check_weight_cache_loader_support(
             vllm_config, model_config, is_draft=self.is_draft
@@ -123,12 +125,14 @@ class PeerModelLoader(BaseModelLoader):
             # Standalone load (no injecting daemon): fetch over our own
             # client built from the extra config.
             payload = self._fetch_standalone(expected_key, model_config.model)
+        transport = transport or self.transport
         manifest = payload["manifest"]
         mover = get_mover(payload["seed"]["backend"])
         device = torch.device(
             current_platform.device_type, torch.accelerator.current_device_index()
         )
         tensors = mover.fill(manifest, payload["seed"], device)
+        acknowledge_lease(transport)
         kinds: dict[str, TensorKind] = {
             name: "param" if view["is_param"] else "buffer"
             for name, view in manifest["tensors"].items()
@@ -164,12 +168,15 @@ class PeerModelLoader(BaseModelLoader):
         transport = SeedTransport(
             seed_config=SeedConfig(source=self.peer_source, token=self.peer_token)
         )
+        self.transport = transport
         backend = self.peer_backend
         if backend is None:
             # The address form already decides the mover: a Unix socket is
             # same-host CUDA IPC, a remote host:port pulls over Mooncake.
             backend = (
-                PEER_IPC_BACKEND if isinstance(self.peer_source, str) else RDMA_BACKEND
+                PEER_IPC_BACKEND
+                if isinstance(self.peer_source, str)
+                else MOONCAKE_BACKEND
             )
         response = transport.request({"kind": "weights", "seed_backend": backend})
         if response is None:

@@ -15,9 +15,8 @@ Key benefits:
 - **Fast engine restarts**: weight loading reduces to mapping existing GPU
   memory, cutting restart time from minutes (disk load + quantization
   processing) to seconds.
-- **Zero-copy sharing**: in the default `zero_copy` mode the engine directly
-  shares the daemon's GPU memory, so a restart adds no extra GPU memory
-  footprint.
+- **Zero-copy sharing**: the engine directly shares the daemon's GPU memory,
+  so a restart adds no extra GPU memory footprint.
 - **Safe fallback**: if the daemon is unavailable or its cached weights don't
   match the engine's configuration, the engine falls back to loading from
   disk.
@@ -89,36 +88,61 @@ falls back to local tuning.
 Source replica:
 
 ```bash
+MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json \
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --seed-listen-host 0.0.0.0 --seed-listen-port 29600 \
-    --seed-token "$TOKEN"
+    --seed-token "$TOKEN" --warmup-cache-stores mooncake
 ```
 
 Mirror replica (possibly on another node):
 
 ```bash
+MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json \
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --seed-source-host <source-host> --seed-source-port 29600 \
-    --seed-token "$TOKEN"
+    --seed-token "$TOKEN" --warmup-cache-stores mooncake
 ```
 
 Each rank binds and dials `base_port + group offset + its global rank`, so one
-`host:base_port` pair covers a whole replica, including the draft daemon group
-when speculative decoding is configured.
+`host:base_port` pair covers a whole single-node replica, including the draft
+daemon group when speculative decoding is configured. The standalone
+`--seed-source-host` option names one source host, so it cannot by itself reach
+every node of a multi-node source. When mirroring weights from a multi-node
+source, the `--weight-cache-seed` addresses below also provide rank-matched
+warmup cache sources. The Store options in these examples enable
+compiled-cache reuse; autotune-only D2D seeding does not require them.
 
-The exchange is keyed by the on-disk cache layout: a request names the cache
-by kind, configuration hash, DP rank and world rank, and the source resolves
-it to files under its cache root. Before installing, the target rejects a
-payload whose FlashInfer environment metadata (GPU, CUDA/cuDNN stack) differs
-from its own — such a table would never load anyway, and a hard conflict is
-never overwritten, which would poison the cache file into re-tuning on every
-start. Tables are shareable across vLLM versions as long as the configuration
-hash matches.
+Compiled-cache reuse requires a live D2D source and the same Store
+configuration on source and target. After warmup, the source publishes a
+content-addressed compiled bundle as
+`vllm-warmup-cache/compile_cache/<bundle-sha256>/bundle.tar`. Its authenticated
+D2D response carries the cache manifest, bundle key, byte length and SHA256
+digest, not the bundle itself. The target fetches the bundle from the Store,
+verifies its length and digest, and installs it before model loading. A Store
+miss or error, an invalid or incompatible bundle, or a D2D failure falls back
+to local compilation. A Store without a source cannot provide a compiled-cache
+cold start.
+
+The source scans compiled caches only when a shared Store is configured. If
+collecting or publishing the bundle fails, for example because the cache exceeds
+the 8 GiB limit, the source logs a warning and continues serving model weights.
+It advertises no compiled bundle, so targets use local compilation. Invalid
+Store configuration and Store initialization errors remain startup errors.
+
+For autotune tables, the exchange is keyed by the on-disk cache layout: a
+request names the cache by kind, configuration hash, DP rank and world rank,
+and the source resolves it to files under its cache root. Before installing,
+the target rejects a payload whose FlashInfer environment metadata (GPU,
+CUDA/cuDNN stack) differs from its own — such a table would never load anyway,
+and a hard conflict is never overwritten, which would poison the cache file
+into re-tuning on every start. Tables are shareable across vLLM versions as
+long as the configuration hash matches.
 
 The channel is a generic seeding point: warmup caches are the first kind, and
 further daemon state (e.g. Triton warmup caches or weight manifests) plugs in
-as additional kinds — small JSON payloads travel inline, while large binary
-state rides the data plane.
+as additional kinds. Small JSON payloads and bundle descriptors travel over
+the authenticated control plane; compiled bundles are fetched separately from
+the configured shared Store.
 
 ## Seeding a replica from another
 
@@ -154,10 +178,12 @@ vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --weight-cache-seed /run/vllm-a/vllm_weight_cache_<hash0>.sock,/run/vllm-a/vllm_weight_cache_<hash1>.sock,/run/vllm-a/vllm_weight_cache_<hash2>.sock,/run/vllm-a/vllm_weight_cache_<hash3>.sock
 ```
 
-`--weight-cache-seed` takes one source socket per local GPU, in device order,
-and rank *i* of the mirror is filled from rank *i* of the source — the cache
-fingerprints are compared first, so a mismatched pairing is rejected rather
-than silently mirroring the wrong shard. The socket paths live in the
+`--weight-cache-seed` takes one source target socket per local GPU, in device
+order, and rank *i* of the mirror is filled from rank *i* of the source — the
+cache fingerprints are compared first, so a mismatched pairing is rejected
+rather than silently mirroring the wrong shard. With speculative decoding,
+always pass the target sockets; each draft daemon automatically uses the
+corresponding `*_draft.sock` path instead. The socket paths live in the
 source's `--weight-cache-socket-dir` and are named from each GPU's UUID, as
 described under [Loader configuration](#loader-configuration). The mirror
 fetches each source rank's manifest over that same owner-verified Unix
@@ -179,17 +205,17 @@ so no placement flag is needed and an arbitrary source placement (not just a
 leading block) works. Do not remap devices with `CUDA_VISIBLE_DEVICES`; the
 mirror refuses a handle that would land on the wrong physical GPU.
 
-`rdma` pulls through the Mooncake TransferEngine and is the mover for a
+`mooncake` pulls through the Mooncake TransferEngine and is the mover for a
 source on another host. The source has to expose its daemon-to-daemon
 listener, and both sides need the same shared token:
 
 ```bash
-# source host
+# single-node source host
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
     --seed-listen-host 0.0.0.0 --seed-listen-port 29700 \
     --seed-token "$TOKEN"
 
-# mirror host
+# single-node mirror host
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
     --weight-cache-seed 10.0.0.1:29700 --seed-token "$TOKEN"
 ```
@@ -273,15 +299,56 @@ seeds the draft group too. Socket paths and `host:port` entries cannot be
 mixed in one list.
 
 !!! warning
-    The seed listener is a network service. It is JSON only and
-    authenticates before it decodes a payload, so an unauthenticated peer
-    cannot reach the daemon's pickle protocol, but it is **unencrypted and
-    unauthenticated beyond the shared token**. Only read-only seed requests
-    are served remotely; exporting IPC handles and releasing weights stay on
-    the local, owner-verified Unix socket. Seed peers are served on their own
-    thread and get 10 seconds to send their request, so a stalled or
-    unauthenticated peer cannot hold up the engines loading from the daemon.
-    Keep the listener on a trusted network and treat the token as a secret.
+    The seed listener is a network service. It accepts JSON seed requests
+    only and authenticates the shared token before decoding a payload; it
+    never uses pickle. Only read-only seed requests are served remotely;
+    exporting IPC handles remains a local operation over the owner-verified
+    Unix socket. Seed peers are served on their own thread and get 10 seconds
+    to send their request, so a stalled or unauthenticated peer cannot hold
+    up the engines loading from the daemon. The connection is unencrypted and
+    unauthenticated beyond the shared token, so use it only on a trusted
+    network and keep the token secret.
+
+## Sharing warmup caches through Mooncake (optional)
+
+For autotune tables, pluggable shared stores are an alternative to D2D seeding
+and let a new node fetch them even when no source replica is online.
+`--warmup-cache-stores` takes a comma-separated list of store backends; the
+`mooncake` backend uses a
+[Mooncake](https://github.com/kvcache-ai/Mooncake) distributed store. Point
+`MOONCAKE_CONFIG_PATH` at the same JSON configuration used by
+[MooncakeStoreConnector](mooncake_store_connector_usage.md#configure-mooncake):
+
+```bash
+MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json \
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --warmup-cache-stores mooncake
+```
+
+After tuning, each daemon publishes its per-rank autotune table to every
+configured store under keys of the form
+`vllm-warmup-cache/<kind>/<config-hash>/<filename>`, in addition to writing
+its local disk cache. All tiers share one interface: the local disk is always
+tier zero, and the stores listed in `--warmup-cache-stores` follow it in list
+order — reads take the first tier that hits, writes fan out to all of them.
+During warmup a daemon pulls its table from the shared stores first, in list
+order; when no store has it — or none are configured — it falls back to D2D
+seeding from a live source daemon, and finally tunes in place. Stores come
+first because they are built for read fan-out, while a D2D fetch makes a busy
+peer proxy the same bytes. For autotune tables, this covers a cold start with
+no live source daemon and nodes whose cache root is ephemeral. When serving
+peers, a daemon answers from the same chain: disk first, then the stores.
+Whatever it fetches is validated and installed to the local disk cache as
+usual. A misspelled store name or a store that cannot be configured fails
+daemon startup immediately; at runtime, store operations are best-effort and
+never block warmup.
+
+Prefer the `standalone-store` topology for this use case. In `embedded` mode
+every daemon contributes `global_segment_size` of host memory to the pool,
+which is hard to justify for kilobyte-sized JSON artifacts. Note that the
+store is a trust boundary: any writer in the Mooncake cluster can influence
+the autotune tables and compiled bundles other nodes load, so only point
+daemons at a trusted deployment.
 
 ## How it works
 
@@ -304,6 +371,13 @@ mixed in one list.
 Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
+
+Shared weights count toward the engine's `gpu_memory_utilization` budget.
+If IPC loading falls back to disk, the engine removes the corresponding external
+weight charge before profiling its locally loaded weights for KV cache sizing.
+The updated budget must still fit the available GPU memory. Engines never
+actively release the daemon's cache, and fallback does not stop the daemon:
+its cached weights remain resident until the daemon shuts down.
 
 ## Multi-node and data parallelism
 
@@ -351,39 +425,32 @@ starts a draft daemon group that caches the draft model. It uses its own cache
 key, Unix sockets (`*_draft.sock`) and rendezvous port
 (`--weight-cache-draft-master-port`, default `--weight-cache-master-port + 1`),
 so each daemon process serves exactly one model role. Other draft types are
-not cached and keep loading from disk in the engine.
-
-## Cache modes
-
-The loader supports two modes, selected via `--model-loader-extra-config`:
-
-- `zero_copy` (default): the engine maps the daemon's CUDA allocations
-  directly. The daemon must stay alive for the engine's lifetime, and each
-  GPU carries only one copy of the weights.
-- `copy`: the engine clones every tensor into its own GPU memory and then
-  asks the daemon to release its cache. Use this when the daemon should free
-  GPU memory after handing off, at the cost of a full copy per restart.
-
-!!! warning
-    In `zero_copy` mode the weights live in the daemon's CUDA IPC allocations,
-    so [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not
-    be used with this loader.
+not cached and keep loading from disk in the engine. With pipeline
+parallelism, only the GPUs of the last stage serve the draft model, since the
+engine runs the draft model there; draft daemons on the other stages exit
+after startup.
 
 ## Loader configuration
 
-The `ipc_cache` loader accepts extra keys via `--model-loader-extra-config`:
+The `ipc_cache` loader supports only zero-copy loading of new model instances;
+standalone in-place weight reload is not supported. The engine maps the
+daemon's CUDA allocations directly, so each GPU carries only one copy of the
+weights. Already-mapped engines keep serving if the daemon exits, but a
+restarted daemon holds a second copy and new engines cannot attach until it is
+ready.
+
+The loader accepts extra keys via `--model-loader-extra-config`:
 
 ```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --load-format ipc_cache \
-    --model-loader-extra-config '{"mode": "copy", "fallback": false}'
+    --model-loader-extra-config '{"fallback": false}'
 ```
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
 | `socket_path` | per-GPU path derived from the GPU UUID | Explicit daemon socket path. |
 | `socket_dir` | per-user private dir under the temp dir | Directory containing the daemon sockets. |
-| `mode` | `zero_copy` | `zero_copy` or `copy` (see above). |
 | `fallback` | `true` | Fall back to disk loading when the daemon is unavailable or the fingerprints mismatch. |
 | `connect_timeout_s` | `5.0` | Socket connect timeout in seconds. |
 | `state_timeout_s` | `300.0` | Timeout for the weight-transfer request in seconds. |
@@ -392,6 +459,11 @@ The daemon's `--weight-cache-socket-dir` and the loader's `socket_dir` /
 `socket_path` must agree when the default per-user directory is not used.
 Socket paths are derived from the GPU UUID, so they are stable regardless of
 `CUDA_VISIBLE_DEVICES` index remapping.
+
+!!! warning
+    The weights live in the daemon's CUDA IPC allocations, so
+    [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not be
+    used with this loader.
 
 ## Limitations
 
@@ -406,17 +478,24 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   passes, and a table tuned on the draft model would key on the draft's
   config, which no engine looks up), so those deployments' first engine
   tunes and fills the cache instead.
-- **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
-  seeded; single-rank daemons use FlashInfer's managed v2 store and always
-  tune in place. Seeding requires a trusted network — the TCP channel is
-  authenticated by a shared token but unencrypted. The standalone
+- **Cache seeding**: autotune seeding supports only the v1 per-rank FlashInfer
+  cache; single-rank daemons use FlashInfer's managed v2 store and always tune
+  in place. Compiled-cache seeding additionally requires a live D2D source and
+  matching Store configuration on source and target; a Store alone cannot
+  cold-start compiled caches. Seeding requires a trusted network — the TCP
+  channel is authenticated by a shared token but unencrypted. Shared stores
+  can serve autotune tables without a live source. Cache misses and errors
+  fall back to local tuning or compilation. The standalone
   `--seed-source-host` / `--seed-source-port` form addresses a single host
   only; the multi-entry list form applies to `--weight-cache-seed` alone.
 - **Weight seeding**: `peer_ipc` cannot cross hosts, because a CUDA IPC
-  handle is node-local; `rdma` requires Mooncake on both sides. A mirror
+  handle is node-local; `mooncake` requires Mooncake on both sides. A mirror
   copies the weights into its own memory, so it does not depend on the
   source staying alive afterwards, and a mirror replica forms its own world
-  group like a normal preload.
+  group like a normal preload. Each outstanding copy holds a lease until the
+  mirror acknowledges it. During graceful shutdown, the source waits for these
+  acknowledgements before weight memory is freed, subject to the timeout under
+  [Daemon lifecycle](#daemon-lifecycle).
 - **Topology discovery**: when a source's seed listener binds a wildcard
   address (`0.0.0.0` / `::`), the reachable address it reports for a rank
   comes from `get_ip()` — the same assumption Mooncake's TransferEngine
@@ -433,6 +512,46 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
   `UnsupportedQuantForIPCError`.
+  Online `fp8_per_tensor`, `fp8_per_channel`, and `fp8_per_block` dense
+  linear layers support CUDA IPC with the CUTLASS linear backend. Set
+  `--kernel-config '{"linear_backend": "cutlass"}'` on both the daemon and
+  engine; the block variant additionally requires a GPU supported by the
+  CUTLASS block-FP8 kernel. Online `mxfp8` linear layers can reuse weights
+  with an MXFP8 kernel that supports pre-processed weights, including
+  FlashInfer CUTLASS on Blackwell.
+  The engine reuses the quantized weights and scales without running online
+  quantization again. This does not enable online MoE quantization or
+  conversion from an already quantized checkpoint.
+  Serialized `compressed-tensors` W8A8 FP8 dense linear layers support
+  per-tensor and per-channel weights with static per-tensor or dynamic
+  per-token activations when both processes select the CUTLASS linear
+  backend. Engines retain the processed tensor layout and scales and rebuild
+  attention scale metadata from the cached scale buffers. Other
+  compressed-tensors schemes, transform wrappers, block FP8 and MoE are
+  not enabled by this support.
+  Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
+  linear layers also support CUDA IPC with the CUTLASS linear backend.
+  Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
+  and engine. Engines reuse the processed weights and scales, including
+  fused-projection scales and output padding. This does not enable ModelOpt
+  block FP8, FP8 MoE, or other FP8 linear backends.
+  Serialized ModelOpt `INT8_PB_WO` linear layers can also reuse pre-processed
+  weights with the Marlin backend and FP16/BF16 activations. Humming and
+  ModelOpt INT8 MoE layers are not covered.
+  Serialized `compressed-tensors` W8A8 FP8 linear layers with 128×128
+  weight blocks and dynamic per-token group-128 activations support CUDA IPC
+  when both processes select the CUTLASS block-FP8 backend on a supported GPU.
+  Set `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon and
+  engine. Attached weights retain their untransposed layout. Other
+  compressed-tensors
+  schemes, block sizes, transform wrappers, linear backends and MoE are not
+  enabled by this support.
+  Serialized `compressed-tensors` WNA16 linear layers can reuse Marlin-packed
+  weights with FP16/BF16 activations. Humming, other WNA16 backends and MoE
+  are not enabled by this support.
+  ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
+  CUTLASS, the daemon fuses activation scales once; engines reuse the fused
+  scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
   agree on model, dtype, quantization, and TP/DP layout, otherwise the
   fingerprint mismatch triggers the disk fallback.
@@ -457,6 +576,11 @@ an unauthenticated peer that stops sending is cut off by a whole-message
 deadline instead of blocking the accept loop. The channel is unencrypted —
 bind it to a trusted network.
 
+The optional shared stores (`--warmup-cache-stores`) trust the store
+they are pointed at: a writer in the store's cluster can influence the
+autotune tables and compiled bundles a daemon installs, so use them only with
+a trusted deployment.
+
 See the [security documentation](../usage/security.md) for vLLM's general
 threat model.
 
@@ -473,9 +597,12 @@ threat model.
   attaching new engines.
 - `SIGINT`/`SIGTERM` to the `vllm preload` process terminates all daemon
   ranks and exits with status 130/143.
-- In either shutdown path, ranks that do not stop within ten seconds are
-  killed and reaped, releasing their GPU memory. A forcibly
-  terminated rank may leave a stale socket; the next daemon replaces it
-  after acquiring the per-GPU lock.
+- During graceful shutdown, a daemon serving as a D2D weight source stops
+  accepting new copy leases and waits up to five minutes for outstanding
+  copies to acknowledge before releasing its weight memory. The launcher
+  allows 30 seconds beyond this lease timeout before killing and reaping ranks
+  that have not stopped. When shutdown follows a rank failure, the launcher
+  instead allows ten seconds. A forcibly terminated rank may leave a stale
+  socket; the next daemon replaces it after acquiring the per-GPU lock.
 
 See [vllm preload](../cli/preload.md) for the full CLI reference.

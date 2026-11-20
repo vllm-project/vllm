@@ -18,7 +18,7 @@ see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
 layout and rendezvous details.
 
 A second replica's daemons can instead pull their weights from a loaded
-replica (``--weight-cache-seed``); see ``docs/features/preload.md``.
+replica (`--weight-cache-seed`); see `docs/features/preload.md`.
 """
 
 import argparse
@@ -43,15 +43,15 @@ from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
-    parse_seed_address,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    SeedAddress,
     discover_seed_topology,
     mirror_device_indices,
+    parse_seed_addresses,
     peer_cache_config,
     preflight_seed_sources,
     seed_address,
-    split_addresses,
 )
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
@@ -115,7 +115,13 @@ def _start_health_server(
 
 
 def _validate_seed_args(
-    args: argparse.Namespace, *, world_size: int, num_groups: int
+    args: argparse.Namespace,
+    *,
+    world_size: int,
+    num_groups: int,
+    nnodes: int,
+    local_world_size: int,
+    addresses: list[SeedAddress],
 ) -> None:
     """Validate the seed CLI options before any daemon spawns."""
     for flag, host, port in (
@@ -128,24 +134,24 @@ def _validate_seed_args(
         raise ValueError(
             "--weight-cache-seed conflicts with --seed-source-host/--seed-source-port"
         )
-    parsed = [
-        parse_seed_address(address)
-        for address in split_addresses(args.weight_cache_seed)
-    ]
-    remote_hosts = [address for address in parsed if isinstance(address, tuple)]
-    if remote_hosts and len(remote_hosts) != len(parsed):
+    unix_seed = any(isinstance(address, str) for address in addresses)
+    remote_seed = any(not isinstance(address, str) for address in addresses)
+    if unix_seed and remote_seed:
         raise ValueError(
-            "--weight-cache-seed cannot mix Unix socket paths with host:port "
-            "entries; a same-host mirror takes socket paths only, and a "
-            "remote source takes one host:base_port per source node"
+            "--weight-cache-seed cannot mix Unix socket paths and "
+            "host:base_port addresses"
         )
-    if len(remote_hosts) > 1 and world_size % len(remote_hosts) != 0:
+    if unix_seed and len(addresses) != local_world_size:
+        raise ValueError(
+            "Unix --weight-cache-seed requires one target socket per local "
+            f"GPU; expected {local_world_size}, got {len(addresses)}"
+        )
+    if remote_seed and len(addresses) > 1 and world_size % len(addresses) != 0:
         raise ValueError(
             "Multi-host --weight-cache-seed passes one host:base_port per "
-            f"source node, so its count ({len(remote_hosts)}) must divide "
+            f"source node, so its count ({len(addresses)}) must divide "
             f"the world size ({world_size})"
         )
-    remote_seed = bool(remote_hosts)
     # A token only protects the TCP planes: the listener and a remote source.
     has_remote = (
         args.seed_listen_host is not None
@@ -160,7 +166,7 @@ def _validate_seed_args(
     for base_port in (
         args.seed_listen_port,
         args.seed_source_port,
-        *(address[1] for address in parsed if isinstance(address, tuple)),
+        *(address[1] for address in addresses if isinstance(address, tuple)),
     ):
         if base_port is None:
             continue
@@ -254,19 +260,26 @@ class PreloadSubcommand(CLISubcommand):
             help="Fill these daemons from an already-loaded replica instead "
             "of the checkpoint: each daemon still builds its model (config "
             "files required, safetensors not) and pulls the post-processed "
-            "weights from its source rank. Either one source Unix socket "
-            "path per local GPU (comma separated, in device order) for "
-            "same-host CUDA IPC copies, or host:base_port entries for "
-            "cross-host copies over Mooncake RDMA. A single host:base_port "
-            "triggers topology discovery: the source replica reports every "
-            "rank's address, so any source node layout works (a source too "
-            "old to answer falls back to every rank dialing base_port + "
-            "its global rank on that host). A source replica spanning "
-            "nodes can also be named explicitly with one host:base_port "
-            "per source node (comma separated, in node order); global "
-            "rank g dials entry g // (world_size // N). The host:base_port "
-            "form also seeds the speculative draft daemon group, whose "
-            "listeners sit past the target group's port block.",
+            "weights from its rank-matched source. For same-host CUDA IPC, "
+            "pass one target Unix socket per local GPU (comma separated, in "
+            "device order); draft daemons use the corresponding *_draft.sock "
+            "paths. For cross-host Mooncake RDMA, a single host:base_port "
+            "discovers every source rank's address, supporting any source "
+            "node layout; legacy sources fall back to that host with "
+            "base_port + group offset + global rank. Alternatively, pass one "
+            "host:base_port per source node (comma separated, in node_rank "
+            "order); each rank selects its node's address and uses the same "
+            "port arithmetic.",
+        )
+        parser.add_argument(
+            "--warmup-cache-stores",
+            type=str,
+            default=None,
+            help="Comma-separated shared store backends mirroring the "
+            "warmup caches (e.g. 'mooncake', connected via "
+            "MOONCAKE_CONFIG_PATH). The local disk cache is always the "
+            "first tier; these add shared tiers that reads fall back to "
+            "and tuned tables are published to.",
         )
 
     @staticmethod
@@ -275,12 +288,16 @@ class PreloadSubcommand(CLISubcommand):
         from vllm.model_executor.model_loader.weight_cache.daemon import (
             _reject_unsupported_parallelism,
             _run_daemon,
+            daemon_serves_model,
             get_draft_daemon_config,
             plan_local_ranks,
         )
         from vllm.model_executor.model_loader.weight_cache.transport import SeedConfig
         from vllm.model_executor.model_loader.weight_cache.utils import (
             format_daemon_role,
+        )
+        from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+            WEIGHT_COPY_LEASE_TIMEOUT_S,
         )
 
         engine_args = EngineArgs.from_cli_args(args)
@@ -376,8 +393,22 @@ class PreloadSubcommand(CLISubcommand):
             for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
                 groups, placements
             )
+            if daemon_serves_model(is_draft, pp_rank, pp_size)
         }
-        _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
+        seed_addresses = parse_seed_addresses(args.weight_cache_seed)
+        _validate_seed_args(
+            args,
+            world_size=world_size,
+            num_groups=len(groups),
+            nnodes=nnodes,
+            local_world_size=local_world_size,
+            addresses=seed_addresses,
+        )
+        warmup_cache_stores = [
+            name.strip()
+            for name in (args.warmup_cache_stores or "").split(",")
+            if name.strip()
+        ]
 
         def _seed_endpoint(
             host: str | None, base_port: int | None, offset: int
@@ -388,15 +419,12 @@ class PreloadSubcommand(CLISubcommand):
             return host, base_port + offset
 
         mirror_devices = None
-        seed_addresses = split_addresses(args.weight_cache_seed)
         if seed_addresses and all(
-            isinstance(parse_seed_address(address), str) for address in seed_addresses
+            isinstance(address, str) for address in seed_addresses
         ):
             # Same-host mirror: place every local daemon on a GPU the
             # source replica does not use, inferred from the source's GPUs.
-            mirror_devices = mirror_device_indices(
-                args.weight_cache_seed, local_world_size
-            )
+            mirror_devices = mirror_device_indices(seed_addresses, local_world_size)
 
         # A single remote host:base_port names a source replica whose
         # per-rank daemon addresses are discovered before any daemon
@@ -404,7 +432,7 @@ class PreloadSubcommand(CLISubcommand):
         # spawn loop falls back to the single-host seed_address arithmetic.
         discovered_maps = None
         if len(seed_addresses) == 1 and mirror_devices is None:
-            seed_endpoint = parse_seed_address(seed_addresses[0])
+            seed_endpoint = seed_addresses[0]
             if isinstance(seed_endpoint, tuple):
                 # Validated above: a remote seed requires a token.
                 assert args.seed_token is not None
@@ -418,25 +446,28 @@ class PreloadSubcommand(CLISubcommand):
                     preflight_seed_sources(discovered_maps, args.seed_token, world_size)
 
         procs: list[BaseProcess] = []
+        serving: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
-            # Draft daemons live past the target group's port block so both
-            # roles can be reached over a single seed host:base_port.
+            # Draft daemons live past the target group's port block at every
+            # source node.
             port_offset = group_index * world_size
             for local_rank, dp_rank, pp_rank, tp_rank in placements:
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
                 offset = port_offset + global_rank
-                peer_source: str | tuple[str, int] | None
+                peer_source: SeedAddress | None
                 if discovered_maps is not None:
                     # Topology discovery already resolved every source
                     # rank's address; bypass the seed_address arithmetic.
                     peer_source = discovered_maps[group_index][global_rank]
                 else:
                     peer_source = seed_address(
-                        args.weight_cache_seed,
+                        seed_addresses,
                         local_rank,
                         global_rank,
                         port_offset,
                         world_size=world_size,
+                        node_rank=node_rank if len(seed_addresses) > 1 else 0,
+                        is_draft=is_draft,
                     )
                 source: str | tuple[str, int] | None
                 if peer_source is not None:
@@ -474,6 +505,7 @@ class PreloadSubcommand(CLISubcommand):
                             mirror_devices[local_rank]
                             if mirror_devices is not None
                             else None,
+                            warmup_cache_stores,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
@@ -481,7 +513,9 @@ class PreloadSubcommand(CLISubcommand):
                         ),
                     )
                 )
-        health_state = _HealthState(procs)
+                if daemon_serves_model(is_draft, pp_rank, pp_size):
+                    serving.append(procs[-1])
+        health_state = _HealthState(serving)
         health_server = None
         health_thread = None
         if args.weight_cache_health_port is not None:
@@ -511,7 +545,12 @@ class PreloadSubcommand(CLISubcommand):
 
             ready: set[tuple[str, int]] = set()
             while not shutdown_requested:
-                dead = [p for p in procs if p.exitcode is not None]
+                # Daemons that serve no model exit cleanly after the rendezvous.
+                dead = [
+                    p
+                    for p in procs
+                    if p.exitcode is not None and (p in serving or p.exitcode != 0)
+                ]
                 if dead:
                     logger.error(
                         "Weight cache daemon rank(s) exited during %s "
@@ -525,7 +564,7 @@ class PreloadSubcommand(CLISubcommand):
                     exit_code = 128 - failure if failure < 0 else failure
                     break
                 if ready == expected_ready:
-                    wait([p.sentinel for p in procs], timeout=1.0)
+                    wait([p.sentinel for p in serving], timeout=1.0)
                     continue
                 try:
                     ready.add(ready_queue.get(timeout=1.0))
@@ -538,11 +577,10 @@ class PreloadSubcommand(CLISubcommand):
                     )
                     logger.info_once(
                         "===== Weight cache daemon READY: node %d/%d serving %d "
-                        "local rank(s) x %d role(s) in %s =====",
+                        "daemon(s) in %s =====",
                         node_rank,
                         nnodes,
-                        local_world_size,
-                        len(groups),
+                        len(expected_ready),
                         socket_dir_msg,
                     )
         finally:
@@ -551,7 +589,13 @@ class PreloadSubcommand(CLISubcommand):
             for proc in started:
                 if proc.is_alive():
                     proc.terminate()
-            deadline = time.monotonic() + 10.0
+            # SIGTERM runs the daemon's lease-aware cleanup. Leave enough
+            # time for outstanding copies to acknowledge before escalating
+            # during an external shutdown; fail fast when a rank has exited.
+            grace_period = (
+                WEIGHT_COPY_LEASE_TIMEOUT_S + 30.0 if shutdown_requested else 10.0
+            )
+            deadline = time.monotonic() + grace_period
             for proc in started:
                 proc.join(timeout=max(0.0, deadline - time.monotonic()))
             for proc in started:
