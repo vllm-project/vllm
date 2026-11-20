@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
+import regex as re
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+_PER_EXPERT_NAME = re.compile(r"experts\.\d+\.[^.]+\.")
 
 
 def _index_expert_mapping(
@@ -1035,6 +1039,9 @@ class RoutedExperts(PluggableLayer):
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
+            if self.lora_base_layer_prefix and ".base_layer." not in qual_name:
+                # LoRA-wrapped experts also take the plain checkpoint names
+                qual_name = _PER_EXPERT_NAME.sub(r"\g<0>base_layer.", qual_name, 1)
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
                 mapping_by_expert.get(expert_key)
