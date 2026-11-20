@@ -652,11 +652,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                         "audio", num_audio_windows
                     )
 
-        if "audio" in modalities:
-            mm_fields["audio_feature_lengths"] = MultiModalFieldConfig.batched(
-                "audio", keep_on_cpu=True
-            )
-
         for modality in modalities:
             # One row per item, and only ever read on the CPU
             mm_fields[_MODALITY_SIZE_KEYS[modality]] = MultiModalFieldConfig.batched(
@@ -670,6 +665,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     )
                 )
 
+        if "audio" in modalities:
+            mm_fields["audio_feature_lengths"] = MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            )
         if "image" in modalities:
             # Always one row per item, whatever they describe
             mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched(
