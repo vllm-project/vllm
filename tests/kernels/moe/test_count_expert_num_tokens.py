@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests compute_expert_num_tokens kernels
-"""
+"""Tests compute_expert_num_tokens kernels."""
 
 import dataclasses
 
@@ -20,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestTensors:
     topk_ids: torch.Tensor
     expert_map: torch.Tensor | None = None

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Expert parallelism load balancer (EPLB) for vLLM.
+"""Expert parallelism load balancer (EPLB) for vLLM.
 
 This module implements the core rearrangement algorithm.
 
@@ -15,7 +14,7 @@ on how the EPLB algorithm works.
 import numpy as np
 import torch
 
-from .abstract import AbstractEplbPolicy
+from .abstract import AbstractEplbPolicy, EplbStats
 
 
 class DefaultEplbPolicy(AbstractEplbPolicy):
@@ -23,17 +22,17 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
     def balanced_packing(
         cls, weight: np.ndarray, num_packs: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Pack n weighted objects to m packs, such that each bin contains exactly
+        """Pack n weighted objects to m packs, such that each bin contains exactly
         n/m objects and the weights of all packs are as balanced as possible.
 
-        Parameters:
+        Args:
             weight: [X, n], the weight of each item
             num_packs: number of packs
 
         Returns:
             pack_index: [X, n], the pack index of each item
             rank_in_pack: [X, n], the rank of the item in the pack
+
         """
         num_layers, num_groups = weight.shape
         assert num_groups % num_packs == 0
@@ -76,17 +75,17 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
     def replicate_experts(
         cls, weight: np.ndarray, num_phy: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Replicate `num_log` experts to `num_phy` replicas, such that the maximum
+        """Replicate `num_log` experts to `num_phy` replicas, such that the maximum
         load of all replicas is minimized.
 
-        Parameters:
+        Args:
             weight: [X, num_log]
             num_phy: total number of experts after replication
 
         Returns:
             phy2log: [X, num_phy], logical expert id of each physical expert
             logcnt: [X, num_log], number of replicas for each logical expert
+
         """
         n, num_log = weight.shape
         num_redundant = num_phy - num_log
@@ -109,8 +108,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         num_nodes: int,
         num_gpus: int,
     ) -> np.ndarray:
-        """
-        Parameters:
+        """Parameters
             weight: [num_moe_layers, num_logical_experts]
             num_physical_experts: number of physical experts after replication
             num_groups: number of expert groups
@@ -121,6 +119,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         Returns:
             phy2log: [layers, num_replicas], the expert
                 index of each replica
+
         """
         num_layers, num_logical_experts = weight.shape
         assert num_logical_experts % num_groups == 0
@@ -195,8 +194,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         num_ranks: int,
         old_phy2log: np.ndarray,
     ) -> np.ndarray:
-        """
-        Reorder the new mapping per GPU so that experts that remain on the same GPU
+        """Reorder the new mapping per GPU so that experts that remain on the same GPU
         keep their previous slot positions when possible. Incoming experts to that GPU
         fill any remaining available slots. This is applied only when the number of GPUs
         is unchanged and the slots per GPU remain the same between
@@ -271,36 +269,17 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
         return post_phy2log
 
-    @classmethod
     def rebalance_experts(
-        cls,
-        weight: torch.Tensor,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
+        self,
+        stats: EplbStats,
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Entry point for expert-parallelism load balancer.
-
-        Parameters:
-            weight: [layers, num_logical_experts], the load statistics for all
-                logical experts
-            num_replicas: number of physical experts, must be a multiple of
-                `num_gpus`
-            num_groups: number of expert groups
-            num_nodes: number of server nodes, where the intra-node network
-                (e.g, NVLink) is faster
-            num_ranks: number of ranks, must be a multiple of `num_nodes`
-            old_global_expert_indices: [layers, num_logical_experts], the old global
-                expert indices. Used to avoid unnecessary weight copying
-                for experts moving within one rank.
-        Returns:
-            phy2log: [layers, num_replicas], the expert
-                index of each replica
-        """
-        weight_np = weight.float().cpu().numpy()
+        """Balance aggregate logical-expert loads and preserve local slots."""
+        num_replicas = stats.num_replicas
+        num_groups = stats.num_groups
+        num_nodes = stats.num_nodes
+        num_ranks = stats.num_gpus
+        weight_np = stats.global_expert_load_window.float().cpu().numpy()
         old_phy2log_np = (
             old_global_expert_indices.cpu().numpy()
             if old_global_expert_indices is not None
@@ -309,12 +288,12 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
         if num_groups % num_nodes == 0:
             # use hierarchical load-balance policy
-            phy2log_np = cls.rebalance_experts_hierarchical(
+            phy2log_np = self.rebalance_experts_hierarchical(
                 weight_np, num_replicas, num_groups, num_nodes, num_ranks
             )
         else:
             # use global load-balance policy
-            phy2log_np = cls.rebalance_experts_hierarchical(
+            phy2log_np = self.rebalance_experts_hierarchical(
                 weight_np, num_replicas, 1, 1, num_ranks
             )
 
@@ -324,7 +303,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         # Helps to avoid unnecessary weight copying when experts move
         # within the same GPU.
         if old_phy2log_np is not None:
-            phy2log_np = cls.preserve_intragpu_slots(
+            phy2log_np = self.preserve_intragpu_slots(
                 phy2log_np, num_ranks, old_phy2log_np
             )
 

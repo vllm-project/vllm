@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GSM8K correctness test for CPU KV offloading connectors.
+"""GSM8K correctness test for CPU KV offloading connectors.
 
 Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
@@ -12,11 +11,13 @@ in-flight offload transfers have released their GPU blocks, so retrying
 it until success also waits for offloading to complete.
 
 Correctness is enforced via GSM8K accuracy on both runs: corrupt reloaded
-KV drops accuracy below threshold.  The reload itself is not asserted, so
-a silently skipped reload (e.g. offloading disabled) would not be flagged.
+KV drops accuracy below threshold.  The reload itself is only asserted for
+configs with `assert_reload`, so elsewhere a silently skipped reload
+(e.g. offloading disabled) would not be flagged.
 
 Covers both KV offloading connectors (OffloadingConnector and
-SimpleCPUOffloadConnector) across five architecture families:
+SimpleCPUOffloadConnector) across five architecture families, plus
+UMBPStoreConnector on ROCm for Gemma 4:
   - Hybrid Mamba (NemotronH: attention + Mamba)
   - Heterogeneous head dim (Gemma 4)
   - Hybrid GDN (Qwen 3.5: attention + GatedDeltaNet)
@@ -36,6 +37,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
 from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
@@ -61,6 +63,17 @@ def _kv_transfer_config(
                     "spec_name": spec_name,
                     "cpu_bytes_to_use": cpu_gib << 30,
                     "eviction_policy": "lru",
+                },
+            }
+        )
+    elif connector == "UMBPStoreConnector":
+        return json.dumps(
+            {
+                "kv_connector": "UMBPStoreConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "mode": "embedded",
+                    "capacity_bytes": cpu_gib << 30,
                 },
             }
         )
@@ -111,7 +124,18 @@ def _reset_gpu_prefix_cache(base_url: str) -> None:
         _force_engine_step(base_url)
 
 
-@dataclass
+def _external_kv_tokens(base_url: str) -> float:
+    metrics = requests.get(f"{base_url}/metrics", timeout=30)
+    metrics.raise_for_status()
+    return sum(
+        float(line.rsplit(" ", 1)[1])
+        for line in metrics.text.splitlines()
+        if line.startswith("vllm:prompt_tokens_by_source_total{")
+        and 'source="external_kv_transfer"' in line
+    )
+
+
+@dataclass(slots=True)
 class OffloadingModelConfig:
     id: str
     model: str
@@ -123,6 +147,8 @@ class OffloadingModelConfig:
     cpu_offload_gib: int = 4
     startup_timeout: int = 600
     spec_name: str = "CPUOffloadingSpec"
+    assert_reload: bool = False
+    num_shots: int = NUM_FEWSHOT
 
 
 MODELS = [
@@ -131,8 +157,12 @@ MODELS = [
         id="offloading-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="OffloadingConnector",
-        # Baseline ~0.49 on 200 questions (measured on GB200).
-        accuracy_threshold=0.39,
+        # Block size is 1088 (Mamba align): 5-shot prompts (~730 tokens) never
+        # fill a block, so nothing is offloaded. 12 shots (~2.5k tokens) share
+        # two blocks. Scores 0.715-0.755 on H200.
+        num_shots=12,
+        accuracy_threshold=0.68,
+        assert_reload=True,
         cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
@@ -192,7 +222,11 @@ MODELS = [
         id="simple-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.45,
+        # Same as offloading-nemotron-h-8b: needs 12 shots to fill a 1088 block.
+        # Scores 0.720-0.740 on H200.
+        num_shots=12,
+        accuracy_threshold=0.68,
+        assert_reload=True,
     ),
     OffloadingModelConfig(
         id="simple-gemma-4-e4b-it",
@@ -229,6 +263,21 @@ MODELS = [
         cpu_offload_gib=16,
         startup_timeout=1200,
     ),
+    # ── UMBPStoreConnector (embedded MORI DRAM store) ────────────────
+    pytest.param(
+        OffloadingModelConfig(
+            id="umbp-gemma-4-e4b-it",
+            model="google/gemma-4-E4B-it",
+            connector="UMBPStoreConnector",
+            accuracy_threshold=0.55,
+            assert_reload=True,
+        ),
+        id="umbp-gemma-4-e4b-it",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_rocm() and mori_has_umbp()),
+            reason="requires ROCm and MORI built with UMBP",
+        ),
+    ),
 ]
 
 
@@ -252,7 +301,6 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
         _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib, cfg.spec_name),
-        "--trust-remote-code",
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,
     ]
@@ -269,7 +317,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         for run_idx in range(1, 3):
             results = evaluate_gsm8k(
                 num_questions=NUM_QUESTIONS,
-                num_shots=NUM_FEWSHOT,
+                num_shots=cfg.num_shots,
                 host=f"http://{server.host}",
                 port=server.port,
             )
@@ -289,3 +337,8 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
 
             if run_idx == 1:
                 _reset_gpu_prefix_cache(base_url)
+                reloaded_before = _external_kv_tokens(base_url)
+            elif cfg.assert_reload:
+                assert _external_kv_tokens(base_url) > reloaded_before, (
+                    f"GSM8K run 2/2 did not reload KV through {cfg.connector}"
+                )

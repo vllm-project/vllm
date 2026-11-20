@@ -32,6 +32,7 @@ class VLLMValidationError(VLLMClientError):
         message: The error message describing the validation failure.
         parameter: Optional parameter name that failed validation.
         value: Optional value that was rejected during validation.
+
     """
 
     def __init__(
@@ -55,8 +56,18 @@ class VLLMValidationError(VLLMClientError):
         return f"{base} ({', '.join(extras)})" if extras else base
 
 
+class PromptUpdateMismatchError(VLLMValidationError):
+    """Raised when a multi-modal item has no matching placeholder in the prompt."""
+
+
 class VLLMNotFoundError(VLLMClientError):
-    """vLLM-specific NotFoundError"""
+    """vLLM-specific NotFoundError."""
+
+    pass
+
+
+class ChatTemplateResolutionError(VLLMClientError):
+    """Raised when chat template resolution fails."""
 
     pass
 
@@ -69,6 +80,7 @@ class LoRAAdapterNotFoundError(VLLMNotFoundError):
 
     Attributes:
         message: The error message string describing the exception
+
     """
 
     message: str
@@ -96,6 +108,7 @@ class VLLMUnprocessableEntityError(VLLMClientError):
         message: The error message describing the unprocessable entity.
         parameter: Optional parameter name that failed validation.
         value: Optional value that was rejected during validation.
+
     """
 
     def __init__(
@@ -125,6 +138,14 @@ class GenerationError(VLLMServerError):
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class RetryableRequestError(GenerationError):
+    """A transient request-level failure that is safe for clients to retry."""
+
+    def __init__(self, message: str = "Request failed; please retry"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.SERVICE_UNAVAILABLE
 
 
 class GracefulHTTPError(VLLMError):
@@ -167,6 +188,32 @@ class MaxQueuedTokensError(GracefulHTTPError):
     def __init__(self):
         super().__init__(
             "The engine has reached its prefill token backlog limit. "
+            "Please try again later or on a different instance.",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+
+
+class ProfilerAlreadyActiveError(GracefulHTTPError):
+    """Raised when a profiling session is already active."""
+
+    def __init__(self):
+        super().__init__(
+            "A profiling session is already active. Call /stop_profile before "
+            "starting another session.",
+            HTTPStatus.CONFLICT,
+        )
+
+
+class EngineFaultedError(GracefulHTTPError):
+    """Raised when the engine has faulted and is awaiting FT recovery.
+
+    Returns HTTP 503 (Service Unavailable) so that load balancers and
+    client SDKs retry the request on a different instance.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "The engine has faulted and cannot accept new requests. "
             "Please try again later or on a different instance.",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )

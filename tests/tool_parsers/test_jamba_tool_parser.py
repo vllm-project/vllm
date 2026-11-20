@@ -78,7 +78,7 @@ def stream_delta_message_generator(
             previous_token_ids,
             current_token_ids,
             delta_token_ids,
-            request=None,  # type: ignore[arg-type]
+            request=None,
         )
         if delta_message:
             yield delta_message
@@ -95,7 +95,7 @@ def test_extract_tool_calls_no_tools(jamba_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = jamba_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -166,7 +166,7 @@ def test_extract_tool_calls(
 ):
     extracted_tool_calls = jamba_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -314,6 +314,37 @@ def test_extract_tool_calls_streaming_arguments_in_single_delta(jamba_tool_parse
         '<tool_calls>[{"name": "get_current_weather"',
         ",",
         ' "arguments": {"city": "Dallas", "state": "TX"}}]',
+        "</tool_calls>",
+    ]
+
+    streamed_arguments = ""
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        delta_message = jamba_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if delta_message and delta_message.tool_calls:
+            arguments = delta_message.tool_calls[0].function.arguments
+            if arguments:
+                streamed_arguments += arguments
+
+    assert json.loads(streamed_arguments) == {"city": "Dallas", "state": "TX"}
+
+
+def test_extract_tool_calls_streaming_partial_args_with_name_delta(jamba_tool_parser):
+    """Arguments first parsed in the name delta must not lose their prefix."""
+    deltas = [
+        '<tool_calls>[{"name": "get_current_weather"',
+        ', "arguments": {"city": "Dallas", "state": "',
+        'TX"}}]',
         "</tool_calls>",
     ]
 

@@ -32,9 +32,10 @@ from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
 from transformers.tokenization_mistral_common import MistralCommonBackend
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers.protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -63,7 +64,7 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # v2.11 release. In the meantime, the official workaround is to
     # consume the iterator so the tool_calls are correctly deserialized
     # in the OpenAI ChatCompletionAssistantMessageParam object
-    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291 # noqa: E501
+    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291
     # Official Pydantic Issues:
     #   - https://github.com/pydantic/pydantic/issues/9541
     # TODO: remove when pydantic v2.11 is released
@@ -144,15 +145,19 @@ def _validate_apply_chat_template_args(
 
 def validate_request_params(request: "ChatCompletionRequest"):
     if request.chat_template is not None or request.chat_template_kwargs is not None:
-        raise ValueError("chat_template is not supported for Mistral tokenizers.")
+        raise VLLMValidationError(
+            "chat_template is not supported for Mistral tokenizers.",
+            parameter="chat_template",
+        )
 
     if request.reasoning_effort and request.reasoning_effort not in list(
         ReasoningEffort
     ):
-        raise ValueError(
+        raise VLLMValidationError(
             f"reasoning_effort={request.reasoning_effort} is not supported by "
             "Mistral models. Supported values are: "
-            f"{[e.value for e in ReasoningEffort]}."
+            f"{[e.value for e in ReasoningEffort]}.",
+            parameter="reasoning_effort",
         )
 
 
@@ -173,33 +178,9 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-def mistral_common_tekkenizer(tokenizer: object) -> "Tekkenizer | None":
-    """Return the underlying `Tekkenizer` for a `MistralCommonBackend`."""
-    mistral = getattr(tokenizer, "tokenizer", None)
-    instruct = getattr(mistral, "instruct_tokenizer", None)
-    tekken = getattr(instruct, "tokenizer", None)
-    return tekken if isinstance(tekken, Tekkenizer) else None
-
-
-def tekken_convert_ids_to_tokens(
-    tokenizer: "Tekkenizer", ids: Sequence[int]
-) -> list[str | bytes]:
-    """Convert ids to pieces, using raw `bytes` for byte-fallback tokens."""
-    tokens: list[str | bytes] = [tokenizer.id_to_piece(i) for i in ids]
-    if any("�" in t for t in tokens):
-        tokens = [
-            tokenizer.id_to_byte_piece(i, SpecialTokenPolicy.KEEP)
-            if i >= tokenizer.num_special_tokens
-            else tokenizer.decode([i], SpecialTokenPolicy.KEEP)
-            for i in ids
-        ]
-    return tokens
-
-
 def tekken_convert_tokens_to_string(
     tokenizer: "Tekkenizer", tokens: Sequence[str | bytes]
 ) -> str:
-    """Reassemble pieces from `tekken_convert_ids_to_tokens` into text."""
     if any(isinstance(t, bytes) for t in tokens):
         ids = [_tekken_token_to_id(tokenizer, t) for t in tokens]
         return tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
@@ -349,22 +330,13 @@ class MistralTokenizer(TokenizerLike):
                 "`text_pair` is not supported by `MistralTokenizer.__call__`."
             )
 
-        encoded = self.transformers_tokenizer(
+        return self.transformers_tokenizer(
             text=text,
             text_pair=text_pair,
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
         )
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, revert to only call self.transformers_tokenizer(...).
-        # Hack to fix wrongly added eos token, when fix will be supported the condition
-        # below will be False even before the revert is done.
-        if encoded["input_ids"] and encoded["input_ids"][-1] == self.eos_token_id:
-            encoded["input_ids"].pop(-1)
-            if attention_mask := encoded.get("attention_mask"):
-                attention_mask.pop(-1)
-        return encoded
 
     @property
     def vocab(self) -> list[str]:
@@ -384,8 +356,10 @@ class MistralTokenizer(TokenizerLike):
         max_length: int | None = None,
         add_special_tokens: bool = True,
     ) -> list[int]:
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, directly call self.transformers_tokenizer.encode(...).
+        # NOTE: transformers guards truncation with `if max_length and ...`, so
+        # `max_length=0` returns the full sequence instead of an empty one. vLLM
+        # treats `truncate_prompt_tokens=0` as an empty prompt, so keep slicing
+        # here until that is fixed upstream.
         encoded = self.tokenizer.encode(text, bos=add_special_tokens, eos=False)
 
         if truncation is not False and max_length is not None:
@@ -400,22 +374,20 @@ class MistralTokenizer(TokenizerLike):
         **kwargs,
     ) -> list[int]:
         add_generation_prompt = kwargs.pop("add_generation_prompt", False)
-        continue_final_message = kwargs.get("continue_final_message", False)
-        tokenize = kwargs.get("tokenize", True)
-        padding = kwargs.get("padding", False)
-        truncation = kwargs.get("truncation", False)
-        max_length = kwargs.get("max_length")
-
-        version_kwargs = {}
-        # NOTE: This is for backward compatibility.
-        # Transformers should be passed arguments it knows.
-        if self.version >= 15:
-            version_kwargs["reasoning_effort"] = kwargs.get("reasoning_effort")
+        continue_final_message = kwargs.pop("continue_final_message", False)
+        tokenize = kwargs.pop("tokenize", True)
+        padding = kwargs.pop("padding", False)
+        truncation = kwargs.pop("truncation", False)
+        max_length = kwargs.pop("max_length", None)
+        kwargs.pop("return_tensors", None)
+        kwargs.pop("return_dict", None)
 
         _validate_apply_chat_template_args(
             messages, continue_final_message, add_generation_prompt
         )
 
+        # Remaining kwargs (e.g. reasoning_effort, response_format) reach
+        # ChatCompletionRequest.from_openai, which drops unknown fields.
         return self.transformers_tokenizer.apply_chat_template(
             conversation=messages,
             tools=tools,
@@ -426,17 +398,12 @@ class MistralTokenizer(TokenizerLike):
             max_length=max_length,
             return_tensors=None,
             return_dict=False,
-            **version_kwargs,
+            **kwargs,
         )
 
     def decode(
         self, ids: Sequence[int] | int, skip_special_tokens: bool = False
     ) -> str:
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, directly call self.transformers_tokenizer.decode(...).
-        if isinstance(ids, int):
-            ids = [ids]
-
         return self.transformers_tokenizer.decode(
             ids, skip_special_tokens=skip_special_tokens
         )

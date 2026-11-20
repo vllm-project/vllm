@@ -16,10 +16,8 @@ from vllm.utils.torch_utils import set_random_seed
 NUM_TOKENS = [1, 17, 256]
 TOP_KS = [2, 8]
 HIDDEN_SIZE = 512
-# One BLOCK_K tile, a partial trailing tile, and Kimi-K3's real dims
-# (moe_intermediate_size 3072, hidden_size 7168) -- exercises the per-tile loop
-# and its tail mask (BLOCK_K caps at 512 for <=2-byte dtypes).
-HIDDEN_SIZES = [512, 1000, 3072, 7168]
+# Include partial tiles and hidden sizes above the CUDA 4096-element tile cap.
+HIDDEN_SIZES = [512, 1000, 3072, 4097, 7168]
 DTYPES = [torch.bfloat16, torch.float32]
 NUM_EXPERTS = 16
 
@@ -233,7 +231,7 @@ def test_nonlocal_and_padding_adjacent():
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", [*DTYPES, torch.float16])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_weighted_sum_matches_reference(
     num_tokens: int, top_k: int, hidden_size: int, dtype: torch.dtype
@@ -268,7 +266,11 @@ def test_weighted_sum_matches_reference(
 
     assert not out.isnan().any(), "invalid slots leaked into the reduction"
     ref = _reference(inputs.nan_to_num(), topk_weights, topk_ids, expert_map=None)
-    atol, rtol = (1e-2, 1e-2) if dtype == torch.bfloat16 else (1e-4, 1e-4)
+    atol, rtol = {
+        torch.bfloat16: (1e-2, 1e-2),
+        torch.float16: (1e-3, 1e-3),
+        torch.float32: (1e-4, 1e-4),
+    }[dtype]
     torch.testing.assert_close(out.float(), ref, atol=atol, rtol=rtol)
 
 
@@ -360,7 +362,7 @@ def test_num_valid_tokens_bounds_stale_padding(dtype: torch.dtype):
     """
     set_random_seed(0)
     device = "cuda"
-    num_tokens, num_recv, top_k, hidden_size = 17, 10, 8, 512
+    num_tokens, num_recv, top_k, hidden_size = 17, 10, 8, 7168
 
     inputs = torch.randn(num_tokens, top_k, hidden_size, dtype=dtype, device=device)
     topk_weights = torch.rand(num_tokens, top_k, dtype=dtype, device=device)

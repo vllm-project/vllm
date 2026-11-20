@@ -3,6 +3,7 @@
 """UVA-based CPU offloading using Unified Virtual Addressing."""
 
 from collections.abc import Generator
+from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,7 @@ from torch.func import functional_call
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -32,6 +34,7 @@ class UVAOffloader(BaseOffloader):
         cpu_offload_max_bytes: Maximum bytes to offload to CPU.
         cpu_offload_params: Set of parameter name segments to selectively
             offload. If empty, all parameters are eligible up to the byte limit.
+
     """
 
     supports_tower_offload = True
@@ -68,6 +71,14 @@ class UVAOffloader(BaseOffloader):
             )
         return modules
 
+    def targets(self, param_name: str) -> bool:
+        """Whether `cpu_offload_params` selects the parameter `param_name`."""
+        # Dots match full segments only: "experts.w2_weight" matches
+        # "mlp.experts.w2_weight" but not "mlp.experts.w2_weight_scale".
+        return not self.cpu_offload_params or any(
+            f".{param}." in f".{param_name}." for param in self.cpu_offload_params
+        )
+
     def _maybe_offload_to_cpu(self, module: nn.Module, prefix: str = "") -> nn.Module:
         """Offload module parameters to CPU using UVA if budget allows."""
         if (params := next(module.parameters(), None)) is None:
@@ -95,18 +106,17 @@ class UVAOffloader(BaseOffloader):
             # memory), so the marker is the only way to recognize those.
             if p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False):
                 continue
-
-            if self.cpu_offload_params:
-                # Check if parameter belongs to the offloading set
-                # Add dots here to ensure we match full segments only
-                # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight"
-                # but not "mlp.experts.w2_weight_scale"
-                should_offload = any(
-                    f".{param}." in f".{prefix}{name}."
-                    for param in self.cpu_offload_params
+            if not self.targets(f"{prefix}{name}"):
+                continue
+            # Online quantization creates meta weights and replaces them after
+            # loading; they have no data to offload.
+            # TODO: offload the quantized weights once they exist.
+            if p.is_meta:
+                logger.warning_once(
+                    "CPU offloading skips weights that online quantization "
+                    "creates at load time: they stay in GPU memory."
                 )
-                if not should_offload:
-                    continue
+                continue
 
             cpu_data = p.data.to(device="cpu")
             if self.pin_memory:
@@ -126,13 +136,14 @@ class UVAOffloader(BaseOffloader):
 
             def forward(*args, **kwargs):
                 module.forward = original_forward
-                device_state = {
-                    # here we blindly call `to(device)`
-                    # if the parameter is already on the device,
-                    # it will be a no-op
-                    k: v.to(device, non_blocking=True)
-                    for k, v in module.state_dict().items()
-                }
+                with nullcontext() if self.pin_memory else gpu_sync_allowed():
+                    device_state = {
+                        # here we blindly call `to(device)`
+                        # if the parameter is already on the device,
+                        # it will be a no-op
+                        k: v.to(device, non_blocking=True)
+                        for k, v in module.state_dict().items()
+                    }
 
                 # set `tie_weights=False` as tied weights in original model
                 # become untied when calling .to(device) individually

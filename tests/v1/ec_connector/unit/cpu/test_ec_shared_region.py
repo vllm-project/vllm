@@ -8,11 +8,14 @@ import errno
 import mmap
 import os
 import uuid
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+from vllm.config import ParallelConfig
+from vllm.distributed.ec_transfer.ec_connector.cpu import common
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
     _wait_for_file_size,
@@ -28,7 +31,7 @@ def _make_region(num_blocks: int = 8, block_size_bytes: int = 64) -> ECSharedReg
 
 
 @pytest.fixture
-def region() -> ECSharedRegion:
+def region() -> Iterator[ECSharedRegion]:
     r = _make_region()
     yield r
     r.cleanup()
@@ -93,6 +96,32 @@ def test_second_instance_opens_existing_file_and_shares_memory():
             r2.cleanup()
     finally:
         r1.cleanup()
+
+
+def test_dense_dp_engines_get_distinct_regions():
+    """Dense DP engines reset data_parallel_rank to 0 but share instance_id,
+    so the region must be keyed by data_parallel_index."""
+    instance_id = str(uuid.uuid4())
+    regions = []
+    try:
+        for dp_index in range(2):
+            parallel_config = ParallelConfig(
+                data_parallel_size=2, data_parallel_rank=dp_index
+            )
+            parallel_config.reconfigure_for_independent_dp_rank()
+            cfg = MagicMock()
+            cfg.instance_id = instance_id
+            cfg.parallel_config = parallel_config
+            cfg.model_config.dtype = torch.float16
+            cfg.model_config.get_inputs_embeds_size.return_value = 8
+            cfg.ec_transfer_config.ec_connector_extra_config = {"ec_cpu_bytes": 64}
+            regions.append(common.create_ec_shared_region(cfg))
+
+        assert all(r._is_creator for r in regions)
+        assert regions[0]._mmap_path != regions[1]._mmap_path
+    finally:
+        for r in regions:
+            r.cleanup()
 
 
 def test_only_creator_unlinks_file_on_cleanup():

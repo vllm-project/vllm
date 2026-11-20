@@ -3,32 +3,36 @@
 """iHC (independent Hyper-Connections) layers for HY V4 (NVIDIA).
 
 iHC replaces the single residual stream of a standard transformer with
-``hc_mult`` parallel residual channels. Each decoder sub-block reduces the
-channels to one hidden state (``HYV4HCPreLayer``), runs the sub-block, then
-scatters the result back over the channels (``HYV4HCPostLayer``). The final
-``HYV4HCHeadLayer`` merges the channels before the model's output norm.
+`hc_mult` parallel residual channels. Each decoder sub-block reduces the
+channels to one hidden state (`HYV4HCPreLayer`), runs the sub-block, then
+scatters the result back over the channels (`HYV4HCPostLayer`). The final
+`HYV4HCHeadLayer` merges the channels before the model's output norm.
 
 NOTE: Each of the three steps has an optional single-kernel HPC replacement
-(``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). They are only constructed
-when the hpc package is installed, ``VLLM_ENABLE_HPC_OPS=1`` and the shape /
-device constraints hold; otherwise the eager path below runs unchanged.
-TODO: port the cross-layer post+pre fusion (``HpcIHCPostPre``) as well; it
+(`HpcIHCPre` / `HpcIHCPost` / `HpcIHCHead`). Pre and post fall back to
+in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager path.
+TODO: port the cross-layer post+pre fusion (`HpcIHCPostPre`) as well; it
 requires restructuring the decoder-layer forward scheduling.
 """
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.models.hy_v4.nvidia.triton_ihc import (
+    triton_ihc_post,
+    triton_ihc_pre,
+    triton_ihc_supported,
+)
 
 
 class HYV4HCPreLayer(nn.Module):
     """iHC pre-processing layer (2D-activation adaptation).
 
     Steps:
-        1. RMS-normalize the flattened ``[num_tokens, hc * d]`` input.
+        1. RMS-normalize the flattened `[num_tokens, hc * d]` input.
         2. Project to the pre/post gating logits.
         3. Turn the logits into sigmoid gates.
         4. Reduce over the channel dim with the pre gates.
@@ -36,7 +40,7 @@ class HYV4HCPreLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_dim: int,
         hc_mult: int = 4,
         magnitude: float = 2.0,
@@ -98,14 +102,25 @@ class HYV4HCPreLayer(nn.Module):
         """Reduce the iHC channels and emit the post gates.
 
         Args:
-            x: Input of shape ``[num_tokens, hc, d]``.
+            x: Input of shape `[num_tokens, hc, d]`.
 
         Returns:
-            A tuple of the pre-gated reduction ``[num_tokens, d]`` and the post
-            gates ``[num_tokens, hc]`` consumed by `HYV4HCPostLayer`.
+            A tuple of the pre-gated reduction `[num_tokens, d]` and the post
+            gates `[num_tokens, hc]` consumed by `HYV4HCPostLayer`.
+
         """
         if self.hpc_op is not None:
             return self.hpc_op(x)
+        if triton_ihc_supported(x):
+            return triton_ihc_pre(
+                x,
+                self.hc_fn.weight,
+                self.hc_scale,
+                self.hc_base,
+                self.magnitude,
+                self.hc_eps,
+                self.layernorm_epsilon,
+            )
 
         shape = x.size()  # [num_tokens, hc, d]
         hc = self.hc_mult
@@ -148,7 +163,7 @@ class HYV4HCPostLayer(nn.Module):
         y[n, i, d] = post[n, i] * x[n, d] + residual[n, i, d]
     """
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
 
@@ -166,15 +181,18 @@ class HYV4HCPostLayer(nn.Module):
         """Scatter the sub-block output back onto the iHC channels.
 
         Args:
-            x: Attention/MLP output of shape ``[num_tokens, d]``.
-            residual: Multi-channel residual ``[num_tokens, hc, d]``.
-            post: Post gates ``[num_tokens, hc]`` from `HYV4HCPreLayer`.
+            x: Attention/MLP output of shape `[num_tokens, d]`.
+            residual: Multi-channel residual `[num_tokens, hc, d]`.
+            post: Post gates `[num_tokens, hc]` from `HYV4HCPreLayer`.
 
         Returns:
-            The updated residual channels ``[num_tokens, hc, d]``.
+            The updated residual channels `[num_tokens, hc, d]`.
+
         """
         if self.hpc_op is not None:
             return self.hpc_op(x, residual, post)
+        if triton_ihc_supported(x):
+            return triton_ihc_post(x, residual, post)
 
         dtype = x.dtype
         x = x.float()
@@ -195,7 +213,7 @@ class HYV4HCHeadLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         hc_mult: int = 4,
         hc_eps: float = 1e-6,
@@ -252,10 +270,11 @@ class HYV4HCHeadLayer(nn.Module):
         """Merge the iHC channels into a single hidden state.
 
         Args:
-            x: Input of shape ``[num_tokens, hc, d]``.
+            x: Input of shape `[num_tokens, hc, d]`.
 
         Returns:
-            The merged hidden state ``[num_tokens, d]``.
+            The merged hidden state `[num_tokens, d]`.
+
         """
         if self.hpc_op is not None:
             return self.hpc_op(x)
@@ -282,7 +301,7 @@ class HYV4HCLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         init_std: float = 6e-3,
         base_noise_std: float = 0.0,
@@ -313,10 +332,10 @@ class HYV4HCLayer(nn.Module):
         return self._prepare_input_to_3d(hidden_states)
 
     def _prepare_input_to_3d(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Reshape the iHC input to ``[num_tokens, hc, h]``.
+        """Reshape the iHC input to `[num_tokens, hc, h]`.
 
-        Accepted inputs are ``[num_tokens, hc, h]`` (no-op), ``[num_tokens, h]``
-        (broadcast over the channels) and ``[num_tokens, hc * h]`` (reshape).
+        Accepted inputs are `[num_tokens, hc, h]` (no-op), `[num_tokens, h]`
+        (broadcast over the channels) and `[num_tokens, hc * h]` (reshape).
         """
         if hidden_states.dim() == 3:
             return hidden_states
@@ -348,9 +367,10 @@ class HYV4HCLayer(nn.Module):
         """Reduce the iHC channels and produce the post gates.
 
         Returns:
-            A tuple of the reduced hidden states ``[num_tokens, d]``, the post
-            gates ``[num_tokens, hc]`` (``None`` when iHC is disabled) and the
+            A tuple of the reduced hidden states `[num_tokens, d]`, the post
+            gates `[num_tokens, hc]` (`None` when iHC is disabled) and the
             residual (the untouched input).
+
         """
         if not self.enable_ihc:
             return hidden_states, None, hidden_states

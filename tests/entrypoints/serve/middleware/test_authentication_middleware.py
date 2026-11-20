@@ -63,6 +63,8 @@ class MockModelConfig:
     def __init__(self):
         self.hf_config = Namespace()
         self.hf_config.num_labels = 1
+        # Register the process checkpoint routes, which require sleep mode.
+        self.enable_sleep_mode = True
 
     def get_pooling_task(self, supported_tasks: tuple["SupportedTask", ...]):
         pooling_tasks = [s for s in supported_tasks if s in POOLING_TASKS]
@@ -84,7 +86,10 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
 
     # Register routers for this specific task (development mode already enabled).
     register_api_routers(
-        args, app, supported_tasks=(task,), model_config=MockModelConfig()
+        args,
+        app,
+        supported_tasks=(task,),
+        model_config=MockModelConfig(),
     )
 
     routes = get_all_http_routes(app)

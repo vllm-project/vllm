@@ -98,12 +98,11 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
             act_type=params_dtype,
             group_size=effective_group_size,
             zero_points=False,
-            has_g_idx=False,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for CompressedTensorsW4A8Int", kernel_type.__name__)
+            logger.debug("Using %s for CompressedTensorsW4A8Int", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         scales_and_zp_size = input_size_per_partition // effective_group_size
@@ -140,7 +139,6 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
             w_q_param_name="weight_packed",
             w_s_param_name="weight_scale",
             w_zp_param_name=None,
-            w_gidx_param_name=None,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

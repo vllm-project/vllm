@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.v1.core.utils import uniform_spec
 from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -68,7 +69,6 @@ def test_mtp_speculative_mixed_batch_short_prefill(
 ):
     """Test to ensure MTP speculative decoding correctly handles
     short prefill chunks that fall below the reorder_batch_threshold."""
-
     # Set so large that both prefills will be classified as decodes in a mixed batch
     # note, with prefix caching we require chunk_size >= mamba_block_size
     chunk_size = 256 if not enable_prefix_caching else 2048
@@ -86,10 +86,8 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         kv_cache_memory_bytes=QWEN_KV_CACHE_BYTES if model_name == QWEN_MODEL else None,
         enforce_eager=True,
         tensor_parallel_size=1,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
-        mamba_cache_mode="align" if enable_prefix_caching else "none",
     ) as llm:
         sampling_params = SamplingParams(
             temperature=0.0,
@@ -124,9 +122,9 @@ def test_mtp_speculative_mixed_batch_short_prefill(
 def _get_mamba_block_size(llm) -> int:
     scheduler = llm.llm_engine.engine_core.engine_core.scheduler
     block_sizes = {
-        group.kv_cache_spec.block_size
+        group.block_size
         for group in scheduler.kv_cache_config.kv_cache_groups
-        if isinstance(group.kv_cache_spec, MambaSpec)
+        if isinstance(uniform_spec(group), MambaSpec)
     }
     assert len(block_sizes) == 1
     block_size = block_sizes.pop()
@@ -162,7 +160,6 @@ def test_qwen_mtp_mamba_prefix_cache_hit_is_bounded(vllm_runner, monkeypatch):
         enforce_eager=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
         speculative_config={"method": "mtp", "num_speculative_tokens": 2},
     ) as runner:
         llm = runner.get_llm()
@@ -204,7 +201,9 @@ def test_qwen_mtp_mamba_prefix_cache_hit_is_bounded(vllm_runner, monkeypatch):
         cold_outputs = llm.generate(wave2_prompts, cold_params)
 
     cached_tokens = [output.num_cached_tokens for output in warm_outputs]
-    assert max(cached_tokens) == block_size
+    # Wave 1 decodes past 2 * block_size, and the Mamba state at the last
+    # boundary crossed in decode is cached, so wave 2 resumes there.
+    assert max(cached_tokens) == 2 * block_size
 
     for arm, outputs in (("warm", warm_outputs), ("cold", cold_outputs)):
         missed = [

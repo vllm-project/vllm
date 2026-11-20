@@ -5,8 +5,10 @@ from collections.abc import Iterable
 
 import torch.fx
 from torch import SymInt
+from torch._prims_common import is_contiguous_or_false
 from torch.fx.experimental.symbolic_shapes import statically_known_true
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from ..fx_utils import is_func
@@ -16,8 +18,7 @@ logger = init_logger(__name__)
 
 
 class NoOpEliminationPass(VllmInductorPass):
-    """
-    This is an inductor pass that removes redundant reshape/slice operations.
+    """This is an inductor pass that removes redundant reshape/slice operations.
     It is required for RMSNorm-quant fusion to work properly.
     That's because apply_fp8_linear adds a reshape, which is redundant
     in the 2D-case. Additionally, torch internal no-op elimination pass does
@@ -64,27 +65,31 @@ class NoOpEliminationPass(VllmInductorPass):
     out: "f16[s0, 4096]" = at[1]
     """
 
+    def __init__(self, config: VllmConfig, graph_may_mutate: bool = False) -> None:
+        super().__init__(config)
+        # After vLLM IR lowering the graph may contain in-place ops, so a reshape
+        # chain may only be collapsed through reshapes that alias their input.
+        self.graph_may_mutate = graph_may_mutate
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph) -> None:
         count = 0
         # Remove no-op reshapes/views:
         for node in graph.nodes:
-            if is_func(node, torch.ops.aten.reshape.default):
+            if self.is_reshape(node):
                 # Case 1: rewrite reshape chains to reshapes on the base tensor
                 input = node.args[0]
                 # If the input is a reshape, rebind to that node
-                if is_func(input, torch.ops.aten.reshape.default):
-                    # The new input is guaranteed not to be a reshape,
-                    # because we process nodes in order
+                if self.is_reshape(input) and self.can_bypass(input):
+                    # The new input is not a bypassable reshape, because we
+                    # process nodes in order
                     node.update_arg(0, input.args[0])
                     if len(input.users) == 0:
                         graph.erase_node(input)
                         count += 1
 
             # remove reshape/slice if it produces the original shape
-            if is_func(node, torch.ops.aten.reshape.default) or is_func(
-                node, torch.ops.aten.slice.Tensor
-            ):
+            if self.is_reshape(node) or is_func(node, torch.ops.aten.slice.Tensor):
                 input = node.args[0]
                 input_shape = input.meta["val"].shape
                 output_shape = node.meta["val"].shape
@@ -92,7 +97,12 @@ class NoOpEliminationPass(VllmInductorPass):
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
-            elif is_func(node, torch.ops.aten.slice_scatter.default):
+            elif (
+                is_func(node, torch.ops.aten.slice_scatter.default)
+                # slice_scatter copies; replacing it with an alias is unsafe
+                # once the graph may hold in-place ops.
+                and not self.graph_may_mutate
+            ):
                 base, view, dim_index, start, end = node.args[:5]
                 base_shape = base.meta["val"].shape
                 view_shape = view.meta["val"].shape
@@ -104,10 +114,27 @@ class NoOpEliminationPass(VllmInductorPass):
 
         logger.debug("Removed %s no-op reshapes and slices", count)
 
+    def can_bypass(self, reshape: torch.fx.Node) -> bool:
+        """Whether users of `reshape` may read its input directly. A reshape of
+        a non-contiguous tensor copies, so an in-place op on its result must not
+        be redirected to the base."""
+        if not self.graph_may_mutate or is_func(reshape, torch.ops.aten.view.default):
+            return True
+        base = reshape.args[0]
+        assert isinstance(base, torch.fx.Node)
+        return is_contiguous_or_false(base.meta["val"])
+
+    @staticmethod
+    def is_reshape(node: torch.fx.Node) -> bool:
+        # Views appear when IR op impls are traced in after Dynamo; in the
+        # functional post-grad graph Inductor lowers them like reshapes.
+        return is_func(node, torch.ops.aten.reshape.default) or is_func(
+            node, torch.ops.aten.view.default
+        )
+
     # ---------------------- Shape comparison helpers ----------------------
     def dims_equivalent(self, dim: int | SymInt, i_dim: int | SymInt) -> bool:
-        """
-        This function checks if two dimensions are equivalent.
+        """This function checks if two dimensions are equivalent.
 
         Args:
             dim: The dimension arg to reshape/slice
@@ -119,6 +146,7 @@ class NoOpEliminationPass(VllmInductorPass):
         There are two cases in which the dimensions are equivalent:
         1. The dimensions are equal (both integers)
         2. The dimensions both correspond to the same SymInt
+
         """
         # Case 1
         return statically_known_true(dim == i_dim)  # type: ignore[no-any-return]

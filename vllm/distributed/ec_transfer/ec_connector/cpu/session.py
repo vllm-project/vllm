@@ -71,7 +71,7 @@ class XferState(enum.Enum):
     WAITING_ACK = "waiting_ack"  # XferReq sent, awaiting XferAck
     READING = "reading"  # NIXL READ in flight
     DONE = "done"  # READ completed; promote to local cache
-    ACK_TIMEOUT = "ack_timeout"  # XferAck never arrived; free blocks + tombstone
+    ACK_TIMEOUT = "ack_timeout"  # XferAck never arrived; free blocks + retry
     READ_FAILED = "read_failed"  # Unexpected NIXL state; free blocks + tombstone
     QUARANTINED = "quarantined"  # Read timed out, NIXL unabortable; keep blocks
     SETTLED = "settled"  # Quarantined DMA done; safe to free blocks
@@ -80,7 +80,7 @@ class XferState(enum.Enum):
 # ── ProducerXfer ──────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ProducerXfer:
     """One pinned read grant on the producer side.
 
@@ -99,7 +99,7 @@ class ProducerXfer:
 # ── ConsumerXfer ──────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerXfer:
     """State machine for one NIXL READ on the consumer side.
 
@@ -388,7 +388,7 @@ class ProducerSession:
 # ── ConsumerSession ───────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerSessionResults:
     """Results from ConsumerSession.take_results()."""
 
@@ -500,7 +500,18 @@ class ConsumerSession:
             if state == XferState.DONE:
                 self._completed.add(mm_hash)
                 del self._xfers[mm_hash]
-            elif state in (XferState.ACK_TIMEOUT, XferState.READ_FAILED):
+            elif state == XferState.ACK_TIMEOUT:
+                # The scheduler bounds retries with a per-request deadline.
+                logger.warning(
+                    "EC consumer: no XferAck for mm_hash=%s from %s:%d in time; "
+                    "will re-request",
+                    mm_hash,
+                    self._addr[0],
+                    self._addr[1],
+                )
+                self._retryable.add(mm_hash)
+                del self._xfers[mm_hash]
+            elif state == XferState.READ_FAILED:
                 self._tombstoned.add(mm_hash)
                 del self._xfers[mm_hash]
             elif state == XferState.QUARANTINED:

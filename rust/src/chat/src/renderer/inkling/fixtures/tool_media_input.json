@@ -1,0 +1,140 @@
+{
+  "add_generation_prompt": false,
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call_shot",
+          "function": {
+            "name": "screenshot",
+            "arguments": "{}"
+          }
+        },
+        {
+          "id": "call_multi",
+          "function": {
+            "name": "shot",
+            "arguments": "{}"
+          }
+        },
+        {
+          "id": "call_bash",
+          "function": {
+            "name": "bash",
+            "arguments": "{}"
+          }
+        },
+        {
+          "id": "call_mixed",
+          "function": {
+            "name": "shot",
+            "arguments": "{}"
+          }
+        },
+        {
+          "id": "call_empty",
+          "function": {
+            "name": "noop",
+            "arguments": "{}"
+          }
+        },
+        {
+          "id": "call_record",
+          "function": {
+            "name": "record",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_shot",
+      "content": [
+        {
+          "type": "text",
+          "text": "captured"
+        },
+        {
+          "type": "image_url",
+          "image_url": "data:image/png;base64,"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_multi",
+      "content": [
+        {
+          "type": "image_url",
+          "image_url": "data:image/png;base64,"
+        },
+        {
+          "type": "image_url",
+          "image_url": "data:image/png;base64,"
+        },
+        {
+          "type": "image_url",
+          "image_url": "data:image/png;base64,"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_bash",
+      "content": [
+        {
+          "type": "text",
+          "text": "stdout"
+        },
+        {
+          "type": "text",
+          "text": "stderr"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_mixed",
+      "content": [
+        {
+          "type": "text",
+          "text": "before"
+        },
+        {
+          "type": "text",
+          "text": " and "
+        },
+        {
+          "type": "image_url",
+          "image_url": "data:image/png;base64,"
+        },
+        {
+          "type": "text",
+          "text": "after"
+        },
+        {
+          "type": "text",
+          "text": " image"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_empty",
+      "content": []
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_record",
+      "content": [
+        {
+          "type": "input_audio",
+          "data": ""
+        }
+      ]
+    }
+  ]
+}

@@ -37,12 +37,6 @@ class ECCPUConnector(ECConnectorBase):
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
         super().__init__(vllm_config=vllm_config, role=role)
 
-        if not vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "ECCPUConnector requires the V2 model runner. "
-                "Set VLLM_USE_V2_MODEL_RUNNER=1."
-            )
-
         self.connector_worker = None
         self.connector_scheduler = None
 
@@ -103,6 +97,10 @@ class ECCPUConnector(ECConnectorBase):
         return self.connector_scheduler.ensure_cache_available(
             request, num_computed_tokens
         )
+
+    def take_unavailable_requests(self) -> set[str]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.take_unavailable_requests()
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         assert self.connector_scheduler is not None

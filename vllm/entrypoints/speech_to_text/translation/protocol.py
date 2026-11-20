@@ -3,9 +3,10 @@
 
 import json
 import time
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from http import HTTPStatus
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeAlias
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from pydantic import (
     Field,
     model_validator,
@@ -101,6 +102,9 @@ class TranslationRequest(OpenAIBaseModel):
     to automatically increase the temperature until certain thresholds are hit.
     """
 
+    watermarking: bool | None = None
+    """Whether to apply the engine's configured watermark to this request."""
+
     top_p: float | None = None
     """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
@@ -169,7 +173,7 @@ class TranslationRequest(OpenAIBaseModel):
     # --8<-- [end:translation-extra-params]
 
     # Default sampling parameters for translation requests.
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "temperature": 0,
         "top_p": 1.0,
@@ -214,6 +218,7 @@ class TranslationRequest(OpenAIBaseModel):
             beam_width=n,
             max_tokens=max_tokens,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
@@ -250,6 +255,7 @@ class TranslationRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             max_tokens=max_tokens,
             seed=self.seed,
             top_p=top_p,
@@ -270,6 +276,11 @@ class TranslationRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if not isinstance(data, dict):
             return data
+        if isinstance(data.get("file"), str):
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail="Expected 'file' to be a file-like object, not 'str'.",
+            )
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -33,7 +33,7 @@ logger = init_logger(__name__)
 # Install: git clone git@github.com:taco-project/FlexKV.git \
 #          && cd FlexKV && bash build.sh
 class FlexKVConnectorV1(KVConnectorBase_V1):
-    """KV Connector that offloads KV cache to FlexKV.
+    r"""KV Connector that offloads KV cache to FlexKV.
 
     FlexKV is a distributed KV Store and multi-level cache management system
     designed for ultra-large-scale LLM inference. It supports offloading KV
@@ -47,11 +47,17 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             cd FlexKV && bash build.sh
 
     Configuration:
-        Pass ``kv_connector="FlexKVConnectorV1"`` via ``--kv-transfer-config``::
+        Pass `kv_connector="FlexKVConnectorV1"` via `--kv-transfer-config`::
 
             --kv-transfer-config \
             '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
     """
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
 
     def __init__(
         self,
@@ -83,19 +89,20 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """No-op for FlexKV (currently).
 
         FlexKV manages all KV transfers on the **scheduler side** via
-        ``build_connector_meta`` (which calls ``launch_tasks``) and
-        ``update_connector_output`` (which polls ``query_finished_task``).
+        `build_connector_meta` (which calls `launch_tasks`) and
+        `update_connector_output` (which polls `query_finished_task`).
         KV blocks are transferred directly between the FlexKV server and
         vLLM's GPU memory without worker-side intervention during the
         forward pass — similar to how NIXL operates.
 
         These worker-side hooks are kept (rather than omitted) to satisfy
-        the ``KVConnectorBase_V1`` interface contract and to serve as
+        the `KVConnectorBase_V1` interface contract and to serve as
         extension points for a future worker-side layer-pipelining path.
 
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs (Any): additional arguments (unused).
+
         """
         self._flexkv_connector.start_load_kv(forward_context, **kwargs)
 
@@ -103,10 +110,11 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """No-op for FlexKV (currently).
 
         FlexKV manages all KV transfers on the scheduler side.
-        This hook is retained for ``KVConnectorBase_V1`` API compatibility.
+        This hook is retained for `KVConnectorBase_V1` API compatibility.
 
         Args:
             layer_name: the name of the layer (unused).
+
         """
         self._flexkv_connector.wait_for_layer_load(layer_name)
 
@@ -120,10 +128,10 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """No-op for FlexKV (currently).
 
         FlexKV offloads KV cache asynchronously from the scheduler side
-        after a request finishes (see ``request_finished``).  It does not
+        after a request finishes (see `request_finished`).  It does not
         intercept individual layer tensors during the forward pass.
 
-        This hook is retained to satisfy ``KVConnectorBase_V1`` and as an
+        This hook is retained to satisfy `KVConnectorBase_V1` and as an
         extension point for future per-layer async offload support.
 
         Args:
@@ -131,6 +139,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             kv_layer (torch.Tensor): the paged KV buffer (unused).
             attn_metadata (AttentionMetadata): the attention metadata (unused).
             **kwargs (Any): additional arguments (unused).
+
         """
         self._flexkv_connector.save_kv_layer(
             layer_name, kv_layer, attn_metadata, **kwargs
@@ -140,11 +149,11 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """No-op for FlexKV (currently).
 
         KV offload tasks are tracked asynchronously by the scheduler
-        connector via ``request_finished`` / ``query_finished_task``.
+        connector via `request_finished` / `query_finished_task`.
         There is no pending worker-side save to wait for at
         forward-context exit.
 
-        Retained to satisfy ``KVConnectorBase_V1`` and as an extension
+        Retained to satisfy `KVConnectorBase_V1` and as an extension
         point for future worker-side save-completion signalling.
         """
         self._flexkv_connector.wait_for_save()
@@ -160,6 +169,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             that have finished asynchronous transfer. The finished saves/sends
             req ids must belong to a set provided in a call to this method
             (this call or a prior one).
+
         """
         return self._flexkv_connector.get_finished(finished_req_ids)
 
@@ -169,6 +179,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
 
         Args:
             kv_caches: dictionary of layer names to kv cache tensors.
+
         """
         self._flexkv_connector.register_kv_caches(kv_caches)
 
@@ -181,7 +192,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """Get the number of new tokens that can be loaded from the
-        external KV cache beyond ``num_computed_tokens``.
+        external KV cache beyond `num_computed_tokens`.
 
         Args:
             request (Request): the request object.
@@ -192,6 +203,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             Tuple of (num_external_tokens, is_ready) where
             num_external_tokens is the number of additional tokens that
             can be loaded from the external KV cache.
+
         """
         return self._flexkv_connector.get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -215,6 +227,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         return self._flexkv_connector.build_connector_meta(scheduler_output)
 
@@ -224,6 +237,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         Args:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
+
         """
         self._flexkv_connector.update_connector_output(connector_output)
 
@@ -238,8 +252,9 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             Tuple of (async_save, kv_transfer_params) where async_save is
             True if the request is being saved/sent asynchronously and blocks
             should not be freed until the request_id is returned from
-            :meth:`get_finished`. kv_transfer_params is an optional dict of
+            `get_finished`. kv_transfer_params is an optional dict of
             KVTransferParams to be included in the request outputs.
+
         """
         return self._flexkv_connector.request_finished(request, block_ids)
 
@@ -248,6 +263,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
 
         Returns:
             New KV cache events since the last call.
+
         """
         return self._flexkv_connector.take_events()
 

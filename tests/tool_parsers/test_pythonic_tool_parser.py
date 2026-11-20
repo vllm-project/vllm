@@ -191,9 +191,11 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     )
     model_output_deltas = [
         "[get_weather(city='San",
-        " Francisco', metric='celsius'), "
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        (
+            " Francisco', metric='celsius'), "
+            f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
+            f"{EMPTY_LIST_FUNCTION_OUTPUT}]"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(
@@ -209,7 +211,7 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
 
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
-    """test regex timeout is handled gracefully"""
+    """Test regex timeout is handled gracefully."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         default_tokenizer
     )

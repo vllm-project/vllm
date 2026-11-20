@@ -13,9 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Processor class for MiniCPMV.
-"""
+"""Processor class for MiniCPMV."""
 
 from typing import TypeAlias
 
@@ -36,8 +34,7 @@ MiniCPMVBatchFeature: TypeAlias = BatchFeature
 
 
 class MiniCPMVProcessor(ProcessorMixin):
-    r"""
-    Constructs a MiniCPMV processor which wraps a MiniCPMV image
+    r"""Constructs a MiniCPMV processor which wraps a MiniCPMV image
     processor and a MiniCPMV tokenizer into a single processor.
 
     [`MiniCPMVProcessor`] offers all the functionalities of
@@ -50,6 +47,7 @@ class MiniCPMVProcessor(ProcessorMixin):
             The image processor is a required input.
         tokenizer ([`LlamaTokenizerWrapper`], *optional*):
             The tokenizer is a required input.
+
     """
 
     attributes = ["image_processor", "tokenizer"]
@@ -73,12 +71,12 @@ class MiniCPMVProcessor(ProcessorMixin):
         """Run the vendored MiniCPMV processor on a (text, images) pair.
 
         Batched inputs are supported following the upstream MiniCPM-V
-        processor flow. ``images`` is forwarded to the underlying image
-        processor and ``text`` is tokenized with image placeholders
+        processor flow. `images` is forwarded to the underlying image
+        processor and `text` is tokenized with image placeholders
         replaced by the appropriate slice tokens. Returns a
-        ``MiniCPMVBatchFeature`` with at minimum ``input_ids`` and (when
-        images are provided) ``pixel_values``, ``image_sizes``,
-        ``image_bound`` and ``tgt_sizes``.
+        `MiniCPMVBatchFeature` with at minimum `input_ids` and (when
+        images are provided) `pixel_values`, `image_sizes`,
+        `image_bound` and `tgt_sizes`.
         """
         if images is not None:
             image_inputs = self.image_processor(
@@ -93,8 +91,7 @@ class MiniCPMVProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor
     # .batch_decode with CLIP->Llama
     def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
+        """This method forwards all its arguments to LlamaTokenizerFast's
         [`~PythonBackend.batch_decode`]. Please refer to the
         docstring of this method for more information.
         """
@@ -126,8 +123,7 @@ class MiniCPMVProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor
     # .decode with CLIP->Llama
     def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
+        """This method forwards all its arguments to LlamaTokenizerFast's
         [`~PythonBackend.decode`]. Please refer to the docstring
         of this method for more information.
         """

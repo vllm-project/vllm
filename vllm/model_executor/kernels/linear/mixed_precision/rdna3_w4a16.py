@@ -3,8 +3,8 @@
 """W4A16 GPTQ kernel for AMD RDNA3 (gfx1100) — fp16 + bf16.
 
 Drop-in replacement for ExllamaLinearKernel on RDNA3 that adds native bf16
-support. The HIP kernel lives in ``csrc/rocm/q_gemm_rdna3.cu``
-and is exposed via ``torch.ops._rocm_C.gptq_gemm_rdna3``.
+support. The HIP kernel lives in `csrc/rocm/q_gemm_rdna3.cu`
+and is exposed via `torch.ops._rocm_C.gptq_gemm_rdna3`.
 
 Registered ahead of TritonW4A16LinearKernel for the ROCm-RDNA3 path; falls
 through to the Triton kernel on non-RDNA3 ROCm devices (e.g. CDNA/MI300).
@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -59,8 +60,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                f"RDNA3 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    f"RDNA3 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.group_size <= 0:
@@ -72,8 +75,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) does not evenly divide K "
-                f"({c.full_weight_shape[0]})",
+                (
+                    f"Group size ({c.group_size}) does not evenly divide K "
+                    f"({c.full_weight_shape[0]})"
+                ),
             )
 
         # Output features must be a multiple of the pack factor (8 nibbles per
@@ -82,15 +87,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.partition_weight_shape[1] % 8 != 0:
             return (
                 False,
-                "Output features must be a multiple of 8 for the RDNA3 "
-                "W4A16 kernel (qzeros packing)",
-            )
-
-        if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
-            return (
-                False,
-                "Act-order with TP-partitioned input features is not "
-                "supported by the RDNA3 W4A16 kernel",
+                (
+                    "Output features must be a multiple of 8 for the RDNA3 "
+                    "W4A16 kernel (qzeros packing)"
+                ),
             )
 
         return True, None
@@ -123,38 +123,16 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
                     "explicit zero points (GPTQv1 +1 quirk)."
                 )
             zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
-            setattr(
-                layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
-            )
-
-        # Act-order: convert g_idx to the inverse permutation array exllama
-        # expects (kernel reads a[perm[k]] instead of using groups indirected
-        # by g_idx[k]).
-        if c.has_g_idx:
-
-            def transform_w_g_idx(x):
-                return torch.argsort(x).to(torch.int)
-
-            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
-        else:
-            self.w_gidx_name = "g_idx"
-            empty_g_idx = torch.nn.Parameter(
-                torch.empty((0,), dtype=torch.int, device=device),
-                requires_grad=False,
-            )
-            setattr(layer, self.w_gidx_name, empty_g_idx)
+            replace_parameter(layer, self.w_zp_name, zeros)
 
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
-            assert self.w_gidx_name is not None
-            g_idx = getattr(layer, self.w_gidx_name)
-
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x_cont = x.data.contiguous()
             # Same 4-bit shuffle as exllama. The RDNA3 kernel reads weights in
             # the same shuffled int32 layout and uses the (qa & 0x000F000F)
             # bit-trick on top.
-            ops.gptq_shuffle(x_cont, g_idx, c.weight_type.size_bits)
+            ops.gptq_shuffle(x_cont, c.weight_type.size_bits)
             return x_cont
 
         def transform_w_s(x):
@@ -181,12 +159,9 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
 
-        w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
-
+        w_q, w_s, w_zp = self._get_weight_params(layer)
         assert w_zp is not None, "Zero points are required by RDNA3 W4A16"
-        assert w_g_idx is not None, "g_idx tensor (possibly empty) required"
-
-        output = ops.gptq_gemm_rdna3(x_2d, w_q, w_zp, w_s, w_g_idx, False)
+        output = ops.gptq_gemm_rdna3(x_2d, w_q, w_zp, w_s, False)
 
         if bias is not None:
             output.add_(bias)

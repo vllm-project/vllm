@@ -10,6 +10,7 @@ except ModuleNotFoundError:
     import triton
     import triton.language as tl
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 
 ASM_PAGE_SIZE = 16
@@ -46,10 +47,10 @@ def _write_sparse_block_table_row_from_values(
 ):
     """Compact one query's selected logical blocks into physical page-16 ids.
 
-    ``BLOCK_PAGE_STRIDE`` is how many page ids a block spans, which is
-    ``PAGES_PER_BLOCK`` when each K/V side is its own dense plane and twice
+    `BLOCK_PAGE_STRIDE` is how many page ids a block spans, which is
+    `PAGES_PER_BLOCK` when each K/V side is its own dense plane and twice
     that when both sides share a block. Padded rows carry a negative
-    ``abs_pos``, which clamps the causal range to empty.
+    `abs_pos`, which clamps the causal range to empty.
     """
     causal_len = tl.maximum(abs_pos + 1, 0)
     self_blk = abs_pos // SPARSE_BLOCK_SIZE_C
@@ -296,6 +297,7 @@ def _insert_index_cache_kernel(
     CACHE_BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
     offs_d = tl.arange(0, BLOCK_D)
@@ -312,7 +314,11 @@ def _insert_index_cache_kernel(
     )
     mask = (slot >= 0) & (offs_d < HEAD_DIM)
     value = tl.load(src, mask=offs_d < HEAD_DIM, other=0.0)
-    tl.store(dst, value, mask=mask)
+    if FP8_MAX > 0:
+        value = tl.clamp(value.to(tl.float32), -FP8_MAX, FP8_MAX)
+    # The side cache carries its own dtype (bf16, or e4m3 for the fp8 indexer),
+    # so convert rather than leaning on the store's implicit cast.
+    tl.store(dst, value.to(dst.dtype.element_ty), mask=mask)
 
 
 @torch.no_grad()
@@ -334,6 +340,9 @@ def minimax_m3_insert_index_cache(
         raise ValueError("MiniMax-M3 index cache requires contiguous head dimension")
 
     head_dim = index_k.shape[1]
+    fp8_max = 0.0
+    if index_cache.element_size() == 1:
+        fp8_max = get_fp8_min_max()[1]
     _insert_index_cache_kernel[(index_k.shape[0],)](
         index_k,
         index_cache,
@@ -347,6 +356,7 @@ def minimax_m3_insert_index_cache(
         CACHE_BLOCK_SIZE=index_cache.shape[1],
         HEAD_DIM=head_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
+        FP8_MAX=fp8_max,
         num_warps=4,
     )
 
@@ -361,11 +371,37 @@ def minimax_m3_sparse_block_page_stride(
 ) -> int:
     """How many page ids one sparse block spans.
 
-    Each side owns ``PAGES_PER_SPARSE_BLOCK`` pages. When the sides are dense
+    Each side owns `PAGES_PER_SPARSE_BLOCK` pages. When the sides are dense
     planes a block is exactly that wide; when they interleave, a block covers
     both sides' pages and V is reached from the same page id at a fixed offset.
     """
     return PAGES_PER_SPARSE_BLOCK * (2 if _sides_are_packed(k_cache, v_cache) else 1)
+
+
+# K/V sides sharing one block, which is how many sides' pages a block spans.
+# The attend publishes two head slots and the indexer's side cache one, and
+# specs that mix HNC shapes narrow the resolved layout to a block-compact one
+# (LHBNC is not), so this path always lands on an interleaved block.
+PAGE16_SIDES_PER_BLOCK = 2
+
+
+def minimax_m3_rebase_block_table_to_page16(
+    block_table: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Rebase a logical page table onto AITER's page-16 page numbering.
+
+    The page ids AITER's top-k emits for the attend are
+    `block_table[blk] * pages_per_block + j`, and `pages_per_block` is fixed
+    at AITER build time to one side's pages. An interleaved block spans both
+    sides, so the only way to reach its pages through that kernel is to hand it
+    a table already scaled to the wider stride. The caller does this once per
+    step, since every sparse layer resolves its selection through the same
+    table.
+    """
+    if out is None:
+        out = torch.empty_like(block_table)
+    return torch.mul(block_table, PAGE16_SIDES_PER_BLOCK, out=out)
 
 
 def _gluon_scale_arg(
@@ -461,14 +497,23 @@ def minimax_m3_sparse_attn_prefill_aiter(
     output: torch.Tensor,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    sparse_bt: torch.Tensor | None = None,
+    sparse_ctx: torch.Tensor | None = None,
 ) -> None:
-    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_prefill(
-        topk_idx,
-        block_table,
-        query_req_id,
-        query_abs_pos,
-        minimax_m3_sparse_block_page_stride(k_cache, v_cache),
-    )
+    if (sparse_bt is None) != (sparse_ctx is None):
+        raise ValueError(
+            "MiniMax-M3 prepared sparse block table and context lengths "
+            "must be provided together"
+        )
+    if sparse_bt is None:
+        sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_prefill(
+            topk_idx,
+            block_table,
+            query_req_id,
+            query_abs_pos,
+            minimax_m3_sparse_block_page_stride(k_cache, v_cache),
+        )
+    assert sparse_ctx is not None
     _run_gluon_decode(
         q,
         k_cache,
@@ -515,6 +560,18 @@ def _run_gluon_decode(
     # V is offset by half a block when the sides interleave, so it holds fewer
     # pages than K even though both are addressed by the same page id.
     v_nphys16 = v_cache.shape[0]
+    sides_packed = _sides_are_packed(k_cache, v_cache)
+    if sides_packed:
+        if v_nphys16 > nphys16:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA packed V view is longer than K "
+                f"({v_nphys16} > {nphys16})"
+            )
+        # AITER's pa_decode_gluon requires equal shape[0]. Trim K to the V
+        # suffix length: valid page ids only address that range (the trailing
+        # K-only pages are the last block's V pages under the K view).
+        k_cache = k_cache[:v_nphys16]
+        nphys16 = v_nphys16
     k_cache_view = k_cache.view(nphys16 * hkv, 1, *k_cache.shape[2:])
     v_cache_view = v_cache.view(v_nphys16 * hkv, 1, *v_cache.shape[2:])
     q_view = q.view(total_q * num_kv_heads, group_size, head_size)
@@ -533,7 +590,7 @@ def _run_gluon_decode(
     is_fp8 = _is_fp8_kv_cache_tensor(k_cache)
     compute_type = aiter_dtypes.fp8 if is_fp8 else q.dtype
     if is_fp8:
-        if _sides_are_packed(k_cache, v_cache) and not all(
+        if sides_packed and not all(
             scale is None or scale.numel() == 1 for scale in (k_scale, v_scale)
         ):
             raise NotImplementedError(

@@ -9,7 +9,7 @@ from vllm.utils.import_utils import has_helion
 if not has_helion():
     pytest.skip("Helion is not installed", allow_module_level=True)
 
-from scripts import benchmark_helion_kernels
+from tools import benchmark_helion_kernels
 
 check_correctness = benchmark_helion_kernels.check_correctness
 

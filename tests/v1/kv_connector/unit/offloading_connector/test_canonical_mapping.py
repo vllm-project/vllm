@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     _layer_mapping,
     _opaque_fallback_mapping,
@@ -14,8 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping i
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
+    AttentionSpec,
     KVCacheSpec,
     KVQuantMode,
     MLAAttentionSpec,
@@ -36,10 +36,10 @@ def _ctx(rank, tp=1, dcp=1, pcp=1, interleave=1, total=None, heads=2):
     )
 
 
-def _full_spec(num_kv_heads: int = 2, **kwargs) -> FullAttentionSpec:
+def _full_spec(num_kv_heads: int = 2, **kwargs) -> AttentionSpec:
     # block_size=4, head_dim=64, int8
     return TritonAttentionBackend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=4,
             num_kv_heads=num_kv_heads,
             head_size=64,
@@ -337,6 +337,63 @@ def test_cross_tp_store_load(form):
         assert _store_all(mappings, pages, canonical_size) == reference
 
 
+def _reference_page(form, tokens, heads, head_size) -> bytes:
+    """Serialize logical K/V, token, head, and dimension coordinates."""
+    if form.endswith("nhd"):
+        token_heads = [(token, head) for token in tokens for head in heads]
+    else:
+        token_heads = [(token, head) for head in heads for token in tokens]
+    if form.startswith("split"):
+        cells = ((kv, token, head) for kv in range(2) for token, head in token_heads)
+    else:
+        cells = ((kv, token, head) for token, head in token_heads for kv in range(2))
+    return bytes(
+        (32 * token + 8 * head + 4 * kv + dim) % 256
+        for kv, token, head in cells
+        for dim in range(head_size)
+    )
+
+
+@pytest.mark.parametrize("form", sorted(CACHE_BUILDERS))
+@pytest.mark.parametrize("interleave", [1, 2])
+def test_tp2_pcp2_store_load_matches_reference(form, interleave):
+    """TP head shards and PCP token shards preserve independent reference bytes."""
+    spec = _full_spec()
+    cache = CACHE_BUILDERS[form](spec)
+    mappings = [
+        _mapping(
+            spec,
+            cache,
+            _ctx(rank, tp=2, dcp=1, pcp=2, interleave=interleave, total=4),
+        )
+        for rank in range(4)
+    ]
+    pcp_tokens = {
+        1: ((0, 2, 4, 6), (1, 3, 5, 7)),
+        2: ((0, 1, 4, 5), (2, 3, 6, 7)),
+    }[interleave]
+    # Rank order: PCP0/TP0, PCP0/TP1, PCP1/TP0, PCP1/TP1.
+    rank_coordinates = (
+        (pcp_tokens[0], (0, 1)),
+        (pcp_tokens[0], (2, 3)),
+        (pcp_tokens[1], (0, 1)),
+        (pcp_tokens[1], (2, 3)),
+    )
+    pages = [
+        _reference_page(form, tokens, heads, spec.head_size)
+        for tokens, heads in rank_coordinates
+    ]
+    reference = _reference_page(form, range(8), range(4), spec.head_size)
+
+    _verify_tiling("tp2-pcp2", mappings)
+    assert _store_all(mappings, pages, len(reference)) == reference
+    for rank, (mapping, page) in enumerate(zip(mappings, pages)):
+        assert mapping.canonical_page_size_bytes == len(reference)
+        assert mapping.local_page_size_bytes == len(page)
+        assert not mapping.parallelism_agnostic
+        assert _load_one(mapping, reference) == page, f"rank {rank}"
+
+
 def test_cp_round_trip():
     # tp=4 / dcp=2 / 2 KV heads: 4 workers jointly hold one canonical page
     spec = _full_spec(num_kv_heads=1)
@@ -442,9 +499,9 @@ def test_derive_mixed_model_with_dcp():
     )
     kv_cache_config = _kv_cache_config(
         [
-            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attn_spec),
-            KVCacheGroupSpec(layer_names=["mla"], kv_cache_spec=mla_spec),
-            KVCacheGroupSpec(layer_names=["quant"], kv_cache_spec=quant_spec),
+            make_kv_cache_group(["attn"], attn_spec),
+            make_kv_cache_group(["mla"], mla_spec),
+            make_kv_cache_group(["quant"], quant_spec),
         ]
     )
     kv_caches = {
@@ -467,9 +524,7 @@ def test_derive_mixed_model_with_dcp():
 
 def test_derive_refuses_foreign_worker_groups():
     attn_spec = _full_spec()
-    kv_cache_config = _kv_cache_config(
-        [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attn_spec)]
-    )
+    kv_cache_config = _kv_cache_config([make_kv_cache_group(["attn"], attn_spec)])
     kv_caches = {"attn": _split_nhd_cache(attn_spec)}
     assert (
         derive_canonical_mappings(
