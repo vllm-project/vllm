@@ -64,9 +64,10 @@ requested sampled-token logprobs or routed experts. Omitting the field
 inherits the engine setting. Explicitly requesting `true` requires
 `--return-sampling-mask`.
 
-GPU Model Runner V2 also skips mask capture for opted-out requests, including
-with fixed-boundary speculative decoding. The CPU sampler still computes masks
-when `--return-sampling-mask` is enabled.
+Model Runner V2 skips mask capture for opted-out requests on GPU and CPU.
+This also applies to fixed-boundary speculative decoding on GPU. The
+`/inference/v1/generate` endpoint defaults to `temperature=1.0` and
+`top_k=0`. Both `0` and `-1` disable top-k truncation.
 
 ## Requirements
 

@@ -228,21 +228,23 @@ async def test_generate_sampling_mask_opt_in_requires_engine_flag(client):
     indirect=True,
 )
 @pytest.mark.parametrize(
-    ("temperature", "top_k", "parameter"), [(0, 5, "temperature"), (1, 0, "top_k")]
+    ("params", "parameter"),
+    [
+        ({"temperature": 0, "top_k": 5}, "temperature"),
+        ({"top_k": 0}, "top_k"),
+        ({"top_k": -1}, "top_k"),
+        ({}, "top_k"),
+    ],
 )
 async def test_generate_sampling_mask_invalid_sampling_params(
-    client, temperature, top_k, parameter
+    client, params, parameter
 ):
     response = await client.post(
         GEN_ENDPOINT,
         json={
             "model": MODEL_NAME,
             "token_ids": [1, 2, 3],
-            "sampling_params": {
-                "max_tokens": 1,
-                "temperature": temperature,
-                "top_k": top_k,
-            },
+            "sampling_params": {"max_tokens": 1, **params},
         },
     )
     assert response.status_code == 400
@@ -270,7 +272,8 @@ async def test_generate_sampling_mask_override_in_stream_and_text(
             "sampling_params": {
                 "max_tokens": 5,
                 "ignore_eos": True,
-                "top_k": 5,
+                "temperature": 1.0,
+                "top_k": 5 if return_sampling_mask else -1,
                 "seed": 0,
                 "logprobs": 0,
                 "return_sampling_mask": return_sampling_mask,
