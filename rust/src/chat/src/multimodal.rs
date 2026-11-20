@@ -1071,16 +1071,22 @@ impl MultimodalModelInfo {
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            let sources = izip!(fetched.images, fetched.image_uuids).collect();
-            prepared.push(self.prepare_images(sources, model_dtype, vision_context).await?);
+            prepared.push(
+                self.prepare_images(
+                    fetched.images,
+                    fetched.image_uuids,
+                    model_dtype,
+                    vision_context,
+                )
+                .await?,
+            );
         }
         if !fetched.videos.is_empty() {
-            let sources = izip!(fetched.videos, fetched.video_uuids).collect();
-            prepared.push(self.prepare_videos(sources, model_dtype).await?);
+            prepared
+                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
         }
         if !fetched.audios.is_empty() {
-            let sources = izip!(fetched.audios, fetched.audio_uuids).collect();
-            prepared.push(self.prepare_audios(sources).await?);
+            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
         }
 
         let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
@@ -2028,7 +2034,7 @@ pub(crate) mod tests {
             AudioSource::InlineBytes,
             "audio".to_owned(),
         ));
-        let prepared = info.prepare_audios(vec![(audio, None)]).await.unwrap();
+        let prepared = info.prepare_audios(vec![audio], vec![None]).await.unwrap();
         assert_eq!(prepared.replacements[0].tokens, [201463, 200038, 201464]);
 
         let frame_len = 3 * 28 * 28;
@@ -2050,7 +2056,8 @@ pub(crate) mod tests {
             "video".to_owned(),
             2.0,
         ));
-        let prepared = info.prepare_videos(vec![(clip, None)], ModelDtype::Float32).await.unwrap();
+        let prepared =
+            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
         let token_ids =
             prepared.replacements[0].tokens.iter().map(|&id| id as u32).collect::<Vec<_>>();
         // Two frames uniformly sampled at 2 fps with temporal_patch_size=2
@@ -2670,7 +2677,8 @@ pub(crate) mod tests {
             "clip".to_string(),
             2.0,
         ));
-        let prepared = info.prepare_videos(vec![(clip, None)], ModelDtype::Float32).await.unwrap();
+        let prepared =
+            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
 
         // 512x512 frames survive adaptive_resize; each frame's 32x32 patch
         // grid merges to 16 x (16 + 1 newline) = 272 embed tokens, and the

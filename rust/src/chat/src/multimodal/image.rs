@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use itertools::izip;
 use llm_multimodal::{
     ImageFrame, Modality, PreprocessedEncoderInputs, PromptReplacement, VisionPreprocessingContext,
 };
@@ -34,7 +35,8 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_images(
         &self,
-        sources: Vec<(Arc<ImageFrame>, Option<String>)>,
+        sources: Vec<Arc<ImageFrame>>,
+        uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreparedMedia> {
@@ -44,7 +46,7 @@ impl MultimodalModelInfo {
 
         let (replacements, items) = self
             .mm_cache_for(Modality::Image)
-            .prepare_cached(sources, async |misses| {
+            .prepare_cached(izip!(sources, uuids).collect(), async |misses| {
                 self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
                     .await
             })

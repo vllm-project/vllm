@@ -1509,7 +1509,8 @@ mod tests {
         };
         let prepared = info
             .prepare_videos(
-                vec![(clip(2, "two"), None), (clip(5, "five"), None)],
+                vec![clip(2, "two"), clip(5, "five")],
+                vec![None, None],
                 ModelDtype::Float32,
             )
             .await

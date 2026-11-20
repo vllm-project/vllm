@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use itertools::izip;
 use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptReplacement};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
@@ -29,7 +30,8 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_audios(
         &self,
-        sources: Vec<(Arc<AudioClip>, Option<String>)>,
+        sources: Vec<Arc<AudioClip>>,
+        uuids: Vec<Option<String>>,
     ) -> Result<PreparedMedia> {
         let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Audio.to_string(),
@@ -37,7 +39,7 @@ impl MultimodalModelInfo {
 
         let (replacements, items) = self
             .mm_cache_for(Modality::Audio)
-            .prepare_cached(sources, async |misses| {
+            .prepare_cached(izip!(sources, uuids).collect(), async |misses| {
                 self.preprocess_audio_batch(support, misses).await
             })
             .await?;
@@ -347,8 +349,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sources = fetched.audios.into_iter().zip(fetched.audio_uuids).collect();
-        let prepared = info.prepare_audios(sources).await.unwrap();
+        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert!(
@@ -391,8 +392,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sources = fetched.audios.into_iter().zip(fetched.audio_uuids).collect();
-        let prepared = info.prepare_audios(sources).await.unwrap();
+        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         // Every replacement token is the soft placeholder; the typed

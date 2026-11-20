@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use itertools::izip;
 use llm_multimodal::{
     FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, PromptReplacement, VideoClip,
     VideoClipOptions,
@@ -47,7 +48,8 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_videos(
         &self,
-        sources: Vec<(Arc<VideoClip>, Option<String>)>,
+        sources: Vec<Arc<VideoClip>>,
+        uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
         let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
@@ -56,7 +58,7 @@ impl MultimodalModelInfo {
 
         let (replacements, items) = self
             .mm_cache_for(Modality::Video)
-            .prepare_cached(sources, async |misses| {
+            .prepare_cached(izip!(sources, uuids).collect(), async |misses| {
                 let mut computed = Vec::with_capacity(misses.len());
                 for (clip, uuid) in misses {
                     computed
@@ -391,19 +393,17 @@ mod tests {
         // groups of two start at frames 0, 17, 35, 53.
         let sampled = info
             .prepare_videos(
-                vec![(
-                    clip(Some(VideoSamplingInfo {
-                        source_fps: 30.0,
-                        frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
-                    })),
-                    None,
-                )],
+                vec![clip(Some(VideoSamplingInfo {
+                    source_fps: 30.0,
+                    frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
+                }))],
+                vec![None],
                 ModelDtype::Float32,
             )
             .await
             .unwrap();
         let fallback = info
-            .prepare_videos(vec![(clip(None), None)], ModelDtype::Float32)
+            .prepare_videos(vec![clip(None)], vec![None], ModelDtype::Float32)
             .await
             .unwrap();
 
