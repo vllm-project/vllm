@@ -55,6 +55,8 @@ pub struct ManagedEngineConfig {
     pub client_handshake_address: Option<String>,
     /// Extra CLI arguments forwarded verbatim to Python vLLM.
     pub python_args: Vec<String>,
+    /// Name of the shared-memory multimodal processor cache segment.
+    pub mm_shm_cache_name: Option<String>,
 }
 
 impl ManagedEngineConfig {
@@ -73,10 +75,6 @@ impl ManagedEngineConfig {
 
     /// Build the concrete Python command line for the managed headless engine.
     pub fn to_command(&self) -> StdCommand {
-        self.to_command_with_envs(&[])
-    }
-
-    fn to_command_with_envs(&self, envs: &[(String, String)]) -> StdCommand {
         let mut command = StdCommand::new(&self.python);
         command
             .arg("-m")
@@ -95,7 +93,9 @@ impl ManagedEngineConfig {
         }
         command.args(&self.python_args);
         command.envs(Self::rust_frontend_envs());
-        command.envs(envs.iter().map(|(key, value)| (key, value)));
+        if let Some(name) = &self.mm_shm_cache_name {
+            command.env("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", name);
+        }
         command
     }
 }
@@ -136,15 +136,7 @@ impl ManagedEngineHandle {
     /// Spawn one managed Python headless engine and return a handle for
     /// monitoring it.
     pub async fn spawn(config: ManagedEngineConfig) -> Result<Self> {
-        Self::spawn_with_envs(config, &[]).await
-    }
-
-    /// Spawn a managed engine with additional environment variables.
-    pub async fn spawn_with_envs(
-        config: ManagedEngineConfig,
-        envs: &[(String, String)],
-    ) -> Result<Self> {
-        let command = config.to_command_with_envs(envs);
+        let command = config.to_command();
         info!(
             handshake_address = %config.handshake_address(),
             command = ?redacted_for_log(&command),
@@ -308,11 +300,9 @@ mod tests {
                 "--max-model-len".to_string(),
                 "512".to_string(),
             ],
+            mm_shm_cache_name: Some("vllm-mm-shm-test".to_string()),
         };
-        let command = config.to_command_with_envs(&[(
-            "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME".to_string(),
-            "vllm-mm-shm-test".to_string(),
-        )]);
+        let command = config.to_command();
         let args = command.get_args().collect::<Vec<_>>();
 
         expect![[r#"
@@ -379,6 +369,7 @@ mod tests {
             ]
             .map(str::to_string)
             .to_vec(),
+            mm_shm_cache_name: None,
         };
         let command = config.to_command();
         assert!(format!("{command:?}").contains("hf_secret"));

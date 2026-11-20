@@ -25,11 +25,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const TOKIO_WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
 const DEFAULT_MAX_TOKIO_WORKER_THREADS: usize = 32;
 
-/// Env var through which the managed Python engine learns the POSIX shm
-/// object name of the shm multi-modal processor cache
-/// (`VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME` in vllm/envs.py).
-const VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: &str = "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME";
-
 /// Cap the default number of Tokio worker threads if the user did not
 /// explicitly set `TOKIO_WORKER_THREADS` to avoid spawning too many threads on
 /// machines with a large number of CPUs, which may lead to excessive context
@@ -170,25 +165,17 @@ async fn async_main(cli: Cli) -> Result<()> {
             let client_handshake_address = (!args.headless
                 && topology.frontend_engine_start_index() != 0)
                 .then(frontend_ipc_handshake_address);
-            let engine_config = args.to_managed_engine_config(
+            let mut engine_config = args.to_managed_engine_config(
                 handshake_port,
                 &topology,
                 client_handshake_address.clone(),
             );
-            let engine_envs = mm_cache
-                .as_ref()
-                .map(|cache| {
-                    (
-                        VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME.to_string(),
-                        cache.shm_name().to_string(),
-                    )
-                })
-                .into_iter()
-                .collect::<Vec<_>>();
+            engine_config.mm_shm_cache_name =
+                mm_cache.as_ref().map(|cache| cache.shm_name().to_string());
             let handshake_address =
                 client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
 
-            let engine = ManagedEngineHandle::spawn_with_envs(engine_config, &engine_envs)
+            let engine = ManagedEngineHandle::spawn(engine_config)
                 .await
                 .context("failed to start managed Python headless engine")?;
 

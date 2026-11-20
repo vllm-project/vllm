@@ -166,6 +166,7 @@ impl ManagedEngineArgs {
             data_parallel_size: self.data_parallel_size,
             client_handshake_address,
             python_args,
+            mm_shm_cache_name: None,
         }
     }
 }

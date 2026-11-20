@@ -162,6 +162,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         data_parallel_size: args.engine.data_parallel_size,
         client_handshake_address: None,
         python_args,
+        mm_shm_cache_name: None,
     };
     eprintln!(
         "Spawning managed headless engine: python={} model={} data_parallel_size={}",
