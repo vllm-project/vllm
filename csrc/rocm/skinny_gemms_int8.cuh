@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// W8A16 skinny GEMM (int8 weights, fp16/bf16 activations) for gfx11/gfx12.
+// Kernels of the W8A16 skinny GEMM (int8 weights, fp16/bf16 activations) for
+// gfx11/gfx12, instantiated per N_in by skinny_gemms_int8_n<n>.cu; see
+// skinny_gemms_int8.h.
+
+#pragma once
+
 #include <type_traits>
 #include <utility>  // std::in_range
 
 #include "skinny_gemms.cuh"
+#include "skinny_gemms_int8.h"
 
 // skinny_gemms.cuh keeps its LDS_SIZE private; gfx11/gfx12 have 64 KiB.
 static constexpr int LDS_SIZE = 64 * 1024;
@@ -217,10 +223,8 @@ __global__ void wvSplitK_int8_hf_sml_(
 }
 #endif  // defined(__HIP__GFX1X__)
 
-torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
-                            const at::Tensor& in_scale,
-                            const std::optional<at::Tensor>& in_bias,
-                            const int64_t CuCount) {
+template <int N>
+torch::Tensor wvSplitK_int8_impl(VLLM_SKINNY_INT8_SIG) {
   TORCH_CHECK(on_gfx1x(), "wvSplitK_int8 supports gfx11/gfx12 only");
   TORCH_CHECK(in_a.dim() == 2 && in_b.dim() == 2,
               "Weight and activation must be 2-D, got ", in_a.sizes(), " and ",
@@ -232,6 +236,8 @@ torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
   const auto M_in = in_a.size(0);
   const auto K_in = in_b.size(1);
   const auto N_in = in_b.size(0);
+  // Internal tripwire: the API unit derives N from the same in_b.size(0).
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(N_in == N);
 
   TORCH_CHECK(in_a.dtype() == torch::kInt8, "Weight must be int8, got ",
               in_a.dtype());
@@ -331,25 +337,7 @@ torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
 
     int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);
 
-    switch (N_in) {
-      case 1:
-        WVSPLIT_INT8_TILE(sYT, 1)
-        break;
-      case 2:
-        WVSPLIT_INT8_TILE(sYT, 2)
-        break;
-      case 3:
-        WVSPLIT_INT8_TILE(sYT, 3)
-        break;
-      case 4:
-        WVSPLIT_INT8_TILE(sYT, 4)
-        break;
-      case 5:
-        WVSPLIT_INT8_TILE(sYT, 5)
-        break;
-      default:
-        TORCH_CHECK(false, "wvSplitK_int8 supports N <= 5, got N=", N_in);
-    }
+    WVSPLIT_INT8_TILE(sYT, N)
   });
 
 #undef WVSPLITK_INT8_LAUNCH

@@ -39,7 +39,11 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    register_or_replace_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.scalar_type import ScalarType
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -50,16 +54,6 @@ def _quantized_at_load(param: Parameter, loaded_weight: torch.Tensor) -> None:
     raise RuntimeError(
         "This lm_head parameter is quantized at load time; a checkpoint cannot load it."
     )
-
-
-def _set_quantized_param(layer: Module, name: str, param: BasevLLMParameter) -> None:
-    # `replace_parameter` keeps an existing parameter (reloads, captured CUDA
-    # graphs) but registers a new one as a plain `Parameter`, and kernels such
-    # as Marlin and Conch require vLLM parameter types.
-    if getattr(layer, name, None) is None:
-        layer.register_parameter(name, param)
-    else:
-        replace_parameter(layer, name, param)
 
 
 class OnlineLMHeadMethodBase(OnlineLinearBase):
@@ -219,11 +213,11 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
                 output_dim=0,
                 weight_loader=_quantized_at_load,
             )
-        _set_quantized_param(layer, "weight_scale", scale_param)
+        register_or_replace_parameter(layer, "weight_scale", scale_param)
         w_zp_name = None
         if zero_points is not None:
             w_zp_name = "weight_zero_point"
-            _set_quantized_param(
+            register_or_replace_parameter(
                 layer,
                 w_zp_name,
                 PackedvLLMParameter(
