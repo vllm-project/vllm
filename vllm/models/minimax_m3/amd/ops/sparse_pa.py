@@ -651,10 +651,7 @@ def minimax_m3_sparse_pa_decode_warmup(
         MiniMaxM3SparseAiterPAImpl,
     )
 
-    seen: set[tuple] = set()
-    # Imported on the first layer that needs it, not at module load and not
-    # when no layer takes the AITER path (AITER may be absent then).
-    get_recommended_splits = None
+    layouts: dict[tuple, tuple] = {}
     for layer in model.modules():
         impl = getattr(layer, "impl", None)
         bt_buf = getattr(layer, "sparse_bt_buffer", None)
@@ -683,31 +680,26 @@ def minimax_m3_sparse_pa_decode_warmup(
             bt_buf.data_ptr(),
             ctx_buf.data_ptr(),
         )
-        if key in seen:
-            continue
-        seen.add(key)
-        if get_recommended_splits is None:
-            from aiter.ops.triton.gluon.pa_decode_gluon import (
-                get_recommended_splits,
-            )
+        layouts.setdefault(
+            key, (impl, k_cache, v_cache, k_scale, v_scale, bt_buf, ctx_buf)
+        )
+    if not layouts:
+        return
 
+    from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+
+    num_variants = 0
+    for impl, k_cache, v_cache, k_scale, v_scale, bt_buf, ctx_buf in layouts.values():
         kvh = impl.num_kv_heads
-        rows_by_splits: dict[int, int] = {}
+        # One row in total is its own Triton specialization (an integer
+        # argument equal to 1), so it is keyed apart from its partition count.
+        rows_by_variant: dict[tuple[int, bool], int] = {}
         for n in range(1, ctx_buf.shape[0] // kvh):
-            # One row in total (one decode token, one KV head per rank) is a
-            # separate Triton specialization (integer arguments equal to 1).
-            # It is skipped because it is what the startup forwards already
-            # run (a single-token decode, the smallest batch they reach), so
-            # it is compiled before serving; this loop adds the larger row
-            # counts, which they do not reach. With more than one KV head per
-            # rank, n * kvh is never 1.
-            if n * kvh == 1:
-                continue
             splits = get_recommended_splits(n * kvh, 1)
-            rows_by_splits.setdefault(splits, n)
+            rows_by_variant.setdefault((splits, n * kvh == 1), n)
             if splits == 1:
                 break
-        for n in rows_by_splits.values():
+        for n in rows_by_variant.values():
             q = torch.zeros(
                 n, impl.num_heads, impl.head_size, dtype=dtype, device=ctx_buf.device
             )
@@ -727,9 +719,11 @@ def minimax_m3_sparse_pa_decode_warmup(
                     k_scale,
                     v_scale,
                 )
-    if seen:
-        torch.accelerator.synchronize()
-        logger.info(
-            "Warmed up MiniMax-M3 AITER sparse PA decode for %d cache layout(s).",
-            len(seen),
-        )
+                num_variants += 1
+    torch.accelerator.synchronize()
+    logger.info(
+        "Warmed up %d MiniMax-M3 AITER sparse PA decode variant(s) over %d cache "
+        "layout(s).",
+        num_variants,
+        len(layouts),
+    )
