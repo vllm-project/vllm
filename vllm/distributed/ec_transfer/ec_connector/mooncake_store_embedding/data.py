@@ -17,7 +17,7 @@ def make_embedding_key(namespace: str, identifier: str) -> str:
     return f"{namespace}@id:{identifier}"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TensorSpec:
     """Contiguous output contract used by the Encoder and Store codec."""
 
@@ -27,6 +27,8 @@ class TensorSpec:
 
 
 def build_embedding_namespace(vllm_config: VllmConfig) -> str:
+    from vllm.config.utils import hash_config
+
     model_config = vllm_config.model_config
     ec_config = vllm_config.ec_transfer_config
     assert ec_config is not None
@@ -34,7 +36,7 @@ def build_embedding_namespace(vllm_config: VllmConfig) -> str:
 
     multimodal_config = model_config.multimodal_config
     encoder_hash = (
-        multimodal_config.compute_hash()
+        hash_config(multimodal_config)
         if multimodal_config is not None
         else "encoder:default"
     )

@@ -3,17 +3,17 @@
 """Unit tests for the LLaVA-OneVision-2 codec-video marker mechanism.
 
 The codec video backend cannot be exercised end-to-end in CI because it
-relies on the model's ``trust_remote_code`` package and real video bytes.
+relies on the model's `trust_remote_code` package and real video bytes.
 These tests cover the pure-Python marker plumbing that wraps a video *path*
-for vLLM's ``MultiModalDataParser``:
+for vLLM's `MultiModalDataParser`:
 
-* :func:`prepare_codec_video_input` must encode a per-path hash into its
-  dummy ndarray so distinct codec videos do not collide on ``mm_hash``
-  (otherwise ``EncoderCacheManager`` would skip the encoder for every video
+* `prepare_codec_video_input` must encode a per-path hash into its
+  dummy ndarray so distinct codec videos do not collide on `mm_hash`
+  (otherwise `EncoderCacheManager` would skip the encoder for every video
   after the first).
-* :func:`_extract_codec_video_paths` must round-trip the marker back to the
+* `_extract_codec_video_paths` must round-trip the marker back to the
   original path(s) after the parser strips the metadata dict, and must return
-  ``None`` for non-codec inputs.
+  `None` for non-codec inputs.
 """
 
 import types

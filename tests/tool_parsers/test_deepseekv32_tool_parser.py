@@ -891,8 +891,8 @@ class TestExtractToolCallsStreaming:
     def _stream_chunked(self, parser, full_text: str, chunk_size: int, request=None):
         """Drive the parser with fixed-size chunks (simulates stream interval).
 
-        Unlike ``_stream`` which splits on newlines, this splits the text
-        into ``chunk_size``-character pieces so the start token can be
+        Unlike `_stream` which splits on newlines, this splits the text
+        into `chunk_size`-character pieces so the start token can be
         split across chunks — exactly what happens with stream interval > 1.
         """
         if request is None:

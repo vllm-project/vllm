@@ -34,7 +34,6 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
-    MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -78,7 +77,7 @@ def _normalize_expert_bias(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Zero-mean the MoE router's per-expert score bias for load balance.
 
-    The rename to ``e_score_correction_bias`` is done by the mapper; only the
+    The rename to `e_score_correction_bias` is done by the mapper; only the
     tensor adjustment lives here, since a WeightsMapper cannot transform data.
     """
     for name, w in weights:
@@ -91,11 +90,11 @@ class Param2MoEAttention(nn.Module):
     """Grouped-Query Attention (GQA) for Param2MoE.
 
     Notable differences from a vanilla GQA layer:
-      * The checkpoint fuses Q, K, V into a single ``query_key_value`` weight.
-        vLLM receives it already renamed to ``qkv_proj`` by the weight-name
-        translator and loads it directly; ``QKVParallelLinear`` splits the
-        fused ``[Q|K|V]`` tensor internally.
-      * Optional per-head RMS norms on Q and K (``use_qk_norm=True``).
+      * The checkpoint fuses Q, K, V into a single `query_key_value` weight.
+        vLLM receives it already renamed to `qkv_proj` by the weight-name
+        translator and loads it directly; `QKVParallelLinear` splits the
+        fused `[Q|K|V]` tensor internally.
+      * Optional per-head RMS norms on Q and K (`use_qk_norm=True`).
     """
 
     def __init__(
@@ -161,11 +160,8 @@ class Param2MoEAttention(nn.Module):
             "rope_type": "default",
             "base": config.rope_theta,
         }
-        if config.rope_scaling is not None:
-            rope_parameters.update(config.rope_scaling)
-            # Normalise key: some checkpoints use "type", vLLM wants "rope_type"
-            if "type" in rope_parameters and "rope_type" not in rope_parameters:
-                rope_parameters["rope_type"] = rope_parameters.pop("type")
+        if config.rope_parameters is not None:
+            rope_parameters.update(config.rope_parameters)
 
         self.rotary_emb = get_rope(
             rope_dim,
@@ -345,9 +341,6 @@ class Param2MoEMoEBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> MoERunner:
-        return self.experts
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -369,7 +362,7 @@ class Param2MoEMoEBlock(nn.Module):
 class Param2MoEDecoderLayer(nn.Module):
     """Single transformer decoder block.
 
-    Dense for the first ``first_k_dense_replace`` layers; MoE thereafter.
+    Dense for the first `first_k_dense_replace` layers; MoE thereafter.
     """
 
     def __init__(

@@ -10,7 +10,7 @@ fi
 
 # TODO: Use the PyPI wheel once it is published.
 uv pip install --system \
-    "kvcr @ git+https://github.com/ai-dynamo/kvcr.git@8c6fb79be4dfd9d7bb797c7dc4656790273bc786"
+    "kvcr @ git+https://github.com/ai-dynamo/kvcr.git@5ce23b1527725cf623a3fc7feb94dc6d3d5fafaa"
 
 # Keep only the NIXL wheel matching the CI image's CUDA runtime.
 NIXL_VERSION=$(uv pip show --system nixl | sed -n 's/^Version: //p')

@@ -9,11 +9,12 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 
 
-@dataclass
+@dataclass(slots=True)
 class SamplerOutput:
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
@@ -40,7 +41,7 @@ def _compact_sampling_mask_kernel(
     ROWS_PER_REQUEST: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Per row: first ``max_num_kept`` finite-logit ids, the full count, the bitmask."""
+    """Per row: first `max_num_kept` finite-logit ids, the full count, the bitmask."""
     output_row = tl.program_id(0)
     req_idx = output_row // ROWS_PER_REQUEST
     slot_idx = output_row % ROWS_PER_REQUEST
@@ -83,9 +84,69 @@ def _compact_sampling_mask_kernel(
 MAX_COMPACT_SUPPORT = 2048
 
 
+def _compact_sampling_mask_triton(
+    logits: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    max_num_kept: int,
+    rows_per_request: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_reqs = num_sampled_tokens.shape[0]
+    vocab_size = logits.shape[1]
+    max_num_kept = min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT)
+    num_output_rows = num_reqs * rows_per_request
+    device = logits.device
+
+    token_ids = torch.empty(
+        (num_output_rows, max_num_kept), dtype=torch.int32, device=device
+    )
+    packed_mask = torch.empty(
+        (num_output_rows, (vocab_size + 7) // 8),
+        dtype=torch.uint8,
+        device=device,
+    )
+    counts = torch.empty(num_output_rows, dtype=torch.int32, device=device)
+    _compact_sampling_mask_kernel[(num_output_rows,)](
+        logits,
+        logits.stride(0),
+        logits.stride(1),
+        cu_num_logits,
+        num_sampled_tokens,
+        token_ids,
+        token_ids.stride(0),
+        packed_mask,
+        packed_mask.stride(0),
+        counts,
+        vocab_size,
+        max_num_kept,
+        ROWS_PER_REQUEST=rows_per_request,
+        BLOCK_SIZE=8192,
+    )
+    return token_ids, packed_mask, counts
+
+
+def _compact_sampling_mask_xpu(
+    logits: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    max_num_kept: int,
+    rows_per_request: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if logits.dtype != torch.float32:
+        logits = logits.to(torch.float32)
+    return torch.ops._xpu_C.compact_sampling_mask(
+        logits,
+        cu_num_logits,
+        num_sampled_tokens,
+        max_num_kept,
+        MAX_COMPACT_SUPPORT,
+        rows_per_request,
+    )
+
+
 class SamplingMaskTensors(NamedTuple):
     """Device-side masks pending async D2H: compact ids, plus the bitmask as
-    the exact fallback for rows wider than ``max_num_kept``."""
+    the exact fallback for rows wider than `max_num_kept`."""
 
     # [num_requests * rows_per_request, max_num_kept]
     token_ids: torch.Tensor
@@ -106,39 +167,15 @@ class SamplingMaskTensors(NamedTuple):
         max_num_kept: int,
         rows_per_request: int = 1,
     ) -> SamplingMaskTensors:
-        """Capture committed target supports in fixed request-major slots."""
-        num_reqs = num_sampled_tokens.shape[0]
-        vocab_size = logits.shape[1]
-        max_num_kept = min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT)
-        num_output_rows = num_reqs * rows_per_request
-        device = logits.device
-
-        token_ids = torch.empty(
-            (num_output_rows, max_num_kept), dtype=torch.int32, device=device
+        """Capture the finite-logit support of every row with a sampled token."""
+        if current_platform.is_xpu():
+            compact_sampling_mask = _compact_sampling_mask_xpu
+        else:
+            compact_sampling_mask = _compact_sampling_mask_triton
+        token_ids, packed_mask, counts = compact_sampling_mask(
+            logits, cu_num_logits, num_sampled_tokens, max_num_kept, rows_per_request
         )
-        packed_mask = torch.empty(
-            (num_output_rows, (vocab_size + 7) // 8),
-            dtype=torch.uint8,
-            device=device,
-        )
-        counts = torch.empty(num_output_rows, dtype=torch.int32, device=device)
-        _compact_sampling_mask_kernel[(num_output_rows,)](
-            logits,
-            logits.stride(0),
-            logits.stride(1),
-            cu_num_logits,
-            num_sampled_tokens,
-            token_ids,
-            token_ids.stride(0),
-            packed_mask,
-            packed_mask.stride(0),
-            counts,
-            vocab_size,
-            max_num_kept,
-            ROWS_PER_REQUEST=rows_per_request,
-            BLOCK_SIZE=8192,
-        )
-        return cls(token_ids, packed_mask, counts, vocab_size, rows_per_request)
+        return cls(token_ids, packed_mask, counts, logits.shape[1], rows_per_request)
 
     @classmethod
     def cat(cls, chunks: Sequence[SamplingMaskTensors]) -> SamplingMaskTensors:

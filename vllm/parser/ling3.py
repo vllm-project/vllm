@@ -3,8 +3,8 @@
 """Ling3 parser for reasoning and tool calls.
 
 Ling3 uses the same XML tool-call format as GLM-4.7 and defaults thinking on.
-It follows the GLM-style ``<think>`` / ``</think>`` reasoning format and
-treats ``<tool_call>`` as an implicit reasoning terminator.
+It follows the GLM-style `<think>` / `</think>` reasoning format and
+treats `<tool_call>` as an implicit reasoning terminator.
 """
 
 from __future__ import annotations
