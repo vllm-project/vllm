@@ -177,8 +177,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
     flint="FlintConfig",
-    inkling_mm_model="InklingMMConfig",
-    inkling_model="InklingModelConfig",
     inkling2="Inkling2MMConfig",
     inkling2_model="Inkling2ModelConfig",
 )
@@ -447,6 +445,20 @@ class HFConfigParser(ConfigParserBase):
                 name = thinker_cls.__name__.removesuffix("Config")
                 thinker_config["architectures"] = [f"{name}ForConditionalGeneration"]
                 config = thinker_cls.from_dict(thinker_config, **kwargs)
+        elif model_type == "inkling_mm_model" and (
+            "dense_intermediate_size"
+            in (text_config := config_dict.get("text_config", {}))
+        ):
+            from transformers import InklingConfig
+
+            # Transformers < 5.20: original checkpoints lose their MoE width
+            # (huggingface/transformers#49416)
+            # TODO: Delete once Transformers 5.20.0 is the minimum supported version
+            dense_width = text_config.pop("dense_intermediate_size")
+            text_config["moe_intermediate_size"] = text_config["intermediate_size"]
+            text_config["intermediate_size"] = dense_width
+            kwargs.setdefault("name_or_path", str(model))
+            config = InklingConfig.from_dict(config_dict, **kwargs)
         elif (
             model_type == "moss_transcribe_diarize"
             and config_dict["audio_config"]["model_type"] == "whisper"

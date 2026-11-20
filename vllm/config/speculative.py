@@ -1220,7 +1220,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV4MTPModel"]}
             )
 
-        if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
+        if hf_config.model_type in ("inkling_mm_model", "inkling_text"):
             mtp_config = getattr(hf_config, "mtp_config", None) or {}
             hf_config = getattr(hf_config, "text_config", hf_config)
             checkpoint_depths = mtp_config.get("num_nextn_predict_layers", 0)
