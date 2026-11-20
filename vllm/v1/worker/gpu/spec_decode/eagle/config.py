@@ -21,7 +21,7 @@ def wrap_eagle_hf_config(spec: SpeculativeConfig, method: str) -> None:
 def check_draft_lm_head_quantization(spec: SpeculativeConfig) -> None:
     draft = spec.draft_model_config
     if (
-        spec.draft_lm_head_quantization is not None
+        spec.draft_lm_head_quantization not in (None, "none")
         and draft is not None
         and draft.head_dtype != draft.dtype
     ):
