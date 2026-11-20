@@ -583,12 +583,14 @@ steps:
   - vllm/config/speculative.py
   - vllm/config/attention.py
   - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  - tests/model_executor/model_loader/test_deepseek_v32_indexer_loading.py
   - tests/models/hy_v4/test_shardq_sinks.py
   - tests/models/hy_v4/test_sequence_parallel.py
   commands:
   - >-
     pytest -v -s
     tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+    tests/model_executor/model_loader/test_deepseek_v32_indexer_loading.py
     tests/models/hy_v4/test_shardq_sinks.py
     tests/models/hy_v4/test_sequence_parallel.py
 
