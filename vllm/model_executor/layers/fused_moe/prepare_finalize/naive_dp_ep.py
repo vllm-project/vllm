@@ -62,6 +62,16 @@ def _quantize_and_setup_dispatch(
     return a1q, scales, a1q_scale
 
 
+def _localize_shared_expert_ids(topk_ids: torch.Tensor) -> torch.Tensor:
+    if not current_platform.is_rocm():
+        return topk_ids
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        localize_fused_shared_expert_ids,
+    )
+
+    return localize_fused_shared_expert_ids(topk_ids)
+
+
 def _unwrap_scale_and_prepare_for_moe(
     scales: list[torch.Tensor] | None,
     quant_config: FusedMoEQuantConfig,
@@ -243,6 +253,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             else:
                 a1q_scale = a1q_scale_orig
 
+        topk_ids = _localize_shared_expert_ids(topk_ids)
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def finalize(
@@ -373,11 +384,12 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         if scales is None:
             assert len(res) == 3
             a1q, topk_weights, topk_ids = res
+            topk_ids = _localize_shared_expert_ids(topk_ids)
             return a1q, a1q_scale_orig, topk_weights, topk_ids
         assert len(res) == 4
         a1q, topk_weights, topk_ids, gathered_scales = res
         a1q_scale = _unwrap_scale_and_prepare_for_moe(gathered_scales, quant_config)
-        return a1q, a1q_scale, topk_weights, topk_ids
+        return a1q, a1q_scale, topk_weights, _localize_shared_expert_ids(topk_ids)
 
     def finalize(
         self,

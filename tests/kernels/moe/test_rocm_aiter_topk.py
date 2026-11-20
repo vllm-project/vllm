@@ -709,3 +709,49 @@ def test_biased_grouped_topk_substitutes_only_when_expected(
     torch.accelerator.synchronize()
     assert bool(calls) is substituted
     assert torch.isfinite(weights).all()
+
+
+@pytest.mark.parametrize("ep_size", [2, 4])
+def test_fused_shared_expert_rows_owned_once_after_ep_dispatch(
+    aiter_shared_expert_fusion, monkeypatch: pytest.MonkeyPatch, ep_size: int
+):
+    """An all-gather dispatch carries each source rank's shared-expert marking;
+    localized, every gathered token's shared expert runs on exactly one rank."""
+    num_experts, topk, num_shared = 16, 2, 1
+    sentinel = num_experts + num_shared
+    tokens_per_rank = [5, 3, 7, 4][:ep_size]
+
+    def init_rank(rank: int) -> torch.Tensor:
+        monkeypatch.setattr(rocm_aiter_moe, "aiter_topK_meta_data", None)
+        monkeypatch.setattr(rocm_aiter_moe, "aiter_topK_ep_shared_cols", 0)
+        rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
+        rocm_aiter_moe.init_aiter_topK_meta_data(
+            n_routed_experts=num_experts,
+            n_shared_experts=num_shared,
+            top_k=topk,
+            tp_rank=rank,
+            tp_size=ep_size,
+            max_num_tokens=64,
+            is_EP=True,
+        )
+        meta = rocm_aiter_moe.aiter_topK_meta_data
+        assert meta is not None
+        return meta[1]
+
+    # Each source rank dispatches its combined ids for its own tokens.
+    gathered = torch.cat(
+        [init_rank(r)[:n].clone() for r, n in enumerate(tokens_per_rank)]
+    )
+
+    def owners(localize: bool) -> torch.Tensor:
+        count = torch.zeros(gathered.shape[0], dtype=torch.int32, device="cuda")
+        for rank in range(ep_size):
+            init_rank(rank)
+            ids = gathered.clone()
+            if localize:
+                ids = rocm_aiter_moe.localize_fused_shared_expert_ids(ids)
+            count += (ids[:, topk] != sentinel).int()
+        return count
+
+    assert not owners(localize=False).eq(1).all()
+    assert owners(localize=True).eq(1).all()
