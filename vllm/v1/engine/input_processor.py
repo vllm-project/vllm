@@ -451,7 +451,9 @@ class InputProcessor:
                 prompt_is_token_ids.count(False)
             ):
                 # Mixed prompts travel compact, keep only the embeds rows.
-                prompt_embeds = prompt_embeds[~torch.tensor(prompt_is_token_ids)]
+                prompt_embeds = prompt_embeds[
+                    ~torch.tensor(prompt_is_token_ids, dtype=torch.bool)
+                ]
         else:
             prompt_token_ids = decoder_input["prompt_token_ids"]
             prompt_embeds = None

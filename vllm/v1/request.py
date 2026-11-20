@@ -68,8 +68,14 @@ def _expand_mixed_prompt_embeds(
     get zero rows, which the workers do not read."""
     if len(prompt_embeds) == len(is_token_ids):
         return prompt_embeds
-    expanded = prompt_embeds.new_zeros(len(is_token_ids), *prompt_embeds.shape[1:])
-    expanded[~torch.tensor(is_token_ids)] = prompt_embeds
+    # Pinned like the decoded rows, so the workers copy them to the GPU as is.
+    expanded = torch.zeros(
+        len(is_token_ids),
+        *prompt_embeds.shape[1:],
+        dtype=prompt_embeds.dtype,
+        pin_memory=prompt_embeds.is_pinned(),
+    )
+    expanded[~torch.tensor(is_token_ids, dtype=torch.bool)] = prompt_embeds
     return expanded
 
 
