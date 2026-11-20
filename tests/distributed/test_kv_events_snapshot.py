@@ -10,12 +10,15 @@ from collections import Counter
 
 import msgspec
 import pytest
+import torch
 import zmq
+from transformers import LlamaConfig
 
 from examples.features.kv_events.kv_events_snapshot_subscriber import (
     ResyncRequired,
     SnapshotClient,
 )
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_events import (
     AllBlocksCleared,
@@ -27,6 +30,13 @@ from vllm.distributed.kv_events import (
     ZmqEventPublisher,
 )
 from vllm.distributed.kv_events_snapshot import KVCacheSnapshot, KVEventSnapshotRecorder
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SinkFullAttentionManager,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheGroup
+from vllm.v1.structured_output import StructuredOutputManager
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -692,7 +702,7 @@ def test_short_ring_leaves_out_what_it_cannot_rebuild(monkeypatch, seed):
 
 
 @pytest.fixture
-def publisher(monkeypatch):
+def publisher(monkeypatch, request):
     monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
     endpoints = None
 
@@ -703,6 +713,7 @@ def publisher(monkeypatch):
             if endpoints
             else "tcp://*:0",
             snapshot_endpoint=endpoints[1] if endpoints else "tcp://*:0",
+            snapshot_full_attention_block_size=getattr(request, "param", None),
         )
 
     pub = create()
@@ -716,11 +727,11 @@ def client(endpoints):
     return SnapshotClient(*endpoints)
 
 
-def request(endpoints):
+def request(endpoints, opcode=b"snapshot"):
     with zmq.Context.instance().socket(zmq.REQ) as sock:
         sock.setsockopt(zmq.LINGER, 0)
         sock.connect(endpoints[1])
-        sock.send(b"snapshot")
+        sock.send(opcode)
         assert sock.poll(5000)
         return sock.recv_multipart()
 
@@ -742,6 +753,206 @@ def test_empty_snapshot_and_idle_subscription(publisher):
         assert payloads == []
     finally:
         with_client.close()
+
+
+@pytest.mark.parametrize("profile", ["full", "sink", "opt-in-unset"])
+def test_scheduler_complete_snapshot_profile(tmp_path, monkeypatch, profile):
+    """Certify only opted-in plain full attention and record its idle reset."""
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+    ).save_pretrained(tmp_path)
+    width = 16
+    cache_config = CacheConfig(block_size=width, enable_prefix_caching=True)
+    cache_config.num_gpu_blocks = 8
+    spec = AttentionSpec(
+        block_size=width, num_kv_heads=2, head_size=16, dtype=torch.float32
+    )
+    layer = (
+        SinkFullAttentionManager.layer_config(spec, sink_len=width)
+        if profile == "sink"
+        else FullAttentionManager.layer_config(spec)
+    )
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="float32", skip_tokenizer_init=True
+        ),
+        scheduler_config=SchedulerConfig.default_factory(max_model_len=32),
+        cache_config=cache_config,
+        kv_events_config=KVEventsConfig(
+            enable_kv_cache_events=True,
+            endpoint="tcp://*:0",
+            snapshot_endpoint="tcp://*:0",
+            snapshot_full_attention_block_size=(
+                None if profile == "opt-in-unset" else width
+            ),
+        ),
+    )
+    scheduler = Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroup.from_layers({"layer": layer})],
+        ),
+        block_size=width,
+        hash_block_size=width,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+    try:
+        config = scheduler.get_kv_event_publisher_config()
+        assert config is not None
+        endpoints = (config.endpoint, config.snapshot_endpoint)
+        strict = b"snapshot-full-attention-v1"
+        reply = request(endpoints, strict)
+        legacy = request(endpoints)
+        assert len(legacy) == 2
+        assert int.from_bytes(legacy[0], "big", signed=True) >= -1
+        assert len(reply[1]) == 16 and reply[1] == legacy[1]
+        watermark = int.from_bytes(reply[0], "big", signed=True)
+        if profile == "full":
+            assert watermark >= -1
+            assert len(reply) == 3
+            assert msgspec.json.decode(reply[2]) == {
+                "protocol": "full-attention-v1",
+                "reporting": "incremental",
+                "rank": 0,
+                "block_size": width,
+                "complete": True,
+                "live_blocks": 0,
+                "live_references": 0,
+            }
+            subscriber = client(endpoints)
+            try:
+                subscriber.bootstrap()
+                assert scheduler.reset_prefix_cache()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    payload = subscriber.poll()
+                    if payload is not None:
+                        batch = msgspec.msgpack.decode(payload, type=KVEventBatch)
+                        if batch.events:
+                            assert batch.events == [AllBlocksCleared()]
+                            break
+                else:
+                    pytest.fail("Idle prefix-cache reset did not publish Clear")
+
+                reset_reply = request(endpoints, strict)
+                reset_watermark = int.from_bytes(reset_reply[0], "big", signed=True)
+                assert reset_watermark >= subscriber.next_seq - 1 > watermark
+                assert reset_reply[1:] == reply[1:]
+            finally:
+                subscriber.close()
+        else:
+            assert watermark == -2 and len(reply) == 2
+    finally:
+        scheduler.shutdown()
+
+
+@pytest.mark.parametrize("publisher", [4], indirect=True)
+def test_complete_cut_rejects_unbuildable_and_ambiguous_history(publisher):
+    pub, ports, _ = publisher
+    strict = b"snapshot-full-attention-v1"
+
+    def full(h, parent=None):
+        event = stored([h], parent, group=0)
+        event.kv_cache_spec_kind = "full_attention"
+        return event
+
+    def cut():
+        reply = request(ports, strict)
+        return int.from_bytes(reply[0], "big", signed=True), reply
+
+    publish(pub, [full(2, parent=1)])
+    assert cut()[0] == -2  # An unreported ancestor cannot prove residency.
+    assert int.from_bytes(request(ports)[0], "big", signed=True) >= 0
+    publish(pub, [AllBlocksCleared(), full(1), full(2, parent=1)])
+    w, reply = cut()
+    assert w >= 0
+    proof = msgspec.json.decode(reply[2])
+    assert (
+        proof["rank"],
+        proof["block_size"],
+        proof["live_blocks"],
+        proof["live_references"],
+    ) == (0, 4, 2, 2)
+    legacy = request(ports)
+    assert legacy[1] == reply[1]
+    for chunks in (legacy[2:], reply[3:]):
+        exported = [
+            e
+            for chunk in chunks
+            for e in msgspec.msgpack.decode(chunk, type=KVEventBatch).events
+        ]
+        assert counts(exported) == {("GPU", 0, 1): 1, ("GPU", 0, 2): 1}
+    publish(pub, [full(1), BlockRemoved([1], "GPU", group_idx=0)])
+    assert cut()[0] == -2  # Full-report cache hits aren't additional copies.
+    assert int.from_bytes(request(ports)[0], "big", signed=True) >= w
+
+
+@pytest.mark.parametrize("publisher", [4], indirect=True)
+def test_complete_cut_teaches_only_ancestors_needed_for_live_blocks(publisher):
+    pub, ports, _ = publisher
+
+    def full(h, parent=None, **kw):
+        event = stored([h], parent, group=0, **kw)
+        event.kv_cache_spec_kind = "full_attention"
+        return event
+
+    def cut():
+        return request(ports, b"snapshot-full-attention-v1")
+
+    def exported(chunks):
+        return [
+            e
+            for c in chunks
+            for e in msgspec.msgpack.decode(c, type=KVEventBatch).events
+        ]
+
+    publish(pub, [full(1, extra_keys=[("salt",)])])
+    assert int.from_bytes(cut()[0], "big", signed=True) == -2
+    publish(pub, [AllBlocksCleared()])
+    empty = cut()
+    assert msgspec.json.decode(empty[2])["live_blocks"] == 0
+    assert exported(empty[3:]) == []
+    # Legacy consumers can still receive recently dead descriptors.
+    assert exported(request(ports)[2:])[0].extra_keys == [("salt",)]
+
+    publish(pub, [full(2), full(3, parent=2), BlockRemoved([2], "GPU", group_idx=0)])
+    reply = cut()
+    events = exported(reply[3:])
+    assert msgspec.json.decode(reply[2])["live_references"] == 1
+    assert counts(events) == {("GPU", 0, 3): 1}
+    assert [
+        h
+        for e in events
+        if isinstance(e, BlockStored) and e.token_ids
+        for h in e.block_hashes
+    ] == [2, 3]
+    publish(pub, [BlockRemoved([3], "GPU", group_idx=0)])
+    assert exported(cut()[3:]) == []
+    # The old descriptor is required again, but its salt is not representable.
+    publish(pub, [full(4, parent=1)])
+    assert int.from_bytes(cut()[0], "big", signed=True) == -2
+    # A later group announcement cannot attest an older untyped ancestor.
+    publish(
+        pub,
+        [
+            AllBlocksCleared(),
+            stored([5], group=0),
+            AllBlocksCleared(),
+            full(6, parent=5),
+        ],
+    )
+    assert int.from_bytes(cut()[0], "big", signed=True) == -2
+    publish(pub, [AllBlocksCleared(), full(5), full(6, parent=5)])
+    assert counts(exported(cut()[3:])) == {("GPU", 0, 5): 1, ("GPU", 0, 6): 1}
 
 
 def test_initial_live_message_obeys_bootstrap_buffer_limit(publisher, monkeypatch):

@@ -68,6 +68,11 @@ class KVEventsConfig:
     snapshots until the engine restarts.
     """
 
+    snapshot_full_attention_block_size: int | None = None
+    """Opt in to the complete worker-local snapshot request for this block size.
+    Unsupported engine configurations still provide ordinary events/snapshots.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

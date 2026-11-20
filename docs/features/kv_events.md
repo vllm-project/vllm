@@ -58,8 +58,10 @@ Without `snapshot_endpoint`, nothing changes. With it:
   snapshot covers. `-1` means nothing has been recorded yet. `-2` means
   snapshots are unavailable, and the reply has no chunks. An empty cache can
   reply with a sequence of 0 or more and no chunks.
-- The whole snapshot comes back as one multipart reply. The publisher ignores
-  any request other than `snapshot`.
+- The whole snapshot comes back as one multipart reply. The publisher accepts
+  the legacy `snapshot` request and the experimental
+  [`snapshot-full-attention-v1` request](#experimental-complete-worker-local-cut).
+  It ignores unknown request opcodes.
 - Chunks use the live encoding and data-parallel rank. Their stores carry each
   block's tokens, extra keys, lookahead tokens, LoRA, group, locality and
   ownership, and no `session_id`.
@@ -89,6 +91,42 @@ messages. Its `ready` flag only reports that the transport is in sync; the
 caller decides when its own index is ready.
 
 ## How a snapshot is built
+
+### Experimental complete worker-local cut
+
+With snapshots enabled, `snapshot_full_attention_block_size` opts into a
+separate request, `snapshot-full-attention-v1`. The original `snapshot`
+request and live event framing are unchanged. A supported Scheduler must have
+one independently addressable engine, a single plain full-attention cache
+allocation group, matching cache/hash block sizes, prefix caching, and no
+lookahead, adapters or transfer connectors. The new request does not add
+transport authentication: use trusted, explicitly enrolled local endpoints.
+
+A complete cut requires continuous recording from a known-empty cache or
+from a valid device Clear that establishes a new baseline. The publisher UUID
+identifies the event stream; it does not attest to cache contents that were
+already warm when recording began.
+
+A successful reply is the inclusive sequence W, the 16-byte publisher ID, a
+JSON proof (protocol, reporting, rank, block size, complete, live blocks and
+live references), then the original encoded snapshot chunks. Check all scope
+and multiplicity constraints; a structural Store or a teaching Remove alone
+does not prove residency. Subscribe before the cut and validate a continuous
+suffix and heartbeat under that same ID. A gap, timeout, producer change or
+unavailable reply (W = -2) means no credit until a new cut.
+
+Use incremental reporting. A repeated data-bearing Store for a live hash
+is indistinguishable from a per-request full-report cache hit. Rather than
+count a hit as a physical copy, the certified view refuses that history until
+a device Clear; the consumer must also revoke on the live path. A cut that
+leaves out any live hash is not certified. These refusals do not disable
+ordinary inference or the best-effort snapshot endpoint.
+
+The complete cut teaches only currently resident blocks and the ancestors
+needed to reconstruct them. Unrelated dead descriptors are omitted, including
+after a Clear. A nonresident ancestor is structural, not cache residency; if
+its inputs cannot be established in this profile, the complete cut is refused.
+The original best-effort export still includes recently dead descriptors.
 
 The recorder keeps one record per block hash: parent, tokens and hash inputs,
 plus a reference count per scope (medium, KV cache group, locality,

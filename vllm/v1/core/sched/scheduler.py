@@ -58,9 +58,10 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
@@ -203,8 +204,46 @@ class Scheduler(SchedulerInterface):
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
 
+        publisher_config = self.kv_events_config
+        if (
+            publisher_config
+            and publisher_config.snapshot_full_attention_block_size is not None
+        ):
+            width = publisher_config.snapshot_full_attention_block_size
+            groups = kv_cache_config.kv_cache_groups
+            group = groups[0] if len(groups) == 1 else None
+            specs = group.distinct_specs if group is not None else ()
+            if not (
+                width > 0
+                and group is not None
+                and group.manager_cls is FullAttentionManager
+                and group.block_size == width == block_size
+                and group.prefix_cacheable
+                and group.prefix_replay_tokens == 0
+                and specs
+                and all(
+                    type(spec) is AttentionSpec and spec.block_size == width
+                    for spec in specs
+                )
+                and (hash_block_size is None or hash_block_size == width)
+                and self.cache_config.enable_prefix_caching
+                and self.parallel_config.data_parallel_size == 1
+                and self.parallel_config.decode_context_parallel_size == 1
+                and self.parallel_config.prefill_context_parallel_size == 1
+                and not vllm_config.num_hash_lookahead_tokens
+                and not vllm_config.speculative_config
+                and not vllm_config.lora_config
+                and self.connector is None
+                and vllm_config.ec_transfer_config is None
+            ):
+                logger.warning(
+                    "Complete full-attention KV snapshots unavailable for this engine"
+                )
+                publisher_config = replace(
+                    publisher_config, snapshot_full_attention_block_size=None
+                )
         self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config,
+            publisher_config,
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
@@ -3297,6 +3336,20 @@ class Scheduler(SchedulerInterface):
                 self._preempt_request(request, timestamp, drop_stale_output=True)
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        if reset_successful:
+            publisher_config = self.get_kv_event_publisher_config()
+            if (
+                publisher_config is not None
+                and publisher_config.snapshot_endpoint is not None
+                and publisher_config.snapshot_full_attention_block_size is not None
+            ):
+                # The engine can stay idle after a reset, with no inference
+                # step to publish the queued device Clear.
+                events = self.kv_cache_manager.take_events()
+                if events:
+                    self.kv_event_publisher.publish(
+                        KVEventBatch(ts=time.time(), events=events)
+                    )
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
