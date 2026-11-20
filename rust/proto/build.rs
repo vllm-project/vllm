@@ -19,6 +19,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // Both variants are large messages.
+        .boxed(".vllm.DerenderStreamRequest.request.start")
+        .boxed(".vllm.DerenderStreamRequest.request.output")
         .compile_fds(file_descriptor_set)?;
 
     Ok(())

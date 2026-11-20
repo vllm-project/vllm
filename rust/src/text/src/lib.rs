@@ -103,6 +103,12 @@ impl TextRequestProcessor {
         self.backend.has_tokenizer()
     }
 
+    /// Return the generation config's `skip_special_tokens` default, which
+    /// applies when a request leaves it unset.
+    pub fn default_skip_special_tokens(&self) -> Result<Option<bool>> {
+        Ok(self.backend.sampling_hints()?.default_skip_special_tokens)
+    }
+
     /// Return the effective model context length.
     pub fn max_model_len(&self) -> u32 {
         self.max_model_len

@@ -221,6 +221,10 @@ bad_words, or n. Supply equivalent generation parameters separately; copying
 only the response fields into `vllm.GenerateRequest` does not preserve those
 settings. This remaining work is tracked in
 [#65503](https://github.com/vllm-project/vllm/issues/65503).
+`Render.DerenderStream` turns the `Inference.GenerateStream` output of a
+request rendered with `Render.Render` back into the client response (SSE events
+or the JSON body). It supports `API_CHAT` with `n = 1`.
+
 See [the renderer documentation](../docs/serving/online_serving/renderer.md#rust-raw-json-grpc-rendering)
 and [`render.proto`](proto/render.proto) for the contract.
 

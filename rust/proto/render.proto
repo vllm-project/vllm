@@ -21,6 +21,17 @@ service Render {
   // Renders a raw JSON request body for the specified API into prompt token IDs
   // plus the generation settings that rendering decides.
   rpc Render (RenderRequest) returns (RenderResponse) {}
+
+  // Turns the Inference.GenerateStream output of a request rendered with
+  // Render into the client response: SSE events for a streaming request, or
+  // the JSON body for a non-streaming one. The first message is `start`, and
+  // each later message is one GenerateStream response, unchanged. Request
+  // `response.output_token_ids = true`; DerenderStream decodes `token_ids` and
+  // does not read `text`. The server ends the stream with the response that
+  // carries the finished sequence and reads no further messages, so stop
+  // sending then. If the stream ends without a finished sequence (an error
+  // event or status), cancel the GenerateStream.
+  rpc DerenderStream (stream DerenderStreamRequest) returns (stream DerenderStreamResponse) {}
 }
 
 // ======================================================================================
@@ -81,6 +92,54 @@ message RenderResponse {
   // RESOURCE_EXHAUSTED. Such responses exceed the 4 MiB default receive limit
   // of many gRPC clients.
   repeated MediaItem media = 4;
+}
+
+// ======================================================================================
+// Derender
+// ======================================================================================
+
+// The first message of a DerenderStream.
+message DerenderStart {
+  // Field 2 is reserved for an opaque context returned by Render.
+  reserved 2;
+
+  oneof context {
+    // The request passed to Render. `mm_payload` is ignored.
+    RenderRequest request = 1;
+  }
+  // `RenderResponse.prompt_token_ids`.
+  repeated uint32 prompt_token_ids = 3;
+}
+
+message DerenderStreamRequest {
+  oneof request {
+    DerenderStart start = 1;
+    // One GenerateStream response, up to and including the one with
+    // `finish_info`. To end early, send an output with
+    // `finish_info.finish_reason = ABORTED`.
+    GenerateResponse output = 2;
+  }
+}
+
+message DerenderStreamResponse {
+  oneof output {
+    // Streaming client: serialized SSE events in order, each
+    // `data: <json>\n\n`. The last response ends with `data: [DONE]\n\n`.
+    bytes events = 1;
+    // Non-streaming client: the final JSON body, on the last response only.
+    bytes body = 2;
+  }
+  // Sequences that ended with this response.
+  repeated SequenceFinish finished = 3;
+}
+
+message SequenceFinish {
+  uint32 index = 1;
+  // The worker's finish info, after the cut: `finish_reason`, `stop_reason` and
+  // `num_output_tokens` describe the returned output, and the other fields are
+  // copied. A `stop_string` stop that the worker did not report means
+  // generation is still running: cancel it.
+  FinishInfo finish_info = 2;
 }
 
 message RenderChatRequest {

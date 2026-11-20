@@ -72,6 +72,14 @@ impl ChatEventStream {
         self
     }
 
+    /// Run `observe` on every event the stream yields, leaving it unchanged.
+    pub fn inspect(mut self, observe: impl FnMut(&Result<ChatEvent>) + Send + 'static) -> Self {
+        use futures::StreamExt as _;
+
+        self.inner = Box::pin(self.inner.inspect(observe));
+        self
+    }
+
     /// Return the request ID associated with this stream.
     pub fn request_id(&self) -> &str {
         &self.request_id
