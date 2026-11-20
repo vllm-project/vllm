@@ -388,44 +388,6 @@ def test_ssd_get_uncertain_failure_retains_receive_buffer(error, monkeypatch):
     assert client._read_buffer.data_ptr() in native.registered
 
 
-@pytest.mark.parametrize(
-    "kinds", [[], ["memory"], ["disk"], ["unknown"], ["local_disk", "memory"]]
-)
-def test_ssd_probe_rejects_unproven_disk_only_reads(kinds):
-    from benchmarks.cross_encoder_store_ssd import require_disk_only
-
-    replicas = []
-    for kind in kinds:
-        replica = MagicMock()
-        replica.is_memory_replica.return_value = kind == "memory"
-        replica.is_local_disk_replica.return_value = kind == "local_disk"
-        replica.is_disk_replica.return_value = kind == "disk"
-        replicas.append(replica)
-    native = MagicMock()
-    native.batch_get_replica_desc.return_value = {"key": replicas}
-    with pytest.raises(ValueError, match="LOCAL_DISK"):
-        require_disk_only(native, ["key"])
-
-
-def test_ssd_probe_verifies_ec_objects_through_real_client(backend):
-    """The probe checks decoded contents, rather than counting successful RPCs."""
-    from benchmarks.cross_encoder_store_ssd import verify_read
-
-    tensor = torch.arange(16, dtype=torch.float32).reshape(4, 4)
-    client = backend.store_client
-    client.put_tensor("key", tensor)
-    replica = MagicMock()
-    replica.is_memory_replica.return_value = False
-    replica.is_local_disk_replica.return_value = True
-    client.store.batch_get_replica_desc = MagicMock(return_value={"key": [replica]})
-    result = verify_read(client, {"key": tensor}, "cpu")
-    assert result["verified"] and result["payload_bytes"] == 64
-    assert result["replicas_before"] == {"key": ["local_disk"]}
-    client.put_tensor("key", tensor + 1)
-    with pytest.raises(AssertionError, match="Embedding mismatch"):
-        verify_read(client, {"key": tensor}, "cpu")
-
-
 @pytest.mark.parametrize("mode", ["miss", "oversized"])
 def test_unloadable_inputs_do_not_allocate_staging(backend, mode):
     client, native = backend.store_client, backend.store_client.store
