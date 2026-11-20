@@ -1066,11 +1066,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             for encoder_cls, modalities in modalities_by_encoder.items():
                 # Towers are built on meta, so `recursive_replace` offloads them once
                 # materialised
-                stack.enter_context(
-                    self._mark_tower_model(
-                        vllm_config, modalities, targets=encoder_cls, offload=False
-                    )
+                tower = self._mark_tower_model(
+                    vllm_config, modalities, targets=encoder_cls, auto_offload=False
                 )
+                stack.enter_context(tower)
             yield
 
     def _decorate_for_torch_compile(self):
