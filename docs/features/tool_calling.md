@@ -468,16 +468,7 @@ Flags:
 ### HY V4 and HY4 Flash (`hy_v4`)
 
 Use `--enable-auto-tool-choice --tool-call-parser hy_v4 --reasoning-parser hy_v4`
-with HY V4 checkpoints, including `tencent/Hy4-flash-fp8`.
-The parsers detect the checkpoint's structural-token suffix from its tokenizer.
-Both streaming and non-streaming requests support parallel calls and convert
-`<arg_key>` / `<arg_value>` arguments according to the supplied tool schemas.
-
-The chat template defaults to `reasoning_effort="high"`. To disable reasoning,
-pass `chat_template_kwargs={"reasoning_effort": "no_think"}` in the request;
-template kwargs take precedence over the top-level `reasoning_effort`.
-For `tool_choice="required"` or a named tool, keep strict tool calling enabled
-so the structural-tag grammar generates the checkpoint's native tool format.
+with HY V4 checkpoints, including `tencent/Hy4-Flash-FP8`.
 
 ### Cohere Command (`cohere_command3` / `cohere_command4`)
 
