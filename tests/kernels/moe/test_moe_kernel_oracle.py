@@ -487,6 +487,30 @@ def test_fp8_aiter_env_selection(
     assert select()[0] is expected
 
 
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_selects_oot_platform_experts(monkeypatch):
+    """An out-of-tree platform's FP8 MoE experts are probed before in-tree
+    backends, in the platform's order, skipping unsupported candidates."""
+
+    def experts(supported: bool) -> type[mk.FusedMoEExperts]:
+        return type(
+            "OOTExperts",
+            (TritonExperts,),
+            {"is_supported_config": staticmethod(lambda *_: (supported, None))},
+        )
+
+    unsupported, supported = experts(False), experts(True)
+    monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "get_fp8_moe_experts_cls", lambda: [unsupported, supported]
+    )
+
+    assert select_fp8_moe_backend(make_dummy_moe_config(), None, None) == (
+        Fp8MoeBackend.OOT,
+        supported,
+    )
+
+
 _FORMAT = mk.FusedMoEActivationFormat
 
 

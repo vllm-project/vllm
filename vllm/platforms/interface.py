@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -395,6 +396,16 @@ class Platform:
         kernel launch. The default implementation does nothing.
         """
         return
+
+    @classmethod
+    def get_fp8_moe_experts_cls(cls) -> list[type["FusedMoEExperts"]]:
+        """Candidate FP8 MoE experts classes for out-of-tree platforms, in
+        priority order. The FP8 MoE oracle selects the first one whose
+        `is_supported_config` accepts the deployment. Weights are passed to
+        the experts unchanged; layout changes belong in the experts'
+        `process_weights_after_loading`.
+        """
+        return []
 
     @classmethod
     def get_attn_backend_cls(
