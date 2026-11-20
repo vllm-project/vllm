@@ -2105,23 +2105,7 @@ class MooncakeConnectorWorker:
                 remote.kv_block_len,
             )
 
-        layouts = []
-        for key, region_pairs in itertools.groupby(
-            zip(local_regions, remote_regions), layout_key
-        ):
-            pairs = list(region_pairs)
-            if len(pairs) == 1:
-                local, remote = pairs[0]
-                src_bases, dst_bases = (
-                    np.uint64(local.base_addr),
-                    np.uint64(remote.base_addr),
-                )
-            else:
-                src_bases, dst_bases = np.array(
-                    [(local.base_addr, remote.base_addr) for local, remote in pairs],
-                    dtype=np.uint64,
-                ).T[:, :, None]
-            layouts.append((key, len(pairs), src_bases, dst_bases))
+        layouts = None
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
@@ -2217,6 +2201,29 @@ class MooncakeConnectorWorker:
             remote_block_ids_by_group = self._logical_to_kernel_block_ids(
                 remote_block_ids_by_group
             )
+
+            # Completion-only pulls release P blocks without needing a layout.
+            if layouts is None:
+                layouts = []
+                for key, region_pairs in itertools.groupby(
+                    zip(local_regions, remote_regions), layout_key
+                ):
+                    pairs = list(region_pairs)
+                    if len(pairs) == 1:
+                        local, remote = pairs[0]
+                        src_bases, dst_bases = (
+                            np.uint64(local.base_addr),
+                            np.uint64(remote.base_addr),
+                        )
+                    else:
+                        src_bases, dst_bases = np.array(
+                            [
+                                (local.base_addr, remote.base_addr)
+                                for local, remote in pairs
+                            ],
+                            dtype=np.uint64,
+                        ).T[:, :, None]
+                    layouts.append((key, len(pairs), src_bases, dst_bases))
 
             # Regions of the same KV group share block ids; group them once.
             block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
