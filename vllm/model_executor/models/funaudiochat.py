@@ -548,7 +548,7 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        budget = envs.VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES
+        budget = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
         if budget <= 0:
             return {"audio": None}
 

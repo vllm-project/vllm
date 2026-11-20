@@ -83,11 +83,11 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
-    VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES: int = 715_827_880
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
+    VLLM_MAX_MEDIA_PREPROCESSING_BYTES: int = 715_827_880
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -1085,11 +1085,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_AUDIO_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_DECODE_BYTES", "268435456")
     ),
-    # Estimated bytes for FunAudioChat feature extraction per prompt.
-    # Set to 0 to disable this preprocessing limit.
-    "VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES": lambda: int(
-        os.getenv("VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES", "715827880")
-    ),
     # Maximum bytes a client-supplied embedding payload (`prompt_embeds`,
     # `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once it is
     # densified. A sparse tensor carries its own declared shape, so a payload
@@ -1121,6 +1116,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # per pixel. Set to 0 to disable.
     "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "715827880")
+    ),
+    # Maximum estimated temporary allocation for one prompt during media
+    # preprocessing. Set to 0 to disable this limit.
+    "VLLM_MAX_MEDIA_PREPROCESSING_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", "715827880")
     ),
     "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", "256")

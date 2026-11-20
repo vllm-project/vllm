@@ -12,6 +12,7 @@ from tokenizers.models import WordLevel
 from transformers import TokenizersBackend, WhisperFeatureExtractor
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.funaudiochat import (
@@ -167,8 +168,8 @@ def local_funaudiochat_model(tmp_path):
 def test_audio_items_fit_the_preprocessing_budget(
     local_funaudiochat_model, monkeypatch, validate
 ):
-    monkeypatch.setenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "0")
-    monkeypatch.setenv("VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES", "500000")
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 0)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 500_000)
     model, tokenizer = local_funaudiochat_model
     model_config = ModelConfig(model=model, dtype="float32", max_model_len=128)
     info = FunAudioChatProcessingInfo(InputProcessingContext(model_config, tokenizer))
@@ -197,7 +198,7 @@ def test_render_respects_the_audio_preprocessing_budget(local_funaudiochat_model
     with RemoteLaunchRenderServer(
         model,
         ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
-        env_dict={"VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES": "500000"},
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "500000"},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
         for content, status in [([audio], 200), ([audio, audio], 400)]:

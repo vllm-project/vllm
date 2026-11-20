@@ -106,12 +106,13 @@ Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
 
-FunAudioChat uses `VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES` to limit the
-estimated memory needed for padded audio feature extraction per prompt. It
-defaults to 715,827,880 bytes (about 683 MiB). The budget covers feature
-extraction, which runs after decoding.
-`--limit-mm-per-prompt` can set a lower audio item limit. A value of `0`
-disables the preprocessing budget.
+### 6. Media preprocessing limit
+
+`VLLM_MAX_MEDIA_PREPROCESSING_BYTES` defaults to 715,827,880 bytes (about
+683 MiB). Preprocessors that support this limit estimate temporary
+allocations for one prompt before expanding decoded media into features or
+image tiles. The preprocessing and decode budgets can be configured
+independently. Set this value to `0` to disable the preprocessing check.
 
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
