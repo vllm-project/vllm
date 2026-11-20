@@ -12,6 +12,7 @@ import torch
 
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
@@ -21,6 +22,7 @@ if HAS_TRITON:
         LoRAKernelMeta,
         fused_moe_lora,
         lora_expand,
+        lora_grouped_linear,
         lora_shrink,
     )
 
@@ -91,6 +93,27 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             # Prepare cuda kernel metadata tensors
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
             self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        shrink_weights: torch.Tensor,
+        expand_weights: torch.Tensor,
+    ) -> None:
+        if not (
+            HAS_TRITON
+            and current_platform.is_cuda()
+            and x.dtype in (torch.bfloat16, torch.float16)
+            and x.dtype == shrink_weights.dtype == expand_weights.dtype == y.dtype
+        ):
+            return super().add_lora_grouped_linear(y, x, shrink_weights, expand_weights)
+
+        # Group offsets refer to the full batch even when x is just a prefix.
+        _, *routing = self.token_mapping_meta.meta_args(
+            None, self.lora_config.specialize_active_lora
+        )
+        lora_grouped_linear(y, x, shrink_weights, expand_weights, *routing)
 
     def add_shrink(
         self,

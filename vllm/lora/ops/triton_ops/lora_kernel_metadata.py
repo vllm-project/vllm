@@ -166,7 +166,7 @@ class LoRAKernelMeta:
 
     def meta_args(
         self,
-        token_nums: int,
+        token_nums: int | None,
         specialize_active_lora: bool,
     ) -> tuple[
         torch.Tensor,
@@ -183,8 +183,9 @@ class LoRAKernelMeta:
         unpacked directly during the lora_shrink/lora_expand function call.
 
         Args:
-            token_nums (int): Number of input tokens in the current forward
-                pass of the kernel.
+            token_nums (int | None): Number of input tokens in the current forward
+                pass. Pass None when the kernel bounds original token IDs after
+                reading groups from the full sorted index buffer.
             specialize_active_lora (bool): If True, report the actual active
                 LoRA count; otherwise report the padded default, which keeps
                 the kernel launch shape stable.
