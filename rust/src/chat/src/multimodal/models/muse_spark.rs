@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! MuseSpark1x Omni model spec: NaViT vision (image + video) and raw-waveform
-//! audio on the MuseSpark1x stack.
+//! Muse Spark Omni model spec: NaViT vision (image + video) and raw-waveform
+//! audio on the Muse Spark stack.
 //!
 //! Mirrors vLLM `models/muse_spark/common/processor.py`
-//! (`MuseSpark1xOmniMultiModalProcessor`):
+//! (`MuseSparkOmniMultiModalProcessor`):
 //!
 //! - Placeholders are the vocabulary tokens `<|patch|>`, `<|video|>`, `<|audio|>`;
 //!   structural/embedding token ids are resolved from the tokenizer vocabulary
@@ -294,10 +294,10 @@ impl ModelProcessorSpec for MuseSparkSpec {
         Some(processor::DEFAULT_SAMPLING_FPS)
     }
 
-    fn default_video_sample_fps_with(&self, config: Option<&PreProcessorConfig>) -> Option<f64> {
+    fn default_video_sample_fps_with(&self, config: &PreProcessorConfig) -> Option<f64> {
         Some(
             config
-                .and_then(|config| config.get_extra::<f64>("fps"))
+                .get_extra::<f64>("fps")
                 .filter(|fps| fps.is_finite() && *fps > 0.0)
                 .unwrap_or(processor::DEFAULT_SAMPLING_FPS),
         )
@@ -313,14 +313,14 @@ impl ModelProcessorSpec for MuseSparkSpec {
         }
     }
 
-    fn video_frame_sampling_with(&self, config: Option<&PreProcessorConfig>) -> FrameSampling {
+    fn video_frame_sampling_with(&self, config: &PreProcessorConfig) -> FrameSampling {
         FrameSampling::TemporalGroups {
             frame_factor: config
-                .and_then(|config| config.temporal_patch_size)
+                .temporal_patch_size
                 .unwrap_or(processor::DEFAULT_PATCH_TEMPORAL)
                 .max(1),
             max_frames: config
-                .and_then(|config| config.get_extra::<usize>("num_frames"))
+                .get_extra::<usize>("num_frames")
                 .filter(|frames| *frames > 0)
                 .unwrap_or(processor::DEFAULT_NUM_FRAMES_PER_VIDEO),
         }
@@ -471,7 +471,7 @@ mod tests {
 
         let config = json!({"model_type": "unknown"});
         let id_metadata = ModelMetadata {
-            model_id: "example/Muse-Spark-1x-Omni",
+            model_id: "example/Muse-Spark-Omni",
             ..metadata(&tokenizer, &config)
         };
         let spec = lookup_spec(&id_metadata).unwrap();
@@ -630,11 +630,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            MuseSparkSpec.default_video_sample_fps_with(Some(&config)),
+            MuseSparkSpec.default_video_sample_fps_with(&config),
             Some(1.0)
         );
         assert_eq!(
-            MuseSparkSpec.video_frame_sampling_with(Some(&config)),
+            MuseSparkSpec.video_frame_sampling_with(&config),
             FrameSampling::TemporalGroups {
                 frame_factor: 4,
                 max_frames: 64

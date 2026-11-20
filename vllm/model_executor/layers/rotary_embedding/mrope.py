@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import numpy as np
 import torch
 
 from vllm.platforms import current_platform
@@ -436,38 +435,18 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
-    def forward_cuda(
+    def _forward_text_rope(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        offsets: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        assert positions.ndim == 1 or positions.ndim == 2
-        assert key is not None
-
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
         cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         query_shape = query.shape
         key_shape = key.shape
-        if positions.ndim == 2:
-            assert self.mrope_section
-
-            q, k = triton_mrope(
-                query,
-                key,
-                cos,
-                sin,
-                self.mrope_section,
-                self.head_size,
-                self.rotary_dim,
-                self.mrope_interleaved,
-                self.is_neox_style,
-            )
-
-            return q.reshape(query_shape), k.reshape(key_shape)
 
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
@@ -489,6 +468,40 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert positions.ndim == 1 or positions.ndim == 2
+        assert key is not None
+
+        if positions.ndim == 2:
+            assert self.mrope_section
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            cos_sin = cos_sin_cache[positions]
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            query_shape = query.shape
+            key_shape = key.shape
+
+            q, k = triton_mrope(
+                query,
+                key,
+                cos,
+                sin,
+                self.mrope_section,
+                self.head_size,
+                self.rotary_dim,
+                self.mrope_interleaved,
+                self.is_neox_style,
+            )
+
+            return q.reshape(query_shape), k.reshape(key_shape)
+
+        return self._forward_text_rope(positions, query, key)
 
     def forward_hip(
         self,
@@ -551,18 +564,3 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
             )
             for _ in range(3)
         ]
-
-    @staticmethod
-    def get_next_input_positions_tensor(
-        out: np.ndarray,
-        out_offset: int,
-        mrope_position_delta: int,
-        context_len: int,
-        num_new_tokens: int,
-    ):
-        values = np.arange(
-            mrope_position_delta + context_len,
-            mrope_position_delta + context_len + num_new_tokens,
-            dtype=out.dtype,
-        )
-        out[:, out_offset : out_offset + num_new_tokens] = values

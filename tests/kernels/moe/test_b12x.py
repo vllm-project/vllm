@@ -20,7 +20,12 @@ from tests.kernels.quantization.nvfp4_utils import (
 from tests.kernels.utils import torch_moe
 from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
 from vllm import _custom_ops as ops
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -40,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
+    nvfp4_backend_supports_csf_scales,
     select_nvfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
@@ -173,6 +179,7 @@ def _make_b12x_moe_kernel(
     topk: int,
     activation: MoEActivation,
     quant_config: FusedMoEQuantConfig,
+    csf_scales: bool = False,
 ) -> mk.FusedMoEKernel:
     num_experts = w1.shape[0]
     moe_config = make_dummy_moe_config(
@@ -190,7 +197,7 @@ def _make_b12x_moe_kernel(
         in_dtype=hidden_states.dtype,
         activation=activation,
     )
-    experts = B12xExperts(moe_config, quant_config)
+    experts = B12xExperts(moe_config, quant_config, csf_scales=csf_scales)
     layer = SimpleNamespace(
         activation=activation,
         apply_router_weight_on_input=False,
@@ -444,6 +451,22 @@ def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
     assert experts_cls is B12xExperts
 
 
+def test_explicit_b12x_mxfp4_force_a16_is_rejected_under_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forcing A16 drops a requested activation quantization, which
+    VLLM_STRICT_QUANT_SCHEME forbids like any other BF16 fallback."""
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(mxfp4_oracle.envs, "VLLM_B12X_MOE_FP4_FORCE_A16", True)
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "1")
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
+    config.moe_backend = "b12x"
+
+    with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+        select_mxfp4_moe_backend(config, activation_key=kMxfp8Dynamic)
+
+
 @pytest.mark.parametrize(
     "force_a16,expected_backend",
     [
@@ -526,7 +549,8 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
     processed_layers: list[torch.nn.Module] = []
     fake_experts = SimpleNamespace(
-        process_weights_after_loading=processed_layers.append
+        process_weights_after_loading=processed_layers.append,
+        keep_constants=lambda layer: None,
     )
     kernel = SimpleNamespace(fused_experts=fake_experts)
     monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())
@@ -586,7 +610,9 @@ def test_explicit_b12x_nvfp4_selection(
     selected_activation_keys = []
 
     def is_supported_config(cls, config, weight_key, activation_key, activation_format):
-        selected_activation_keys.append(activation_key)
+        selected_activation_keys.append(
+            cls.executed_activation_key(weight_key, activation_key)
+        )
         return True, None
 
     monkeypatch.setattr(B12xExperts, "is_supported_config", is_supported_config)
@@ -607,6 +633,53 @@ def test_explicit_b12x_nvfp4_selection(
     assert backend == NvFp4MoeBackend.B12X
     assert experts_cls is B12xExperts
     assert selected_activation_keys == [expected_activation_key]
+
+
+@pytest.mark.parametrize("uncompressed", [False, True])
+def test_csf_scales_stay_compressed_only_on_b12x_w4a4(uncompressed: bool) -> None:
+    config = make_dummy_moe_config(hidden_dim=2560, intermediate_size=640)
+    kernel_config = KernelConfig(b12x_moe_uncompressed_scales=uncompressed)
+    with set_current_vllm_config(VllmConfig(kernel_config=kernel_config)):
+        assert nvfp4_backend_supports_csf_scales(
+            NvFp4MoeBackend.B12X, config, False
+        ) is (not uncompressed)
+        assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, True)
+        assert not nvfp4_backend_supports_csf_scales(
+            NvFp4MoeBackend.FLASHINFER_CUTLASS, config, False
+        )
+
+
+@pytest.mark.parametrize("force_a16", [False, True])
+def test_b12x_nvfp4_uninterleave_support_follows_executed_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    force_a16: bool,
+) -> None:
+    """Force-A16 runs W4A4 layers unquantized, so the W4A8-only uninterleave
+    rejection must not apply to them."""
+    monkeypatch.setattr(
+        nvfp4_oracle.envs,
+        "VLLM_B12X_MOE_FP4_FORCE_A16",
+        force_a16,
+    )
+    monkeypatch.setattr(
+        B12xExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    config = make_dummy_moe_config(
+        hidden_dim=128,
+        intermediate_size=64,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
+
+    supported, reason = B12xExperts.is_supported_config(
+        B12xExperts,
+        config,
+        kNvfp4Static,
+        kNvfp4Dynamic,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert force_a16 == (reason is None or "swigluoai" not in reason)
+    assert not force_a16 or supported
 
 
 @pytest.mark.parametrize(
@@ -989,7 +1062,7 @@ def test_b12x_moe_workspace_uses_prepared_router_weight_contract(
     ]
 
 
-@dataclass
+@dataclass(slots=True)
 class _B12xMoeCase:
     hidden_states: torch.Tensor
     score: torch.Tensor
@@ -1354,3 +1427,130 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
             )
             assert cosine >= 0.999 and relative_l2 <= 0.01
         graph.reset()
+
+
+@pytest.mark.skipif(not _has_b12x_moe(), reason="requires b12x MoE on SM120")
+# Qwen3.8-Flash-Next routed-expert shards at TP1, TP2 and TP4.
+@pytest.mark.parametrize("intermediate_size", [640, 320, 160])
+@torch.inference_mode()
+def test_b12x_compressed_csf_scales_match_decoded_scales(
+    intermediate_size: int, workspace_init
+) -> None:
+    from vllm.v1.worker.workspace import lock_workspace
+
+    set_random_seed(29)
+    num_experts, hidden_size, topk = 512, 2560, 10
+    w13 = torch.randint(
+        256, (num_experts, 2 * intermediate_size, hidden_size // 2), device="cuda"
+    ).to(torch.uint8)
+    w2 = torch.randint(
+        256, (num_experts, hidden_size, intermediate_size // 2), device="cuda"
+    ).to(torch.uint8)
+    # Spread over 32 E4M3 codes, so many scales are CSF exceptions.
+    w13_scale, w2_scale = (
+        torch.randint(0x28, 0x48, (*w.shape[:2], w.shape[2] // 8), device="cuda")
+        .to(torch.uint8)
+        .view(torch.float8_e4m3fn)
+        for w in (w13, w2)
+    )
+    alpha = torch.full((num_experts,), 1 / 64, device="cuda")
+    input_scale = torch.ones(num_experts, device="cuda")
+    kernels = {}
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        for csf_scales in (False, True):
+            prepared = prepare_nvfp4_moe_layer_for_b12x(
+                w13.clone(),
+                w13_scale,
+                alpha,
+                input_scale,
+                w2.clone(),
+                w2_scale,
+                alpha,
+                input_scale,
+                is_act_and_mul=True,
+                reorder_w13=csf_scales,
+            )
+            if csf_scales:
+                expected_scales = (prepared[1].clone(), prepared[5].clone())
+            quant_config = FusedMoEQuantConfig.make(
+                quant_dtype="nvfp4",
+                weight_dtype="nvfp4",
+                w1_scale=prepared[1],
+                w2_scale=prepared[5],
+                g1_alphas=prepared[2],
+                g2_alphas=prepared[6],
+                a1_gscale=1.0 / prepared[3],
+                a2_gscale=1.0 / prepared[7],
+            )
+            kernel = _make_b12x_moe_kernel(
+                torch.empty(0, hidden_size, dtype=torch.bfloat16),
+                prepared[0],
+                prepared[4],
+                topk,
+                MoEActivation.SILU,
+                quant_config,
+                csf_scales=csf_scales,
+            )
+            kernels[csf_scales] = (kernel, prepared[0], prepared[4])
+
+        experts = kernels[True][0].fused_experts
+        assert isinstance(experts, B12xExperts)
+        csf = experts._prepared()
+        csf.nvfp4_csf.decode_all(csf.w1_blockscale, csf.w2_blockscale)
+        for expanded, expected in zip(
+            (csf.w1_blockscale, csf.w2_blockscale), expected_scales
+        ):
+            assert torch.equal(expanded.view(torch.uint8), expected.view(torch.uint8))
+
+        hidden_states = torch.randn(
+            64, hidden_size, device="cuda", dtype=torch.bfloat16
+        )
+        scores = torch.randn(64, num_experts, device="cuda", dtype=torch.bfloat16)
+        topk_weights, topk_ids, _ = fused_topk(hidden_states, scores, topk, False)
+
+        def apply(csf_scales: bool, tokens: int) -> torch.Tensor:
+            kernel, w1, w2 = kernels[csf_scales]
+            return kernel.apply(
+                hidden_states=hidden_states[:tokens],
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights[:tokens],
+                topk_ids=topk_ids[:tokens],
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        # The eager calls also build the b12x plans that capture needs.
+        # One token runs the micro kernel, 64 the dynamic one. The dynamic
+        # kernel sums the experts with atomics, so only the micro kernel is
+        # bit-reproducible run to run, with decoded or with compressed scales.
+        token_counts = (64, 1)
+        tolerance = {64: 0.25, 1: 0.0}
+        for tokens in token_counts:
+            expected = apply(False, tokens)
+            assert torch.isfinite(expected).all() and torch.count_nonzero(expected)
+            torch.testing.assert_close(
+                apply(True, tokens), expected, rtol=0, atol=tolerance[tokens]
+            )
+
+        lock_workspace()
+        graphs, outputs = [], []
+        for tokens in token_counts:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
+                outputs.append(apply(True, tokens))
+            graphs.append(graph)
+        # Replays must expand the newly routed experts' scales themselves.
+        hidden_states.neg_()
+        topk_ids.copy_(topk_ids.roll(1, dims=0))
+        for tokens, graph, output in zip(token_counts, graphs, outputs):
+            csf.w1_blockscale.view(torch.uint8).fill_(0x7F)
+            csf.w2_blockscale.view(torch.uint8).fill_(0x7F)
+            graph.replay()
+            torch.testing.assert_close(
+                output, apply(False, tokens), rtol=0, atol=tolerance[tokens]
+            )

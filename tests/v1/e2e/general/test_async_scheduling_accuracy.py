@@ -292,7 +292,7 @@ def run_tests(
                         f"{context}: acceptance={actual}, baseline={baseline}"
                     )
                 else:
-                    assert actual > 0.1, f"{context}: acceptance={actual}"
+                    assert actual > 1.1, f"{context}: acceptance={actual}"
 
 
 def run_test(
@@ -346,7 +346,7 @@ def run_test(
         **cache_arg,
     ) as vllm_model:
         results = []
-        acceptance_rates: list[float] | None = [] if spec_decoding else None
+        acceptance_lengths: list[float] | None = [] if spec_decoding else None
         for override_params in sampling_param_tests:
             metrics_before = vllm_model.llm.get_metrics()
             print(f"----------- RUNNING PARAMS: {override_params}")
@@ -357,10 +357,12 @@ def run_test(
                 )
             )
             metrics_after = vllm_model.llm.get_metrics()
-            if acceptance_rates is not None:
-                acceptance_rate = _get_acceptance_rate(metrics_before, metrics_after)
-                acceptance_rates.append(acceptance_rate)
-                print(f"ACCEPTANCE RATE {acceptance_rate}")
+            if acceptance_lengths is not None:
+                acceptance_length = _get_acceptance_length(
+                    metrics_before, metrics_after
+                )
+                acceptance_lengths.append(acceptance_length)
+                print(f"ACCEPTANCE RATE {acceptance_length}")
 
             if test_preemption:
                 preemptions = _get_count(
@@ -387,7 +389,7 @@ def run_test(
                 f"{test_config}: structured sampling parameters had no effect"
             )
 
-    return test_config, results, acceptance_rates
+    return test_config, results, acceptance_lengths
 
 
 def _result_signature(requests):
@@ -402,12 +404,11 @@ def _result_signature(requests):
     ]
 
 
-def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
-    draft = _get_count(before, after, "vllm:spec_decode_num_draft_tokens")
+def _get_acceptance_length(before: list[Metric], after: list[Metric]) -> float:
+    draft = _get_count(before, after, "vllm:spec_decode_num_drafts")
     accept = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
     assert draft > 0, "speculative test did not draft any tokens"
-    assert 0 <= accept <= draft, f"invalid acceptance counters: {accept=}, {draft=}"
-    return accept / draft
+    return 1 + accept / draft
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:

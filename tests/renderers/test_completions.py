@@ -26,12 +26,12 @@ from vllm.tokenizers.hf import get_cached_tokenizer
 MODEL_NAME = "openai-community/gpt2"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     runner_type = "generate"
     model: str = MODEL_NAME
@@ -56,12 +56,12 @@ class MockModelConfig:
         return self.hidden_size
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -599,7 +599,7 @@ class TestRenderPrompt:
 class TestMaxTokensNotReservation:
     """Regression tests for GitHub issue #42474.
 
-    ``max_tokens`` must be treated as an upper bound on generation length, not
+    `max_tokens` must be treated as an upper bound on generation length, not
     as a hard reservation that is subtracted from the available input space.
     """
 

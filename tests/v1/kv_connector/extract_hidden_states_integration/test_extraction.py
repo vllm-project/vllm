@@ -44,7 +44,7 @@ def predictable_llama_config_path(tmp_path_factory):
 
     # Create a minimal Llama config with small dimensions
     config = LlamaConfig(
-        vocab_size=1000,
+        vocab_size=32000,  # Covers the TinyLlama tokenizer below.
         hidden_size=256,
         intermediate_size=512,
         num_hidden_layers=24,  # Enough layers to test various layer_ids
@@ -77,7 +77,7 @@ PREDICTABLE_LLAMA_MODEL_CLS = (
 
 @create_new_process_for_each_test()
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path, monkeypatch
+    predictable_llama_config_path, tmp_path
 ):
     """Test hidden-state extraction with a predictable dummy model.
 
@@ -93,8 +93,6 @@ def test_extract_hidden_states_with_predictable_dummy_model(
        include_output_tokens — verifies per-request kv_transfer_params
        plumbing.
     """
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-
     layer_ids = [5, 2, 10]
     expected_layer_ids = sorted(layer_ids)
     num_layers = len(layer_ids)
@@ -358,3 +356,40 @@ def test_extract_hidden_states_tp2():
             len(layer_ids),
             hidden_size,
         )
+
+
+@pytest.mark.parametrize("model_impl", ["vllm", "transformers"])
+@create_new_process_for_each_test()
+def test_extract_layer_zero_is_input_embeddings(tmp_path, model_impl):
+    """Layer 0 is the input to the first decoder layer, i.e. the input embeddings."""
+    from transformers import AutoModelForCausalLM
+
+    model = "meta-llama/Llama-3.2-1B-Instruct"
+    llm = LLM(
+        model=model,
+        model_impl=model_impl,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": [0, 1]}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        max_model_len=256,
+        gpu_memory_utilization=0.4,
+    )
+    hidden_size = llm.llm_engine.model_config.get_hidden_size()
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    output = llm.generate(["Hello world"], sampling_params)[0]
+    expected_shape = (len(output.prompt_token_ids), 2, hidden_size)
+    token_ids, hidden_states = get_and_check_output(output, expected_shape)
+
+    hf_model = AutoModelForCausalLM.from_pretrained(model, dtype=hidden_states.dtype)
+    with torch.no_grad():
+        embeddings = hf_model.get_input_embeddings()(token_ids)
+    torch.testing.assert_close(hidden_states[:, 0, :], embeddings)

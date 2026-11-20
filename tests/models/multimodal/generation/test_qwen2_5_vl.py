@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
+import torch
 
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
 
 from ....conftest import VIDEO_ASSETS
+from ....utils import multi_gpu_test
+from ...utils import check_logprobs_close
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 models = ["Qwen/Qwen2.5-VL-3B-Instruct"]
@@ -181,6 +185,91 @@ def test_qwen2_5_vl_evs_batched_videos(
 
             # Ensure the output is a string
             assert isinstance(output_text, str)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", models)
+def test_qwen2_5_vl_evs_pipeline_parallel(vllm_runner, video_assets, model) -> None:
+    """Regression: later PP stages must use the M-RoPE positions that EVS
+    recomputes on the first stage, the only one that runs the vision encoder."""
+    asset = video_assets[0]
+    video = sample_frames_with_video_metadata((asset.np_ndarrays, asset.metadata), 16)
+    outputs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            model,
+            max_model_len=4000,
+            dtype=target_dtype,
+            enforce_eager=True,
+            limit_mm_per_prompt={"video": 1},
+            video_pruning_rate=0.75,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+        ) as vllm_model:
+            (outputs[pp_size],) = vllm_model.generate_greedy_logprobs(
+                [VIDEO_PROMPTS[0]],
+                max_tokens=16,
+                num_logprobs=5,
+                num_prompt_logprobs=0,
+                videos=[video],
+                include_prompt_token_ids=True,
+            )
+
+    def prompt_logprobs(output) -> torch.Tensor:
+        *_, token_ids, positions = output
+        return torch.tensor(
+            [
+                position[token_id].logprob
+                for token_id, position in zip(token_ids[1:], positions[1:])
+            ]
+        )
+
+    diff = prompt_logprobs(outputs[1]) - prompt_logprobs(outputs[2])
+    mean_diff = diff.abs().mean().item()
+    # Without the relayed positions the mean difference is about 0.2.
+    assert mean_diff < 0.05, f"PP=2 prompt logprobs differ from PP=1: {mean_diff=}"
+    # Decode positions come from the per-request M-RoPE delta, which EVS also
+    # changes.
+    check_logprobs_close(
+        outputs_0_lst=[outputs[1][:3]],
+        outputs_1_lst=[outputs[2][:3]],
+        name_0="pp1",
+        name_1="pp2",
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    current_platform.is_cpu(), reason="17k-token video prefill is too slow on CPU"
+)
+@pytest.mark.parametrize("model", models)
+def test_qwen2_5_vl_video_fits_max_model_len(vllm_runner, model) -> None:
+    num_frames = 60
+    video = np.zeros((num_frames, 504, 896, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    prompt = qwen2_5_vl_chat_template(VIDEO_PLACEHOLDER, "Describe the video.")
+
+    with vllm_runner(
+        model,
+        runner="generate",
+        max_model_len=20000,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=8192,
+        dtype=target_dtype,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy([prompt], 8, videos=[(video, metadata)])
+
+    output_ids, output_text = outputs[0]
+    assert len(output_ids) > 17280
+    assert len(output_text) > 0
 
 
 @pytest.mark.core_model

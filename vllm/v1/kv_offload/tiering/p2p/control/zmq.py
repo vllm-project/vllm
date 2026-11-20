@@ -76,7 +76,7 @@ def _apply_heartbeat(sock: zmq.Socket) -> None:
     sock.setsockopt(zmq.HEARTBEAT_TTL, _HEARTBEAT_TTL_MS)
 
 
-@dataclass
+@dataclass(slots=True)
 class _Sockets:
     dealer: zmq.Socket
     monitor: zmq.Socket
@@ -132,6 +132,10 @@ class ZmqConnection(ControlConnection):
         self._closed = True
         self._dead = True
         logger.info("ZmqConnection: closing connection to %s", self.peer_id)
+        # libzmq sends monitor events with a blocking send from its I/O
+        # thread, so an event raised after the reader is closed (EVENT_CLOSED
+        # for a connect still in progress) blocks every socket in the context.
+        self._sockets.dealer.disable_monitor()
         self._sockets.monitor.close()
         self._sockets.dealer.close()
 
