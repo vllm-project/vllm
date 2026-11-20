@@ -886,7 +886,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingResult:
         if self.info._fuses_audio_into_video:
-            # use_audio_in_video can't make use of a cache yet
+            # load_audio_from_video can't make use of a cache yet
             return self._apply_hf_processor(inputs, timing_ctx)
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
@@ -975,14 +975,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
 
-        use_audio_in_video = self.info._fuses_audio_into_video
+        load_audio_from_video = self.info._fuses_audio_into_video
         override = _get_load_audio_from_video(hf_kwargs)
-        if override is not None and bool(override) != use_audio_in_video:
+        if override is not None and bool(override) != load_audio_from_video:
             raise ValueError(
                 "load_audio_from_video is a server-level setting and cannot be "
                 "overridden per request; pass it in --mm-processor-kwargs instead."
             )
-        if use_audio_in_video:
+        if load_audio_from_video:
             hf_kwargs = {
                 **hf_kwargs,
                 "load_audio_from_video": False,
@@ -991,10 +991,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         item_counts = mm_items.get_all_counts()
         num_audios = item_counts.get("audio", 0)
         num_videos = item_counts.get("video", 0)
-        use_audio_in_video = use_audio_in_video and num_videos > 0
-        if use_audio_in_video and num_audios != num_videos:
+        load_audio_from_video = load_audio_from_video and num_videos > 0
+        if load_audio_from_video and num_audios != num_videos:
             raise ValueError(
-                f"use_audio_in_video requires equal number of audio and video "
+                f"load_audio_from_video requires equal number of audio and video "
                 f"items, got {num_audios=}, {num_videos=}"
             )
 
@@ -1005,7 +1005,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         hf_processor = self.info.get_hf_processor(**hf_kwargs)
         call_kwargs = hf_kwargs
-        if use_audio_in_video:
+        if load_audio_from_video:
             call_kwargs = {
                 **hf_kwargs,
                 "load_audio_from_video": True,
@@ -1038,7 +1038,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         if "video_second_per_grid" in hf_inputs:
             hf_inputs["second_per_grid_ts"] = hf_inputs.pop("video_second_per_grid")
 
-        if use_audio_in_video:
+        if load_audio_from_video:
             hf_inputs["use_audio_in_video"] = torch.tensor(True)
 
         # Drop the inputs the model would reject
@@ -1071,7 +1071,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         audio_token_id = None
-        if use_audio_in_video:
+        if load_audio_from_video:
             audio_token_id = cached_encode(
                 tokenizer, hf_processor.audio_token, add_special_tokens=False
             )[0]
