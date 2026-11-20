@@ -9,11 +9,9 @@ import torch
 import torch.nn as nn
 from transformers import NemotronHConfig
 
-import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -50,8 +48,6 @@ from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
 )
-
-logger = init_logger(__name__)
 
 
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
@@ -389,49 +385,26 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
 
         self.lm_head: ParallelLMHead | None = None
 
-        self.masked_embedding: HierarchicalLMHead | None = None
-        if envs.VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD:
+        self.masked_embedding = HierarchicalLMHead.from_config(
+            config,
+            hidden_size=config.hidden_size,
+            vocab_size=config.vocab_size,
+            router_path=speculative_config.hierarchical_lm_head_router_path,
+            top_k=speculative_config.hierarchical_lm_head_top_k,
+        )
+        if self.masked_embedding is not None:
             if speculative_config.draft_lm_head_quantization is not None:
                 raise ValueError(
                     "The hierarchical head requires floating-point vocabulary weights"
                 )
             if vllm_config.parallel_config.tensor_parallel_size != 1:
                 raise ValueError("Hierarchical Nemotron head requires TP=1")
-            sidecar = envs.VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD_PATH
-            if not sidecar:
-                raise ValueError(
-                    "Hierarchical Nemotron head requires a router sidecar path"
-                )
-            self.masked_embedding = HierarchicalLMHead(
-                config.hidden_size,
-                config.vocab_size,
-                envs.VLLM_NEMOTRON_MTP_LM_HEAD_NUM_CLUSTERS,
-                envs.VLLM_NEMOTRON_MTP_LM_HEAD_CLUSTER_TOP_K,
-                backend=envs.VLLM_NEMOTRON_MTP_SPARSE_HEAD_BACKEND,
-                moe_routing=envs.VLLM_NEMOTRON_MTP_MOE_ROUTING,
-            )
-            self.masked_embedding.load_sidecar(sidecar)
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-    def prepare_hierarchical_lm_head(self) -> None:
-        if self.masked_embedding is not None and self.lm_head is not None:
-            self.masked_embedding.prepare_weights(self.lm_head.weight)
-            logger.info(
-                "Nemotron MTP hierarchical head: backend=%s, dtype=%s, "
-                "clusters=%d, top_k=%d",
-                self.masked_embedding.backend,
-                self.lm_head.weight.dtype,
-                self.masked_embedding.num_centroids,
-                self.masked_embedding.centroid_intermediate_top_k,
-            )
-
-    def process_weights_after_loading(self) -> None:
-        self.prepare_hierarchical_lm_head()
 
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
@@ -499,11 +472,15 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
         return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
-        """Only MTP weights are loaded: the embedding and LM head are the
-        target's, shared after loading, so a target refit also updates the
-        drafter."""
+        """Load MTP and router weights; embeddings and head are target-shared."""
         name = name.removeprefix("language_model.")
-        return not name.startswith("mtp.")
+        return not (
+            name.startswith("mtp.")
+            or (
+                self.masked_embedding is not None
+                and name.startswith("masked_embedding.")
+            )
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
@@ -530,12 +507,20 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        router_weights = []
 
         for name, loaded_weight in weights:
             # MTP weights are nested in "language_model."
             # in Multimodal Nemotron-H checkpoints.
             name = name.removeprefix("language_model.")
             if self.is_unused_checkpoint_weight(name):
+                continue
+            if name.startswith("masked_embedding."):
+                assert self.masked_embedding is not None
+                if self.masked_embedding.router_path is None:
+                    router_weights.append(
+                        (name.removeprefix("masked_embedding."), loaded_weight)
+                    )
                 continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
@@ -624,8 +609,11 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
             loaded_params.add(name)
 
         if self.masked_embedding is not None:
+            if self.masked_embedding.router_path is not None:
+                loaded_params.update(self.masked_embedding.load_sidecar_weights())
             loaded_params.update(
                 "masked_embedding." + name
-                for name, _ in self.masked_embedding.named_parameters()
+                for name in self.masked_embedding.load_weights(router_weights)
             )
+            self.masked_embedding.validate_loaded_weights(loaded_params)
         return loaded_params

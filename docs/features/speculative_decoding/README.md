@@ -13,7 +13,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [DSpine](#dspine)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [DFly](dfly.md)
-- [Hierarchical LM Head Backends (Experimental)](hierarchical_lm_head.md)
+- [Hierarchical LM Head (Experimental)](hierarchical_lm_head.md)
 - [Draft Model](draft_model.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
