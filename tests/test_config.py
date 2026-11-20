@@ -2347,6 +2347,7 @@ def test_engram_peer_group_model_options(
     [
         ({"enable_dbo": True}, "auto", None, "DBO"),
         ({}, "ipc_cache", None, "ipc_cache"),
+        ({}, "sharded_state", None, "sharded_state"),
         ({}, "auto", True, "weight transfer"),
     ],
 )
@@ -2354,6 +2355,7 @@ def test_qwen_ple_pool_rejects_unsupported_engine_options(
     monkeypatch, parallel, load_format, transfer, error
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "has_device_capability", lambda _: True)
     config = cast(
         VllmConfig,
         SimpleNamespace(

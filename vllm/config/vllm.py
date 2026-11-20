@@ -1577,9 +1577,10 @@ class VllmConfig:
                 raise ValueError(
                     "Qwen4Exp Engram pool does not support DBO or microbatching"
                 )
-            if self.load_config.load_format == "ipc_cache":
+            if self.load_config.load_format in ("ipc_cache", "sharded_state"):
                 raise ValueError(
-                    "Qwen4Exp Engram pool does not support ipc_cache loading"
+                    "Qwen4Exp Engram pool does not support "
+                    f"{self.load_config.load_format} loading. Use a full checkpoint."
                 )
             if self.weight_transfer_config:
                 raise ValueError(

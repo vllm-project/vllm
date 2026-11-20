@@ -341,7 +341,9 @@ def test_ngram_embedding_loads_shards_and_ignores_legacy_token_lookup() -> None:
     )
 
 
-@pytest.mark.parametrize("case", ["complete", "missing", "duplicate", "peer_failure"])
+@pytest.mark.parametrize(
+    "case", ["complete", "missing", "duplicate", "missing_scale", "peer_missing_scale"]
+)
 def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
     module = _make_ngram_embedding_for_load_test()
     embedding = Qwen4ExpPLEPoolEmbedding.__new__(Qwen4ExpPLEPoolEmbedding)
@@ -350,13 +352,17 @@ def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
     embedding.shard_indices = module.ngram_embedding.shard_indices
     embedding.weight = module.ngram_embedding.weight
     embedding._loaded_ranges = []
+    scale = torch.finfo(torch.float32).min if case == "missing_scale" else 0.25
+    embedding.weight_scale = nn.Parameter(torch.tensor([scale]))
     embedding.table = SimpleNamespace(row_start=2, shard=embedding.weight)
     ready = []
     embedding.pool = SimpleNamespace(
         group=SimpleNamespace(
             all_gather=lambda status: [
                 status,
-                b"peer missing PLE rows" if case == "peer_failure" else b"",
+                b"FP8 PLE checkpoint is missing its global scale"
+                if case == "peer_missing_scale"
+                else b"",
             ]
         ),
         ready=lambda table: ready.append(table),
@@ -371,13 +377,19 @@ def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
     elif case == "duplicate":
         shards.append(shards[0])
     module.load_weights(shards)
+    Qwen4ExpPLEFp8EmbeddingMethod().process_weights_after_loading(embedding)
     if case == "complete":
         embedding.process_weights_after_loading()
         assert ready == [embedding.table]
         torch.testing.assert_close(embedding.weight[:2], torch.zeros(2, 2))
         torch.testing.assert_close(embedding.weight[2:], torch.ones(2, 2))
     else:
-        with pytest.raises(RuntimeError, match="checkpoint coverage failed"):
+        error = (
+            "missing its global scale"
+            if case.endswith("scale")
+            else "checkpoint validation failed"
+        )
+        with pytest.raises(RuntimeError, match=error):
             embedding.process_weights_after_loading()
         assert not ready
 
@@ -1360,9 +1372,7 @@ def test_ple_pool_checkpoint_shards_and_cuda_graph(
 ) -> None:
     if transport == "nvlink" and not imex_channel_available():
         pytest.skip("requires CUDA FABRIC handles")
-    if transport == "rdma" and not any(
-        device.startswith("mlx5") for device in verbs.active_devices()
-    ):
+    if transport == "rdma" and not verbs.active_devices():
         pytest.skip("requires an active mlx5 RDMA device")
     text_config = Qwen4ExpTextConfig(
         vocab_size=64,

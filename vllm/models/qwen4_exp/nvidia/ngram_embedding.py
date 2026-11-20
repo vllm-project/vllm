@@ -266,6 +266,8 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
 class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding):
     """Serve FP8 PLE rows from shards split over an NVLink or RDMA peer group."""
 
+    validate_fp8_scale_collectively = True
+
     def __init__(
         self,
         *args,
@@ -313,9 +315,16 @@ class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding):
             cursor = last
         if not error and cursor != end:
             error = f"PLE rows covered through {cursor}, expected {end}"
+        if not error:
+            try:
+                Qwen4ExpPLEFp8EmbeddingMethod.validate_global_scale(self)
+            except ValueError as exc:
+                error = str(exc)
         errors = self.pool.group.all_gather(error.encode())
         if any(errors):
-            raise RuntimeError(f"Engram pool PLE checkpoint coverage failed: {errors}")
+            raise RuntimeError(
+                f"Engram pool PLE checkpoint validation failed: {errors}"
+            )
         self.pool.ready(self.table)
 
     def record_checkpoint_rows(self, start: int, end: int) -> None:

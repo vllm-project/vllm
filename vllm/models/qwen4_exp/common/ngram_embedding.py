@@ -381,11 +381,16 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer: nn.Module) -> None:
+    @staticmethod
+    def validate_global_scale(layer: nn.Module) -> None:
         """Reject FP8 PLE checkpoints without a global scale."""
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale == sentinel):
             raise ValueError("FP8 PLE checkpoint is missing its global scale")
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        if not getattr(layer, "validate_fp8_scale_collectively", False):
+            self.validate_global_scale(layer)
         super().process_weights_after_loading(layer)
 
     def dequantize(

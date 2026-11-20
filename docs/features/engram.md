@@ -233,8 +233,9 @@ assigned to its peer rank and keeps a local copy of the table's scale. The PLE
 layer reads from the pool on the compute stream. Set `disk_offload` and
 `embedding_across_dp` to false (their defaults).
 
-Use checkpoint loading with the pool. The `ipc_cache` loader and online weight
-updates are unsupported. Restart the peer group to change weights.
+Use a full checkpoint with the pool. The `ipc_cache` and `sharded_state` loaders
+and online weight updates are unsupported. Restart the peer group to change
+weights.
 
 Prefill and decode engines can share one group (each GPU holds less of every
 table) or form one group each (each group holds a full copy, and neither slows
