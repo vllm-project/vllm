@@ -17,6 +17,12 @@ class ExtensionA:
     def init_worker_extension(self):
         self.events.append("init-a")
 
+    def before_load_model(self, *, load_dummy_weights: bool):
+        self.events.append(f"before-load-a:{load_dummy_weights}")
+
+    def after_load_model(self, *, load_dummy_weights: bool):
+        self.events.append(f"after-load-a:{load_dummy_weights}")
+
     def destroy_worker_extension(self):
         self.events.append("destroy-a")
 
@@ -38,6 +44,11 @@ def make_wrapper(monkeypatch):
 
         def init_device(self):
             self.events.append("device")
+
+        def load_model(self, *, load_dummy_weights: bool = False):
+            self.events.append(f"load:{load_dummy_weights}")
+            if getattr(self, "fail_load", False):
+                raise RuntimeError("load failed")
 
         def shutdown(self):
             self.events.append("shutdown")
@@ -83,3 +94,31 @@ def test_failing_destroy_hook_is_logged_not_raised(make_wrapper, caplog_vllm):
     wrapper.shutdown()
     assert wrapper.worker.events == ["device", "shutdown"]
     assert "Worker extension destroy hook failed" in caplog_vllm.text
+
+
+def test_worker_extension_hooks_bracket_model_load(make_wrapper):
+    wrapper = make_wrapper("ExtensionA")
+    wrapper.load_model(load_dummy_weights=True)
+    wrapper.shutdown()
+    assert wrapper.worker.events == [
+        "device",
+        "init-a",
+        "before-load-a:True",
+        "load:True",
+        "after-load-a:True",
+        "destroy-a",
+        "shutdown",
+    ]
+
+
+def test_after_load_hook_is_not_called_when_model_load_fails(make_wrapper):
+    wrapper = make_wrapper("ExtensionA")
+    wrapper.worker.fail_load = True
+    with pytest.raises(RuntimeError, match="load failed"):
+        wrapper.load_model()
+    assert wrapper.worker.events == [
+        "device",
+        "init-a",
+        "before-load-a:False",
+        "load:False",
+    ]
