@@ -436,7 +436,7 @@ def _construct_message_from_response_item(
                 parameter="input",
             )
         elif item.content and len(item.content) >= 1:
-            reasoning = item.content[0].text
+            reasoning = "\n".join(part.text for part in item.content)
         elif len(item.summary) >= 1:
             reasoning = item.summary[0].text
             logger.warning(
@@ -456,10 +456,16 @@ def _construct_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
-        # Assistant messages may legitimately have empty content (e.g. when the
-        # assistant emitted only a tool call). Fall back to empty string instead
-        # of crashing on item.content[0].text.
-        output_text = item.content[0].text if item.content else ""
+        # content may be empty, hold several output-text parts, or be a refusal with no
+        # text; join all output-text parts and fall back to a refusal's text so empty,
+        # multi-part, and refusal messages all reconstruct without crashing.
+        output_text = "".join(
+            part.text for part in item.content if part.type == "output_text"
+        )
+        if not output_text:
+            output_text = next(
+                (part.refusal for part in item.content if part.type == "refusal"), ""
+            )
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
@@ -491,11 +497,10 @@ def _construct_message_from_response_item(
         summary = item.get("summary")
         if content:
             content = list(content)
-            if len(content) >= 1:
-                text = content[0]
-                reasoning_content = (
-                    text.get("text", "") if isinstance(text, dict) else text
-                )
+            reasoning_content = "\n".join(
+                (part.get("text", "") if isinstance(part, dict) else str(part))
+                for part in content
+            ) if content else ""
         elif summary:
             summary = list(summary)
             if len(summary) >= 1:
@@ -515,11 +520,10 @@ def _construct_message_from_response_item(
         content = item.get("content")
         if content and not isinstance(content, str):
             content = list(content)
-            if len(content) >= 1:
-                first = content[0]
-                text = first.get("text", "") if isinstance(first, dict) else first
-            else:
-                text = ""
+            text = "".join(
+                (part.get("text", "") if isinstance(part, dict) else str(part))
+                for part in content
+            ) if content else ""
         elif isinstance(content, str):
             text = content
         else:
