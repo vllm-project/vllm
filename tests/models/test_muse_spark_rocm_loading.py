@@ -207,11 +207,15 @@ def test_unquantized_loader_routes_per_expert_names_to_expert_mapping(
     assert per_expert_calls == [[name for name, _ in individual]]
 
 
-def test_consolidated_loader_fills_every_initial_redundant_replica() -> None:
-    """Slots filled match EplbState.build_initial_global_physical_to_logical_map."""
+@pytest.mark.parametrize("num_physical", [4, 6])
+def test_consolidated_loader_fills_every_initial_redundant_replica(
+    num_physical: int,
+) -> None:
+    """Slots filled match EplbState.build_initial_global_physical_to_logical_map;
+    without redundant experts that is one call per expert, as before EPLB."""
     from vllm.distributed.eplb.eplb_state import EplbState
 
-    num_logical, num_physical = 4, 6
+    num_logical = 4
     calls: list[tuple[str, int, float]] = []
 
     def weight_loader(*, param, loaded_weight, weight_name, shard_id, expert_id):

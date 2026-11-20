@@ -12,9 +12,15 @@ import torch
 import vllm.models.muse_spark.amd.muse_moe_runner as amd_muse_moe_runner
 from tests.kernels.moe.muse_spark_utils import run_moe
 from vllm import envs
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -1241,3 +1247,128 @@ def test_unsupported_online_expert_targets_raise(
 ) -> None:
     with pytest.raises(NotImplementedError, match=match):
         _muse_moe(layer, {"*feed_forward.experts*": target}, checkpoint_format)
+
+
+def _eplb_checkpoint(fmt: str, num_experts: int, hidden: int) -> list:
+    """BF16 experts stacked as `w13_weight`/`w2_weight`, or Quark PTPC FP8 per
+    expert and projection with per-channel scales, as the FP8 checkpoint ships."""
+    w13 = torch.randn(num_experts, 2 * hidden, hidden, device="cuda") / 16
+    w2 = torch.randn(num_experts, hidden, hidden, device="cuda") / 16
+    if fmt == "bf16_stacked":
+        return [("w13_weight", w13.bfloat16()), ("w2_weight", w2.bfloat16())]
+    gate, up = w13.chunk(2, dim=1)
+    checkpoint = []
+    for e in range(num_experts):
+        for proj, w in (
+            ("gate_proj", gate[e]),
+            ("up_proj", up[e]),
+            ("down_proj", w2[e]),
+        ):
+            scale = w.abs().amax(dim=1) / torch.finfo(torch.float8_e4m3fn).max
+            checkpoint.append(
+                (f"{e}.{proj}.weight", (w / scale[:, None]).to(torch.float8_e4m3fn))
+            )
+            checkpoint.append((f"{e}.{proj}.weight_scale", scale))
+    return checkpoint
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
+@pytest.mark.parametrize("fmt", ["bf16_stacked", "fp8_per_expert"])
+@torch.inference_mode()
+def test_eplb_replicas_and_moved_experts_keep_the_layer_output(
+    dist_init, workspace_init, fmt
+) -> None:
+    """Routing to the loaded redundant replicas, then to slots the weights were
+    moved to, gives the output of the same experts without EPLB."""
+    num_logical, num_redundant, hidden = 8, 4, 256
+    num_physical = num_logical + num_redundant
+    fp8 = dict(dtype="fp8_e4m3", qscheme="per_channel", symmetric=True)
+    quant_config = (
+        QuarkConfig(
+            {
+                "global_quant_config": {
+                    "weight": {**fp8, "ch_axis": 0, "is_dynamic": False},
+                    "input_tensors": {**fp8, "ch_axis": 1, "is_dynamic": True},
+                },
+                "layer_type_quant_config": {},
+                "exclude": [],
+            }
+        )
+        if fmt == "fp8_per_expert"
+        else None
+    )
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        kernel_config=KernelConfig(moe_backend="triton"),
+    )
+    # As --enable-eplb sets it; the BF16 method skips the ROCm MoE padding then.
+    vllm_config.parallel_config.enable_eplb = True
+    torch.manual_seed(0)
+    checkpoint = _eplb_checkpoint(fmt, num_logical, hidden)
+    post_expert_norm = _post_expert_norm_module(hidden).cuda()
+
+    def _layer(redundant: int):
+        with set_current_vllm_config(vllm_config), torch.device("cuda"):
+            runner = FusedMoEFactory(
+                num_experts=num_logical,
+                top_k=2,
+                hidden_size=hidden,
+                intermediate_size=hidden,
+                router=MuseSparkRouter(2, num_logical, torch.zeros(num_logical), 1.0),
+                quant_config=quant_config,
+                prefix=f"model.layers.{1 + (redundant > 0)}.feed_forward.experts",
+                params_dtype=torch.bfloat16,
+                enable_eplb=redundant > 0,
+                num_redundant_experts=redundant,
+                routed_experts_cls=MuseSparkRoutedExperts,
+                runner_cls=MuseMoERunner,
+                runner_args={"post_expert_norm": post_expert_norm},
+                moe_config_cls=MuseSparkMoEConfig,
+            )
+        routed = runner.routed_experts
+        list(routed.load_weights(checkpoint))
+        routed.quant_method.process_weights_after_loading(routed)
+        return runner
+
+    plain, runner = _layer(0), _layer(num_redundant)
+    # FusedMoEFactory gives the caller-built Muse router the layer's EPLB state.
+    state = runner.router.eplb_state
+    assert state is not None
+    placement = EplbState.build_initial_global_physical_to_logical_map(
+        num_logical, num_redundant
+    )
+    weights = list(runner.get_expert_weights())
+    for physical, logical in enumerate(placement):
+        for w in weights:
+            torch.testing.assert_close(w[physical], w[logical], rtol=0, atol=0)
+
+    x = torch.randn(64, hidden, dtype=torch.bfloat16, device="cuda")
+    logits = torch.randn(64, num_logical, device="cuda")
+    expected = run_moe(plain, vllm_config, x, logits)
+
+    def _run_on(slots: torch.Tensor) -> torch.Tensor:
+        runner.set_eplb_state(
+            0,
+            torch.zeros(1, num_physical, dtype=torch.int32, device="cuda"),
+            slots.view(1, num_logical, 1).to(torch.int64).cuda(),
+            torch.ones(1, num_logical, dtype=torch.int32, device="cuda"),
+        )
+        state.should_record_tensor = torch.ones((), dtype=torch.bool, device="cuda")
+        state.num_unpadded_tokens_tensors = [torch.tensor(0, device="cuda")]
+        return run_moe(runner, vllm_config, x, logits)
+
+    # Each logical expert with a replica is served only by that replica.
+    slots = torch.tensor(
+        [
+            placement.index(e, num_logical) if e in placement[num_logical:] else e
+            for e in range(num_logical)
+        ]
+    )
+    torch.testing.assert_close(_run_on(slots), expected, rtol=2e-2, atol=2e-2)
+
+    # A rearrangement moves every weight and scale EPLB lists to a new slot.
+    perm = torch.randperm(num_physical)
+    for w in weights:
+        w.copy_(w[perm.to(w.device)])
+    moved = torch.argsort(perm)[slots]
+    torch.testing.assert_close(_run_on(moved), expected, rtol=2e-2, atol=2e-2)
