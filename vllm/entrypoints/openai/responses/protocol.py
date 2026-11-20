@@ -52,6 +52,7 @@ from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     BeforeValidator,
+    FailFast,
     Field,
     PrivateAttr,
     ValidationError,
@@ -265,11 +266,14 @@ class ResponsesRequest(OpenAIBaseModel):
     ) = None
     input: (
         str
-        | list[
-            Annotated[
-                ResponseInputOutputItem,
-                BeforeValidator(_default_input_image_details),
-            ]
+        | Annotated[
+            list[
+                Annotated[
+                    ResponseInputOutputItem,
+                    BeforeValidator(_default_input_image_details),
+                ]
+            ],
+            FailFast(),
         ]
     )
     instructions: str | None = None
@@ -399,9 +403,12 @@ class ResponsesRequest(OpenAIBaseModel):
         description=(
             "What the render response's `features` carry for multimodal "
             "items. 'tensors' serializes the processed tensors into "
-            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
-            "callers that need only the token layout and item hashes, such as "
-            "cache-aware routers. Do not send a 'none' response to "
+            "`kwargs_data` and `mm_metadata`. 'metadata' sets `kwargs_data` to "
+            "null and keeps `mm_metadata` for prefill with "
+            "`ec_transfer_params`. 'none' sets both to null for callers that "
+            "need only the token layout and item hashes, such as cache-aware "
+            "routers. `mm_metadata` is null if any modality has no metadata, "
+            "which 'metadata' rejects. Do not send a 'none' response to "
             "`/inference/v1/generate` which reads a null `kwargs_data` as "
             "every item being cached. Only supported on the render endpoints. "
             "Ignored on regular generation endpoints."
@@ -524,6 +531,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

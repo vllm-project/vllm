@@ -35,6 +35,10 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
             return False, "only supports MXFP4 dynamic activation"
         return True, None
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         N, scale_K = layer.weight_scale.shape
         K = scale_K * _MXFP4_GROUP_SIZE
