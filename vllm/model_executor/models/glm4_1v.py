@@ -1802,10 +1802,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     ),
                     video_mm_kwargs,
                 )
-                out_meta = video_outputs["video_metadata"]
-                sampled_metadata.append(
-                    out_meta[0][0] if isinstance(out_meta[0], list) else out_meta[0]
-                )
+                # Absent if the caller disabled `return_metadata` in a scoped
+                # kwarg; the timestamp helper then keeps the input metadata.
+                out_meta = video_outputs.get("video_metadata")
+                sampled = None
+                if out_meta:
+                    sampled = (
+                        out_meta[0][0] if isinstance(out_meta[0], list) else out_meta[0]
+                    )
+                sampled_metadata.append(sampled)
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
             video_outputs = dict(
