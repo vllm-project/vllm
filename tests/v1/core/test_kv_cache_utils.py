@@ -150,7 +150,9 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
     ) == pytest.approx(64 / 24)
 
 
-def _hisparse_mla_layout_inputs(monkeypatch, kv_transfer_config=None):
+def _hisparse_mla_layout_inputs(
+    monkeypatch, kv_transfer_config=None, hisparse_config=None
+):
     monkeypatch.setattr(
         current_platform,
         "get_hisparse_backend_cls",
@@ -174,7 +176,9 @@ def _hisparse_mla_layout_inputs(monkeypatch, kv_transfer_config=None):
         ),
     }
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        attention_config=SimpleNamespace(
+            hisparse_config=hisparse_config or HiSparseConfig()
+        ),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
         ),
@@ -202,11 +206,11 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
             create_hisparse_layout(config, groups, host_budget=host_budget)
 
 
-@pytest.mark.parametrize("cpu_bytes_to_use", [None, 1 << 30])
-def test_hisparse_host_pool_shared_with_indexer_offload(monkeypatch, cpu_bytes_to_use):
-    """An indexer offload tier without its own budget takes its share of
-    host_pool_gib, sized to hold the same tokens as the host pool."""
-    offload_extra = {} if cpu_bytes_to_use is None else {"cpu_bytes_to_use": 1 << 30}
+@pytest.mark.parametrize("managed", [True, False])
+def test_hisparse_host_pool_shared_with_indexer_offload(monkeypatch, managed):
+    """With hisparse_config.host_pool_gib, the indexer offload tier vLLM adds
+    takes its share of the budget, sized to hold the same tokens as the host
+    pool; an explicit KV transfer config keeps host_pool_gib for HiSparse."""
     kv_transfer_config = KVTransferConfig(
         kv_connector="MultiConnector",
         kv_role="kv_both",
@@ -217,28 +221,24 @@ def test_hisparse_host_pool_shared_with_indexer_offload(monkeypatch, cpu_bytes_t
                     "kv_role": "kv_both",
                     "kv_connector_extra_config": {"host_pool_gib": 1},
                 },
-                {
-                    "kv_connector": "OffloadingConnector",
-                    "kv_role": "kv_both",
-                    "kv_connector_extra_config": offload_extra,
-                },
+                {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
             ]
         },
     )
-    config, groups, _ = _hisparse_mla_layout_inputs(monkeypatch, kv_transfer_config)
+    hisparse_config = HiSparseConfig(host_pool_gib=1 if managed else None)
+    config, groups, _ = _hisparse_mla_layout_inputs(
+        monkeypatch, kv_transfer_config, hisparse_config
+    )
     (indexer,) = [g for g in groups if g.role is KVCacheGroupRole.HISPARSE_INDEXER]
     host_budget = 1000 * 64 * 1024
 
     layout = create_hisparse_layout(config, groups, host_budget=host_budget)
 
-    if cpu_bytes_to_use is not None:
-        assert layout.host_num_blocks == host_budget // layout.host_block_stride
-        return
     indexer_bytes_per_block = cdiv(
         round_up(indexer.page_size_bytes, mmap.PAGESIZE) * 64, indexer.block_size
     )
     assert layout.host_num_blocks == host_budget // (
-        layout.host_block_stride + indexer_bytes_per_block
+        layout.host_block_stride + (indexer_bytes_per_block if managed else 0)
     )
 
 

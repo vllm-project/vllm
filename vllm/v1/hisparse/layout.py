@@ -5,10 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 
 from vllm.config import VllmConfig
-from vllm.config.kv_transfer import (
-    hisparse_host_pool_gib,
-    hisparse_indexer_offload_shares_host_pool,
-)
+from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_constants import GiB_bytes
@@ -366,10 +363,17 @@ def create_hisparse_layout(
             for spec in gqa_source_specs
         )
     gpu_block_size = source_group.block_size
-    # The indexer offload tier holds the same tokens as the host pool, so a
-    # shared budget is split in proportion to their per-token sizes.
+    # A vLLM-managed indexer offload tier holds the same tokens as the host
+    # pool, so the budget is split in proportion to their per-token sizes.
     indexer_chunk_bytes = indexer_block_size = 0
-    if hisparse_indexer_offload_shares_host_pool(vllm_config.kv_transfer_config):
+    hisparse_config = vllm_config.attention_config.hisparse_config
+    assert hisparse_config is not None
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if (
+        hisparse_config.host_pool_gib is not None
+        and kv_transfer_config is not None
+        and kv_transfer_config.has_connector("OffloadingConnector")
+    ):
         (indexer_group,) = [
             group for group in groups if group.role is KVCacheGroupRole.HISPARSE_INDEXER
         ]

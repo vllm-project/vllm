@@ -556,7 +556,8 @@ def test_hisparse_offloads_only_indexer_group():
     assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
 
 
-def test_hisparse_indexer_tier_defaults_to_host_pool_tokens():
+@pytest.mark.parametrize("host_pool_gib,expected", [(64, 10), (None, None)])
+def test_hisparse_indexer_tier_defaults_to_host_pool_tokens(host_pool_gib, expected):
     source = make_kv_cache_group(["source"], _mla_spec(), host_resident=True)
     indexer = make_kv_cache_group(
         ["indexer"],
@@ -570,10 +571,14 @@ def test_hisparse_indexer_tier_defaults_to_host_pool_tokens():
         hisparse_host_num_blocks=37,
     )
 
-    offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
+    config = _make_vllm_config()
+    config.attention_config.hisparse_config.host_pool_gib = host_pool_gib
 
-    # 37 host blocks of 16 tokens fit in 10 indexer blocks of 64 tokens.
-    assert offloading_config.default_num_blocks == 10
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    # 37 host blocks of 16 tokens fit in 10 indexer blocks of 64 tokens; an
+    # explicit KV transfer config must size the tier itself.
+    assert offloading_config.default_num_blocks == expected
 
 
 def test_hisparse_partial_group_size_survives_scheduler_flattening():

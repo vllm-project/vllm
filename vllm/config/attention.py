@@ -35,14 +35,13 @@ class HiSparseConfig:
     resident-only and evicted pages are copied to host at spill time. Prefill
     rows are always mirrored during the forward."""
 
-    offload_indexer: bool = True
-    """Add an `OffloadingConnector` for the indexer cache group when prefix
-    caching is enabled and no connector offloads it. Every HiSparse prefix hit
-    also needs the prefix's indexer KV, so without an offload tier prefixes are
-    lost once their indexer blocks are evicted from the GPU, however much host
-    pool remains. Unless the connector sets `cpu_bytes_to_use`, the HiSparse
-    `host_pool_gib` is split between the sparse-MLA host pool and the indexer
-    tier so that both hold the same number of tokens."""
+    host_pool_gib: float | None = Field(default=None, gt=0)
+    """Enable HiSparse with this host memory budget, without writing a KV
+    transfer config. vLLM adds `HiSparseConnector` and, when prefix caching is
+    enabled, an `OffloadingConnector` for the indexer cache, and splits the
+    budget so both hold the same tokens: a prefix hit needs both. With an
+    explicit `--kv-transfer-config`, set `host_pool_gib` on `HiSparseConnector`
+    instead; that config is used as written."""
 
 
 @config
@@ -176,9 +175,10 @@ class AttentionConfig:
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
-    Model Runner V2-only HiSparse DSA and QSA decode hot-buffering. It is inferred
-    with defaults when HiSparseConnector is configured (directly or via
-    MultiConnector); set it explicitly only to tune its fields."""
+    Model Runner V2-only HiSparse DSA and QSA decode hot-buffering. Set its
+    `host_pool_gib` to have vLLM configure HiSparse's KV connectors. It is
+    inferred with defaults when HiSparseConnector is configured (directly or via
+    MultiConnector)."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""

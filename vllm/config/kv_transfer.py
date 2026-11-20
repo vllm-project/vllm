@@ -13,9 +13,11 @@ KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
 
-def _connector_extra_configs(
-    kv_transfer_config: "KVTransferConfig", connector_name: str
-) -> list[dict[str, Any]]:
+def hisparse_host_pool_gib(
+    kv_transfer_config: "KVTransferConfig | None",
+) -> float | None:
+    if kv_transfer_config is None:
+        return None
     if kv_transfer_config.kv_connector == "MultiConnector":
         connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
     else:
@@ -27,19 +29,11 @@ def _connector_extra_configs(
                 ),
             }
         ]
-    return [
+    entries = [
         connector.get("kv_connector_extra_config", {})
         for connector in connectors
-        if connector.get("kv_connector") == connector_name
+        if connector.get("kv_connector") == "HiSparseConnector"
     ]
-
-
-def hisparse_host_pool_gib(
-    kv_transfer_config: "KVTransferConfig | None",
-) -> float | None:
-    if kv_transfer_config is None:
-        return None
-    entries = _connector_extra_configs(kv_transfer_config, "HiSparseConnector")
     if len(entries) > 1:
         raise ValueError("Only one HiSparseConnector may be configured")
     if not entries:
@@ -51,17 +45,6 @@ def hisparse_host_pool_gib(
     if host_pool_gib <= 0:
         raise ValueError("HiSparseConnector host_pool_gib must be positive")
     return host_pool_gib
-
-
-def hisparse_indexer_offload_shares_host_pool(
-    kv_transfer_config: "KVTransferConfig | None",
-) -> bool:
-    """Whether an OffloadingConnector without its own `cpu_bytes_to_use` holds
-    the HiSparse indexer, splitting `host_pool_gib` with the host pool."""
-    if kv_transfer_config is None:
-        return False
-    entries = _connector_extra_configs(kv_transfer_config, "OffloadingConnector")
-    return bool(entries) and not any(entry.get("cpu_bytes_to_use") for entry in entries)
 
 
 class KVCacheAccess(enum.IntFlag):

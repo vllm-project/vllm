@@ -259,7 +259,12 @@ def build_offloading_config(
     )
 
     default_num_blocks = None
-    if kv_cache_config.hisparse_host_num_blocks is not None:
+    hisparse_config = vllm_config.attention_config.hisparse_config
+    if (
+        kv_cache_config.hisparse_host_num_blocks is not None
+        and hisparse_config is not None
+        and hisparse_config.host_pool_gib is not None
+    ):
         # Hold as many tokens as the HiSparse host pool, whose budget it shares.
         (source_group,) = (
             g for g in kv_cache_config.kv_cache_groups if g.host_resident
