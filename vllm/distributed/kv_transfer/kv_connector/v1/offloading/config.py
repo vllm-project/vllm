@@ -158,6 +158,7 @@ def build_offloading_config(
     )
 
     worker_kv_bytes_per_block = 0
+    kv_tp_replicas = kv_cache_config.kv_tp_replicas
     if (
         kv_cache_config.hisparse_host_num_blocks is None
         and kv_cache_config.num_blocks > 0
@@ -172,11 +173,6 @@ def build_offloading_config(
         worker_kv_bytes_per_block = sum(
             group.page_size_bytes for _, group in selected_groups
         )
-
-    kv_tp_replicas = kv_cache_config.kv_tp_replicas
-    if kv_cache_config.hisparse_host_num_blocks is not None:
-        # Only the indexer is offloaded; HiSparse's raw-page groups carry no TP
-        # replication metadata and would otherwise force one copy per rank.
         kv_tp_replicas = kv_cache_groups_tp_replicas(
             [group for _, group in selected_groups],
             parallel_config.tensor_parallel_size,
