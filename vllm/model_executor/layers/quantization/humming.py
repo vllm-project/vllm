@@ -46,6 +46,9 @@ from vllm.model_executor.layers.quantization.utils.humming.linear import (
     kernel_parameters,
     replace_layer_parameters,
 )
+from vllm.model_executor.layers.quantization.utils.humming.moe import (
+    snapshot_humming_fp8_dispatch_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -626,6 +629,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self, quant_config: HummingLayerQuantizationConfig, moe: "FusedMoEConfig"
     ) -> None:
         super().__init__(moe)
+        self._fp8_dispatch_enabled = snapshot_humming_fp8_dispatch_enabled()
         self.quant_config = quant_config
         self.weight_schema = quant_config.weight_schema
         self.input_schema = quant_config.input_schema
@@ -813,6 +817,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             self.moe,
             self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            enabled=self._fp8_dispatch_enabled,
         )
 
     def apply(

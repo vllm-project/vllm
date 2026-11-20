@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configure, prepare weights for, and assemble Humming MoE kernels."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -10,10 +11,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 import vllm.model_executor.layers.quantization.utils.humming.schema as humming_schema
 from vllm import envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -24,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     HummingGroupedExperts,
     HummingIndexedExperts,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.quantization.utils.humming.linear import (
     get_live_param,
     kernel_parameters,
@@ -257,46 +257,90 @@ def select_humming_moe_experts(
     return None
 
 
+def snapshot_humming_fp8_dispatch_enabled() -> bool:
+    """Save the opt-in policy before the construction config exits."""
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return False
+    return (
+        vllm_config.kernel_config.humming_fp8_dispatch
+        # Elastic EP rebuilds prepare/finalize without preserving the callback.
+        and not vllm_config.parallel_config.enable_elastic_ep
+    )
+
+
+def _make_humming_fp8_dispatch_quantizer(
+    quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
+    experts_cls: type[mk.FusedMoEExperts],
+    enabled: bool = False,
+) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor] | None] | None:
+    """Bind the indexed backend's producer without changing its quant descriptor."""
+    if (
+        not enabled
+        or experts_cls is not HummingIndexedExperts
+        or not moe_config.use_ag_rs_all2all_kernels
+        or moe_config.in_dtype not in (torch.float16, torch.bfloat16)
+        or not isinstance(quant_config, HummingMoEQuantConfig)
+    ):
+        return None
+
+    from vllm.utils.humming import InputQuantizationMode, dtypes, may_process_input
+
+    config = quant_config.w1_humming_config
+    if (
+        config.a_dtype != dtypes.float8e4m3
+        or config.input_quant_mode != InputQuantizationMode.DynamicToken
+        or config.input_scale_group_size != 0
+        or config.as_dtype != dtypes.float32
+        or not quant_config.per_act_token_quant
+        or quant_config.is_block_quantized
+        or quant_config.w1_hadamard_block_size not in (None, 0, 1)
+        or quant_config.w1_input_scale is not None
+        or quant_config.w1_input_scale_2 is not None
+    ):
+        return None
+
+    def quantize_input(
+        inputs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if inputs.shape[0] == 0:
+            # Humming's in-place pointer check precedes its zero-work return;
+            # distinct empty tensors can both have data_ptr()==0.
+            return (
+                inputs.new_empty(inputs.shape, dtype=torch.float8_e4m3fn),
+                inputs.new_empty((0, 1), dtype=torch.float32),
+            )
+        # AgRs accepts contiguous offset views that the native producer rejects.
+        # Materialize locally before calling the native producer.
+        if inputs.is_contiguous() and inputs.data_ptr() % 16 != 0:
+            inputs = inputs.clone()
+        data, group_scales, token_scales = may_process_input(
+            config, inputs=inputs, hadamard_block_size=1, layout="normal"
+        )
+        assert group_scales is None and token_scales is not None
+        return data, token_scales
+
+    return quantize_input
+
+
 def make_humming_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    enabled: bool = False,
 ) -> mk.FusedMoEKernel:
-    # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+    input_quantizer = _make_humming_fp8_dispatch_quantizer(
+        moe_quant_config, moe_config, experts_cls, enabled=enabled
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    # Create Experts.
-    if prepare_finalize.activation_format.is_batched:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        prepare_finalize_kwargs={"input_quantizer": input_quantizer},
     )
-
-    return kernel
 
 
 def _extract_sublayer_tensors(

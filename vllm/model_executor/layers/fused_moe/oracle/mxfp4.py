@@ -2315,14 +2315,31 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    enabled: bool = False,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
+
+    prepare_finalize_kwargs = None
+    if mxfp4_backend == Mxfp4MoeBackend.HUMMING and enabled:
+        from vllm.model_executor.layers.quantization.utils.humming.moe import (
+            _make_humming_fp8_dispatch_quantizer,
+        )
+
+        prepare_finalize_kwargs = {
+            "input_quantizer": _make_humming_fp8_dispatch_quantizer(
+                moe_quant_config,
+                moe_config,
+                experts_cls,
+                enabled=enabled,
+            )
+        }
 
     return make_moe_kernel(
         moe_quant_config,
         moe_config,
         experts_cls,
         routing_tables,
+        prepare_finalize_kwargs=prepare_finalize_kwargs,
         experts_log="Using %s",
     )
