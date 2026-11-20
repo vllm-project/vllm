@@ -28,9 +28,6 @@ LABELS = tuple(string.ascii_uppercase)
 class Option:
     name: str
     description: str | None = None
-    #: The request's criteria value the option was built from, for question
-    #: types that echo it back in the answer, like a score's legend.
-    raw: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,9 +37,6 @@ class Question:
     instructions: str
     options: tuple[Option, ...]
     labels: tuple[str, ...]
-    #: The request's raw ``instructions`` before coercion, for question
-    #: types that render them themselves, like KnowLine's.
-    raw_instructions: Any = None
     #: The request's instructions and criteria as sent. Holds dicts, so it is
     #: left out of equality and hashing.
     raw: tuple[Any, Any] | None = field(default=None, compare=False, repr=False)
@@ -147,7 +141,6 @@ def build_question(
         instructions=instructions,
         options=tuple(options),
         labels=qtype.label_set[: len(options)],
-        raw_instructions=raw_instructions,
         raw=(raw_instructions, criteria),
     )
 
