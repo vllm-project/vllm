@@ -19,7 +19,7 @@ Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
 """
 
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -679,9 +679,7 @@ def _config(**overrides) -> SimpleNamespace:
         speculative_config=None,
         weight_transfer_config=None,
     )
-    config = SimpleNamespace(**(fields | overrides))
-    config.direct_reload_refusal = MethodType(VllmConfig.direct_reload_refusal, config)
-    return config
+    return SimpleNamespace(**(fields | overrides))
 
 
 @pytest.mark.parametrize(
