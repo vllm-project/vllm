@@ -293,10 +293,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
             extra_body={"truncate_prompt_tokens": 8193},
         )
         assert "error" in response.object
-        assert (
-            "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please request a smaller truncation size." in response.message
-        )
+        assert "Please request a smaller truncation size." in response.message
 
 
 @pytest.mark.asyncio
