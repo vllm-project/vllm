@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.artifacts import (
     AuxOutputBuffer,
@@ -260,8 +261,9 @@ class AuxOutputWorkerConnector:
                 key_prefix=key_prefix,
                 max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
                 fields=self._object_fields,
-                put_stall_timeout_s=(
-                    vllm_config.aux_output_config.object_put_stall_timeout_s
+                put_stall_timeout_s=min(
+                    vllm_config.aux_output_config.object_put_stall_timeout_s,
+                    envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS / 2,
                 ),
             )
 

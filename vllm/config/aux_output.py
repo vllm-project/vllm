@@ -60,7 +60,9 @@ class AuxOutputConfig:
     the engine drops them. A write the store refuses is retried every 0.2 s:
     it may fit once the store has offloaded to SSD or a release has freed
     memory, or once a lost store process is replaced. Dropped objects are
-    missing from the store; the engine keeps running."""
+    missing from the store; the engine keeps running. The engine uses at most
+    half of `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`, so that a step waiting for
+    the store does not time out."""
 
     @model_validator(mode="after")
     def _check_object_key_prefix(self) -> Self:
