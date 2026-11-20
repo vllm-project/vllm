@@ -303,7 +303,7 @@ impl LoraManager {
         media_modalities: impl IntoIterator<Item = MmModality>,
     ) -> LoraModelResolution {
         let adapters = self.adapters.read().await;
-        let model_names = base_model_names.with_names(adapters.keys().cloned());
+        let model_names = base_model_names.with_adapter_names(adapters.keys().cloned());
         let lora_request = model_name
             .and_then(|name| adapters.get(name))
             .or_else(|| {
