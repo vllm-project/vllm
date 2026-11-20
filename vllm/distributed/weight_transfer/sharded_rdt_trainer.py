@@ -871,6 +871,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         self._owned_names: set[str] = set()
         # this rank's units in gather order, each with its owned names
         self._owned_units: dict[int, list[str]] = {}
+        self._unit_ordinal: dict[int, int] = {}
         # Gathered tensors shared with the server, by unit, and the event
         # that orders the server's reads after them: a CUDA-IPC export must
         # outlive its import, so they stay until released.
@@ -1003,6 +1004,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         for m, u in zip(self._meta, self._units):
             if m.name in self._owned_names:
                 self._owned_units.setdefault(u, []).append(m.name)
+        self._unit_ordinal = {u: i for i, u in enumerate(self._owned_units)}
 
     def _meta_digest(self) -> str:
         import hashlib
@@ -1290,7 +1292,9 @@ class ShardedRDTTrainerWeightTransferEngine(
             taken = set(self._slot_of_unit.values())
             free = [i for i in range(len(self._export_ring)) if i not in taken]
             assert free, "no free export slot past the credit gate"
-            slot = self._slot_of_unit[unit] = free[0]
+            # the same slot each sync, so the producer's cached sources fit
+            want = self._unit_ordinal[unit] % len(self._export_ring)
+            slot = self._slot_of_unit[unit] = want if want in free else free[0]
             st, vw, rf = self._pack_for_export(small, slot)
             ((slot_sid, reduce_args),) = st.items()
             ust = next(iter(rf.values())).untyped_storage()
