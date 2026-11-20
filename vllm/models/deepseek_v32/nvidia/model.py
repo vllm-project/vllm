@@ -383,11 +383,20 @@ class DeepseekV32Model(torch.nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # With index_topk_freq>1 only some layers build an indexer, yet the
+        # checkpoint ships indexer weights for all of them; track the built ones.
+        indexer_present_prefixes = {
+            n.rsplit(".indexer.", 1)[0] for n in params_dict if ".indexer." in n
+        }
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             # MTP / nextn layers are loaded by the MTP model, not here.
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
+                continue
+            if ".indexer." in name and (
+                name.rsplit(".indexer.", 1)[0] not in indexer_present_prefixes
+            ):
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
