@@ -75,7 +75,6 @@ from vllm.config import (
 from vllm.config.cache import (
     CacheDType,
     KVOffloadingBackend,
-    MambaCacheMode,
     MambaDType,
     PrefixCachingHashAlgo,
 )
@@ -453,12 +452,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
-    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
-    "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
-)
-
-
 _IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
     "ir_op_priority (--ir-op-priority) is deprecated because vLLM IR is being "
     "removed. It will be removed in v0.34.0."
@@ -641,7 +634,7 @@ class EngineArgs:
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
     language_model_only: bool = MultiModalConfig.language_model_only
-    limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
+    limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
@@ -814,7 +807,6 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
-    mamba_cache_mode: MambaCacheMode | None = None
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
@@ -841,6 +833,7 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
+    async_scheduling_depth: int = SchedulerConfig.async_scheduling_depth
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -1449,14 +1442,6 @@ class EngineArgs:
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
-            "--mamba-cache-mode",
-            **{
-                **cache_kwargs["mamba_cache_mode"],
-                "default": None,
-                "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
-            },
-        )
-        cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
             **cache_kwargs["enable_mamba_shared_prefix_checkpoint"],
         )
@@ -1833,6 +1818,9 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
+        )
+        scheduler_group.add_argument(
+            "--async-scheduling-depth", **scheduler_kwargs["async_scheduling_depth"]
         )
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
@@ -2323,8 +2311,6 @@ class EngineArgs:
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
-        if self.mamba_cache_mode is not None:
-            logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
@@ -2716,6 +2702,7 @@ class EngineArgs:
             cache_aware_admission_threshold=self.cache_aware_admission_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            async_scheduling_depth=self.async_scheduling_depth,
             stream_interval=self.stream_interval,
         )
 
