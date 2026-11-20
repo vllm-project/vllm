@@ -291,13 +291,11 @@ def test_static_image_preprocessing_budget(
     # One tile for the first image, two tiles and a thumbnail for the second.
     # The outputs coexist with their concatenated copy.
     required_bytes = 2 * sum(expected_patches) * 3 * 16 * 16 * torch.float32.itemsize
-    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", required_bytes - 1)
-    with pytest.raises(
-        VLLMValidationError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"
-    ):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", required_bytes - 1)
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
         processor(text=text, images=images, max_num_tiles=2)
 
-    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", required_bytes)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", required_bytes)
     output = processor(text=text, images=images, max_num_tiles=2)
     assert output["image_num_patches"].tolist() == expected_patches
     assert output["pixel_values_flat"].dtype == dtype
@@ -333,7 +331,7 @@ def test_render_rejects_over_budget_static_image_patches(tmp_path):
     with RemoteLaunchRenderServer(
         model,
         ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
-        env_dict={"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": "8000"},
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "8000"},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
         for content, status in ((images, 400), (images[:1], 200)):
@@ -347,7 +345,7 @@ def test_render_rejects_over_budget_static_image_patches(tmp_path):
             assert response.status_code == status, response.text[:512]
             if status == 400:
                 assert (
-                    "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"
+                    "VLLM_MAX_MEDIA_PREPROCESSING_BYTES"
                     in response.json()["error"]["message"]
                 )
 

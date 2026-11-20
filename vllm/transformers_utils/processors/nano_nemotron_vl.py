@@ -850,7 +850,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         images: list[Image.Image],
         max_num_tiles: int,
     ) -> list[torch.Tensor]:
-        limit = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+        limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
         if limit > 0:
             target_ratios = get_internvl_target_ratios(1, max_num_tiles)
             num_patches = sum(
@@ -874,7 +874,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 patch_bytes *= 2
             if patch_bytes > limit:
                 raise VLLMValidationError(
-                    "Image preprocessing exceeds VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES="
+                    "Image preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES="
                     f"{limit} (estimated {patch_bytes} bytes for patches).",
                     parameter="image",
                 )
