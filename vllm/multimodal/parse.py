@@ -829,6 +829,8 @@ class MultiModalDataParser:
                 metadata_lst.append(None)
                 continue
             video, metadata = self._get_video_with_metadata(data_item)
+            if isinstance(video, np.ndarray) and any(s < 0 for s in video.strides):
+                video = np.ascontiguousarray(video)
             if self.video_needs_metadata:
                 if metadata is None:
                     raise ValueError(
