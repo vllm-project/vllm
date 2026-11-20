@@ -9,24 +9,22 @@ use axum::Json;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
-use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
-use crate::error::{ApiError, text_submit_error};
-use crate::model_names::ServedModelNames;
+use crate::error::{ApiError, chat_submit_error, text_submit_error};
 use crate::render::{RenderContext, RenderState};
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
-    validate_request_compat as validate_generate_request,
+    validate_request as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validate_max_output_tokens;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
 };
@@ -84,7 +82,6 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
 
 fn lower_render_request(
     state: &impl RenderContext,
-    model_names: &ServedModelNames,
     text_request: TextRequest,
     model: String,
     n: Option<u32>,
@@ -138,7 +135,7 @@ fn lower_render_request(
         .then_some(text_request.reasoning_parser_kwargs),
         other: Default::default(),
     };
-    validate_generate_request(&request, model_names)?;
+    validate_generate_request(&request)?;
     Ok(request)
 }
 
@@ -171,8 +168,9 @@ fn hoist_transfer_params(
 pub(crate) async fn render_chat<S: RenderContext>(
     State(state): State<Arc<S>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    body: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
+    let Json(body) = body?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model(requested_model).await;
     let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
@@ -197,11 +195,10 @@ pub(crate) async fn render_chat<S: RenderContext>(
         // its output grammar is the same for every sample.
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
+        .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
         .text_request;
     Ok(Json(lower_render_request(
         state.as_ref(),
-        &lora_resolution.model_names,
         text_request,
         model,
         n,
@@ -217,8 +214,9 @@ pub(crate) async fn render_chat<S: RenderContext>(
 pub(crate) async fn render_completion<S: RenderContext>(
     State(state): State<Arc<S>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    body: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
+    let Json(body) = body?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model(requested_model).await;
     let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
@@ -246,7 +244,6 @@ pub(crate) async fn render_completion<S: RenderContext>(
         .map(|text_request| {
             lower_render_request(
                 state.as_ref(),
-                &lora_resolution.model_names,
                 text_request,
                 model.clone(),
                 n,

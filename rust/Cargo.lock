@@ -5948,7 +5948,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "validator",
  "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",

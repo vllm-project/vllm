@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::future;
@@ -31,7 +32,6 @@ use self::types::{
 };
 use crate::error::{ApiError, bail_invalid_request, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::types::Usage;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
 
@@ -39,8 +39,9 @@ use crate::utils::{resolve_request_context, unix_timestamp};
 pub async fn generative_scoring(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(request): ValidatedJson<GenerativeScoringRequest>,
+    request: Result<Json<GenerativeScoringRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(request) = request?;
     let ctx = resolve_request_context(&headers, request.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(request.model.as_deref()).await;
     lora_resolution.model_names.check(request.model.as_deref())?;

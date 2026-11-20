@@ -52,7 +52,8 @@ pub(super) fn prepare_generate_request(
     ctx: ResolvedRequestContext,
     mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
 
     let n = resolve_n(request.sampling_params.n)?;
     let stream = request.stream;
