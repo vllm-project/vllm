@@ -1314,7 +1314,7 @@ def _pipeline_kv_cache_configs(
     num_blocks = 4
     groups = [make_kv_cache_group(layers, spec) for layers in stage_layers]
     stages = tuple(
-        KVCacheStage(kv_cache_groups=(group,))
+        KVCacheStage(kv_cache_groups=(group,), bytes_per_block=len(layers) * page)
         for layers, group in zip(stage_layers, groups)
     )
     kv_cache_configs = []

@@ -947,6 +947,19 @@ class KVCacheConfig:
             for layer_name in group.layer_names
         }
 
+    def pipeline_layer_specs(self, group_id: int) -> dict[str, KVCacheSpec]:
+        """The specs of a group's layers on every pipeline stage, in model
+        order, or of this worker's layers when the stages are unknown."""
+        if not self.pipeline_stages:
+            return dict(self.kv_cache_groups[group_id].kv_cache_specs)
+        return {
+            layer_name: spec
+            for stage in self.pipeline_stages
+            for layer_name, spec in stage.kv_cache_groups[
+                group_id
+            ].kv_cache_specs.items()
+        }
+
     def select_transfer_block_ids(
         self, block_ids: Sequence[list[int]]
     ) -> tuple[list[int], ...]:

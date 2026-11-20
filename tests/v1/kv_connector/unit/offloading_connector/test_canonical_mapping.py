@@ -575,6 +575,8 @@ def _stage_kv_cache_config(partition: list[int], stage: int) -> KVCacheConfig:
                     [f"mla.{i}" for i in range(start, end)], _mla_spec()
                 ),
             ),
+            # No KV cache tensors are placed.
+            bytes_per_block=0,
         )
         for start, end in zip(bounds, bounds[1:])
     )

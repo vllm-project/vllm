@@ -825,6 +825,43 @@ def test_pipeline_stages_describe_every_stage():
     assert get_pipeline_stages(kv_cache_configs[:3], 2) == ()
 
 
+def _pipeline_layer_specs(partition: list[int]) -> list[list[str]]:
+    """Each group's layers on every stage of a hybrid model that `partition`
+    splits across pipeline stages, as one worker's config lists them."""
+    full = new_kv_cache_layer()
+    swa = new_sliding_window_layer(sliding_window=32)
+    # Two sliding-window layers per full attention layer
+    layers = {f"layer{i}": full if i % 3 == 2 else swa for i in range(6)}
+    names = list(layers)
+    bounds = [sum(partition[:i]) for i in range(len(partition) + 1)]
+    layer_configs = [
+        {name: layers[name] for name in names[start:end]}
+        for start, end in zip(bounds, bounds[1:])
+    ]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config, layer_configs, [2**30] * len(layer_configs)
+    )
+    kv_cache_config = kv_cache_configs[-1]
+    kv_cache_config.pipeline_stages = get_pipeline_stages(
+        kv_cache_configs, len(partition)
+    )
+    return [
+        list(kv_cache_config.pipeline_layer_specs(group_id))
+        for group_id in range(len(kv_cache_config.kv_cache_groups))
+    ]
+
+
+@pytest.mark.parametrize("partition", [[2, 4], [4, 2], [3, 3], [1, 2, 3]])
+def test_pipeline_layer_specs_do_not_depend_on_pipeline_partition(partition):
+    """Joined across the pipeline stages, every group lists the same layers in
+    the same order under any PP size and layer partition."""
+    single_stage = _pipeline_layer_specs([6])
+    assert len(single_stage) > 1
+    assert _pipeline_layer_specs(partition) == single_stage
+
+
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])
 def test_group_on_pp_stage_keeps_the_whole_groups_specs(stage_layers):
     """A PP stage holding none or only some of a group's layers answers what
