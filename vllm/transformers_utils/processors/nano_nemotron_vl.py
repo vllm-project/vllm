@@ -22,6 +22,7 @@ import regex as re
 import torch
 from PIL import Image
 from transformers import BatchFeature, PreTrainedConfig, TensorType
+from transformers.image_transforms import to_pil_image
 
 from vllm.logger import init_logger
 from vllm.model_executor.models.parakeet import ParakeetExtractor
@@ -870,6 +871,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         if len(images) == 0:
             return text, {}
 
+        images = [to_pil_image(image) for image in images]
         image_inputs: dict[str, Any]
         if tiler := self.dynamic_tiler:
             sans_images = text[0].replace("<image>", "")
