@@ -1663,6 +1663,8 @@ class Worker(WorkerBase):
             self.synchronize_device()
         except Exception as e:
             logger.exception("GPU health probe failed")
+            # The engine keeps serving: undo the dummy run's connector disable.
+            self.model_runner.kv_connector.set_disabled(False)
             return repr(e)
         return None
 
