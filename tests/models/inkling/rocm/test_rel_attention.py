@@ -5,13 +5,13 @@
 import pytest
 import torch
 
-from vllm.models.inkling.amd.ops.fa4_rel_attention import (
+from vllm.models.inkling.common.ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
     inkling_fa4_rel_attention,
     use_gfx950_gluon_decode,
     use_gfx950_gluon_extend,
 )
-from vllm.models.inkling.amd.ops.rel_attention_decode import (
+from vllm.models.inkling.common.ops.rel_attention_decode import (
     decode_split_count,
     use_split_kv_decode,
 )
@@ -106,7 +106,7 @@ def test_split_kv_dispatch_thresholds():
 
 
 def test_gfx950_gluon_dispatch_is_strict(monkeypatch: pytest.MonkeyPatch):
-    import vllm.models.inkling.amd.ops.fa4_rel_attention as rel_attention
+    import vllm.models.inkling.common.ops.fa4_rel_attention as rel_attention
 
     monkeypatch.setattr(rel_attention, "on_gfx950", lambda: True)
     assert use_gfx950_gluon_decode(max_query_len=1, page_size=128, head_dim=128)

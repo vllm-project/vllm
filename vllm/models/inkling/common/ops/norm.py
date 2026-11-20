@@ -8,6 +8,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from ..platform import num_compute_units
+
 _MAX_FUSED_SIZE = 65536
 
 
@@ -28,7 +30,7 @@ def _largest_power_of_2(n: int) -> int:
 
 @lru_cache(maxsize=128)
 def _get_grid_size_for_mem_bw_kernel(device: torch.device, factor: int = 8) -> int:
-    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    num_sms = num_compute_units(device)
     return _largest_power_of_2(num_sms) * factor
 
 
