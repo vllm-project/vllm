@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -12,6 +13,7 @@
 
 #include "../torch_utils.h"
 #include "core/cuda_compat.h"
+#include "fused_gdn_decode.h"
 
 namespace {
 
@@ -67,6 +69,14 @@ load_state4<__nv_bfloat16>(const __nv_bfloat16* state) {
                      __bfloat162float(hi.x), __bfloat162float(hi.y));
 }
 
+template <>
+__device__ __forceinline__ float4 load_state4<__half>(const __half* state) {
+  const __half2 lo = *reinterpret_cast<const __half2*>(state);
+  const __half2 hi = *reinterpret_cast<const __half2*>(state + 2);
+  return make_float4(__half2float(lo.x), __half2float(lo.y), __half2float(hi.x),
+                     __half2float(hi.y));
+}
+
 template <typename StateT>
 __device__ __forceinline__ void store_state4(StateT* state, float4 value);
 
@@ -85,6 +95,13 @@ __device__ __forceinline__ void store_state4<__nv_bfloat16>(
       __floats2bfloat162_rn(value.z, value.w);
 }
 
+template <>
+__device__ __forceinline__ void store_state4<__half>(__half* state,
+                                                     float4 value) {
+  *reinterpret_cast<__half2*>(state) = __floats2half2_rn(value.x, value.y);
+  *reinterpret_cast<__half2*>(state + 2) = __floats2half2_rn(value.z, value.w);
+}
+
 constexpr int kDimK = 128;
 constexpr int kDimV = 128;
 constexpr int kThreads = 256;
@@ -92,20 +109,7 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
-constexpr int kMaxMtpTokens = 9;
 constexpr int kTokenPasses = (kMaxMtpTokens + kWarps - 1) / kWarps;
-constexpr int kDtBiasFloat32 = 0;
-constexpr int kDtBiasBFloat16 = 1;
-constexpr int kDtBiasFloat16 = 2;
-
-struct GdnDecodeStrides {
-  int64_t mixed_row;
-  int64_t a_row;
-  int64_t b_row;
-  int64_t gate_row;
-  int64_t state_slot;
-};
-
 __device__ __forceinline__ float sigmoid_fast(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
@@ -485,6 +489,30 @@ void launch_gdn_decode_post_conv_mtp(
   const int num_requests = static_cast<int>(state_indices.size(0));
   const int split_v = choose_split_v(num_requests * num_value_heads,
                                      mixed_qkv.get_device_index());
+  // Without a V split, 16-bit state runs fused_gdn_decode_16bit_kernel.cu.
+  if constexpr (!std::is_same_v<StateT, float>) {
+    if (split_v == 1) {
+      const cudaError_t error =
+          launch_gdn_decode_post_conv_mtp_16bit<StateT, ValueHeadsPerKeyHead,
+                                                SigmoidGate>(
+              dim3(num_requests, num_value_heads), stream,
+              static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
+              static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
+              static_cast<const int*>(state_indices.data_ptr()),
+              static_cast<const int*>(cu_seqlens.data_ptr()),
+              static_cast<const int*>(num_accepted_tokens.data_ptr()),
+              static_cast<StateT*>(state.data_ptr()), output_gate,
+              norm_weight.data_ptr(),
+              static_cast<__nv_bfloat16*>(out.data_ptr()), num_key_heads,
+              num_value_heads, static_cast<int>(state_indices.size(1)),
+              dt_bias_type, norm_weight.scalar_type() == ScalarType::BFloat16,
+              static_cast<float>(scale), static_cast<float>(norm_eps), strides);
+      STD_TORCH_CHECK(error == cudaSuccess,
+                      "GDN decode MTP post-conv kernel launch failed: ",
+                      cudaGetErrorString(error));
+      return;
+    }
+  }
   const auto launch = [&]<int SplitV>() {
     return launch_split<StateT, ValueHeadsPerKeyHead, SigmoidGate, SplitV>(
         dim3(num_requests, num_value_heads, SplitV), stream,
@@ -548,8 +576,9 @@ void fused_gdn_decode_post_conv_mtp(
   const auto state_scalar_type = state.scalar_type();
   STD_TORCH_CHECK(
       state.is_cuda() && (state_scalar_type == ScalarType::Float ||
-                          state_scalar_type == ScalarType::BFloat16),
-      "state must be a CUDA float32 or bfloat16 tensor");
+                          state_scalar_type == ScalarType::BFloat16 ||
+                          state_scalar_type == ScalarType::Half),
+      "state must be a CUDA float32, bfloat16, or float16 tensor");
   STD_TORCH_CHECK(output_gate.is_cuda() &&
                       output_gate.scalar_type() == ScalarType::BFloat16,
                   "output_gate must be a CUDA bfloat16 tensor");
@@ -657,6 +686,12 @@ void fused_gdn_decode_post_conv_mtp(
         launch.template operator()<float, ValueHeadsPerKeyHead, true>();
       } else {
         launch.template operator()<float, ValueHeadsPerKeyHead, false>();
+      }
+    } else if (state_scalar_type == ScalarType::Half) {
+      if (output_gate_activation == "sigmoid") {
+        launch.template operator()<__half, ValueHeadsPerKeyHead, true>();
+      } else {
+        launch.template operator()<__half, ValueHeadsPerKeyHead, false>();
       }
     } else {
       if (output_gate_activation == "sigmoid") {

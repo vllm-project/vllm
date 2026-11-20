@@ -21,7 +21,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, group_kernel_blocks
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
@@ -29,7 +29,7 @@ def _schema_fingerprint(parts: tuple[object, ...]) -> str:
     return hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
 
 
-@dataclass
+@dataclass(slots=True)
 class KeyMetadata:
     """Metadata for constructing pool keys."""
 
@@ -48,7 +48,7 @@ class KeyMetadata:
     store_namespace: str = ""
 
 
-@dataclass(order=True)
+@dataclass(order=True, slots=True)
 class PoolKey:
     """Key for addressing KV cache blocks in the distributed store."""
 
@@ -244,9 +244,7 @@ class RankLocalStoreLayout(StoreLayout):
                 continue
             if cache.ndim == 0 or cache.shape[0] % num_blocks:
                 raise ValueError("KV cache block count must divide into manager blocks")
-            if cache.shape[0] != num_blocks:
-                cache = cache.unflatten(0, (num_blocks, -1))
-            append_regions(cache)
+            append_regions(group_kernel_blocks(cache, num_blocks))
 
         # Sort an auxiliary index so enclosing intervals precede covered aliases.
         # Stable sorting retains the first identical alias. Emit in input order.

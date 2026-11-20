@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.kv_cache_interface import group_kernel_blocks
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 BLOCK_SIZE = 128
@@ -37,10 +38,10 @@ def _reset_conv_state_layout_cache():
 def _attention_specs(
     num_layers: int, block_size: int, local_heads: int, content_size: int = 4
 ):
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     return tuple(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=block_size,
             num_kv_heads=local_heads,
             head_size=content_size // 2,
@@ -306,12 +307,17 @@ def test_rank_local_descriptors_handle_empty_and_invalid_chunks():
 
 
 @pytest.mark.parametrize(
-    "component_slice,kernel_blocks_per_manager",
-    [(slice(16, 24), 1), (slice(None, None, 2), 1), (slice(0, 16), 2)],
-    ids=["offset", "strided", "grouped-kernel-blocks"],
+    "component_slice,kernel_blocks_per_manager,pre_grouped",
+    [
+        (slice(16, 24), 1, False),
+        (slice(None, None, 2), 1, False),
+        (slice(0, 16), 2, False),
+        (slice(0, 16), 2, True),
+    ],
+    ids=["offset", "strided", "kernel-blocks", "manager-blocks"],
 )
 def test_component_layout_round_trip_preserves_neighboring_blocks(
-    component_slice, kernel_blocks_per_manager
+    component_slice, kernel_blocks_per_manager, pre_grouped
 ):
     """Copy a component without changing padding or neighboring blocks."""
     count = kernel_blocks_per_manager
@@ -326,7 +332,10 @@ def test_component_layout_round_trip_preserves_neighboring_blocks(
         for _ in range(2)
     ]
     for layout, cache in zip(layouts, (source, destination), strict=True):
-        layout.register_kv_caches([cache[: 4 * count, component_slice]], 4)
+        view = cache[: 4 * count, component_slice]
+        if pre_grouped:
+            view = group_kernel_blocks(view, 4)
+        layout.register_kv_caches([view], 4)
     source_addrs, sizes, _ = layouts[0].prepare_values([(0, 16)], [3], [0])
     destination_addrs, destination_sizes, _ = layouts[1].prepare_values(
         [(0, 16)], [1], [0]
@@ -418,6 +427,52 @@ def test_component_layout_does_not_coalesce_across_registered_storage_bounds():
         [[8, 8]],
         [0],
     )
+
+
+def test_rank_local_padded_kernel_blocks_round_trip_preserves_padding():
+    # Merged DSA cache (Kimi K3.1): 64-token kernel blocks of 64 x 788 B, each
+    # padded to 50512 B, 17 per manager block.
+    num_blocks, ratio, unit, padded = 4, 17, 64 * 788, 50_512
+    source = torch.arange(num_blocks * ratio * padded).to(torch.uint8)
+    destination = torch.full_like(source, 255)
+    expected = destination.clone().view(num_blocks * ratio, padded)
+    expected[ratio : 2 * ratio, :unit] = source.view(-1, padded)[-ratio:, :unit]
+    layouts = [
+        RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 1088, 1088)
+        for _ in range(2)
+    ]
+    for layout, raw in zip(layouts, (source, destination), strict=True):
+        cache = raw.as_strided((num_blocks * ratio, 1, 64, 788), (padded, unit, 788, 1))
+        layout.register_kv_caches([cache], num_blocks)
+        # Gaps may belong to another component: only transfer live bytes.
+        assert layout.kv_caches_base_addr == [
+            raw.data_ptr() + i * padded for i in range(ratio)
+        ]
+        assert layout.block_stride == [ratio * padded] * ratio
+        assert layout.block_len == [unit] * ratio
+    addrs, sizes, _ = layouts[0].prepare_values([(0, 1088)], [num_blocks - 1], [0])
+    assert addrs[0][-1] + sizes[0][-1] == (
+        source.data_ptr() + source.numel() - (padded - unit)
+    )
+    dst_addrs, dst_sizes, _ = layouts[1].prepare_values([(0, 1088)], [1], [0])
+    assert sizes == dst_sizes
+    for src, dst, size in zip(addrs[0], dst_addrs[0], sizes[0], strict=True):
+        ctypes.memmove(dst, src, size)
+    assert torch.equal(destination.view_as(expected), expected)
+
+
+def test_rank_local_splits_interleaved_blocks_per_head():
+    # K and V of all blocks in separate planes: a block is not stride-compact.
+    num_blocks = 4
+    kv = torch.zeros(2, num_blocks, BLOCK_SIZE, 64, dtype=torch.uint8)
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0), BLOCK_SIZE, BLOCK_SIZE
+    )
+
+    layout.register_kv_caches([kv.permute(1, 0, 2, 3)], num_blocks)
+
+    assert layout.kv_caches_base_addr == [kv[0].data_ptr(), kv[1].data_ptr()]
+    assert layout.block_len == [BLOCK_SIZE * 64] * 2
 
 
 def test_rank_local_layout_skips_block_padding():
