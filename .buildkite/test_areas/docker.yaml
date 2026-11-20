@@ -29,7 +29,6 @@ steps:
     - tools/ci/rocm_kernel_symbol_map.py
     - .buildkite/image_build/image_build_xpu.sh
     - docker/Dockerfile.xpu
-    - docker/Dockerfile.xpu_base
     - docker/docker-bake-xpu.hcl
     - tests/tools/test_xpu_image_build.py
   commands:

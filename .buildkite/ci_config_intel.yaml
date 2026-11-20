@@ -8,7 +8,6 @@ run_all_patterns:
   - ".dockerignore"
   - "docker/Dockerfile"
   - "docker/Dockerfile.xpu"
-  - "docker/Dockerfile.xpu_base"
   - "docker/docker-bake-xpu.hcl"
   - "CMakeLists.txt"
   - "requirements/common.txt"

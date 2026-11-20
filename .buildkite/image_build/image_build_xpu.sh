@@ -41,7 +41,6 @@ fi
 
 build_xpu_image() {
   local image_exists=false base_key base_image base_digest="" metadata_file status
-  local -a base_args=()
 
   if image_digest "$IMAGE" > /dev/null; then
     echo "Image found"
@@ -57,9 +56,23 @@ build_xpu_image() {
     return
   fi
 
-  # The shared base is for CI builders with an amd64 default platform.
+  # Hash only the base stage, not the application stages.
   base_key=$(
-    { sha256sum docker/Dockerfile.xpu_base && printf 'linux/amd64\n'; } |
+    { awk '
+        /^FROM[[:space:]]/ {
+          if (in_base) exit
+          seen_from = 1
+          if ($0 ~ /[[:space:]]AS[[:space:]]vllm-base[[:space:]]*$/) in_base = 1
+        }
+        !seen_from && /^ARG[[:space:]]/ { print }
+        in_base { print }
+        END {
+          if (!in_base) {
+            print "Missing vllm-base stage in docker/Dockerfile.xpu" > "/dev/stderr"
+            exit 1
+          }
+        }
+      ' docker/Dockerfile.xpu && printf 'linux/amd64\n'; } |
       sha256sum | cut -c1-32
   )
   base_image="$REGISTRY/$REPO:xpu-base-$base_key"
@@ -72,7 +85,7 @@ build_xpu_image() {
       # Only main publishes a shared base; PRs build it locally on a miss.
       echo "Building and publishing $base_image"
       metadata_file=$(mktemp)
-      docker buildx build --file docker/Dockerfile.xpu_base \
+      docker buildx build --file docker/Dockerfile.xpu --target vllm-base \
         --tag "$base_image" --push --metadata-file "$metadata_file" --progress plain . || {
         status=$?
         rm -f "$metadata_file"
@@ -96,15 +109,21 @@ build_xpu_image() {
 
   if [[ -n $base_digest ]]; then
     # Pin the base so later tag updates cannot change this build.
-    base_args=(--set "vllm-openai.contexts.vllm-base=docker-image://$base_image@$base_digest")
+    docker buildx bake \
+      --file docker/docker-bake-xpu.hcl --load \
+      --set vllm-openai.args.max_jobs=16 \
+      --set "vllm-openai.args.buildkite_commit=$BUILDKITE_COMMIT" \
+      --set "vllm-openai.tags=$IMAGE" \
+      --set "vllm-openai.contexts.vllm-base=docker-image://$base_image@$base_digest" \
+      --progress plain vllm-openai
+  else
+    docker build \
+      --file docker/Dockerfile.xpu \
+      --build-arg max_jobs=16 \
+      --build-arg "buildkite_commit=$BUILDKITE_COMMIT" \
+      --tag "$IMAGE" \
+      --progress plain .
   fi
-  docker buildx bake \
-    --file docker/docker-bake-xpu.hcl --load \
-    --set vllm-openai.args.max_jobs=16 \
-    --set "vllm-openai.args.buildkite_commit=$BUILDKITE_COMMIT" \
-    --set "vllm-openai.tags=$IMAGE" \
-    "${base_args[@]}" \
-    --progress plain vllm-openai
   docker push "$IMAGE"
 }
 

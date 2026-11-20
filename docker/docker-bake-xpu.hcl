@@ -1,6 +1,7 @@
 target "xpu-base" {
   context    = "."
-  dockerfile = "docker/Dockerfile.xpu_base"
+  dockerfile = "docker/Dockerfile.xpu"
+  target     = "vllm-base"
 }
 
 target "_xpu" {
@@ -10,12 +11,6 @@ target "_xpu" {
   contexts = {
     vllm-base = "target:xpu-base"
   }
-}
-
-target "vllm-build" {
-  inherits = ["_xpu"]
-  target   = "vllm-build"
-  tags     = ["vllm-xpu-env"]
 }
 
 target "vllm-openai" {
