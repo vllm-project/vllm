@@ -135,6 +135,7 @@ async fn render_chat(
         structured_output,
         engine_reasoning_gate,
         media,
+        render_fingerprint: state.render_fingerprint().unwrap_or_default().to_string(),
     })
 }
 

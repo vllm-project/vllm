@@ -211,7 +211,9 @@ Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
 `Render.RenderChat` renders a chat request into prompt token IDs plus the
 settings rendering decides (structured-output constraint, reasoning gate,
 preprocessed media), which the client copies into its `vllm.GenerateRequest`
-for `Inference.Generate`. See [`render.proto`](proto/render.proto).
+for `Inference.Generate`. It also returns `render_fingerprint`, a versioned
+digest of the resolved renderer inputs; a generation worker can use it to
+reject token IDs from an incompatible renderer. See [`render.proto`](proto/render.proto).
 
 ### Example Request
 

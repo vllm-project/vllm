@@ -13,6 +13,7 @@ mod middleware;
 mod mm_wire;
 mod model_names;
 mod render;
+mod render_fingerprint;
 mod routes;
 mod runtime;
 mod server_info;
@@ -148,13 +149,11 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     )
     .await
     .context("failed to create chat/text backends")?;
-    let text_backend = loaded.text_backend;
-    let chat_backend = loaded.chat_backend;
 
-    let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
+    let coordinator_mode = config.effective_coordinator_mode(loaded.text_backend.is_moe());
     info!(
         engine_count = config.engine_count(),
-        model_is_moe = text_backend.is_moe(),
+        model_is_moe = loaded.text_backend.is_moe(),
         ?coordinator_mode,
         "resolved coordinator mode"
     );
@@ -172,6 +171,19 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let system_fingerprint = config
         .fingerprint_mode
         .fingerprint(&client.ready_responses(), client.data_parallel_size());
+    let ready_responses = client.ready_responses();
+    let ready = ready_responses
+        .iter()
+        .min_by_key(|ready| ready.max_model_len)
+        .expect("engine core client requires at least one engine");
+    let render_fingerprint = render_fingerprint::for_server(
+        config,
+        ready.max_model_len,
+        ready.dtype,
+        &loaded.resolved_model_files,
+    )?;
+    let text_backend = loaded.text_backend;
+    let chat_backend = loaded.chat_backend;
 
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
@@ -200,6 +212,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
             .with_system_fingerprint(system_fingerprint)
+            .with_render_fingerprint(render_fingerprint)
             .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
