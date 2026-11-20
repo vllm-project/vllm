@@ -234,7 +234,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         # it has no sdist. The build does not need it; the wheel still
         # requires it (the build stage re-copies cuda.txt), and the Ubuntu
         # runtime image installs it.
-        sed -i '/^PyNvVideoCodec==/d' requirements/cuda.txt; \
+        sed -i '/^PyNvVideoCodec\b/d' requirements/cuda.txt; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \

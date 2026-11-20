@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 
 import vllm.config.parallel as parallel_config_module
 import vllm.distributed.eplb.eplb_state as eplb_state_module
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import ParallelConfig
 from vllm.config.parallel import EPLBConfig
 from vllm.config.utils import hash_config_cached
@@ -48,16 +49,19 @@ from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
         ("dspark", "deepseek_v41", False, False, True, False),
         ("dspark", "deepseek_v41", False, True, False, False),
         ("eagle3", "deepseek_v41", False, True, False, False),
+        ("eagle3", "deepseek_v41", False, True, True, True),
+        # A standalone draft model is built without EPLB.
+        ("draft_model", "deepseek_v41", False, True, True, False),
     ],
 )
 def test_draft_model_supports_eplb(
     monkeypatch, method, model_type, is_rocm, has_moe, draft_enable_eplb, expected
 ):
-    speculative_config = SimpleNamespace(
+    speculative_config = fake_speculative_config(
         method=method,
         draft_enable_eplb=draft_enable_eplb,
         draft_model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(model_type=model_type)
+            hf_config=SimpleNamespace(model_type=model_type), is_moe=has_moe
         ),
     )
     monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)

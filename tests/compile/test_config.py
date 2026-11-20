@@ -10,6 +10,7 @@ import pytest
 import torch
 from pydantic import ValidationError
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
@@ -769,13 +770,11 @@ def _mock_config_for_cudagraph_sizes(
     config.diffusion_config = None
     schedule = num_speculative_tokens_per_batch_size
     config.speculative_config = (
-        SimpleNamespace(
+        fake_speculative_config(
             method=method,
             num_speculative_tokens=num_speculative_tokens,
             num_speculative_tokens_per_batch_size=schedule,
             uses_dynamic_speculative_decoding=lambda: schedule is not None,
-            use_multi_module_mtp=lambda: False,
-            use_gemma4_mtp=lambda: False,
             enable_adaptive_verification=False,
         )
         if num_speculative_tokens

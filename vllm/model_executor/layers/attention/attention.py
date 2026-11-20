@@ -415,6 +415,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 or self.attn_backend.get_name() == "TRITON_MLA"
             )
         ):
+            if (
+                vllm_config.model_config is not None
+                and vllm_config.model_config.is_hybrid
+            ):
+                raise ValueError(
+                    "Prefix caching with batch invariance is not supported for "
+                    "FLASHINFER/TRITON_MLA in hybrid Mamba models; pass "
+                    "--no-enable-prefix-caching."
+                )
             logger.warning_once(
                 "Disabling prefix caching for FLASHINFER/TRITON_MLA "
                 "with batch invariance, as it is not yet supported.",
@@ -712,11 +721,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 page_size_padded=shared_page,
             )
-            speculative_config = vllm_config.speculative_config
+            spec_config = vllm_config.speculative_config
             if (
                 self.is_draft_layer
-                and speculative_config is not None
-                and speculative_config.method in ("dflash", "dspark")
+                and spec_config is not None
+                and spec_config.speculator_config.projects_context_kv
             ):
                 # The DFlash context-KV writer skips null block-table entries.
                 return DFlashSlidingWindowManager.layer_config(
