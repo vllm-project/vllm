@@ -40,10 +40,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HYV4VLConfig": "vllm.transformers_utils.configs.hy_v4",
     "HYV4VLVisionConfig": "vllm.transformers_utils.configs.hy_v4",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
-    # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
-    # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
-    # `FalconConfig` class from the official HuggingFace transformers library.
-    "RWConfig": "vllm.transformers_utils.configs.falcon",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MingV3ASRConfig": "vllm.transformers_utils.configs.ming_v3_asr",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
@@ -74,7 +70,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
-    "RadioConfig": "vllm.transformers_utils.configs.radio",
     "RicursiveConfig": "vllm.transformers_utils.configs.ricursive",
     "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators",
     "UltravoxConfig": "vllm.transformers_utils.configs.ultravox",
@@ -124,7 +119,6 @@ __all__ = [
     "HYV4Config",
     "HyperCLOVAXConfig",
     "IsaacConfig",
-    "RWConfig",
     "MiDashengLMConfig",
     "MingV3ASRConfig",
     "MiniMaxM3MTPConfig",
@@ -153,7 +147,6 @@ __all__ = [
     "OpenVLAConfig",
     "OvisConfig",
     "PixelShuffleSiglip2VisionConfig",
-    "RadioConfig",
     "RicursiveConfig",
     "SpeculatorsConfig",
     "UltravoxConfig",
