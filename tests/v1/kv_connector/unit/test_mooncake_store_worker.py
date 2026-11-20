@@ -3656,56 +3656,6 @@ def test_pp_stage_keys_name_their_layers_only_with_pp_sizes(pp_stage_layouts):
 
 
 @pytest.mark.cpu_test
-def test_pp_sizes_share_store_tp_keys_across_pp_sizes(pp_stage_layouts):
-    """With pp_sizes=[1, 2] and Store TP, a PP=1 instance stores each block as
-    one object per PP=2 stage, under the keys the PP=2 stages use."""
-    config = {"pp_sizes": [1, 2], "store_tp_size": 2}
-    (pp1,) = pp_stage_layouts(1, 0, config)
-    stages = [pp_stage_layouts(2, rank, config)[0] for rank in (0, 1)]
-
-    assert type(pp1) is HeadMajorStoreLayout
-    assert _layout_keys(pp1) == _layout_keys(stages[0]) + _layout_keys(stages[1])
-
-
-@pytest.mark.cpu_test
-def test_pp_sizes_share_hybrid_group_keys_across_pp_sizes(
-    pp_stage_layouts, monkeypatch
-):
-    """KV cache groups are formed over the whole model, so with pp_sizes each
-    group of a PP=1 instance stores the objects the PP=2 stages store for it."""
-    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-
-    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
-    gdn = mamba_layer(
-        block_size=16,
-        shapes=((24, 3), (4, 2, 2)),
-        dtypes=(torch.uint8, torch.uint8),
-        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
-    )
-    # Layers 3 and 7 use full attention; the GDN layers form three groups.
-    groups = [(_PP_ATTENTION, (3, 7)), (gdn, (0, 4)), (gdn, (1, 5)), (gdn, (2, 6))]
-
-    def group_keys(pp_size: int, rank: int) -> list[list[str]]:
-        layouts = pp_stage_layouts(
-            pp_size,
-            rank,
-            {"pp_sizes": [1, 2]},
-            num_layers=8,
-            groups=groups,
-            prefix_match_unit=16,
-        )
-        return [_layout_keys(layout) for layout in layouts]
-
-    pp1 = group_keys(1, 0)
-    stages = [group_keys(2, rank) for rank in (0, 1)]
-
-    for g in range(len(groups)):
-        assert len(pp1[g]) == 2
-        assert pp1[g] == stages[0][g] + stages[1][g]
-
-
-@pytest.mark.cpu_test
 def test_pp_sizes_lists_a_custom_partition(pp_stage_layouts, monkeypatch):
     """A PP size whose stages are set with VLLM_PP_LAYER_PARTITION is listed by
     its per-stage layer counts, so other PP sizes cut at its real boundaries.

@@ -183,23 +183,6 @@ class StoreLayout:
         raise NotImplementedError
 
 
-def split_layer_range(
-    layer_range: tuple[int, int], cut_points: Iterable[int]
-) -> tuple[tuple[int, int], ...]:
-    """Split `[start, end)` at every cut point inside it."""
-    start, end = layer_range
-    cuts = sorted({start, end, *(cut for cut in cut_points if start < cut < end)})
-    return tuple(zip(cuts[:-1], cuts[1:]))
-
-
-def layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
-    """Index of the range holding `layer`."""
-    for index, (start, end) in enumerate(layer_ranges):
-        if start <= layer < end:
-            return index
-    raise ValueError(f"Layer {layer} is not in the Store layer ranges {layer_ranges}")
-
-
 @dataclass(frozen=True, slots=True)
 class LayerRangeObjects:
     """A cache group's blocks stored as one object per layer range.
@@ -451,11 +434,15 @@ class LayerRangeStoreLayout(RankLocalStoreLayout):
             cache = kv_caches[cache_index]
             buffer = cache.untyped_storage().data_ptr()
             segments = ranges[range_index]
-            for addr, block_stride, length in _layer_block_segments(cache, num_blocks)[
-                0
-            ]:
+            layer_segments, _ = _layer_block_segments(cache, num_blocks)
+            for addr, block_stride, length in layer_segments:
                 last = segments[-1] if segments else None
-                if last and last[1:] == [block_stride, addr - last[0], buffer]:
+                if (
+                    last is not None
+                    and last[3] == buffer
+                    and last[1] == block_stride
+                    and last[0] + last[2] == addr
+                ):
                     last[2] += length
                 else:
                     segments.append([addr, block_stride, length, buffer])
@@ -470,9 +457,6 @@ class LayerRangeStoreLayout(RankLocalStoreLayout):
                     list(lengths),
                 )
             )
-        self.kv_caches_base_addr = [s[0] for segments in ranges for s in segments]
-        self.block_stride = [s[1] for segments in ranges for s in segments]
-        self.block_len = [s[2] for segments in ranges for s in segments]
 
     def prepare_values(
         self,

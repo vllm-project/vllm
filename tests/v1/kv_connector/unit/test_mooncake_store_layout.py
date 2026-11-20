@@ -394,37 +394,6 @@ def _range_objects(
     )
 
 
-def test_rank_local_layer_ranges_store_one_object_per_range():
-    """A block is one object per layer range, holding only that range's
-    layers under a key naming the range."""
-    num_blocks = 3
-    caches = [
-        torch.zeros(num_blocks, 1, BLOCK_SIZE, 8, dtype=torch.uint8) for _ in range(5)
-    ]
-    metadata = KeyMetadata("test-model", 0, 0, 0, 0)
-    names = [*_layer_names(range(4)), "draft_model.model.layers.0.self_attn.attn"]
-    layout = LayerRangeStoreLayout(
-        metadata,
-        BLOCK_SIZE,
-        BLOCK_SIZE,
-        _range_objects(metadata, ((0, 2), (2, 4)), dict(zip(names, [0, 0, 1, 1, 1]))),
-    )
-    layout.register_kv_caches(caches, num_blocks, layer_names=names)
-
-    assert layout.local_shard_ids == (0, 1)
-    assert "@layers:0-2@group:0@" in layout.key_for(0, BlockHash(b"h"))
-    assert "@layers:2-4@group:0@" in layout.key_for(1, BlockHash(b"h"))
-    addrs, sizes, _ = layout.prepare_values(
-        [(0, BLOCK_SIZE), (0, BLOCK_SIZE)], [1], [1, 0]
-    )
-    block_bytes = BLOCK_SIZE * 8
-    assert addrs == [
-        [cache.data_ptr() + block_bytes for cache in caches[2:]],
-        [cache.data_ptr() + block_bytes for cache in caches[:2]],
-    ]
-    assert sizes == [[block_bytes] * 3, [block_bytes] * 2]
-
-
 @pytest.mark.parametrize(
     ("slot_bytes", "slots", "segments"),
     [

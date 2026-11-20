@@ -19,7 +19,7 @@ import queue
 import socket
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
@@ -74,8 +74,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     StoreShardId,
     TokenMajorStoreLayout,
     group_compact_kernel_blocks,
-    layer_range_index,
-    split_layer_range,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -173,6 +171,23 @@ def _decoder_layer_index(layer_name: str) -> int:
     return extract_layer_index(layer_name)
 
 
+def _split_layer_range(
+    layer_range: tuple[int, int], cut_points: Iterable[int]
+) -> tuple[tuple[int, int], ...]:
+    """Split `[start, end)` at every cut point inside it."""
+    start, end = layer_range
+    cuts = sorted({start, end, *(cut for cut in cut_points if start < cut < end)})
+    return tuple(zip(cuts[:-1], cuts[1:]))
+
+
+def _layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
+    """Index of the range holding `layer`."""
+    for index, (start, end) in enumerate(layer_ranges):
+        if start <= layer < end:
+            return index
+    raise ValueError(f"Layer {layer} is not in the Store layer ranges {layer_ranges}")
+
+
 def _group_range_objects(
     metadata: KeyMetadata,
     group: KVCacheGroup,
@@ -198,7 +213,7 @@ def _group_range_objects(
             return 0
         if name in draft_layers:
             return len(layer_ranges) - 1
-        return layer_range_index(layer_ranges, _decoder_layer_index(name))
+        return _layer_range_index(layer_ranges, _decoder_layer_index(name))
 
     ranges = [range_of(name) for name in names]
     first_seen: dict[tuple[int, KVCacheSpec], int] = {}
@@ -1912,8 +1927,11 @@ class MooncakeStoreWorker:
         if store_layer_ranges is not None:
             # Every object costs a Store operation per save, load and lookup.
             logger.info(
-                "Mooncake store writes %d objects per block on this rank",
+                "Mooncake store writes %d objects per block on this rank for "
+                "layer ranges %s (pp_sizes=%s)",
                 sum(len(db.store_layout.local_shard_ids) for db in self.token_dbs),
+                store_layer_ranges,
+                extra_config.get("pp_sizes"),
             )
         self._init_lookup_key_prefixes()
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
@@ -2130,13 +2148,7 @@ class MooncakeStoreWorker:
             for counts in partitions
             for start in itertools.accumulate(counts, initial=0)
         }
-        layer_ranges = split_layer_range(stages[self.pp_rank], cut_points)
-        logger.info(
-            "Mooncake store stores layer ranges %s per block for pp_sizes=%s",
-            layer_ranges,
-            pp_sizes,
-        )
-        return layer_ranges
+        return _split_layer_range(stages[self.pp_rank], cut_points)
 
     def _build_token_databases(
         self,
