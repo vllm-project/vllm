@@ -264,13 +264,14 @@ def _compute_local_logits_stats_kernel(
 
     block_idx = tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block_offsets < vocab_size
+    target_mask = block_offsets < vocab_size
+    draft_mask = block_offsets < draft_vocab_size
 
     if temp == 0.0:
         # Greedy sampling. Only the target max/argmax are needed.
         target_logits = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
+            mask=target_mask,
             other=float("-inf"),
         ).to(tl.float32)
         value, idx = tl.max(target_logits, axis=0, return_indices=True)
@@ -289,7 +290,7 @@ def _compute_local_logits_stats_kernel(
         # Get local target max and summed exponentials.
         target_logits = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
+            mask=target_mask,
             other=float("-inf"),
         ).to(tl.float32)
         target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
@@ -315,7 +316,7 @@ def _compute_local_logits_stats_kernel(
                     * draft_logits_stride_0
                     + draft_step_idx * draft_logits_stride_1
                     + block_offsets,
-                    mask=mask & (block_offsets < draft_vocab_size),
+                    mask=draft_mask,
                     other=float("-inf"),
                 ).to(tl.float32)
                 / temp
@@ -906,10 +907,11 @@ def _resample_kernel(
 
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
+    target_mask = block < vocab_size
+    draft_mask = block < draft_vocab_size
     target_logits = tl.load(
         target_logits_ptr + resample_token_idx * target_logits_stride + block,
-        mask=mask,
+        mask=target_mask,
         other=float("-inf"),
     ).to(tl.float32)
 
@@ -963,7 +965,7 @@ def _resample_kernel(
                 * draft_logits_stride_0
                 + resample_idx * draft_logits_stride_1
                 + block,
-                mask=mask & (block < draft_vocab_size),
+                mask=draft_mask,
                 other=float("-inf"),
             ).to(tl.float32)
             / temp
@@ -1015,7 +1017,7 @@ def _resample_kernel(
         if is_watermarked & (temp != 0.0) & ~skip_watermarking:
             watermark_value, idx = philox_gumbel_block_argmax(
                 residual_logits,
-                mask,
+                target_mask,
                 block_idx,
                 contexts_ptr + resample_token_idx * contexts_stride,
                 watermark_key_0.to(tl.uint32),
@@ -1029,7 +1031,7 @@ def _resample_kernel(
             value, idx = _seeded_resample_argmax(
                 residual_logits,
                 block,
-                mask,
+                target_mask,
                 resample_token_idx,
                 expanded_idx_mapping_ptr,
                 temp_ptr,
@@ -1042,7 +1044,7 @@ def _resample_kernel(
         value, idx = _seeded_resample_argmax(
             residual_logits,
             block,
-            mask,
+            target_mask,
             resample_token_idx,
             expanded_idx_mapping_ptr,
             temp_ptr,

@@ -172,17 +172,18 @@ def test_eagle_correctness_medium(
     )
 
 
-@pytest.mark.parametrize("use_v2", ["0", "1"])
-def test_eagle_narrow_vocabulary_preserves_target_distribution(
-    tmp_path, monkeypatch, vllm_runner, use_v2: str
+@pytest.mark.parametrize(
+    "draft_vocab_size", [8201, 8193], ids=["equal_vocab", "narrow_vocab"]
+)
+def test_eagle_vocabulary_width_preserves_target_distribution(
+    tmp_path, vllm_runner, draft_vocab_size: int
 ):
-    """Loaded EAGLE weights must preserve target-only mass during verification."""
+    """Equal and narrow EAGLE vocabularies must preserve the target distribution."""
     import torch
     from safetensors.torch import save_file
     from transformers import LlamaConfig, LlamaForCausalLM
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2)
-    vocab_size, draft_vocab_size, hidden_size = 8201, 8193, 64
+    vocab_size, hidden_size = 8201, 64
     config = LlamaConfig(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
@@ -217,7 +218,7 @@ def test_eagle_narrow_vocabulary_preserves_target_distribution(
         for name, value in target.state_dict().items()
         if name.startswith("model.layers.0.") and "input_layernorm" not in name
     }
-    # The EAGLE head shares target embeddings/lm_head, but truncates its logits.
+    # The EAGLE head shares target embeddings/lm_head and may truncate its logits.
     weights["fc.weight"] = torch.cat(
         [torch.eye(hidden_size), torch.zeros(hidden_size, hidden_size)], dim=1
     )
