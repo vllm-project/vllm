@@ -32,7 +32,6 @@ def server():
         "--max-num-seqs",
         "2",
         "--enforce-eager",
-        "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"video": MAXIMUM_VIDEOS}),
         "--media-io-kwargs",

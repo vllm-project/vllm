@@ -295,13 +295,20 @@ class CudaGraphManager:
         prefill_sizes = sorted(
             compilation_config.prefill_cudagraph_capture_token_sizes or []
         )
+        # A batch never holds more than max_num_reqs * max_model_len tokens.
+        max_num_tokens = self.max_num_reqs * self.vllm_config.model_config.max_model_len
+        if prefill_sizes and prefill_sizes[-1] > max_num_tokens:
+            logger.warning(
+                "Dropping %s from CUDA graph capture sizes: above "
+                "max_num_seqs * max_model_len = %d.",
+                [n for n in prefill_sizes if n > max_num_tokens],
+                max_num_tokens,
+            )
+            prefill_sizes = [n for n in prefill_sizes if n <= max_num_tokens]
         decode_sizes = self.decode_request_sizes
         if decode_sizes is None:
             decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         decode_sizes = decode_sizes or []
-        max_decode_tokens = (
-            self.max_num_reqs * self.vllm_config.uniform_decode_query_len
-        )
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
@@ -357,11 +364,7 @@ class CudaGraphManager:
         for num_tokens, num_active_loras in product(
             prefill_sizes, self.lora_capture_cases
         ):
-            # recoverSSM cannot capture a dummy query wider than its workspace.
-            if mixed_mode and (
-                not self.vllm_config.cache_config.use_kda_recoverssm
-                or num_tokens <= max_decode_tokens
-            ):
+            if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
                 # For breakable PW graphs, break-point kernels read the real batch
@@ -1115,10 +1118,9 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
-    kv_cache_spec = runner.get_kv_cache_spec()
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, runner.vllm_config, kv_cache_spec
+        builder, runner.vllm_config, runner.get_kv_cache_layer_configs()
     )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
@@ -1139,14 +1141,6 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
-    # Invalidate the align-mode Mamba group metadata cached from the
-    # profiling KVCacheConfig: the real (e.g. PP-projected) config may
-    # place Mamba layers into a different group layout, so it must be
-    # re-derived from the real config.
-    if hasattr(runner.model_state, "_mamba_group_ids"):
-        runner.model_state._mamba_group_ids = []
-    if hasattr(runner.model_state, "_mamba_spec"):
-        runner.model_state._mamba_spec = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

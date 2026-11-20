@@ -236,9 +236,11 @@ class RoutedExperts(PluggableLayer):
             loader.create_staging(self, params_dtype, weight_loader=self.weight_loader)
 
         self.lora_base_layer_prefix = ""
+        self._flag_padding_for_reload()
 
-    def padding_fill_params(self) -> list[str]:
-        """Params a direct reload zero-fills; read at cold start, before PWAL."""
+    def _flag_padding_for_reload(self) -> None:
+        """Flag the params a direct reload zero-fills whole at begin; decided
+        from the sizes at construction, before post-load processing."""
         c = self.moe_config
         inter = c.intermediate_size_per_partition
         if not (
@@ -247,13 +249,11 @@ class RoutedExperts(PluggableLayer):
             # The loader refills this padding too, but a load plan skips loader fills.
             or c.tp_shard_with_padding
         ):
-            return []
+            return
         # Per-expert scalars ((E,), (E, <=2)) aren't padded.
-        return [
-            n
-            for n, p in self._parameters.items()
-            if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]
-        ]
+        for p in self._parameters.values():
+            if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]:
+                p.fill_on_reload = True
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -1456,6 +1456,7 @@ class RoutedExperts(PluggableLayer):
         x: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Execute routed experts using the quantization method's apply function.
 
@@ -1468,12 +1469,15 @@ class RoutedExperts(PluggableLayer):
             x: Input tensor after any transforms
             router_logits: Router logits (for monolithic kernels)
             input_ids: input ids for DeepSeek V4
+            x_scale: Scales of `x` when the caller already quantized it (needs
+                `quant_method.accepts_quantized_input`)
 
         Returns:
             Finalized routed states or a deferred-finalize output.
 
         """
         assert self.quant_method.is_monolithic
+        extra = {} if x_scale is None else {"x_scale": x_scale}
 
         # Monolithic kernels handle routing internally
         return self.quant_method.apply_monolithic(
@@ -1481,6 +1485,7 @@ class RoutedExperts(PluggableLayer):
             x=x,
             router_logits=router_logits,
             input_ids=input_ids,
+            **extra,
         )
 
     @property

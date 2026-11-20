@@ -63,7 +63,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import (
@@ -73,6 +73,7 @@ from .utils import (
     make_kv_cache_config,
     make_nixl_push_scheduler,
     region_pairs_by_index,
+    remote_stage,
 )
 
 # ----------------------------------------------------------------- #
@@ -472,19 +473,17 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._failed_remote_engines = set()
+        w._disconnected_remote_engines = set()
         w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w.region_group_ids = [0]
         w._packed_member_layouts = {}
-        w.dst_region_num_blocks = {}
-        w.dst_region_group_ids = {}
-        w._dst_pairs = {}
-        w.dst_region_mem_types = {}
+        w._remote_stages = {}
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
-        w._group_spec_types = (FullAttentionSpec,)
+        w._group_spec_types = (AttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
@@ -637,6 +636,7 @@ def test_job_that_raises_fails_only_its_request():
     w._process_chunk_jobs()
     assert w._chunk_states["req-p"].failed
     assert w.writes == [(([5],), ([200],), True)]
+
 
 def _fail_writes(w: _StubWriterWorker) -> None:
     """Make in-flight WRITEs report failure when polled."""
@@ -1113,7 +1113,7 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w._handshake_lock = threading.RLock()
     # _cleanup_remote_engine touches these when reaping an engine.
     w.nixl_wrapper = MagicMock()
-    w.dst_xfer_side_handles = {}
+    w._remote_stages = {}
     w.kv_caches_base_addr = {}
     w.dst_num_blocks = {}
     w.tp_mappings = {}
@@ -1387,9 +1387,10 @@ class TestPushWriterNotifs:
         w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
         w._compute_desc_ids = MagicMock(return_value=[0])
         w.dst_num_blocks = {w.engine_id: 8}
-        w.dst_region_num_blocks[w.engine_id] = [8]
-        w.dst_region_group_ids[w.engine_id] = [0]
-        w._dst_pairs[w.engine_id] = region_pairs_by_index(1)
+        w.region_num_blocks = [8]
+        w._remote_stages[w.engine_id] = remote_stage(
+            region_pairs_by_index(1), region_num_blocks=[8]
+        )
         w.nixl_wrapper.make_prepped_xfer.return_value = 101
         w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
         if release_fails:
@@ -1862,9 +1863,11 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
-        w.dst_region_group_ids[engine_id] = [0]
-        w._dst_pairs[engine_id] = region_pairs_by_index(1)
-        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        w._remote_stages[engine_id] = remote_stage(
+            region_pairs_by_index(1),
+            region_num_blocks=[100],
+            xfer_side_handles={r: 1000 + r for r in d_ranks},
+        )
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
@@ -1943,9 +1946,12 @@ class TestPushWriterMlaReplication:
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.region_group_ids = [0, 1, 2, 3]
-        w.dst_region_group_ids[engine_id] = [0, 1, 2, 3]
-        w._dst_pairs[engine_id] = region_pairs_by_index(4, groups=[0, 1, 2, 3])
-        w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
+        w._remote_stages[engine_id] = remote_stage(
+            region_pairs_by_index(4, groups=[0, 1, 2, 3]),
+            region_num_blocks=[100] * 4,
+            region_group_ids=[0, 1, 2, 3],
+            xfer_side_handles={0: 1000, 1: 1001},
+        )
         w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
 
         writes = []
@@ -2024,13 +2030,14 @@ class TestPushPrefixCaching:
             )
         }
         w.dst_num_blocks = {engine_id: 10_000, w.engine_id: 10_000}
-        w.dst_region_num_blocks = {
-            engine_id: [10_000],
-            w.engine_id: [10_000],
+        w.region_num_blocks = [10_000]
+        w._remote_stages = {
+            engine_id: remote_stage(
+                region_pairs_by_index(1),
+                region_num_blocks=[10_000],
+                xfer_side_handles={0: 5000},
+            )
         }
-        w.dst_region_group_ids = {engine_id: [0], w.engine_id: [0]}
-        w._dst_pairs = {engine_id: region_pairs_by_index(1)}
-        w.dst_xfer_side_handles = {engine_id: {0: 5000}}
         w.src_xfer_handles_by_block_size = {16: 2000}
 
         # Stub only the NIXL WRITE; kernel expansion, prefix-cache trim, desc
@@ -2079,8 +2086,9 @@ class TestPushPrefixCaching:
         """A layer in a pooled remote region still receives its blocks; a layer
         in another cache group on D is refused."""
         w, engine_id = self._worker_driving_xfer()
-        w.dst_region_group_ids[engine_id] = [-1]
-        w._dst_pairs[engine_id].groups_match = groups_match
+        stage = w._remote_stages[engine_id][0]
+        stage.region_group_ids = [-1]
+        stage.pairs.groups_match = groups_match
         reg = _registration_data("req-groups", local_block_ids=([500, 501],))
 
         if not groups_match:

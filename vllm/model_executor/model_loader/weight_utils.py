@@ -40,6 +40,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
+    in_single_pp_stage,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
@@ -337,7 +338,9 @@ def get_quant_config(
     # 1. composed online quantization, before `maybe_compose_online_quantization`,
     # 2. Ambiguous online shorthands as `"mxpf4"`, `"mxfp8"`, for which `online_args`
     # is not set yet.
-    if quant_cls is OnlineQuantizationConfig and online_args is not None:
+    # `quant_cls` is the class registered for this method name, which an
+    # out-of-tree platform may have overridden with its own subclass.
+    if issubclass(quant_cls, OnlineQuantizationConfig) and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
         # Activation-only overrides apply to pre-quantized checkpoints; without
         # a weight key, standalone online quantization would silently no-op.
@@ -349,7 +352,7 @@ def get_quant_config(
                     f"quantization_config.{name} = {spec} does not set a weight "
                     "quantization key, which online quantization requires."
                 )
-        return OnlineQuantizationConfig(args=online_args)
+        return quant_cls(args=online_args)
 
     model_name_or_path = (
         maybe_download_from_modelscope(
@@ -386,12 +389,16 @@ def get_quant_config(
             )
             fp8_args = resolve_quantization_config("fp8_per_tensor", online_args)
             assert fp8_args is not None
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=fp8_args)
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
             assert not isinstance(online_args, dict)
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -406,6 +413,8 @@ def get_quant_config(
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
@@ -579,6 +588,33 @@ def download_safetensors_index_file_from_hf(
             logger.info("No %s found in remote.", index_file)
 
 
+def get_safetensors_files_in_index(hf_folder: str, index_file: str) -> list[str] | None:
+    """Return the files the safetensors index lists, or None without an index.
+
+    The files may sit in a subdirectory, like tensors/, and may be missing.
+    Raises ValueError if the index lists a file outside hf_folder.
+    """
+    index_file_name = os.path.join(hf_folder, index_file)
+    if not os.path.isfile(index_file_name):
+        return None
+    # model.safetensors.index.json is a mapping from keys in the
+    # torch state_dict to safetensors file holding that weight.
+    with open(index_file_name) as f:
+        weight_map = json.load(f)["weight_map"]
+    files = {os.path.join(hf_folder, name) for name in weight_map.values()}
+    # Compare paths without resolving links: Hub snapshot files link to blobs
+    # outside the snapshot folder.
+    folder = os.path.abspath(hf_folder)
+    outside = [
+        f
+        for f in sorted(files)
+        if os.path.commonpath([folder, os.path.abspath(f)]) != folder
+    ]
+    if outside:
+        raise ValueError(f"{index_file} lists files outside {hf_folder}: {outside}")
+    return sorted(files)
+
+
 # For models like Mistral-7B-v0.3, there are both sharded
 # safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
@@ -587,30 +623,18 @@ def download_safetensors_index_file_from_hf(
 def filter_duplicate_safetensors_files(
     hf_weights_files: list[str], hf_folder: str, index_file: str
 ) -> list[str]:
-    # model.safetensors.index.json is a mapping from keys in the
-    # torch state_dict to safetensors file holding that weight.
-    index_file_name = os.path.join(hf_folder, index_file)
-    if not os.path.isfile(index_file_name):
+    weight_files_in_index = get_safetensors_files_in_index(hf_folder, index_file)
+    if weight_files_in_index is None:
         return hf_weights_files
-
-    # Iterate through the weight_map (weight_name: safetensors files)
-    # to identify weights that we should use.
-    with open(index_file_name) as f:
-        weight_map = json.load(f)["weight_map"]
-    weight_files_in_index = set()
-    for weight_name in weight_map:
-        weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
     # Check if files referenced in model.safetensors.index.json actually exist.
     # Raise error if any file is missing.
-    hf_weights_files_set = set(hf_weights_files)
-    missing_files = weight_files_in_index - hf_weights_files_set
+    missing_files = {f for f in weight_files_in_index if not os.path.isfile(f)}
     if missing_files:
         raise FileNotFoundError(
             f"Weight files referenced in index but missing: {missing_files}"
         )
-    # Filter out any fields that are not found in the index file.
-    hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
-    return hf_weights_files
+    # Take the files from the index, which may list some in a subdirectory.
+    return weight_files_in_index
 
 
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
@@ -645,52 +669,8 @@ def _mapped_weight_name(weights_mapper: "WeightsMapper | None", key: str) -> str
     return weights_mapper.map_name(key)
 
 
-def _hf_prefix_maps_to_lm(
-    new_name: str | None, lm_module_prefixes: tuple[str, ...]
-) -> bool:
-    if not new_name:
-        return False
-    new_p = new_name if new_name.endswith(".") else f"{new_name}."
-    return any(new_p.startswith(p) or p.startswith(new_p) for p in lm_module_prefixes)
-
-
-def _shared_hf_root_module_prefixes(
-    lm_module_prefixes: tuple[str, ...],
-    weights_mapper: "WeightsMapper | None",
-) -> tuple[str, ...]:
-    """Module prefixes that are also an HF root for non-LM weights.
-
-    E.g. Molmo/Phi-4-MM/Muse mark LM as `model` while vision HF keys stay
-    under `model.vision_*` / `model.embed_tokens_extend.*`. Detected via
-    `WeightsMapper.orig_to_new_prefix` (no hard-coded name list).
-    """
-    if weights_mapper is None:
-        return ()
-    mapping = weights_mapper.orig_to_new_prefix
-    if not mapping:
-        return ()
-
-    non_lm_origs: list[str] = []
-    for orig, new in mapping.items():
-        orig_p = orig if orig.endswith(".") else f"{orig}."
-        if not _hf_prefix_maps_to_lm(new, lm_module_prefixes):
-            non_lm_origs.append(orig_p)
-
-    if not non_lm_origs:
-        return ()
-
-    shared = [
-        p
-        for p in lm_module_prefixes
-        if any(orig.startswith(p) for orig in non_lm_origs)
-    ]
-    return tuple(shared)
-
-
 def resolve_mm_encoder_only_lm_prefixes(
     language_model_names: Iterable[str] | None,
-    *,
-    weights_mapper: "WeightsMapper | None" = None,
 ) -> tuple[str, ...] | None:
     """Resolve vLLM LM *module* prefixes for `--mm-encoder-only` shard skip.
 
@@ -700,25 +680,9 @@ def resolve_mm_encoder_only_lm_prefixes(
     hard-code Qwen/HF nest lists.
 
     Returns `None` (leave the safetensors file list unchanged) when
-    `_language_model_names` is empty/missing, or when a module prefix is a
-    shared HF checkpoint root for both LM and non-LM weights — fail-closed so
-    Molmo / Phi-4-MM / Muse cannot under-load the encoder.
+    `_language_model_names` is empty/missing.
     """
-    prefixes = _normalize_module_prefixes(language_model_names)
-    if not prefixes:
-        return None
-    shared = _shared_hf_root_module_prefixes(prefixes, weights_mapper)
-    if shared:
-        logger.warning_once(
-            "mm-encoder-only whole-shard filter not applied: LM module "
-            "prefix(es) %s share an HF checkpoint root with non-LM weights "
-            "(via WeightsMapper). Encoder-only load keeps the full "
-            "safetensors file list; finer HF prefixes or key-level "
-            "filtering can enable skip later.",
-            shared,
-        )
-        return None
-    return prefixes
+    return _normalize_module_prefixes(language_model_names) or None
 
 
 def filter_mm_encoder_only_safetensors_files(
@@ -739,8 +703,10 @@ def filter_mm_encoder_only_safetensors_files(
     Without a mapper, HF names are compared directly (identity checkpoint
     layout, e.g. Kimi `language_model.*`).
 
-    A shard is kept if it contains any non-LM key. Without an index file,
-    returns `hf_weights_files` unchanged.
+    A shard is kept if it contains any non-LM key. Without an index file, or when
+    an LM module prefix is also the HF root of non-LM keys, returns
+    `hf_weights_files` unchanged: this fails closed so Molmo / Phi-4-MM / Muse
+    cannot under-load the encoder.
     """
     prefixes = tuple(language_model_prefixes)
     if not prefixes:
@@ -766,6 +732,25 @@ def filter_mm_encoder_only_safetensors_files(
         if mapped is None:
             return False
         return any(mapped.startswith(p) for p in prefixes)
+
+    def _is_shared_root_key(key: str) -> bool:
+        mapped = _mapped_weight_name(weights_mapper, key)
+        if mapped is None or not key.startswith(prefixes):
+            return False
+        return not mapped.startswith(prefixes)
+
+    shared_root_keys = [key for key in weight_map if _is_shared_root_key(key)]
+    if shared_root_keys:
+        logger.warning_once(
+            "mm-encoder-only whole-shard filter not applied: LM module "
+            "prefix(es) %s share an HF checkpoint root with non-LM weights "
+            "(e.g. %s). Encoder-only load keeps the full safetensors file "
+            "list; finer HF prefixes or key-level filtering can enable skip "
+            "later.",
+            prefixes,
+            shared_root_keys[0],
+        )
+        return hf_weights_files
 
     def _is_lm_only(weight_file: str) -> bool:
         keys = keys_by_file.get(weight_file)
@@ -939,7 +924,19 @@ def drop_checkpoint_cache(
         return
     for checkpoint_dir in checkpoint_dirs:
         dropped_bytes = 0
-        for path in checkpoint_dir.glob("*.safetensors"):
+        paths = set(checkpoint_dir.glob("*.safetensors"))
+        # The index may list shards in a subdirectory, like tensors/.
+        try:
+            index_files = get_safetensors_files_in_index(
+                str(checkpoint_dir), SAFE_WEIGHTS_INDEX_NAME
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not read the safetensors index in %s: %s", checkpoint_dir, exc
+            )
+            index_files = None
+        paths.update(Path(f) for f in index_files or () if os.path.isfile(f))
+        for path in paths:
             try:
                 with path.open("rb") as file:
                     os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
@@ -1316,7 +1313,10 @@ def fastsafetensors_weights_iterator(
     """
     from fastsafetensors.parallel_loader import ParallelLoader
 
-    if torch.distributed.is_initialized():
+    distributed = torch.distributed.is_initialized()
+    # Other pipeline stages do not load a model built as a single stage, so
+    # collectives that include their ranks would hang.
+    if distributed and not in_single_pp_stage():
         pg = torch.distributed.group.WORLD
     else:
         pg = SingleGroup()
@@ -1327,7 +1327,7 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    nogds = pg.size() > 1
+    nogds = distributed and torch.distributed.get_world_size() > 1
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
@@ -1402,7 +1402,10 @@ def instanttensor_weights_iterator(
         # Entering here only in unit tests where the world group is not initialized.
         process_group = None
     else:
-        process_group = world_group.device_group if world_group.world_size > 1 else None
+        # Other pipeline stages do not load a model built as a single stage, so
+        # collectives that include their ranks would hang.
+        distributed = world_group.world_size > 1 and not in_single_pp_stage()
+        process_group = world_group.device_group if distributed else None
 
     gpu_weight_names: list[str] = []
     cpu_weights: dict[str, list[str]] = {}
@@ -1646,12 +1649,24 @@ def composed_weight_loader(
     return composed_loader
 
 
-# E8M0 byte 120 encodes 2**-7: with packed FP4 (|x| <= 6) or the FP8 dummy
-# range below, the dequantized weights stay small and finite.
+# E8M0 byte 120 encodes 2**-7: with packed FP4 (|x| <= 6) or full-range FP8
+# (|x| <= 448), the dequantized weights stay small and finite.
 _DUMMY_E8M0_SCALE_BYTE = 120
-# Default dummy range of 8-bit floats. +-1e-3 is below FP8 E4M3's smallest
-# normal (2**-6), so it would mostly round to zero or subnormals.
-_DUMMY_FP8_RANGE = 1.0
+
+
+def _fill_random_fp8_codes(param: torch.Tensor, generator: torch.Generator) -> None:
+    """Fill an 8-bit float tensor with random finite codes across its range.
+
+    Real checkpoints scale FP8 weights to use the whole range, and the bit
+    activity of the operands sets GEMM power draw: values from a narrow range
+    (few exponent codes) let power-capped GPUs run measurably faster than real
+    weights do.
+    """
+    raw = param.view(torch.uint8)
+    raw.random_(0, 256, generator=generator)
+    codes = torch.arange(256, dtype=torch.uint8).view(param.dtype).float()
+    for code in (~codes.isfinite()).nonzero().flatten().tolist():
+        raw[raw == code] = 0
 
 
 @torch.no_grad()
@@ -1666,9 +1681,10 @@ def initialize_single_dummy_weight(
 
     8-bit integer and packed FP4 params get random bytes (every FP4 code is
     finite), except uint8 params named like a scale, which hold E8M0 scales
-    and get a fixed exponent. Other integer params (e.g. indices) are left
-    untouched. Float params are sampled from `[low, high]`, which defaults to
-    +-1e-3, or +-1 for 8-bit floats.
+    and get a fixed exponent. 8-bit float params get random finite codes
+    across their range, as real checkpoints use it, unless `low`/`high` are
+    given. Other integer params (e.g. indices) are left untouched. Other float
+    params are sampled from `[low, high]`, which defaults to +-1e-3.
     """
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
@@ -1696,6 +1712,18 @@ def initialize_single_dummy_weight(
             param.view(torch.uint8).random_(0, 256, generator=generator)
         return
 
+    if (
+        torch.is_floating_point(param)
+        and torch.finfo(param.dtype).bits == 8
+        and low is None
+        and high is None
+        and not current_platform.is_tpu()
+    ):
+        generator = torch.Generator(device=param.device)
+        generator.manual_seed(seed)
+        _fill_random_fp8_codes(param, generator)
+        return
+
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
             # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
@@ -1705,9 +1733,7 @@ def initialize_single_dummy_weight(
         return
 
     if low is None or high is None:
-        dummy_range = 1e-3
-        if torch.finfo(param.dtype).bits < 16:
-            dummy_range = _DUMMY_FP8_RANGE
+        dummy_range = 1e-3 if torch.finfo(param.dtype).bits >= 16 else 1.0
         low = -dummy_range if low is None else low
         high = dummy_range if high is None else high
 

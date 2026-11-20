@@ -135,7 +135,7 @@ def _external_kv_tokens(base_url: str) -> float:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class OffloadingModelConfig:
     id: str
     model: str
@@ -292,7 +292,6 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
         _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib, cfg.spec_name),
-        "--trust-remote-code",
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,
     ]

@@ -491,9 +491,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = patched_processor
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        hf_model.model_name, trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(hf_model.model_name)
 
     original_generate = hf_model.model.generate
 
@@ -1039,27 +1037,10 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches the HfRunner to fix create_causal_mask API mismatch.
-
-    The PaddleOCR-VL HF model passes `inputs_embeds` to create_causal_mask,
-    but transformers renamed this parameter to `input_embeds`.
-    """
-    import sys
-
-    model_module = sys.modules.get(type(hf_model.model.model).__module__)
-    if model_module is None:
-        return hf_model
-
-    original_create_causal_mask = getattr(model_module, "create_causal_mask", None)
-    if original_create_causal_mask is None:
-        return hf_model
-
-    def patched_create_causal_mask(*args, **kwargs):
-        if "inputs_embeds" in kwargs:
-            kwargs["input_embeds"] = kwargs.pop("inputs_embeds")
-        return original_create_causal_mask(*args, **kwargs)
-
-    model_module.create_causal_mask = patched_create_causal_mask  # type: ignore[attr-defined]
+    # TODO: Remove this patch once CI uses Transformers 5.23, which defaults to False.
+    # Match the original checkpoint's position embedding interpolation.
+    embeddings = hf_model.model.model.visual.vision_model.embeddings
+    embeddings.interpolation_align_corners = False
     return hf_model
 
 
@@ -1222,7 +1203,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
 def moondream3_processor(model: str):
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    return Moondream3Processor.from_pretrained(model, trust_remote_code=True)
+    return Moondream3Processor.from_pretrained(model)
 
 
 def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
