@@ -15,7 +15,7 @@ meta:
     - thinkingmachines/Inkling-Small
   hardware:
     gb200: verified
-    h200: supported
+    h200: verified
 
 model:
   model_id: "thinkingmachines/Inkling-2-Small"
