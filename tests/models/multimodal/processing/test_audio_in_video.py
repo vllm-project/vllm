@@ -37,7 +37,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import LruKeyReplicatedSenderCache
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.multimodal.utils import get_use_audio_in_video
+from vllm.multimodal.utils import VIDEO_AUDIO_UUID_PREFIX, get_use_audio_in_video
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 
 from ....multimodal.utils import random_audio, random_video
@@ -190,6 +190,49 @@ def test_audio_in_video_partial_cache_hit(model_id: str) -> None:
     second_out = run(second)
 
     assert len(second_out["prompt_token_ids"]) == len(first_out["prompt_token_ids"])
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_partial_cache_hit_without_audio_data_reports_clear_error(
+    model_id: str,
+) -> None:
+    """A new video paired with a UUID-only audio must be rejected clearly.
+
+    The processor cache stores processed kwargs rather than raw media, so the
+    audio data needed to process the new video together with its audio is not
+    available. The request must fail with an actionable message instead of an
+    assertion deep in the processor.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        mm_processor_cache_gb=1,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = LruKeyReplicatedSenderCache(ctx.model_config)
+    video_token_id = processor.info.get_hf_config().video_token_id
+
+    processor(
+        [video_token_id],
+        mm_items=processor.info.parse_mm_data(create_mm_data(1)),
+        mm_uuid_items={"video": ["video-0"], "audio": ["audio-0"]},
+        hf_processor_mm_kwargs={"use_audio_in_video": True},
+        cache=cache,
+    )
+
+    new_video = random_video(
+        np.random.RandomState(123), min_frames=8, max_frames=9, min_wh=64, max_wh=65
+    )
+    with pytest.raises(VLLMValidationError, match="only referenced by UUID"):
+        processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data(
+                {"video": [new_video], "audio": [None]}
+            ),
+            mm_uuid_items={"video": ["video-1"], "audio": ["audio-0"]},
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+            cache=cache,
+        )
 
 
 @pytest.mark.parametrize("model_id", MODELS)
@@ -555,22 +598,33 @@ def test_nemotron_silent_video_degrades_per_video():
 
     audible_audio = load_audio_pyav(BytesIO(videos_bytes[1][1]), max_duration_s=None)
 
-    def run(mm_data, names):
+    def run(mm_data, names, audio_uuids=None):
         mm_items = processor.info.parse_mm_data(mm_data)
         out = processor(
             tokenizer.encode("<video>" * len(names), add_special_tokens=False),
             mm_items=mm_items,
             mm_uuid_items={
                 "video": [f"video-{name}" for name in names],
-                "audio": [f"audio-{name}" for name in names],
+                "audio": audio_uuids or [f"audio-{name}" for name in names],
             },
         )
         text = tokenizer.decode(out["prompt_token_ids"], skip_special_tokens=False)
         return text, out["mm_hashes"]
 
     # A silent video degrades to video-only: no audio context is injected.
-    silent_text, _ = run({"video": [silent_item], "audio": [None]}, ["silent"])
+    # The renderer marks that sentinel with a prefixed UUID.
+    silent_text, _ = run(
+        {"video": [silent_item], "audio": [None]},
+        ["silent"],
+        [VIDEO_AUDIO_UUID_PREFIX + "silent"],
+    )
     assert AUDIO_CONTEXT not in silent_text
+
+    # A `None` audio under a plain UUID references audio sent in an earlier
+    # request; it is not a silent video, and this path cannot read the data
+    # back from the cache, so it must be rejected rather than dropped.
+    with pytest.raises(VLLMValidationError, match="references an audio track by UUID"):
+        run({"video": [silent_item], "audio": [None]}, ["silent"], ["audio-silent"])
 
     # Mixed request: only the audible video contributes its audio context,
     # the silent video must not add a second one.
@@ -580,6 +634,7 @@ def test_nemotron_silent_video_degrades_per_video():
     mixed_text, mixed_hashes = run(
         {"video": [silent_item, audible_item], "audio": [None, audible_audio]},
         ["silent", "audible"],
+        [VIDEO_AUDIO_UUID_PREFIX + "silent", "audio-audible"],
     )
     assert audible_text.count(AUDIO_CONTEXT) > 0
     assert mixed_text.count(AUDIO_CONTEXT) == audible_text.count(AUDIO_CONTEXT)
