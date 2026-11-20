@@ -246,6 +246,8 @@ class SessionObjectWriter:
             try:
                 if self._error is None:
                     self._write(batch)
+                    if self._deferred and self._deferred[0][0] <= self._taken:
+                        self._remove([], self._taken + 1)
             except BaseException as error:
                 self._fail(error)
                 logger.exception("Auxiliary output object write failed.")
@@ -283,10 +285,8 @@ class SessionObjectWriter:
 
     def _write(self, batch: tuple[list[str], list[bytes] | None]) -> None:
         keys, values = batch
-        if values is not None and self._deferred and self._deferred[0][0] < self._taken:
-            self._remove([])
         if values is None:
-            self._remove(keys)
+            self._remove(keys, self._taken)
             if self._unremoved:
                 logger.warning(
                     "%d auxiliary output objects are not removed yet; first: %s",
@@ -307,7 +307,7 @@ class SessionObjectWriter:
             except BlockObjectStoreError as error:
                 attempts += 1
                 if attempts & (attempts - 1) == 0 or attempts % 32 == 0:
-                    self._remove([])
+                    self._remove([], self._taken)
                 if (
                     self._dropped
                     or self._stalled()
@@ -326,9 +326,9 @@ class SessionObjectWriter:
                     )
                     self._dropped = 0
 
-    def _remove(self, keys: list[str]) -> None:
+    def _remove(self, keys: list[str], before: int) -> None:
         deferred = []
-        while self._deferred and self._deferred[0][0] < self._taken:
+        while self._deferred and self._deferred[0][0] < before:
             deferred += self._deferred.popleft()[1]
         keys = self._unremoved + deferred + keys
         codes = self._call(self._store.remove, keys) if keys else []
@@ -350,7 +350,7 @@ class SessionObjectWriter:
         if not self._queue.unfinished_tasks:
             self._last_progress = time.monotonic()
         while True:
-            wait = not (self._dropped or self._stalled() or self._hung())
+            wait = not (self._dropped or self._stalled())
             try:
                 self._queue.put(batch, wait, _PUT_RETRY_INTERVAL_S)
                 self._enqueued += 1
@@ -361,6 +361,9 @@ class SessionObjectWriter:
                     keys, values = batch
                     if values is None:
                         self._deferred.append((self._enqueued, keys))
+                        if not self._queue.full():
+                            self._queue.put_nowait(([], None))
+                            self._enqueued += 1
                     else:
                         self._drop(keys, "the queue is full while the store fails")
                     return
@@ -486,8 +489,6 @@ class SessionObjectWriter:
 
     def close(self) -> None:
         self._closed.set()
-        if self._deferred:
-            self._queue.put(([], None))
         self._queue.put(None)
         self._thread.join()
         self._store.close()

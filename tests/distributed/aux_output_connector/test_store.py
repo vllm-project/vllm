@@ -3347,12 +3347,11 @@ def test_session_object_writer_drain_abandons_before_the_next_put_starts(
     release = threading.Event()
 
     def put(keys):
-        if keys[0] == "job/s/tail/0":
+        if keys[0] == "job/s/a":
             entered.set()
             release.wait(30)
 
     client, writer = _timed_writer(put, 600.0, 4)
-    rows = np.zeros((1, 1), dtype=np.uint8)
 
     def hung():
         release.set()
@@ -3360,18 +3359,17 @@ def test_session_object_writer_drain_abandons_before_the_next_put_starts(
         return True
 
     try:
-        writer.add_tail("job/s/tail/0", rows, {})
+        writer._put((["job/s/a", "job/s/b"], [b"a", b"b"]))
         assert entered.wait(10)
-        writer.add_tail("job/s/tail/1", rows, {})
         monkeypatch.setattr(writer, "_hung", hung)
         assert _run_within(writer.drain) is None
     finally:
         release.set()
         assert _run_within(writer.close) is None
-    assert list(client.objects) == ["job/s/tail/0"]
+    assert list(client.objects) == ["job/s/a"]
 
 
-def test_session_object_writer_sends_deferred_removals_at_close():
+def test_session_object_writer_sends_a_deferred_removal_after_the_batches_before_it():
     entered = threading.Event()
     release = threading.Event()
 
@@ -3390,10 +3388,13 @@ def test_session_object_writer_sends_deferred_removals_at_close():
         writer.add_tail("job/s/tail/2", rows, {})
         assert _run_within(lambda: writer.remove(["job/s/tail/0"])) is None
         release.set()
+        deadline = time.monotonic() + 10
+        while "job/s/tail/0" in client.objects and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert list(client.objects) == ["job/s/tail/1", "job/s/tail/2"]
     finally:
         release.set()
         assert _run_within(writer.close) is None
-    assert list(client.objects) == ["job/s/tail/1", "job/s/tail/2"]
 
 
 def test_session_object_writer_close_stops_retrying():

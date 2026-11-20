@@ -2531,7 +2531,7 @@ def test_llm_engine_releases_the_final_output_of_a_request_aborted_before_it(
     def send_input(request_type, request):
         inputs.append(request_type)
         if request_type == EngineCoreRequestType.UTILITY:
-            threading.Timer(0.2, deliver, (request[1],)).start()
+            threading.Timer(1.5, deliver, (request[1],)).start()
 
     engine, client, released = _sync_client_and_llm_engine(send_input)
     if queued:
