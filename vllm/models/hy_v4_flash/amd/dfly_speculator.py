@@ -31,7 +31,7 @@ class HYV4FlashDFlySpeculator(HYV4DFlySpeculator):
                     f"draft backend, got {layer.attn_backend.get_name()}"
                 )
             layer.attn_backend = FlashPackedSparseBackend
-            layer.impl.__class__ = FlashPackedSparseImpl
+            layer.impl.__class__ = FlashPackedSparseImpl  # type: ignore[assignment]
         if not layers:
             raise ValueError("HYV4 DFly draft has no MLA attention layers")
         return draft
