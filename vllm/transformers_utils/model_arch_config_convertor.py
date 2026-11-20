@@ -675,7 +675,7 @@ class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Mutate hf_config (like the deepseek_v4/mimo_v2 rewrites above)
         # because model-class resolution reads hf_config.architectures.
         if getattr(hf_config, "architectures", None) == [
-            "Qwen3OmniMoeForConditionalGeneration"
+            "Qwen3OmniMoeThinkerForConditionalGeneration"
         ]:
             model_path = hf_config.name_or_path
             if model_path and file_or_path_exists(
@@ -877,7 +877,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
-    "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
+    "qwen3_omni_moe_thinker": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,

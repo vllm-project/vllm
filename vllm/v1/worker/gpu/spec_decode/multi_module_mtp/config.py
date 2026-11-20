@@ -9,6 +9,8 @@ class MultiModuleMTPSpeculatorConfig(MTPSpeculatorConfig):
         "MultiModuleMTPSpeculator"
     )
     supports_pcp = False
+    # Each draft step runs its own MTP module.
+    one_token_draft_decodes = False
 
     @property
     def num_prefill_lookahead_tokens(self) -> int:
