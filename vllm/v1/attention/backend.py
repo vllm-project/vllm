@@ -643,6 +643,18 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         return cls._cudagraph_support
 
     @classmethod
+    def get_max_num_reqs(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: "VllmConfig",
+    ) -> int:
+        """Get the largest `num_reqs` that `build()` can receive.
+
+        Builders size their per-request buffers by this. A wrapper that splits
+        requests before `build()`, such as chunked local attention, raises it.
+        """
+        return vllm_config.scheduler_config.max_num_seqs
+
+    @classmethod
     def get_varlen_cudagraph_max_query_len(
         cls: type["AttentionMetadataBuilder"],
         vllm_config: "VllmConfig",

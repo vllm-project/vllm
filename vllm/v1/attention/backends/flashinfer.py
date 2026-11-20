@@ -1059,9 +1059,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         max_num_pages_per_req = cdiv(
             self.model_config.max_model_len, self.kv_cache_spec.block_size
         )
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_reqs = self.get_max_num_reqs(vllm_config)
         self.max_num_reqs = max_num_reqs
-        max_num_pages = max_num_reqs * max_num_pages_per_req
+        # Chunked local attention splits a request's pages across virtual
+        # batches, so the page count is still bounded by real requests.
+        max_num_pages = (
+            vllm_config.scheduler_config.max_num_seqs * max_num_pages_per_req
+        )
         # Persistent uniform masks keep stable addresses for CUDA graphs.
         self._decode_mask_cache: dict[tuple[int, bool], torch.Tensor] = {}
         speculative_config = vllm_config.speculative_config
