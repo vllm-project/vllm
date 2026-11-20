@@ -17,6 +17,7 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     PerRequestMetrics,
     RequestResponseMetadata,
+    parser_chat_template_kwargs,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
@@ -221,7 +222,9 @@ class OpenAIServingChat(GenerateBaseServing):
         return self.parser_cls(
             tokenizer,
             request.tools,
-            chat_template_kwargs=chat_template_kwargs,
+            chat_template_kwargs=parser_chat_template_kwargs(
+                request.extract_structured_outputs(), chat_template_kwargs
+            ),
             model_config=self.model_config,
         )
 
@@ -254,8 +257,9 @@ class OpenAIServingChat(GenerateBaseServing):
         reasoning_parser_kwargs = None
         if parser is not None and parser.reasoning_parser is not None:
             reasoning_parser_kwargs = {
-                "chat_template_kwargs": self._engine_chat_template_kwargs(
-                    chat_template_kwargs
+                "chat_template_kwargs": parser_chat_template_kwargs(
+                    request.extract_structured_outputs(),
+                    self._engine_chat_template_kwargs(chat_template_kwargs),
                 ),
             }
         return {

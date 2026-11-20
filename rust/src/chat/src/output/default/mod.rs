@@ -110,7 +110,7 @@ impl DefaultChatOutputProcessor {
                 );
             });
         }
-        let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
+        let mut parser = if let Some(parser) = Self::resolve_optional_unified_parser(
             request.tools(),
             tokenizer.clone(),
             response_template,
@@ -132,6 +132,9 @@ impl DefaultChatOutputProcessor {
 
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = Some(false);
+        }
+        if request.sampling_params.structured_outputs.is_some() {
+            parser.set_constrained_answer();
         }
         let tool_strict_level =
             tool_strict_level.unwrap_or_else(|| parser.default_tool_strict_level());
@@ -472,6 +475,71 @@ mod tests {
         assert_eq!(
             run(&none, &none, qwen3_coder_text, ChatToolChoice::None).await,
             (qwen3_coder_text.to_string(), vec![])
+        );
+    }
+
+    #[tokio::test]
+    async fn muse_commentary_is_reasoning_only_under_structured_outputs() {
+        let tokenizer = Arc::new(
+            TestTokenizer::new()
+                .with_special_token("<|start|>", 200022)
+                .with_special_token("<|message|>", 200023)
+                .with_special_token("<|eom|>", 200007)
+                .with_special_token("<|eot|>", 200008),
+        );
+        let text = " to=self<|message|>Plan.<|eom|><|start|>assistant to=commentary\
+                    <|message|>Working.<|eom|><|start|>assistant to=user<|message|>{\"a\": 1}<|eot|>";
+        let run = async |structured_outputs: Option<StructuredOutputsParams>| {
+            let mut request = ChatRequest::for_test();
+            request.sampling_params.structured_outputs = structured_outputs;
+            let muse = ParserSelection::Explicit("muse".to_string());
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer.clone(),
+                &muse,
+                &muse,
+                None,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            let decoded = stream::iter([Ok(DecodedTextEvent::TextDelta {
+                decoded: DecodedText::unattributed(text),
+                sampled: SampledDelta::default(),
+                finished: Some(Box::new(Finished {
+                    usage: vllm_llm::TokenUsage::default(),
+                    finish_reason: crate::FinishReason::Stop(None),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
+                    timestamps: Default::default(),
+                })),
+            })]);
+            let events =
+                Box::new(processor).process(decoded.boxed()).unwrap().collect::<Vec<_>>().await;
+            let Some(Ok(ChatEvent::Done { message, .. })) = events.last() else {
+                panic!("expected done");
+            };
+            (message.reasoning(), message.text())
+        };
+
+        let schema = serde_json::json!({"type": "object"});
+        for structured_outputs in [
+            StructuredOutputsParams::json(schema),
+            StructuredOutputsParams::json_object(),
+            StructuredOutputsParams::regex(r"\{.*\}"),
+            StructuredOutputsParams::choice(vec![r#"{"a": 1}"#.to_string()]),
+        ] {
+            assert_eq!(
+                run(Some(structured_outputs)).await,
+                (Some("Plan.Working.".to_string()), r#"{"a": 1}"#.to_string())
+            );
+        }
+        assert_eq!(
+            run(None).await,
+            (Some("Plan.".to_string()), r#"Working.{"a": 1}"#.to_string())
         );
     }
 

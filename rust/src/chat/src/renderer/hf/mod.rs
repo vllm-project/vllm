@@ -43,6 +43,18 @@ fn effective_template_kwargs(
     let mut kwargs = default_template_kwargs.clone();
     kwargs.extend(request.chat_options.template_kwargs.clone());
 
+    // Templates that state the requested format to the model read it. The
+    // validated request field owns the key: a client kwarg of the same name
+    // never reaches the template or the engine-core reasoning parser.
+    match &request.chat_options.response_format {
+        Some(response_format) => {
+            kwargs.insert("response_format".to_string(), response_format.clone());
+        }
+        None => {
+            kwargs.remove("response_format");
+        }
+    }
+
     if let Some(reasoning_effort) = &request.chat_options.reasoning_effort {
         kwargs.insert(
             "reasoning_effort".to_string(),
@@ -1646,6 +1658,42 @@ mod tests {
         let rendered = renderer.render(&request).unwrap().prompt;
 
         assert_eq!(rendered, Prompt::Text("True|x|True|auto".to_string()));
+    }
+
+    #[test]
+    fn chat_template_receives_the_request_response_format() {
+        let template = "{% if response_format is defined %}{{ response_format.type }}:\
+                        {{ response_format.json_schema.schema | tojson }}{% else %}none{% endif %}";
+        let renderer = HfChatRenderer::new(
+            Some(template.to_string()),
+            HashMap::new(),
+            None,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        assert_eq!(
+            renderer.render(&request).unwrap().prompt,
+            Prompt::Text("none".to_string())
+        );
+
+        // A client kwarg alone is dropped, so the parser never reads it either.
+        request.chat_options.template_kwargs.insert(
+            "response_format".to_string(),
+            Value::String("client".to_string()),
+        );
+        let rendered = renderer.render(&request).unwrap();
+        assert_eq!(rendered.prompt, Prompt::Text("none".to_string()));
+        assert!(!rendered.effective_template_kwargs.contains_key("response_format"));
+
+        request.chat_options.response_format = Some(serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {"name": "a", "schema": {"type": "object"}},
+        }));
+        assert_eq!(
+            renderer.render(&request).unwrap().prompt,
+            Prompt::Text(r#"json_schema:{"type": "object"}"#.to_string())
+        );
     }
 
     #[test]

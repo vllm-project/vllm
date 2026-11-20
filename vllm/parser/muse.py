@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Muse Spark parser: recipient-routed messages parsed by one state machine.
+"""Muse parser (Muse Glimmer and Muse Spark Open): recipient-routed messages
+parsed by one state machine.
 
-Muse Spark writes an assistant turn as a sequence of messages::
+Muse writes an assistant turn as a sequence of messages::
 
     to=self<|message|>...reasoning...<|eom|><|start|>assistant
+    to=commentary<|message|>...visible update...<|eom|><|start|>assistant
     to=get_weather<|message|><atem:function_calls>
     <atem:invoke name="get_weather">
     <atem:parameter name="city">Paris</atem:parameter>
@@ -13,9 +15,16 @@ Muse Spark writes an assistant turn as a sequence of messages::
     to=user<|message|>...final answer...<|eot|>
 
 The recipient before `<|message|>` routes each body: `self` or none is
-reasoning, `user` and `commentary` are content, `developer` is dropped, and
-any other recipient is a tool. The model may write `to=NAME<|message|>` right
-after a body without `<|eom|>`, so a trailing `to=NAME` in a body is held back.
+reasoning, `commentary` is content, `user` is content and ends reasoning,
+and any other recipient is a tool. Muse Glimmer may
+also write `<atem:function_calls>` inside its answer; that is a tool call too,
+while the same text in reasoning stays reasoning. Reasoning ends at the answer
+or at a tool message. For structured output (`is_reasoning_end*`) only the
+answer counts: the grammar constrains the `to=user` body, and a turn that ends
+in a tool call stays unconstrained. With
+structured outputs, `content` is that answer alone and commentary is returned
+as reasoning. The model may write `to=NAME<|message|>` right after a
+body without `<|eom|>`, so a trailing `to=NAME` in a body is held back.
 """
 
 from __future__ import annotations
@@ -27,7 +36,6 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -37,7 +45,7 @@ from vllm.parser.engine.parser_engine_config import (
 )
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.schema_types import ParameterTypesCache, convert_value
-from vllm.tool_parsers.utils import find_tool_name, get_function_tools
+from vllm.tool_parsers.utils import find_tool_name
 from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
@@ -58,20 +66,25 @@ _PARAMETER_RE = re.compile(
     r'<atem:parameter\b[^<>]*?\bname="([^"]+)"[^<>]*?>(.*?)</atem:parameter>',
     re.DOTALL,
 )
+_FUNCTION_CALLS = "<atem:function_calls>"
 _INVOKE_END = "</atem:invoke>"
 _BODY_STATES = frozenset({ParserState.CONTENT, ParserState.REASONING})
 _MAX_HEADER_TOKENS = 64
 
 
-def _route_header(header: str) -> tuple[str, str | None]:
+def _route_header(
+    header: str, commentary_is_reasoning: bool = False
+) -> tuple[str, str | None]:
     match = _RECIPIENT_RE.search(header)
     recipient = match.group(1) if match else None
-    if recipient in (None, "self"):
+    if recipient in (None, "self") or (
+        recipient == "commentary" and commentary_is_reasoning
+    ):
         return "REASONING_HEADER", recipient
-    if recipient in ("user", "commentary"):
+    if recipient == "user":
+        return "ANSWER_HEADER", recipient
+    if recipient == "commentary":
         return "CONTENT_HEADER", recipient
-    if recipient == "developer":
-        return "DROPPED_HEADER", recipient
     return "TOOL_HEADER", recipient
 
 
@@ -87,8 +100,7 @@ def muse_config() -> ParserEngineConfig:
     routes = {
         "REASONING_HEADER": Transition(ParserState.REASONING),
         "CONTENT_HEADER": Transition(ParserState.CONTENT),
-        # The dropped body is buffered as header text and discarded with it.
-        "DROPPED_HEADER": Transition(ParserState.MESSAGE_HEADER),
+        "ANSWER_HEADER": Transition(ParserState.CONTENT, (EventType.REASONING_END,)),
         "TOOL_HEADER": Transition(
             ParserState.TOOL_PREAMBLE, (EventType.REASONING_END,)
         ),
@@ -99,20 +111,25 @@ def muse_config() -> ParserEngineConfig:
         "EOT": Transition(ParserState.CONTENT),
     }
     markers = {"START": START, "MSG": MESSAGE, "EOM": EOM, "EOT": EOT}
+    transitions = {
+        (state, terminal): transition
+        for state in (
+            ParserState.MESSAGE_HEADER,
+            ParserState.REASONING,
+            ParserState.CONTENT,
+            ParserState.TOOL_PREAMBLE,
+        )
+        for terminal, transition in routes.items()
+    }
+    # A tool call inside the answer body. Elsewhere the text stays in its body.
+    transitions[(ParserState.CONTENT, "TOOL_START")] = Transition(
+        ParserState.TOOL_PREAMBLE, (EventType.REASONING_END,)
+    )
     return ParserEngineConfig(
         name="muse",
-        terminals=markers,
+        terminals={**markers, "TOOL_START": _FUNCTION_CALLS},
         token_id_terminals=markers,
-        transitions={
-            (state, terminal): transition
-            for state in (
-                ParserState.MESSAGE_HEADER,
-                ParserState.REASONING,
-                ParserState.CONTENT,
-                ParserState.TOOL_PREAMBLE,
-            )
-            for terminal, transition in routes.items()
-        },
+        transitions=transitions,
         initial_state=ParserState.MESSAGE_HEADER,
         stream_arg_deltas=False,
         tool_args_json=False,
@@ -121,6 +138,8 @@ def muse_config() -> ParserEngineConfig:
 
 
 class MuseStreamingParserEngine(StreamingParserEngine):
+    commentary_is_reasoning = False
+
     def reset(self, initial_state: ParserState | None = None) -> None:
         super().reset(initial_state)
         self._header_tail = ""
@@ -128,12 +147,29 @@ class MuseStreamingParserEngine(StreamingParserEngine):
         self._tool_body = ""
         self._tool_body_pos = 0
         self._routed_header = False
+        self._handed_off = False
+        # The tool pass starts in content: what the reasoning pass hands it.
+        self._in_answer = initial_state is ParserState.CONTENT
 
     def finish(self) -> list[SemanticEvent]:
         events = self._process_scanner_items(self._scanner.flush_pending())
         events.extend(self._process_lex_tokens(self._lexer.flush()))
         events.extend(self._flush_header_tail())
         events.extend(self._flush_unframed_text())
+        if (
+            self.skip_tool_parsing
+            and self._handed_off
+            and self.state is ParserState.MESSAGE_HEADER
+        ):
+            # After the hand-off, a header still waiting for its `<|message|>`
+            # goes to the tool pass, which routes it.
+            events.append(
+                SemanticEvent(
+                    EventType.TEXT_CHUNK,
+                    value=START + self._message_header_buffer,
+                    token_count=self._message_header_token_count,
+                )
+            )
         self._message_header_buffer = ""
         self._message_header_token_count = 0
         self._tool_body = ""
@@ -147,12 +183,17 @@ class MuseStreamingParserEngine(StreamingParserEngine):
         events: list[SemanticEvent] = []
         if terminal == "MSG":
             self._routed_header = True
-            terminal, recipient = _route_header(self._take_header(events))
+            terminal, recipient = _route_header(
+                self._take_header(events), self.commentary_is_reasoning
+            )
+            self._in_answer = terminal == "ANSWER_HEADER"
             # The tool pass routes the forwarded header again.
             if recipient is not None:
                 value = f"to={recipient}{value}"
         else:
             events.extend(self._flush_unframed_text())
+            if terminal == "TOOL_START" and not self._in_answer:
+                return events + self._emit_for_state(value, token_count)
         events.extend(self._flush_header_tail())
         if (
             self.state is ParserState.TOOL_PREAMBLE
@@ -161,6 +202,7 @@ class MuseStreamingParserEngine(StreamingParserEngine):
             self._tool_body = ""
             self._tool_body_pos = 0
         events.extend(super()._on_terminal(terminal, value, token_count))
+        self._handed_off |= any(e.type is EventType.REASONING_END for e in events)
         return events
 
     def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
@@ -203,7 +245,9 @@ class MuseStreamingParserEngine(StreamingParserEngine):
         token_count = self._message_header_token_count
         self._message_header_buffer = ""
         self._message_header_token_count = 0
+        # Text outside any message is the answer.
         self.state = ParserState.CONTENT
+        self._in_answer = True
         return self._emit_for_state(text, token_count) + self._flush_header_tail()
 
     def _flush_header_tail(self) -> list[SemanticEvent]:
@@ -246,6 +290,10 @@ class MuseParser(ParserEngine):
     ) -> None:
         kwargs.setdefault("parser_engine_config", muse_config())
         super().__init__(tokenizer, tools, **kwargs)
+        assert isinstance(self._engine, MuseStreamingParserEngine)
+        self._engine.commentary_is_reasoning = (
+            kwargs.get("chat_template_kwargs") or {}
+        ).get("has_structured_outputs", False)
         self._has_reasoning = True
         self._reasoning_ended = False
         self._arg_converter = self._convert_args
@@ -276,7 +324,8 @@ class MuseParser(ParserEngine):
         return False
 
     def _header_ends_reasoning(self, input_ids: Sequence[int], pos: int) -> bool | None:
-        """True for a tool message, False for another role's message, else None."""
+        """True for the answer header, False for another role's message (the
+        prompt's last turn), else None."""
         start = max(pos - _MAX_HEADER_TOKENS, 0)
         boundary = rfind_tokens(input_ids, self._boundary_ids, start, pos)
         begin = boundary + 1 if boundary >= 0 else start
@@ -287,57 +336,21 @@ class MuseParser(ParserEngine):
             and not header.startswith("assistant")
         ):
             return False
-        return True if _route_header(header)[0] == "TOOL_HEADER" else None
+        return True if _route_header(header)[0] == "ANSWER_HEADER" else None
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return []
-
-    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        """Count reasoning-body tokens from the ids alone.
-
-        Counting streamed text events undercounts when the detokenizer holds
-        text back (stop strings, partial UTF-8) while ids advance.
-        """
-        count = 0
-        header_start = 0
-        in_reasoning = False
-        for i, token_id in enumerate(token_ids):
-            if token_id in self._message_ids:
-                header = self.model_tokenizer.decode(list(token_ids[header_start:i]))
-                in_reasoning = _route_header(header)[0] == "REASONING_HEADER"
-                header_start = i + 1
-            elif token_id in self._boundary_ids:
-                in_reasoning = False
-                header_start = i + 1
-            elif in_reasoning:
-                count += 1
-        return count
 
     def _handle_tool_name(self, event: SemanticEvent) -> None:
         self._tool_slots[event.tool_index].name += self._registered_name(event.value)
 
     def _registered_name(self, name: str) -> str:
-        """Map `NAME.<suffix>` back to a registered bare `NAME`.
-
-        The chat template renders a bare tool as `"NAME.*"`, so the model may
-        fill in any suffix (`Bash.Bash`, `Bash.command`, `Glob.`). The doubled
-        form always collapses; other suffixes collapse only when no registered
-        name lives under `NAME.`, where the suffix may name a missing sibling.
-        """
         if not self._tools or find_tool_name(self._tools, name):
             return name
         head, sep, tail = name.partition(".")
-        if not sep or not find_tool_name(self._tools, head):
-            return name
-        names = (
-            tool.function.name
-            if isinstance(tool, ChatCompletionToolsParam)
-            else tool.name
-            for tool in get_function_tools(self._tools)
-        )
-        if head != tail and any(n.startswith(f"{head}.") for n in names):
-            return name
-        return head
+        if sep and head == tail and find_tool_name(self._tools, head):
+            return head
+        return name
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
         match = _INVOKE_RE.match(raw_args)

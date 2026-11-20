@@ -64,8 +64,10 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MAX,
     PRIORITY_MIN,
+    JsonSchemaResponseFormat,
     MMPayload,
     PerRequestMetrics,
+    ResponseFormat,
     StopParam,
     TopLogprobsParam,
     resolve_return_mm_kwargs_alias,
@@ -528,6 +530,24 @@ class ResponsesRequest(OpenAIBaseModel):
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
             parallel_tool_calls=self.parallel_tool_calls is not False,
+            response_format=self.chat_response_format(),
+        )
+
+    def chat_response_format(self) -> ResponseFormat | None:
+        """`text.format` in the Chat Completions `response_format` shape."""
+        fmt = None if self.text is None else self.text.format
+        if fmt is None or fmt.type == "text":
+            return None
+        if fmt.type == "json_object":
+            return ResponseFormat(type="json_object")
+        return ResponseFormat(
+            type="json_schema",
+            json_schema=JsonSchemaResponseFormat(
+                name=fmt.name,
+                description=fmt.description,
+                schema=fmt.schema_,
+                strict=fmt.strict,
+            ),
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

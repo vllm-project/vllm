@@ -185,6 +185,18 @@ AnyResponseFormat: TypeAlias = (
 )
 
 
+def parser_chat_template_kwargs(
+    structured_outputs: StructuredOutputsParams | None,
+    chat_template_kwargs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Parsers read whether the request constrains its output with the other
+    per-request kwargs; it replaces any client-supplied kwarg of the same name."""
+    return {
+        **(chat_template_kwargs or {}),
+        "has_structured_outputs": structured_outputs is not None,
+    }
+
+
 def structured_outputs_from_response_format(
     structured_outputs: StructuredOutputsParams | None,
     response_format: AnyResponseFormat | None,

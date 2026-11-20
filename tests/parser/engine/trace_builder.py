@@ -1199,86 +1199,6 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
-# ── Muse Spark (recipient-routed messages, ATEM tool calls) ──────────
-
-_MUSE_VOCAB: dict[str, int] = {
-    "<|eom|>": 200007,
-    "<|eot|>": 200008,
-    "<|start|>": 200022,
-    "<|message|>": 200023,
-}
-
-
-def _muse_atem_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
-
-
-def _muse_message(
-    segs: list[tuple[str, bool]], recipient: str, body: str, end: str
-) -> None:
-    if segs:
-        segs.extend([("<|start|>", True), ("assistant", False)])
-    segs.extend([(f" to={recipient}", False), ("<|message|>", True)])
-    if body:
-        segs.append((body, False))
-    segs.append((end, True))
-
-
-def _muse_segments(scenario: Scenario) -> list[tuple[str, bool]]:
-    segs: list[tuple[str, bool]] = []
-    tool_calls = scenario.tool_calls
-    if scenario.reasoning is not None:
-        _muse_message(segs, "self", scenario.reasoning, "<|eom|>")
-    if tool_calls is not None and not tool_calls:
-        _muse_message(
-            segs,
-            "functions",
-            "<atem:function_calls>\n</atem:function_calls>",
-            "<|eom|>",
-        )
-    if scenario.content is not None:
-        if tool_calls:
-            _muse_message(segs, "commentary", scenario.content, "<|eom|>")
-        else:
-            _muse_message(segs, "user", scenario.content, "<|eot|>")
-    for i, tc in enumerate(tool_calls or []):
-        parameters = "".join(
-            f'<atem:parameter name="{key}">{_muse_atem_value(value)}</atem:parameter>\n'
-            for key, value in tc.arguments.items()
-        )
-        body = (
-            f'<atem:function_calls>\n<atem:invoke name="{tc.name}">\n'
-            f"{parameters}</atem:invoke>\n</atem:function_calls>"
-        )
-        end = "<|eot|>" if i == len(tool_calls) - 1 else "<|eom|>"
-        _muse_message(segs, tc.name, body, end)
-    return segs
-
-
-def _build_muse(scenario: Scenario, validate: bool = True) -> Sample:
-    prompt_token_ids = None
-    if scenario.after_tool_response:
-        prompt_token_ids = [_MUSE_VOCAB["<|eot|>"], _MUSE_VOCAB["<|start|>"]]
-    sample = _make_sample(
-        sample_id=f"muse-{scenario.id}",
-        description=scenario.description,
-        vocab=_MUSE_VOCAB,
-        segments=_muse_segments(scenario),
-        expected_reasoning=scenario.reasoning,
-        expected_content=_qwen3_expected_content(scenario),
-        expected_tool_calls=_expected_tc(scenario),
-        tools=_expected_tools(scenario),
-        prompt_token_ids=prompt_token_ids,
-    )
-    if validate:
-        _validate_sample(sample, MuseParser)
-    return sample
-
-
 # ── PLaMo3 (literal nested tool-request wrappers) ───────────────────
 
 _PLAMO3_MARKERS = (
@@ -1376,6 +1296,74 @@ def _build_ripple(scenario: Scenario, validate: bool = True) -> Sample | None:
     )
     if validate:
         _validate_sample(sample, RippleParser)
+    return sample
+
+
+# ── Muse (recipient-routed messages; Glimmer and Spark Open) ─────────────
+
+_MUSE_VOCAB: dict[str, int] = {
+    "<|start|>": 200022,
+    "<|message|>": 200023,
+    "<|eom|>": 200007,
+    "<|eot|>": 200008,
+}
+
+
+def _muse_message(recipient: str, body: list[tuple[str, bool]], end: str):
+    return [(f" to={recipient}", False), ("<|message|>", True), *body, (end, True)]
+
+
+def _muse_segments(scenario: Scenario) -> list[tuple[str, bool]] | None:
+    if scenario.tool_calls == [] or (
+        scenario.content is not None
+        and scenario.tool_calls
+        and not scenario.content.strip()
+    ):
+        # Muse never writes an empty tool message or a whitespace-only update.
+        return None
+    messages: list[list[tuple[str, bool]]] = []
+    if scenario.reasoning is not None:
+        messages.append(_muse_message("self", [(scenario.reasoning, False)], "<|eom|>"))
+    for tc in scenario.tool_calls or []:
+        args = "".join(
+            f'<atem:parameter name="{key}">{_qwen3_arg_value(value)}</atem:parameter>'
+            for key, value in tc.arguments.items()
+        )
+        body = (
+            f'<atem:function_calls><atem:invoke name="{tc.name}">{args}'
+            "</atem:invoke></atem:function_calls>"
+        )
+        messages.append(_muse_message(tc.name, [(body, False)], "<|eom|>"))
+    if scenario.content is not None:
+        # Content before a tool call is a visible update; otherwise the answer.
+        recipient = "commentary" if scenario.tool_calls else "user"
+        end = "<|eom|>" if scenario.tool_calls else "<|eot|>"
+        update = _muse_message(recipient, [(scenario.content, False)], end)
+        messages.insert(1 if scenario.reasoning is not None else 0, update)
+    segs: list[tuple[str, bool]] = []
+    for i, message in enumerate(messages):
+        if i:
+            segs += [("<|start|>", True), ("assistant", False)]
+        segs += message
+    return segs
+
+
+def _build_muse(scenario: Scenario, validate: bool = True) -> Sample | None:
+    segments = _muse_segments(scenario)
+    if segments is None:
+        return None
+    sample = _make_sample(
+        sample_id=f"muse-{scenario.id}",
+        description=scenario.description,
+        vocab=_MUSE_VOCAB,
+        segments=segments,
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=scenario.content,
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, MuseParser)
     return sample
 
 
@@ -1479,12 +1467,12 @@ _BUILDERS: dict[str, Any] = {
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
     "mimo": _build_mimo,
+    "muse": _build_muse,
     "step3p5": _build_step3p5,
     "inkling": _build_inkling,
     "plamo3": _build_plamo3,
     "ripple": _build_ripple,
     "zaya": _build_zaya,
-    "muse": _build_muse,
 }
 
 

@@ -1,54 +1,143 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the engine-based Muse Spark parser, streaming and non-streaming."""
+"""Muse parser (Muse Glimmer and Muse Spark Open): recipient-routed messages.
+
+Covers routing in both parse paths, and where the structured output grammar
+starts: at the `to=user` answer header, not at a reasoning, commentary or tool
+header, so a turn that ends in a tool call is not forced into the schema.
+"""
 
 import json
 
 import pytest
 
+from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.replay_harness import (
-    MockTokenizer,
+    _test_request,
     collect_output,
     replay_streaming,
-    replay_with_text_holdback,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
+from vllm.entrypoints.generate.base.protocol import parser_chat_template_kwargs
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.engine.registered_adapters import (
+    MuseParserToolAdapter,
 )
+from vllm.parser.muse import MuseParser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParserManager
+from vllm.reasoning.muse_engine_reasoning_parser import MuseEngineReasoningParser
+from vllm.tool_parsers import ToolParserManager
 
-EOM, EOT, START, MESSAGE = "<|eom|>", "<|eot|>", "<|start|>", "<|message|>"
-VOCAB = {EOM: 200007, EOT: 200008, START: 200022, MESSAGE: 200023}
-H = f"{START}assistant"
-
-
-def _tool(name: str, properties: dict | None = None) -> dict:
-    return {
+VOCAB = {
+    "<|start|>": 200022,
+    "<|message|>": 200023,
+    "<|eom|>": 200007,
+    "<|eot|>": 200008,
+}
+JSON_FORMAT = {"type": "json_schema", "json_schema": {"name": "a", "schema": {}}}
+TOOLS = [
+    {
         "type": "function",
         "function": {
-            "name": name,
-            "parameters": {"type": "object", "properties": properties or {}},
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
         },
-    }
+    },
+]
 
 
-def _call(name: str, emitted: str | None = None, **params: str) -> str:
-    body = "".join(
-        f'<atem:parameter name="{key}">{value}</atem:parameter>\n'
-        for key, value in params.items()
+def _msg(recipient: str, body: str, end: str = "<|eom|>") -> str:
+    return f" to={recipient}<|message|>{body}{end}"
+
+
+def _turn(*messages: str) -> str:
+    return "<|start|>assistant".join(messages)
+
+
+def _call(city: str) -> str:
+    return _msg(
+        "get_weather",
+        '<atem:function_calls><atem:invoke name="get_weather">'
+        f'<atem:parameter name="city">{city}</atem:parameter>'
+        "</atem:invoke></atem:function_calls>",
     )
-    return (
-        f" to={emitted or name}{MESSAGE}<atem:function_calls>\n"
-        f'<atem:invoke name="{emitted or name}">\n{body}</atem:invoke>\n'
-        "</atem:function_calls>"
-    )
+
+
+# (model output, reasoning, content, tool-call cities)
+CASES = {
+    "answer": (_msg("user", "391.", "<|eot|>"), "", "391.", []),
+    "reasoning_answer": (
+        _turn(_msg("self", "17*23."), _msg("user", "391.", "<|eot|>")),
+        "17*23.",
+        "391.",
+        [],
+    ),
+    "commentary_answer": (
+        _turn(
+            _msg("self", "Plan."),
+            _msg("commentary", "Working. "),
+            _msg("user", "391.", "<|eot|>"),
+        ),
+        "Plan.",
+        "Working. 391.",
+        [],
+    ),
+    "reasoning_tool": (
+        _turn(_msg("self", "Need the tool."), _call("Paris")),
+        "Need the tool.",
+        "",
+        ["Paris"],
+    ),
+    # Muse Glimmer may write the call inside its answer.
+    "tool_in_answer": (
+        _turn(
+            _msg("self", "Need the tool."),
+            _msg("user", "Checking." + _call("Paris").split("<|message|>")[1]),
+        ),
+        "Need the tool.",
+        "Checking.",
+        ["Paris"],
+    ),
+    "tool_text_in_reasoning": (
+        _turn(
+            _msg("self", "Maybe <atem:function_calls> later."),
+            _msg("user", "No call.", "<|eot|>"),
+        ),
+        "Maybe <atem:function_calls> later.",
+        "No call.",
+        [],
+    ),
+    "tool_then_more_reasoning": (
+        _turn(
+            _msg("self", "Plan."),
+            _call("Paris"),
+            _msg("self", "Again."),
+            _call("Rome"),
+        ),
+        "Plan.Again.",
+        "",
+        ["Paris", "Rome"],
+    ),
+    "answer_then_tool": (
+        _turn(_msg("user", "A"), _call("Paris")),
+        "",
+        "A",
+        ["Paris"],
+    ),
+    "truncated_header": (
+        _msg("self", "Plan.") + "<|start|>assistant to=us",
+        "Plan.",
+        "",
+        [],
+    ),
+}
 
 
 def _tokens(text: str) -> list[tuple[int, str]]:
-    tokens: list[tuple[int, str]] = []
-    i = 0
+    tokens, i = [], 0
     while i < len(text):
         marker = next((m for m in VOCAB if text.startswith(m, i)), None)
         if marker is not None:
@@ -60,153 +149,170 @@ def _tokens(text: str) -> list[tuple[int, str]]:
     return tokens
 
 
-def _muse_parser(tokens: list[tuple[int, str]], tools: list[dict] | None = None):
-    parser_cls = ParserManager.get_parser(
+def _ids(text: str) -> list[int]:
+    return [token_id for token_id, _ in _tokens(text)]
+
+
+PROMPT = _ids("<|start|>user<|message|>hi<|eot|><|start|>assistant")
+
+
+@pytest.fixture
+def tokenizer():
+    return make_mock_tokenizer(VOCAB)
+
+
+@pytest.fixture
+def parser_cls():
+    return ParserManager.get_parser(
         tool_parser_name="muse", reasoning_parser_name="muse", enable_auto_tools=True
     )
-    assert parser_cls is not None
-    tool_params = [ChatCompletionToolsParam.model_validate(t) for t in tools or []]
-    return parser_cls(MockTokenizer(dict(VOCAB), tokens), tool_params or None)
 
 
-def _parse(
-    raw: str, chunk: int | None, tools: list[dict] | None = None
-) -> tuple[str, str, list[tuple[str, dict]]]:
-    """Return reasoning, content and calls; `chunk=None` parses non-streaming."""
-    tokens = _tokens(raw)
-    parser = _muse_parser(tokens, tools)
-    if chunk is None:
-        request = ChatCompletionRequest(
-            model="muse", messages=[{"role": "user", "content": "hi"}], tools=tools
+def test_parser_names_resolve_to_engine_adapters():
+    for name in ("muse", "musespark"):
+        assert issubclass(
+            ToolParserManager.get_tool_parser(name), MuseParserToolAdapter
         )
-        reasoning, content, calls = parser.parse(
-            raw,
-            request,
-            enable_auto_tools=True,
-            model_output_token_ids=[tid for tid, _ in tokens],
+        assert (
+            ReasoningParserManager.get_reasoning_parser(name)
+            is MuseEngineReasoningParser
         )
-        found = [(c.name, json.loads(c.arguments)) for c in calls or []]
-        return reasoning or "", content or "", found
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_parse(parser_cls, tokenizer, case):
+    text, reasoning, content, cities = CASES[case]
+    parsed_reasoning, parsed_content, tool_calls = parser_cls(tokenizer).parse(
+        text, _test_request(TOOLS), enable_auto_tools=True
+    )
+    assert (parsed_reasoning or "") == reasoning
+    assert (parsed_content or "") == content
+    assert [json.loads(tc.arguments)["city"] for tc in tool_calls or []] == cities
+
+
+@pytest.mark.parametrize("chunk_size", range(1, 24))
+@pytest.mark.parametrize("case", CASES)
+def test_streaming_matches_parse(parser_cls, tokenizer, case, chunk_size):
+    text, reasoning, content, cities = CASES[case]
     output = collect_output(
         replay_streaming(
-            parser, tokens, chunk_size=chunk, finished_on_last=True, tools=tools
+            parser_cls(tokenizer),
+            _tokens(text),
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=TOOLS,
         )
     )
-    found = [(c["name"], json.loads(c["arguments"])) for c in output.tool_calls]
-    return output.reasoning, output.content, found
+    assert output.reasoning == reasoning
+    assert output.content == content
+    assert [json.loads(tc["arguments"])["city"] for tc in output.tool_calls] == cities
 
 
-MODES = pytest.mark.parametrize("chunk", [1, 3, None], ids=["s1", "s3", "full"])
-
-
-@MODES
-@pytest.mark.parametrize(
-    ("raw", "reasoning", "content"),
-    [
-        (
-            f" to=self{MESSAGE}Plan.{EOM}{H} to=user{MESSAGE}Done.{EOT}",
-            "Plan.",
-            "Done.",
-        ),
-        (f" to=developer{MESSAGE}internal{EOM}{H} to=user{MESSAGE}Ok.", "", "Ok."),
-        (f" to=commentary{MESSAGE}Wait. {EOM}{H} to=user{MESSAGE}Ok.", "", "Wait. Ok."),
-        (f" to=self{MESSAGE}Think. to=user{MESSAGE}Done.{EOT}", "Think. ", "Done."),
-        ("Plain text.", "", "Plain text."),
-    ],
-    ids=["self-user", "developer", "commentary", "missing-eom", "unframed"],
-)
-def test_recipient_routes_body(chunk, raw, reasoning, content):
-    assert _parse(raw, chunk) == (reasoning, content, [])
-
-
-@MODES
-def test_tool_header_after_body_without_eom_keeps_call(chunk):
-    raw = f" to=self{MESSAGE}Need the time." + _call("time_now") + EOT
-    assert _parse(raw, chunk, [_tool("time_now")]) == (
-        "Need the time. ",
-        "",
-        [("time_now", {})],
-    )
-
-
-@MODES
-def test_atem_quoted_in_answer_is_not_a_call(chunk):
-    quoted = _call("get_weather", city="Rome").split(MESSAGE, 1)[1]
-    raw = f" to=user{MESSAGE}Write {quoted} to call it.{EOT}"
-    assert _parse(raw, chunk, [_tool("get_weather")])[2] == []
-
-
-@MODES
-def test_arguments_follow_the_registered_tool(chunk):
-    tool = _tool("echo", {"text": {"type": "string"}, "count": {"type": "integer"}})
-    raw = _call("echo", "echo.echo", text="25", count="25") + EOT
-    assert _parse(raw, chunk, [tool])[2] == [("echo", {"text": "25", "count": 25})]
-
-
-@MODES
-@pytest.mark.parametrize("emitted", ["Bash.command", "Bash.execute", "Bash."])
-def test_bare_tool_name_with_any_suffix_collapses(chunk, emitted):
-    tool = _tool("Bash", {"timeout": {"type": "integer"}})
-    raw = _call("Bash", emitted, timeout="5") + EOT
-    assert _parse(raw, chunk, [tool])[2] == [("Bash", {"timeout": 5})]
-
-
-@MODES
-def test_suffix_is_kept_when_a_sibling_is_registered(chunk):
-    raw = _call("Bash", "Bash.fetch") + EOT
-    tools = [_tool("Bash"), _tool("Bash.run")]
-    assert _parse(raw, chunk, tools)[2] == [("Bash.fetch", {})]
-
-
-def test_reasoning_ends_only_at_a_tool_header_of_the_current_turn():
-    prompt = _tokens(
-        f"{H}{_call('get_weather', city='Paris')}{EOT}"
-        f"{START}tool get_weather{MESSAGE}21{EOT}{H}"
-    )
-    output = _tokens(f" to=self{MESSAGE}Check.{EOM}{H}" + _call("time_now"))
-    reasoner_cls = ReasoningParserManager.get_reasoning_parser("muse")
-    reasoner = reasoner_cls(MockTokenizer(dict(VOCAB), prompt + output))
-    ids = [tid for tid, _ in prompt + output]
-    assert not reasoner.is_reasoning_end(ids[: len(prompt)])
-    ended = [
-        reasoner.is_reasoning_end_streaming(ids[: end + 1], ids[end : end + 1])
-        for end in range(len(prompt), len(ids))
-    ]
-    tool_message = len(ids) - ids[::-1].index(VOCAB[MESSAGE]) - 1
-    assert [i for i, e in enumerate(ended) if e] == [tool_message - len(prompt)]
-
-
-def test_reasoning_tokens_include_reasoning_after_tool_call():
-    tokens = _tokens(
-        f" to=self{MESSAGE}ab{EOM}{H}"
-        + _call("time_now")
-        + f"{EOM}{H} to=self{MESSAGE}cde{EOM}{H} to=user{MESSAGE}Ok.{EOT}"
-    )
-    parser = _muse_parser(tokens)
-    replay_streaming(parser, tokens, chunk_size=1, finished_on_last=True)
-    assert parser.count_reasoning_tokens([tid for tid, _ in tokens]) == len("abcde")
-
-
-def test_reasoning_tokens_count_text_held_back_by_the_detokenizer():
-    tokens = _tokens(f" to=self{MESSAGE}abcd{EOM}{H} to=user{MESSAGE}Ok.{EOT}")
-    parser = _muse_parser(tokens)
-    replay_with_text_holdback(parser, tokens, text_delay=3)
-    assert parser.count_reasoning_tokens([tid for tid, _ in tokens]) == len("abcd")
-
-
-def test_parallel_tool_calls_survive_detokenizer_holdback():
-    tools = [_tool("get_weather", {"city": {"type": "string"}})]
-    tokens = _tokens(
-        _call("get_weather", city="Paris")
-        + f"{EOM}{H}"
-        + _call("get_weather", city="Rome")
-        + EOT
-    )
-    parser = _muse_parser(tokens, tools)
+def test_header_pending_when_reasoning_ends(parser_cls, tokenizer):
+    # The first batch ends reasoning at the tool header and stops inside the
+    # next message's header; the tool pass must still route that header.
+    text = CASES["tool_then_more_reasoning"][0]
+    tokens = _tokens(text)
+    split = [i for i, (t, _) in enumerate(tokens) if t == VOCAB["<|message|>"]][2]
     output = collect_output(
-        replay_with_text_holdback(parser, tokens, text_delay=3, tools=tools)
+        replay_streaming(
+            parser_cls(tokenizer),
+            tokens,
+            chunk_size=split,
+            finished_on_last=True,
+            tools=TOOLS,
+        )
     )
-    assert [(c["name"], json.loads(c["arguments"])) for c in output.tool_calls] == [
-        ("get_weather", {"city": "Paris"}),
-        ("get_weather", {"city": "Rome"}),
+    assert (output.reasoning, output.content) == ("Plan.Again.", "")
+    assert [json.loads(tc["arguments"])["city"] for tc in output.tool_calls] == [
+        "Paris",
+        "Rome",
     ]
+
+
+@pytest.mark.parametrize("chunk_size", range(1, 12))
+def test_streaming_without_tool_parser(tokenizer, chunk_size):
+    # Without --enable-auto-tool-choice the reasoning parser alone parses
+    # every message, including those after the answer starts.
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="muse")
+    assert parser_cls is not None
+    text = _turn(_msg("self", "Plan."), _msg("user", "A"), _msg("user", "B", "<|eot|>"))
+    output = collect_output(
+        replay_streaming(
+            parser_cls(tokenizer),
+            _tokens(text),
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            prompt_token_ids=PROMPT,
+        )
+    )
+    assert (output.reasoning, output.content) == ("Plan.", "AB")
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        {"response_format": JSON_FORMAT},
+        {"response_format": {"type": "json_object"}},
+        {"structured_outputs": {"regex": r"\d+\."}},
+        {"structured_outputs": {"choice": ["391."]}},
+    ],
+)
+@pytest.mark.parametrize("chunk_size", [None, 1, 3])
+def test_commentary_is_reasoning_under_structured_outputs(
+    tokenizer, constraint, chunk_size
+):
+    # With structured outputs, `content` is the constrained answer alone.
+    text = CASES["commentary_answer"][0]
+    request = ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "test"}], **constraint
+    )
+    kwargs = parser_chat_template_kwargs(request.extract_structured_outputs(), None)
+    parser = MuseParser(tokenizer, chat_template_kwargs=kwargs)
+    if chunk_size is None:
+        reasoning, content = parser.extract_reasoning(text, request)
+    else:
+        output = collect_output(
+            replay_streaming(
+                parser, _tokens(text), chunk_size=chunk_size, finished_on_last=True
+            )
+        )
+        reasoning, content = output.reasoning, output.content
+    assert (reasoning, content) == ("Plan.Working. ", "391.")
+
+
+@pytest.mark.parametrize(
+    "client_kwargs",
+    [{"has_structured_outputs": True}, {"response_format": {"type": "json_object"}}],
+)
+def test_client_chat_template_kwargs_do_not_route_commentary(tokenizer, client_kwargs):
+    # Clients control `chat_template_kwargs`; only the request's validated
+    # constraint may select commentary routing.
+    kwargs = parser_chat_template_kwargs(None, client_kwargs)
+    reasoning, content = MuseParser(
+        tokenizer, chat_template_kwargs=kwargs
+    ).extract_reasoning(CASES["commentary_answer"][0], _test_request())
+    assert (reasoning, content) == ("Plan.", "Working. 391.")
+
+
+def test_grammar_starts_at_the_answer_header(tokenizer):
+    parser = MuseParser(tokenizer)
+    reasoning = _ids(_msg("self", "Plan."))
+    commentary = _ids("<|start|>assistant to=commentary<|message|>")
+    answer = _ids("<|start|>assistant to=user<|message|>")
+    tool = _ids("<|start|>assistant to=get_weather<|message|>")
+
+    def ends(*parts: list[int]) -> bool:
+        ids = [t for part in parts for t in part]
+        return parser.is_reasoning_end_streaming(ids, parts[-1])
+
+    assert not parser.is_reasoning_end(PROMPT)
+    assert not ends(PROMPT, reasoning)
+    assert not ends(PROMPT, reasoning, commentary)
+    assert ends(PROMPT, reasoning, answer)
+    assert not ends(PROMPT, reasoning, tool)
+    # A speculative suffix that opens the answer and then more text still ends
+    # reasoning at the answer header.
+    assert ends(PROMPT, reasoning, answer + _ids('{"a": 1}'))
+    # A prompt that already ends with the answer header (a prefilled answer).
+    assert parser.is_reasoning_end(PROMPT + reasoning + answer)

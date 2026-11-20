@@ -108,6 +108,19 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
 )
 
 
+def _hf_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
+    # Templates that state the requested format read it. The validated request
+    # field owns the key, so a client kwarg of the same name never reaches the
+    # template.
+    kwargs = params.get_apply_chat_template_kwargs()
+    kwargs.pop("response_format", None)
+    if params.response_format is not None:
+        kwargs["response_format"] = params.response_format.model_dump(
+            mode="json", by_alias=True, exclude_none=True
+        )
+    return kwargs
+
+
 def _filter_prompt_embeds_by_template(
     conversation: list[ConversationMessage],
     prompt_embeds_tensors: list[torch.Tensor],
@@ -1154,7 +1167,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if not mm_data:
                 mm_data = None
 
-        chat_template_kwargs = params.get_apply_chat_template_kwargs()
+        chat_template_kwargs = _hf_chat_template_kwargs(params)
         if prompt_embeds_tensors:
             visibility_check_kwargs = chat_template_kwargs.copy()
             visibility_check_kwargs["tokenize"] = False
@@ -1268,7 +1281,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if not mm_data:
                 mm_data = None
 
-        chat_template_kwargs = params.get_apply_chat_template_kwargs()
+        chat_template_kwargs = _hf_chat_template_kwargs(params)
         if prompt_embeds_tensors:
             visibility_check_kwargs = chat_template_kwargs.copy()
             visibility_check_kwargs["tokenize"] = False

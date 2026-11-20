@@ -82,9 +82,10 @@ def _discover_parsers() -> list[_ParserInfo]:
             continue
         if cfg.name in ("inkling", "plamo3", "minimax_m3", "ripple", "muse"):
             # Inkling uses typed structural blocks. PLaMo, MiniMax M3 and
-            # Ripple markers can span several token IDs. Muse routes each
-            # message by its recipient. None fits this TOOL_END-token harness;
-            # their direct and delegating coverage lives in dedicated tests.
+            # Ripple markers can span several token IDs, and Muse tool calls
+            # end with text, not a token. None fits this TOOL_END-token
+            # harness; their direct and delegating coverage lives in dedicated
+            # tests.
             continue
         if cfg.name == "granite":
             # Granite has a JSON-array tool body with no TOOL_END terminal, so
