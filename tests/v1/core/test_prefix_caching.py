@@ -101,11 +101,11 @@ def _dflash_layer(
 
 
 def _mamba_layer(
-    mamba_cache_mode: str = "none", num_speculative_blocks: int = 0, **spec_kwargs
+    enable_prefix_caching: bool = False, num_speculative_blocks: int = 0, **spec_kwargs
 ) -> KVCacheLayerConfig:
     return mamba_layer(
         MambaSpec(**spec_kwargs),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
     )
 
@@ -1412,7 +1412,7 @@ def test_hisparse_mamba_prefix_hit_leaves_a_writable_tail():
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         )
     )
@@ -1499,7 +1499,7 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
                         block_size=16,
                         shapes=((1,),),
                         dtypes=(torch.float32,),
-                        mamba_cache_mode="align",
+                        enable_prefix_caching=True,
                     ),
                 )
             ],
@@ -1977,7 +1977,7 @@ def make_kv_cache_config_hybrid_model(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         )
 
     return KVCacheConfig(
@@ -2013,7 +2013,7 @@ def make_kv_cache_config_three_types(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         )
     elif third_spec_type == "sliding_window":
         third_spec = _swa_layer(
@@ -2094,7 +2094,7 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                 ),
             ),
         ],
@@ -2550,7 +2550,7 @@ def _make_hybrid_kv_cache_config(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
     }
 
@@ -2693,10 +2693,10 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 
 
 def test_prefill_hybrid_model_mamba_align():
-    """Test that MambaManager.cache_blocks() handles null blocks in align mode.
+    """Test that MambaManager.cache_blocks() handles null blocks.
 
     Regression test for https://github.com/vllm-project/vllm/issues/34361.
-    In mamba_cache_mode="align", allocate_new_blocks() pads req_to_blocks with
+    With prefix caching, allocate_new_blocks() pads req_to_blocks with
     null blocks. cache_full_blocks() correctly skips them, but
     MambaManager.cache_blocks() must also skip null blocks when tracking
     cached_blocks_this_step.
@@ -5432,7 +5432,7 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                     num_speculative_blocks=num_spec,
                 ),
             ),
@@ -6176,7 +6176,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
         block_size=block_size,
         shapes=(1, 1),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
 
     def retained(retention_interval, num_prompt_tokens=256, end_block=16):
@@ -6214,7 +6214,7 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
         block_size=block_size,
         shapes=(1, 1),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
 
     def retained(retention_interval, shared_prefix_boundary, end_block=16):
@@ -6571,7 +6571,7 @@ def test_mamba_reachable_block_mask_ignores_dcp():
         block_size=16,
         shapes=(1, 1),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
 
     def get_mask(dcp_world_size):
@@ -6605,7 +6605,7 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
         block_size=8,
         shapes=(1, 1),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
 
     def get_mask(dcp_world_size):
