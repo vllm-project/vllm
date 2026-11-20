@@ -89,6 +89,33 @@ def _warm(
     hold.update([_row(arrived=n, admitted=n, admitted_uncached=uncached * n)] * RANKS)
 
 
+def test_stalled_steps_are_not_learned():
+    """A step far longer than a step of its shape takes, as when the GPU hangs
+    or compiles a kernel, says nothing about step costs: neither the decode
+    step time nor the cost fit learns from it. A large mixed step within what
+    the fit predicts for it still teaches the fit."""
+    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    _warm(hold, random.Random(0))
+    t_dec, theta, var = hold._t_dec, list(hold._fit.theta), hold._fit.var
+    hold.update([_row(done=1, period=100.0, decodes=16)] * RANKS)
+    assert hold._t_dec == t_dec
+
+    tokens = [8192] * RANKS
+    attn = [t * t / 2 for t in tokens]
+
+    def mixed(period: float) -> list[list[float]]:
+        return [
+            _row(done=1, period=period, done_tokens=t, done_attn=a, decodes=16)
+            for t, a in zip(tokens, attn)
+        ]
+
+    hold.update(mixed(100.0))
+    assert hold._fit.theta == theta and hold._fit.var == var
+    # Over ten decode steps long, but as long as the fit expects.
+    hold.update(mixed(T_DEC + _extra_ms(tokens, attn) / 1e3))
+    assert hold._fit.theta != theta
+
+
 def _one_rank_queued(slack: float = T) -> list[list[float]]:
     """2K tokens queued on one rank, 16 decodes on every rank."""
     busy = _row(

@@ -63,6 +63,9 @@ _RATE_TAU_S = 30.0
 _DEC_TAU_S = 1.0
 # The cost fit forgets over about this many mixed steps.
 _FIT_WINDOW = 200.0
+# A step this many times longer than expected for its shape stalled, as on a
+# GPU hang or a kernel compile, and says nothing about step costs.
+_STALL_FACTOR = 10.0
 _RIDGE = 1e-6
 _LOG_INTERVAL_S = 60.0
 
@@ -500,11 +503,13 @@ class PrefillHold:
         if any(tokens):
             if self._t_dec is not None:
                 phi = self._fit.features(tokens, [r[_DONE_ATTN] for r in rows])
-                self._fit.update(phi, (period - self._t_dec) * 1e3)
+                extra = max(0.0, self._fit.predict_ms(phi)) / 1e3
+                if self._fit.dof < 1 or period < _STALL_FACTOR * (self._t_dec + extra):
+                    self._fit.update(phi, (period - self._t_dec) * 1e3)
         elif self._t_dec is None:
             self._t_dec = period
             self._t_dec_at = self._clock
-        else:
+        elif period < _STALL_FACTOR * self._t_dec:
             w = math.exp(-(self._clock - self._t_dec_at) / _DEC_TAU_S)
             self._t_dec = w * self._t_dec + (1.0 - w) * period
             self._t_dec_at = self._clock
