@@ -194,6 +194,7 @@ def rank(request):
             _, expert_map, expert_mask = determine_expert_map(
                 WORLD, 0, NUM_EXPERTS, return_expert_mask=True
             )
+            assert expert_map is not None and expert_mask is not None
             expert_map, expert_mask = expert_map.cuda(), expert_mask.cuda()
         native = MuseSparkAiterExperts(config, quant_config)
         native.process_weights_after_loading(
