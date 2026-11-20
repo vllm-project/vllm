@@ -2123,6 +2123,7 @@ def test_kv_connector_stats_failure_grouping():
     stats.record_failed_notification()
     stats.record_kv_expired_req()
     stats.record_notification_after_expiry()
+    stats.record_declined_expired_read()
     assert not stats.is_empty()
 
     # No successful transfers: latency stats are zero but the failure
@@ -2132,6 +2133,7 @@ def test_kv_connector_stats_failure_grouping():
     assert reduced["Num failed transfers"] == 3
     assert reduced["Num KV expired reqs"] == 1
     assert reduced["Num notifs after expiry"] == 1
+    assert reduced["Num declined expired reads"] == 1
 
 
 def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
@@ -2177,6 +2179,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     stats.record_failed_notification()
     stats.record_kv_expired_req()
     stats.record_notification_after_expiry()
+    stats.record_declined_expired_read()
     prom.observe(stats.data, engine_idx=0)
 
     def counter_value(name: str) -> float:
@@ -2189,6 +2192,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
     assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
     assert counter_value("vllm:nixl_num_notifications_after_expiry_total") == 1.0
+    assert counter_value("vllm:nixl_num_declined_expired_reads_total") == 1.0
 
 
 @patch(
@@ -2540,6 +2544,8 @@ def recv_worker():
     )
     worker._physical_blocks_per_logical_kv_block = 1
     worker._recving_metadata = {"request": MagicMock(local_block_ids=([1, 2, 3],))}
+    worker._engine_clock_offset = {}
+    worker._remote_leases = {}
     worker._recving_transfers = defaultdict(list)
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
@@ -3761,10 +3767,11 @@ class TestPeerReplacement:
         metadata = self._request("old")
         if expired:
             metadata.reqs_to_recv["old-req"].remote.blocks_expiry_time = 0.0
-            self.worker._bidirectional_kv_xfer_enabled = True
         with (
             patch.object(self.worker.xfer_stats, "record_failed_transfer") as failure,
-            patch.object(self.worker.xfer_stats, "record_kv_expired_req") as expiry,
+            patch.object(
+                self.worker.xfer_stats, "record_declined_expired_read"
+            ) as expiry,
         ):
             self.worker.start_load_kv(metadata)
             result = self.worker.get_transfer_results()
@@ -3774,6 +3781,33 @@ class TestPeerReplacement:
             failure.assert_not_called()
         self.transport.check_remote_metadata.assert_not_called()
         self.transport.remove_remote_agent.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "completed_at,renewed_deadline,lapsed",
+        [(1001.0, None, False), (1006.0, None, True), (1006.0, 1020.0, False)],
+        ids=["in-lease", "lapsed-mid-read", "renewed"],
+    )
+    def test_read_completing_past_lease_deadline_fails(
+        self, monkeypatch, completed_at, renewed_deadline, lapsed
+    ):
+        """A read observed complete after the remote may have released the
+        blocks fails, unless our heartbeats renewed the lease."""
+        now = {"t": 1000.0}
+        monkeypatch.setattr(time, "perf_counter", lambda: now["t"])
+        self.worker._engine_clock_offset["old"] = 0.0
+        metadata = self._request("old")
+        metadata.reqs_to_recv["old-req"].remote.blocks_expiry_time = 1010.0
+        if renewed_deadline is not None:
+            self.worker._remote_leases[("old", "old-prefill")] = renewed_deadline
+        with patch.object(
+            self.worker.xfer_stats, "record_declined_expired_read"
+        ) as declined:
+            self.worker.start_load_kv(metadata)
+            now["t"] = completed_at
+            result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"old-req"}
+        assert result.failed_recving == ({"old-req"} if lapsed else set())
+        assert declined.call_count == int(lapsed)
 
     @pytest.mark.parametrize("awaiting_kvs", [False, True])
     def test_invalid_peer_empty_recv_is_reported_only_when_awaited(self, awaiting_kvs):
@@ -5371,3 +5405,42 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
     wrapper = connector.connector_worker.nixl_wrapper
     assert wrapper.config.backends == agent_backends
     assert wrapper.created_backends == created_backends
+
+
+@pytest.mark.parametrize("transfer_mode", ["pull", "push"])
+def test_agent_is_synchronized(dist_init, transfer_mode):
+    """Handshake threads load remote agents while other threads post, so the
+    agent locks in both modes. Push posts from its writer thread with no UCX
+    thread pool, whose posting waits on the pool's threads."""
+    rw = object()
+
+    def agent_config(**kwargs):
+        return SimpleNamespace(**{"backends": ["UCX"], **kwargs})
+
+    block_size = maybe_update_block_size(16)
+    vllm_config = create_vllm_config(block_size=block_size)
+    connector_cls = NixlPushConnector if transfer_mode == "push" else NixlConnector
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+            _BackendRecordingNixlWrapper,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.nixl_agent_config",
+            agent_config,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.nixl_thread_sync_t",
+            SimpleNamespace(NIXL_THREAD_SYNC_RW=rw),
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        connector = connector_cls(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=block_size),
+        )
+        config = connector.connector_worker.nixl_wrapper.config
+        connector.shutdown()
+    assert config.num_threads == (0 if transfer_mode == "push" else 4)
+    assert config.sync_mode is rw

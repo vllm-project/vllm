@@ -1,6 +1,6 @@
 # Base UBI image for s390x architecture
 ARG BASE_UBI_IMAGE_TAG=9.6
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS base
 
 # Install basic dependencies
@@ -34,7 +34,7 @@ ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 RUN microdnf install -y \
-    python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel  && \
+    python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip && \
     python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel uv && microdnf clean all
 
 FROM python-install AS rust
