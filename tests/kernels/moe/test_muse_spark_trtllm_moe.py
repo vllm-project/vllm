@@ -480,7 +480,8 @@ def test_megamoe_trtllm_weight_layout_matches_native(
     for layout, tp_size in (("native", 1), ("trtllm", 4)):
         config = VllmConfig(
             kernel_config=KernelConfig(moe_backend="deep_gemm_mega_moe"),
-            quant_config=nvfp4_quant_config() if nvfp4 else None,
+            # BF16 experts take the TRT-LLM layout only in an NVFP4 model.
+            quant_config=nvfp4_quant_config(),
             parallel_config=ParallelConfig(
                 tensor_parallel_size=tp_size,
                 enable_expert_parallel=True,
