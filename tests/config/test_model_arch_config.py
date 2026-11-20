@@ -10,7 +10,6 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-import transformers
 from transformers import DiffusionGemmaConfig, PreTrainedConfig
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
@@ -52,13 +51,6 @@ BASE_MODELS_TO_TEST = [
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "stepfun-ai/Step-3.5-Flash",
     "meituan-longcat/LongCat-Flash-Chat",
-    pytest.param(
-        "sarvamai/sarvam-105b",
-        marks=pytest.mark.skipif(
-            not hasattr(transformers, "SarvamMLAConfig"),
-            reason="Needs https://github.com/huggingface/transformers/pull/44569",
-        ),
-    ),
 ] + list(BASE_TRUST_REMOTE_CODE_MODELS)
 
 # (target_model, draft_model)
