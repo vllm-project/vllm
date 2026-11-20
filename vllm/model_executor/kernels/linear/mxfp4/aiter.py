@@ -175,10 +175,12 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
                 self.out_dtype,
                 x_s,
             )
-        elif self.split_asm_act_quant:
+        elif self.split_asm_act_quant and not self.is_hadamard_fused:
             # Same for the ASM layout: the HIP quant mxfp4_gemm_dynamic_quant
             # runs otherwise, scales laid out the way the preshuffle / a4w4
-            # GEMM reads them for this M.
+            # GEMM reads them for this M. The standalone quant doesnt rotate,
+            # so a layer that fused its input Hadamard keeps the single call
+            # (fuse_input_hadamard runs after the split is decided).
             x_q, x_s = torch.ops.vllm.rocm_aiter_dynamic_mxfp4_asm_quant(x)
             y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
                 x_q,

@@ -8,6 +8,8 @@ opt-in fuse_norm_mxfp4_quant. The SiLU-mul fold also covers linears on the ASM
 layout (HIP quant, shuffled scales), bitwise equal there too.
 """
 
+import inspect
+
 import pytest
 import torch
 
@@ -54,6 +56,17 @@ class SiluMulMxfp4AsmModel(torch.nn.Module):
         y = self.silu_and_mul(x)
         q, s = rocm_aiter_ops.get_dynamic_mxfp4_asm_quant_op()(y)
         return q, s
+
+
+class SiluMulMxfp4LinearModel(torch.nn.Module):
+    def __init__(self, kernel, layer: torch.nn.Module) -> None:
+        super().__init__()
+        self.silu_and_mul = SiluAndMul()
+        self.kernel = kernel
+        self.layer = layer
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.kernel.apply_weights(self.layer, self.silu_and_mul(x))
 
 
 class RMSNormMxfp4Model(torch.nn.Module):
@@ -291,6 +304,93 @@ def test_mxfp4_asm_linear_split_quant_matches_single_op(
         assert kernel.split_asm_act_quant is (mode == CompilationMode.VLLM_COMPILE)
         outs[mode] = kernel.apply_weights(layer, x)
     assert torch.equal(outs[CompilationMode.NONE], outs[CompilationMode.VLLM_COMPILE])
+
+
+@pytest.mark.parametrize("num_tokens", [1, 33, 65])
+@pytest.mark.parametrize("hadamard", [False, True])
+def test_mxfp4_asm_linear_with_fused_hadamard_keeps_single_op(
+    num_tokens: int, hadamard: bool, monkeypatch: pytest.MonkeyPatch
+):
+    # a layer that rotates its input inside the HIP quant (fuse_input_hadamard)
+    # must not split: the standalone quant doesnt rotate, so the fold would
+    # feed the rotated weight an unrotated activation
+    from torch.nn.parameter import Parameter
+
+    from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+        RocmAiterSiluMulFp8GroupQuantFusionPass,
+    )
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        AiterMxfp4LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp4.base import (
+        MxFp4LinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Dynamic,
+    )
+
+    _setup(monkeypatch)
+    if not rocm_aiter_ops.is_mxfp4_asm_quant_fusion_supported():
+        pytest.skip("installed AITER lacks scaling_mode='ceil'")
+    if not rocm_aiter_ops.is_asm_fp4_gemm_supported():
+        pytest.skip("ASM FP4 GEMM is gfx950 only")
+    from aiter import per_1x32_f4_quant_hip
+
+    if hadamard and (
+        "hadamard_rotate" not in inspect.signature(per_1x32_f4_quant_hip).parameters
+    ):
+        pytest.skip("installed AITER cant rotate inside the HIP quant")
+    monkeypatch.setattr(rocm_aiter_ops, "is_asm_fp4_gemm_tuned", lambda n, k: True)
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_triton_gemm_afp4wfp4_presh_ws_tuned", lambda n, k: True
+    )
+
+    n, k = 4096, 14336
+    torch.manual_seed(0)
+    w, ws = per_1x32_f4_quant_hip(torch.randn(n, k) * 0.05, shuffle=False)
+    x = torch.randn(num_tokens, 2 * k, dtype=torch.bfloat16, device="cuda")
+    quant_op = rocm_aiter_ops.get_dynamic_mxfp4_asm_quant_op()
+    fused_op = rocm_aiter_ops.get_act_mul_fused_mxfp4_asm_quant_op()
+
+    def make_passes(config):
+        if not config.compilation_config.pass_config.fuse_act_quant:
+            return []
+        return [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+
+    def make_model():
+        kernel = AiterMxfp4LinearKernel(
+            MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
+        )
+        layer = torch.nn.Module()
+        layer.weight = Parameter(w.view(torch.uint8).clone(), requires_grad=False)
+        layer.weight_scale = Parameter(
+            ws.view(torch.uint8)[:n].clone(), requires_grad=False
+        )
+        kernel.process_weights_after_loading(layer)
+        assert kernel.use_asm_gemm
+        if hadamard:
+            assert kernel.fuse_input_hadamard(32)
+        return SiluMulMxfp4LinearModel(kernel, layer)
+
+    outs = {}
+    for enabled in (False, True):
+        _setup(monkeypatch)
+        xi = x.clone()
+        torch._dynamo.mark_dynamic(xi, 0)
+        config = _config(["none"], fuse_act_quant=enabled, fuse_norm_quant=False)
+        outs[enabled], fusion_passes, backend = _compile(
+            config, make_passes, make_model, xi
+        )
+        if enabled:
+            expected = 0 if hadamard else 1
+            assert fusion_passes[0].matched_count == expected
+            assert backend.op_count(quant_op, before=True) == expected
+            assert backend.op_count(fused_op) == expected
+        else:
+            assert backend.op_count(quant_op, before=True) == 0
+    # with the rotation fused both runs are the single rotating call, without
+    # it the fold is bitwise equal to the HIP quant + GEMM
+    assert torch.equal(outs[False], outs[True])
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 257])
