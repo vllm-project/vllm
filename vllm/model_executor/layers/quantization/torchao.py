@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from packaging import version
 from torch.nn.parameter import Parameter
 
-from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -320,20 +319,20 @@ def torchao_quantize_param_data(
 
 
 def _take_act_pre_scales(layer: torch.nn.Module, weight_loader: Callable) -> Callable:
-    """Wrap `weight_loader` to move each loaded shard's `act_pre_scale` (AWQ) to
-    the layer before the weight data is copied in.
+    """Wrap `weight_loader` to move each loaded shard's `act_pre_scale` (AWQ) into
+    `layer.torchao_act_pre_scales` before the weight data is copied in.
 
     The weight has room for one `act_pre_scale`, but a fused layer such as
     `qkv_proj` gets one per shard, and a row parallel layer gets the scale for
     the full input.
     """
-    layer.torchao_act_pre_scales = {}
 
     def loader(param, loaded_weight, *args, **kwargs):
         act_pre_scale = getattr(loaded_weight, "act_pre_scale", None)
         if act_pre_scale is not None:
             shard_id = args[0] if args else kwargs.get("loaded_shard_id")
-            layer.torchao_act_pre_scales[shard_id] = act_pre_scale
+            for i in shard_id if isinstance(shard_id, tuple) else (shard_id,):
+                layer.torchao_act_pre_scales[i] = act_pre_scale
             loaded_weight.act_pre_scale = None
         return weight_loader(param, loaded_weight, *args, **kwargs)
 
@@ -360,7 +359,7 @@ def _loaded_act_pre_scales(layer: torch.nn.Module) -> list[torch.Tensor] | None:
     input_size = layer.input_size_per_partition
     if ordered[0].numel() != input_size:
         # Row parallel: the scale covers the full input; keep this rank's part.
-        start = get_tensor_model_parallel_rank() * input_size
+        start = layer.tp_rank * input_size
         ordered = [scale.narrow(-1, start, input_size) for scale in ordered]
     return ordered
 
@@ -414,6 +413,7 @@ class TorchAOLinearMethod(LinearMethodBase):
                 and "weight_loader" in extra_weight_attrs
             ):
                 weight.act_pre_scale = None
+                layer.torchao_act_pre_scales = {}
                 extra_weight_attrs["weight_loader"] = _take_act_pre_scales(
                     layer, extra_weight_attrs["weight_loader"]
                 )
@@ -445,15 +445,15 @@ class TorchAOLinearMethod(LinearMethodBase):
             if act_pre_scales is not None and len(act_pre_scales) > 1:
                 # One matmul per shard, each with its own act_pre_scale, on the
                 # loaded layout; hardware-packed layouts cannot be sliced.
-                offsets = itertools.accumulate(layer.output_partition_sizes, initial=0)
+                sizes = list(layer.output_partition_sizes)
+                sizes[-1] += layer.weight.shape[0] - sum(sizes)  # padding rows
+                offsets = itertools.accumulate(sizes, initial=0)
                 layer.torchao_shards = [
                     (
                         scale.to(layer.weight.device),
                         _narrow_rows(layer.weight, start, size),
                     )
-                    for scale, start, size in zip(
-                        act_pre_scales, offsets, layer.output_partition_sizes
-                    )
+                    for scale, start, size in zip(act_pre_scales, offsets, sizes)
                 ]
                 return
 

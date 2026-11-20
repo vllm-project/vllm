@@ -445,7 +445,7 @@ def _save_awq_checkpoint(model_name: str, out_dir) -> str:
     not current_platform.is_cuda(), reason="tinygemm int4 kernel is CUDA only"
 )
 def test_awq_fused_layers_keep_each_shard_act_pre_scale(
-    tmp_path, hf_runner, vllm_runner, example_prompts
+    tmp_path, hf_runner, vllm_runner, example_prompts, enable_pickle
 ):
     """AWQ gives q/k/v_proj and gate/up_proj their own act_pre_scale. vLLM fuses
     them into qkv_proj and gate_up_proj, and used to apply the last shard's
@@ -464,6 +464,11 @@ def test_awq_fused_layers_keep_each_shard_act_pre_scale(
     with vllm_runner(
         model_dir, quantization="torchao", dtype="bfloat16", max_model_len=1024
     ) as llm:
+
+        def max_shards(model):
+            return max(len(getattr(m, "torchao_shards", ())) for m in model.modules())
+
+        assert llm.apply_model(max_shards)[0] > 1
         vllm_outputs = llm.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
