@@ -4,11 +4,13 @@
 a weight update, where one call may hold only part of the checkpoint, or in a
 cold start, where completeness checks must run."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.config import VllmConfig, WeightTransferConfig, set_current_vllm_config
 from vllm.model_executor.model_loader.reload import (
     abort_reload,
     finish_reload,
@@ -19,6 +21,7 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import weights_already_processed
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.float32
@@ -73,19 +76,30 @@ def test_active_only_between_start_and_finish(monkeypatch, mode):
     torch.testing.assert_close(model.proj.weight, _checkpoint(1.01)["proj.weight"])
 
 
-@pytest.mark.parametrize("mode", ["direct", "layerwise"], ids=["direct", "layerwise"])
-def test_abort_ends_the_update(monkeypatch, mode):
+@pytest.mark.parametrize(
+    "mode,preprocessed",
+    [("direct", False), ("layerwise", False), ("auto", False), ("auto", True)],
+    ids=["direct", "layerwise", "auto-direct", "auto-layerwise"],
+)
+def test_abort_ends_the_update(monkeypatch, mode, preprocessed):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     model = _TinyModel()
     record_metadata_for_reloading(model)
     model.load_weights(_checkpoint().items())
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    config = VllmConfig(weight_transfer_config=WeightTransferConfig(backend="ipc"))
+    with (
+        set_current_vllm_config(config),
+        weights_already_processed() if preprocessed else nullcontext(),
+    ):
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
 
     start_reload(model)
     model.load_weights([("proj.weight", _checkpoint(1.01)["proj.weight"])])
-    abort_reload(model)
+    with set_current_vllm_config(config):
+        abort_reload(model)
     assert not weight_update_active()
-    if mode == "direct":
+    torch.testing.assert_close(model.embed.weight, _checkpoint()["embed.weight"])
+    if mode == "direct" or (mode == "auto" and not preprocessed):
         with pytest.raises(RuntimeError, match="finish without a begin"):
             finish_reload(model, _MODEL_CONFIG, _DEVICE)
 

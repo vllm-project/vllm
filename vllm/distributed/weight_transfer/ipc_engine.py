@@ -120,8 +120,6 @@ class IPCWeightTransferEngine(
     memory between processes on the same node.
     """
 
-    rolls_back_failed_updates = True
-
     # Define backend-specific dataclass types
     init_info_cls = IPCWeightTransferInitInfo
     update_info_cls = IPCWeightTransferUpdateInfo
@@ -174,7 +172,7 @@ class IPCWeightTransferEngine(
         finish_reload(self.model, self.model_config, self.device)
 
     def abort_weight_update(self) -> None:
-        """Put the pre-update weights back after a failed update."""
+        """Abort the reload of the current target after a failed update."""
         from vllm.model_executor.model_loader.reload import abort_reload
 
         # A partial transfer is expected on abort. close() checks completeness.

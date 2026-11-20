@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Begin, complete or abort a checkpoint-format weight update in the reload mode
-`VLLM_RELOAD_MODE` selects (fixed for the process)."""
+"""Begin, complete or abort a checkpoint-format weight update in the mode
+selected at model load."""
 
 import torch
 
@@ -10,8 +10,8 @@ from vllm.config import ModelConfig
 from .direct import (
     abort_direct_reload,
     begin_direct_reload,
-    direct_reload_enabled,
     finish_direct_reload,
+    reloads_directly,
 )
 from .layerwise import (
     abort_layerwise_reload,
@@ -35,7 +35,7 @@ def weight_update_active() -> bool:
 def start_reload(model: torch.nn.Module) -> None:
     """Begin a weight update in the configured mode."""
     global _weight_update_active
-    if direct_reload_enabled():
+    if reloads_directly(model):
         begin_direct_reload(model)
     else:
         initialize_layerwise_reload(model)
@@ -48,7 +48,7 @@ def finish_reload(
     """Complete the weight update `start_reload` began."""
     global _weight_update_active
     _weight_update_active = False
-    if direct_reload_enabled():
+    if reloads_directly(model):
         finish_direct_reload(model, model_config, device)
     else:
         finalize_layerwise_reload(model, model_config)
@@ -57,13 +57,12 @@ def finish_reload(
 def abort_reload(model: torch.nn.Module) -> None:
     """Undo a weight update `start_reload` began that will not finish.
 
-    Layerwise reload puts back the weights it started from. Direct reload has
-    no rollback: the model keeps the partial update until a new full update
-    finishes.
+    Layerwise reload restores layers still loading. Direct reload keeps any
+    writes already made. A full resend brings all weights to the same version.
     """
     global _weight_update_active
     _weight_update_active = False
-    if direct_reload_enabled():
+    if reloads_directly(model):
         abort_direct_reload(model)
     else:
         abort_layerwise_reload(model)

@@ -395,13 +395,13 @@ def test_full_weight_transfer_flow(vllm_runner):
 def test_failed_update_leaves_model_usable(vllm_runner):
     """A chunk that fails inside update_weights must not take the model down.
 
-    The IPC engine parks every weight on the meta device at start_weight_update;
-    the worker's abort path has to put them back, or the next forward runs on
-    meta tensors and kills the engine.
+    Layerwise IPC reload parks weights on the meta device at start_weight_update.
+    The worker must restore layers still loading so the next forward can run.
     """
     # A real IPC engine reaches CUDA IPC calls; the mock-engine tests here do not.
     if not current_platform.is_cuda_alike():
         pytest.skip("Requires a CUDA-like device for the real IPC engine")
+    os.environ["VLLM_RELOAD_MODE"] = "layerwise"
 
     with vllm_runner(
         MODEL_NAME,

@@ -94,8 +94,8 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     every trainer rank before contacting the workers. The check stays until
     re-init, even if planning failed and the workers fell back to
     `load_weights`. The inference server
-    must run with `VLLM_RELOAD_MODE=direct` and without EPLB; the workers
-    refuse otherwise at init."""
+    must reload directly (the default with weight updates) and run without
+    EPLB; the workers refuse otherwise at init."""
 
 
 @dataclass
@@ -171,8 +171,6 @@ class NCCLWeightTransferEngine(
     Receives dense checkpoint-format weights broadcast from the trainer ranks
     below `rank_offset` and loads them with the layerwise reload lifecycle.
     """
-
-    rolls_back_failed_updates = True
 
     # Define backend-specific dataclass types
     init_info_cls = NCCLWeightTransferInitInfo
@@ -288,7 +286,7 @@ class NCCLWeightTransferEngine(
         torch.accelerator.empty_cache()
 
     def abort_weight_update(self) -> None:
-        """Put the pre-update weights back after a failed update."""
+        """Abort the reload of the current target after a failed update."""
         from vllm.model_executor.model_loader.reload import abort_reload
 
         abort_reload(self.model)
