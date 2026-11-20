@@ -103,13 +103,7 @@ def direct_reload_enabled() -> bool:
         config = get_current_vllm_config_or_none()
         if config is None or config.weight_transfer_config is None:
             return False
-        reason: str | None
-        if config.lora_config is not None:
-            # a LoRA model's lm_head is not loaded again by every update
-            reason = "LoRA"
-        else:
-            reason = direct_reload_refusal(config)
-        if reason:
+        if reason := direct_reload_refusal(config):
             _log_layerwise(reason)
             return False
     return True
