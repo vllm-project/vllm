@@ -8,15 +8,21 @@ import pytest
 import torch
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
+from vllm.config import CacheConfig, VllmConfig
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import MultipleOf
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
+    KpoolTailBackend,
+)
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
@@ -27,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
     KVCacheSpec,
+    MLAAttentionSpec,
     get_block_table_width,
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
@@ -363,6 +370,60 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     )
     with pytest.raises(ValueError, match="MOCK_EXACT"):
         XPUPlatform.update_block_size_for_backend(vllm_config)
+
+
+@pytest.mark.parametrize(
+    ("backends", "num_spec_tokens", "num_mla", "block_size", "mamba_page_size_padded"),
+    [
+        # Without draft tokens the 528-byte row keeps the padded 656-byte estimate.
+        ([_mock_backend([64])], 0, 1, 3328, 3328 * 656),
+        ([_mock_backend([64]), KpoolTailBackend], 0, 1, 3328, 3328 * 656),
+        # KPOOL_TAIL supports only BLHNC, which packs Mamba states unpadded.
+        ([_mock_backend([64]), KpoolTailBackend], 1, 1, 4224, None),
+        # 13 rows of 4096 tokens hold 12 of the 34 states, a group of three.
+        ([_mock_backend([64]), KpoolTailBackend], 1, 13, 4096, None),
+    ],
+)
+def test_hybrid_mla_block_alignment(
+    monkeypatch, backends, num_spec_tokens, num_mla, block_size, mamba_page_size_padded
+):
+    monkeypatch.setattr(
+        Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
+    )
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda c: ((3, 12288), (32, 128, 128)),
+        get_mamba_state_dtype_from_config=lambda c: (torch.bfloat16, torch.float32),
+    )
+    monkeypatch.setattr(
+        ModelRegistry, "resolve_model_cls", lambda *args, **kwargs: (model_cls, None)
+    )
+    vllm_config = VllmConfig(cache_config=CacheConfig(cache_dtype="fp8_ds_mla"))
+    vllm_config.model_config = SimpleNamespace(
+        use_mla=True,
+        architecture=None,
+        get_num_kv_heads=lambda parallel_config: 1,
+        get_head_size=lambda: 512,
+    )
+    mla_layer = Mock(spec=AttentionLayerBase)
+    mla_layer.get_attn_backend.return_value.is_mla.return_value = True
+    mla_layer.get_kv_cache_config.return_value.spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        state_content_bytes=528,
+    )
+    layers = vllm_config.compilation_config.static_forward_context
+    layers.update({f"mla.{i}": mla_layer for i in range(num_mla)})
+    layers.update({f"kda.{i}": Mock(spec=MambaBase) for i in range(34)})
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=num_spec_tokens
+    )
+
+    Platform._align_hybrid_block_size(vllm_config, backends[0])
+
+    assert vllm_config.cache_config.block_size == block_size
+    assert vllm_config.cache_config.mamba_page_size_padded == mamba_page_size_padded
 
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():

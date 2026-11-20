@@ -95,6 +95,7 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch):
     )
     config = types.SimpleNamespace(
         cache_config=cache,
+        compilation_config=types.SimpleNamespace(static_forward_context={}),
         parallel_config=None,
         model_config=types.SimpleNamespace(
             dtype=torch.bfloat16,
@@ -104,7 +105,10 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch):
             get_head_size=lambda: LATENT,
         ),
     )
-    backend = types.SimpleNamespace(get_supported_kernel_block_sizes=lambda: [64])
+    backend = types.SimpleNamespace(
+        get_supported_kernel_block_sizes=lambda: [64],
+        supported_kv_cache_layouts=lambda: None,
+    )
     monkeypatch.setattr(
         Platform, "_find_non_ssm_backends", classmethod(lambda cls, _: [backend])
     )

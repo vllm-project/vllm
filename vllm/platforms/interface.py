@@ -972,12 +972,21 @@ class Platform:
         backend_cls: "type[AttentionBackend]",
     ) -> None:
         """For hybrid attention/mamba models, ensure that the attention page
-        size is >= the mamba page size, and pad the mamba page size to match.
+        size is >= the mamba page size, and pad the mamba page size to match
+        unless the backends only support block-outermost layouts.
         """
         from math import lcm
 
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
         from vllm.model_executor.layers.mamba.abstract import (
+            MambaBase,
+            get_mamba_num_speculative_blocks,
             get_mamba_prefill_checkpoint_alignment,
         )
         from vllm.model_executor.layers.mamba.mamba_utils import mamba_state_alignment
@@ -985,6 +994,8 @@ class Platform:
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
+        from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+        from vllm.v1.core.kv_cache_planning import packed_mamba_group_size
         from vllm.v1.kv_cache_interface import (
             AttentionSpec,
             MambaSpec,
@@ -1002,6 +1013,7 @@ class Platform:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
+        pad_mamba = narrow_row = False
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
@@ -1024,6 +1036,30 @@ class Platform:
                     else DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
                 ),
             ).page_size_bytes
+            # The layer's backend sets the packed row (e.g. 528-byte fp8_ds_mla
+            # rows on SM120), so size the block for the page an MLA layer
+            # allocates. Platforms that register no layers keep the estimate.
+            # The larger block a narrower row needs only pays when requests hold
+            # draft-token Mamba states; without them keep the padded estimate.
+            mla_config = next(
+                (
+                    layer.get_kv_cache_config(vllm_config)
+                    for layer in get_layers_from_vllm_config(
+                        vllm_config,
+                        AttentionLayerBase,  # type: ignore[type-abstract]
+                    ).values()
+                    if layer.get_attn_backend().is_mla()
+                ),
+                None,
+            )
+            if mla_config is not None and isinstance(mla_config.spec, AttentionSpec):
+                mla_spec = mla_config.spec
+                row = mla_spec.real_page_size_bytes // mla_spec.block_size
+                narrow_row = row < attn_page_size_1_token
+                if narrow_row and not get_mamba_num_speculative_blocks(vllm_config):
+                    pad_mamba = True
+                else:
+                    attn_page_size_1_token = row
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
             or cache_config.cache_dtype == "ultraquant_4bit"
@@ -1136,6 +1172,8 @@ class Platform:
 
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
+            backends = cls._find_non_ssm_backends(vllm_config)
+            layouts = get_supported_kv_cache_layouts(backends)
             kernel_block_alignment_size = max(
                 min(
                     s.base if isinstance(s, MultipleOf) else s
@@ -1147,7 +1185,7 @@ class Platform:
             backend_block_alignment = lcm(
                 *(
                     min(s.base if isinstance(s, MultipleOf) else s for s in sizes)
-                    for b in cls._find_non_ssm_backends(vllm_config)
+                    for b in backends
                     if (sizes := b.get_supported_kernel_block_sizes())
                 )
             )
@@ -1182,10 +1220,34 @@ class Platform:
         else:
             # Use minimum block size that satisfies both backend alignment and
             # mamba page size compatibility
-            attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
-                kernel_block_alignment_size * attn_page_size_1_token,
+            steps = cdiv(
+                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
             )
+            if (
+                narrow_row
+                and not pad_mamba
+                and all(layout.is_block_outermost for layout in layouts)
+            ):
+                # Round down instead if the MLA pages one step lower still hold the
+                # packed planner's Mamba group.
+                layers = get_layers_from_vllm_config(
+                    vllm_config,
+                    AttentionLayerBase,  # type: ignore[type-abstract]
+                ).values()
+                specs = [
+                    config.spec
+                    for layer in layers
+                    if not isinstance(layer, MambaBase)
+                    and (config := layer.get_kv_cache_config(vllm_config)) is not None
+                    and isinstance(config.spec, MLAAttentionSpec)
+                ]
+                down = kernel_block_alignment_size * (steps - 1)
+                pages = sum(s.page_size_bytes * down // s.block_size for s in specs)
+                num_mamba = sum(isinstance(layer, MambaBase) for layer in layers)
+                group = packed_mamba_group_size(num_mamba, pages // mamba_page_size)
+                if group * mamba_page_size <= pages:
+                    steps -= 1
+            attn_block_size = kernel_block_alignment_size * steps
             attn_block_size = backend_block_alignment * cdiv(
                 attn_block_size, backend_block_alignment
             )
@@ -1205,11 +1267,13 @@ class Platform:
             return
 
         # Pad mamba page size to exactly match attention page size
+        # unless block-outermost layouts pack the Mamba states at their own size.
         attn_page_size = cache_config.block_size * attn_page_size_1_token
-        assert attn_page_size >= mamba_page_size
-
-        if attn_page_size == mamba_page_size:
+        if attn_page_size == mamba_page_size or (
+            not pad_mamba and all(layout.is_block_outermost for layout in layouts)
+        ):
             return
+        assert attn_page_size >= mamba_page_size
 
         if (
             cache_config.mamba_page_size_padded is None
