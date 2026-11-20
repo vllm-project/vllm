@@ -60,6 +60,19 @@ class StreamingUpdate:
         )
 
 
+def _expand_mixed_prompt_embeds(
+    prompt_embeds: torch.Tensor, is_token_ids: list[bool]
+) -> torch.Tensor:
+    """One row per prompt position from a mixed prompt's compact embeddings,
+    which hold only the rows of its `False` positions. The token-id positions
+    get zero rows, which the workers do not read."""
+    if len(prompt_embeds) == len(is_token_ids):
+        return prompt_embeds
+    expanded = prompt_embeds.new_zeros(len(is_token_ids), *prompt_embeds.shape[1:])
+    expanded[~torch.tensor(is_token_ids)] = prompt_embeds
+    return expanded
+
+
 class Request:
     def __init__(
         self,
@@ -142,11 +155,15 @@ class Request:
         self.prompt_token_ids: list[int] | None = (
             TokenBuffer(prompt_token_ids) if prompt_token_ids is not None else None
         )
-        self.prompt_embeds = prompt_embeds
         # Per-position mask used in mixed-mode (chat completion with
         # prompt_embeds). `None` except when both `prompt_token_ids` and
         # `prompt_embeds` are set and their positions are interleaved.
         self.prompt_is_token_ids = prompt_is_token_ids
+        if prompt_embeds is not None and prompt_is_token_ids is not None:
+            prompt_embeds = _expand_mixed_prompt_embeds(
+                prompt_embeds, prompt_is_token_ids
+            )
+        self.prompt_embeds = prompt_embeds
         # Cache per-block prompt-embed hashes to avoid rehashing the same
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}

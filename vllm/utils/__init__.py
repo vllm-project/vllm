@@ -18,6 +18,9 @@ def length_from_prompt_token_ids_or_embeds(
 ) -> int:
     """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
+
+    With both set (a mixed prompt), the token ids give the length and
+    `prompt_embeds` may be compact: only the rows of the embeds positions.
     """
     prompt_token_len = None if prompt_token_ids is None else len(prompt_token_ids)
     prompt_embeds_len = None if prompt_embeds is None else len(prompt_embeds)
@@ -27,7 +30,7 @@ def length_from_prompt_token_ids_or_embeds(
             raise ValueError("Neither prompt_token_ids nor prompt_embeds were defined.")
         return prompt_embeds_len
     else:
-        if prompt_embeds_len is not None and prompt_embeds_len != prompt_token_len:
+        if prompt_embeds_len is not None and prompt_embeds_len > prompt_token_len:
             raise ValueError(
                 "Prompt token ids and prompt embeds had different lengths"
                 f" prompt_token_ids={prompt_token_len}"
