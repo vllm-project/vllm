@@ -375,6 +375,15 @@ class TestChunkedPushScheduler:
         assert (last.start_block, last.end_block, last.block_ids) == (2, 3, [3])
         assert last.total_blocks == 3
 
+    def test_request_generating_more_tokens_is_pushed_whole(self):
+        sched, _, output = self._scheduler_with_request()
+        request = create_request(num_tokens=40, block_size=16, do_remote_decode=True)
+        request.max_tokens = 4
+        sched.update_state_after_alloc(request, _BlocksMock(([4, 5, 6],)), 0)
+
+        output.num_scheduled_tokens = {request.request_id: 40}
+        assert sched.build_connector_meta(output).push_chunk_jobs == []
+
     def test_preempted_request_pushes_again_from_first_block(self):
         sched, request, output = self._scheduler_with_request()
         output.num_scheduled_tokens = {request.request_id: 32}

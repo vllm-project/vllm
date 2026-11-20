@@ -183,7 +183,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # matches what the worker expects on the next step.
         if params.get("do_remote_decode"):
             self._reqs_in_batch.add(request.request_id)
-            if self._chunked_push:
+            if self._chunked_push and request.max_tokens == 1:
+                # The last chunk notifies D once the prompt is computed, so
+                # only requests that finish with the prompt are pushed in
+                # chunks; the others are pushed whole when they finish.
                 # A preempted request starts again from the first block.
                 self._chunk_trackers[request.request_id] = _ChunkPushTracker(request)
 
