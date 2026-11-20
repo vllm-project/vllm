@@ -53,6 +53,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -397,6 +398,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # on the last PP rank.
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        loaded = super().add_lora(lora_request)
+        if not loaded or self.pcp_manager is None:
+            return loaded
+
+        adapter = self.lora_manager.get_adapter(lora_request.lora_int_id)
+        if adapter is None:
+            return loaded
+        try:
+            self.pcp_manager.validate_lora_adapter(adapter)
+        except NotImplementedError:
+            self.lora_manager.remove_adapter(lora_request.lora_int_id)
+            raise
+        return loaded
 
     def load_model(
         self,

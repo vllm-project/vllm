@@ -12,6 +12,8 @@ from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import FusedMoE3DWithLoRA
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.attention.ops import pcp as attention_pcp
@@ -91,6 +93,35 @@ def test_validate_lora_modules_rejects_expert_lora():
     PCPManager.validate_lora_modules([attn_lora])
     with pytest.raises(NotImplementedError, match="attention-only LoRA"):
         PCPManager.validate_lora_modules([attn_lora, expert_lora])
+
+
+def _make_lora_adapter(adapter_id: int, module_name: str) -> LoRAModel:
+    return LoRAModel(
+        adapter_id,
+        rank=8,
+        loras={
+            module_name: LoRALayerWeights(
+                module_name,
+                rank=8,
+                lora_alpha=16,
+                lora_a=torch.zeros(8, 4),
+                lora_b=torch.zeros(4, 8),
+            )
+        },
+    )
+
+
+def test_validate_lora_adapter_accepts_attention_only():
+    adapter = _make_lora_adapter(1, "model.layers.0.self_attn.q_proj")
+    PCPManager.validate_lora_adapter(adapter)
+
+
+def test_validate_lora_adapter_rejects_expert_weights():
+    adapter = _make_lora_adapter(2, "model.layers.0.mlp.experts")
+    with pytest.raises(NotImplementedError, match="attention-only LoRA") as exc_info:
+        PCPManager.validate_lora_adapter(adapter)
+    assert "adapter 2" in str(exc_info.value)
+    assert "model.layers.0.mlp.experts" in str(exc_info.value)
 
 
 def test_validate_config_rejects_full_graph_for_prefills():

@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 
 if TYPE_CHECKING:
+    from vllm.lora.lora_model import LoRAModel
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
     from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
@@ -163,6 +164,20 @@ class PCPManager:
                 "MRV2 PCP currently supports attention-only LoRA; LoRA on MoE "
                 "experts is not supported. Restrict --lora-target-modules to "
                 "attention modules."
+            )
+
+    @staticmethod
+    def validate_lora_adapter(lora_model: "LoRAModel") -> None:
+        expert_modules = sorted(
+            module_name
+            for module_name in lora_model.loras
+            if ".experts" in module_name or module_name.startswith("experts")
+        )
+        if expert_modules:
+            raise NotImplementedError(
+                "MRV2 PCP currently supports attention-only LoRA; adapter "
+                f"{lora_model.id} contains unsupported MoE expert module(s): "
+                f"{', '.join(expert_modules)}."
             )
 
     @staticmethod
