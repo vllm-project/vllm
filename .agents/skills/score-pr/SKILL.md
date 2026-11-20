@@ -79,16 +79,21 @@ validation (0–4) + review context (0–1). Use the following criteria.
 Use the available evidence conservatively. An unsearched alternative is
 not a verified gap. If the PR or diff is inaccessible, omit the table until
 it can be examined. The scores are advisory.
-Give each score one plain-text sentence (up to 180 characters) in the Why
-column. Name the specific benefit or limitation that most affected usefulness.
-For readiness, name the strongest relevant evidence or the most consequential
-gap. Use facts from this PR. Omit mentions, links and Markdown within the
-explanations. Replace U and R with integers from 1 to 10.
+Write each total as an integer from 1 to 10 followed by `/10`. In the Why
+column, use one short sentence you'd leave on the PR (up to 180 characters).
+For usefulness, say what gets better for whom, or point to the code or docs
+that already solve the problem. For readiness, say what you can check or what
+you're still missing. “The test sends one document, but the crash needs two”
+tells the author more than “needs more testing.” Use plain text without
+mentions or links.
+
+For example, suppose a PR adds a second empty-list guard and shows the request
+and response on both revisions. Score each real PR from its own evidence.
 
 | Metric | Score | Why |
 | --- | --- | --- |
-| Usefulness | U/10 | One reason grounded in the problem and alternatives. |
-| Review Readiness | R/10 | One reason grounded in the review evidence. |
+| Usefulness | 1/10 | The line above already rejects an empty list with the same error, so this guard doesn't fix a bug. |
+| Review Readiness | 9/10 | The PR shows the request and the 400 response from both versions, so you can check the behavior with one curl call. |
 
 ## Bot integration
 
