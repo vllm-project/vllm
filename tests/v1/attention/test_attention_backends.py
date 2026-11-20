@@ -1137,7 +1137,7 @@ def test_flashinfer_xqa_draft_masks():
     causal = flashinfer_backend._make_xqa_draft_block_mask(3, True, device)
     full = flashinfer_backend._make_xqa_draft_block_mask(3, False, device)
     ragged = flashinfer_backend._make_xqa_ragged_draft_block_mask(
-        [2, 3], 3, True, device
+        torch.tensor([2, 3]), 3, True, device
     )
 
     assert torch.equal(
@@ -1154,6 +1154,30 @@ def test_flashinfer_xqa_draft_masks():
             dtype=torch.int16,
         ),
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer with CUDA is required.",
+)
+def test_flashinfer_xqa_ragged_draft_mask_does_not_sync():
+    """Ragged spec-decode steps rebuild this mask, so it must not sync."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    q_lens = torch.tensor([4, 4, 0, 2, 4])
+    expected = flashinfer_backend._make_xqa_ragged_draft_block_mask(
+        q_lens, 4, True, torch.device("cpu")
+    )
+    prev_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        mask = flashinfer_backend._make_xqa_ragged_draft_block_mask(
+            q_lens, 4, True, torch.device("cuda")
+        )
+    finally:
+        torch.cuda.set_sync_debug_mode(prev_mode)
+    assert torch.equal(mask.cpu(), expected)
 
 
 @pytest.mark.skipif(
@@ -1177,7 +1201,8 @@ def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
     )
 
     assert q_len == 6
-    assert q_lens == [3, 6, 6, 0]
+    assert q_lens is not None
+    assert q_lens.tolist() == [3, 6, 6, 0]
     assert q_cu_seq_lens is not None
     assert q_cu_seq_lens.tolist() == [0, 3, 9, 15, 15]
 
@@ -1399,7 +1424,8 @@ def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     )
 
     assert q_len == 3
-    assert q_lens == [3, 0, 0]
+    assert q_lens is not None
+    assert q_lens.tolist() == [3, 0, 0]
     assert q_cu_seq_lens is not None
     assert q_cu_seq_lens.tolist() == [0, 3, 3, 3]
 
