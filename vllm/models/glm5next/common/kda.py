@@ -13,8 +13,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    Glm5NextMergedColumnParallelLinear,
     RowParallelLinear,
-    _Glm5NextMergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
@@ -347,7 +347,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
         # Shards 4 (f_a) and 5 (g_a) are replicated across TP ranks.
-        self.in_proj_qkvbfg_a = _Glm5NextMergedColumnParallelLinear(
+        self.in_proj_qkvbfg_a = Glm5NextMergedColumnParallelLinear(
             self.hidden_size,
             [
                 projection_size,  # q (shard 0)

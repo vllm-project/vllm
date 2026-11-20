@@ -44,11 +44,11 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    Glm5NextMergedColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
-    _Glm5NextMergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -1342,7 +1342,7 @@ def test_merged_lora_b_replicated_shards(
             torch.device("cpu"),
         ):
             if replicated:
-                base = _Glm5NextMergedColumnParallelLinear(
+                base = Glm5NextMergedColumnParallelLinear(
                     16, sizes, (4, 5), tp_size=tp_size, bias=False
                 )
             else:

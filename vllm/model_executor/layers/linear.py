@@ -1628,7 +1628,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         copy_weight_(param_data, loaded_weight)
 
 
-class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
+class Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with multiple replicated output shards.
 
     Extends K3's `_KimiGDNMergedColumnParallelLinear` to support two
