@@ -188,6 +188,13 @@ def unshuffle_weight(
     `[N / rows][K / cols][row][col]`, the order an MFMA's operand loads want --
     so undoing it is that transpose the other way round. `cols` counts stored
     bytes, which for a packed fp4x2 weight is half its K.
+
+    Written here rather than imported because AITER ships the forward
+    permutation and no inverse, and these tests run on a CPU where AITER is
+    not importable at all. The durable home for it is AITER's own
+    `shuffle_weight`; if one lands there, this should become its caller --
+    an inverse that only exists here is a third place the layout is written
+    down, and the one nobody updates.
     """
     n, k = weight.shape[-2:]
     assert n % rows == 0 and k % cols == 0, (
@@ -226,7 +233,19 @@ def mx_quantize(
     multiplies, not the bytes it stores. A definition that needs to know what
     an activation lost on its way into a kernel calls this at the point the
     kernel quantizes, and stays in float64 either side of it.
+
+    `fmax` is what the scale code aims the group's amax at, and `fnuz` picks
+    the E4M3 the values then round onto. Aiming past the format's own maximum
+    saturates every group whose amax lands in the top of its range -- a clip
+    of up to 2x that produces numbers rather than an error -- so the two have
+    to agree. Below it is headroom, which is the caller's business.
     """
+    e4m3_max = 224.0 if fnuz else 448.0
+    assert fmax <= e4m3_max, (
+        f"the scale code aims at `fmax` and the rounding saturates at the "
+        f"E4M3 maximum, so `fmax` is at most {e4m3_max} for "
+        f"{'FNUZ' if fnuz else 'OCP'}, got {fmax}"
+    )
     assert x.shape[-1] % group == 0, (
         f"`x`'s last axis is whole groups of {group}, got {x.shape[-1]}"
     )
@@ -253,7 +272,14 @@ def ordered_sum(
     not this file's.
     """
     terms = terms.double()
-    order = range(terms.shape[dim]) if order is None else order
+    count = terms.shape[dim]
+    order = list(range(count)) if order is None else list(order)
+    # A reordering, not a selection: an order that drops a term or names one
+    # twice would still return a well-formed total, and a reference that
+    # quietly answers the wrong question is worse than one that stops.
+    assert sorted(order) == list(range(count)), (
+        f"`order` is a permutation of the {count} terms along dim {dim}, got {order}"
+    )
     total = None
     for i in order:
         term = terms.select(dim, i)
@@ -273,6 +299,11 @@ def rms_norm(
     Mean of the squares, not sum: `eps` sits next to a quantity that does not
     grow with H, which is why the same `eps` means the same thing at every
     hidden size.
+
+    Written out rather than deferred to `F.rms_norm`, which the layers under
+    test reach for themselves -- a yardstick that calls the same helper as
+    the thing it measures cancels that helper's bugs instead of catching
+    them. Four lines is the price of the definition being independent.
     """
     x = x.double()
     normed = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps)
@@ -288,6 +319,11 @@ def sinkhorn(logits: torch.Tensor, eps: float, repeat: int) -> torch.Tensor:
     it leaves the result near doubly stochastic rather than exactly so, and
     a kernel that dropped it would converge somewhere else.
     """
+    # `range(repeat - 1)` is empty for 0 and for every negative value, so
+    # without this a caller asking for no passes at all silently gets one.
+    assert repeat >= 1, (
+        f"`repeat` counts column passes, so it is at least 1, got {repeat}"
+    )
     comb = torch.softmax(logits.double(), dim=-1) + eps
     comb = comb / (comb.sum(-2, keepdim=True) + eps)
     for _ in range(repeat - 1):
@@ -306,12 +342,20 @@ def mhc_post(
     residual streams `residual` [T, M, H], stream j becoming
     `sum_i comb[t, i, j] r[t, i] + post[t, j] x[t]`.
 
-    `post_mix` is [T, M, 1] and `comb_mix` [T, M, M] -- the mixes the
-    *previous* seam handed out, which is what makes the seam a delayed one.
+    `post_mix` is [T, M] and `comb_mix` [T, M, M] -- the mixes the *previous*
+    seam handed out, which is what makes the seam a delayed one, and the
+    shapes `mhc_mixes` publishes them in, so a seam's output is the next
+    seam's input with nothing reshaped in between.
     """
     residual, x = residual.double(), x.double()
+    m = residual.shape[-2]
+    assert post_mix.shape[-1] == m and tuple(comb_mix.shape[-2:]) == (m, m), (
+        f"`residual` carries {m} streams, so `post_mix` is [..., {m}] and "
+        f"`comb_mix` [..., {m}, {m}], got {tuple(post_mix.shape)} and "
+        f"{tuple(comb_mix.shape)}"
+    )
     mixed = torch.einsum("...ij,...ih->...jh", comb_mix.double(), residual)
-    return mixed + post_mix.double() * x.unsqueeze(-2)
+    return mixed + post_mix.double().unsqueeze(-1) * x.unsqueeze(-2)
 
 
 def mhc_collapse(residual: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -345,6 +389,15 @@ def mhc_mixes(
     it is bounded; the comb mix goes through `sinkhorn`.
     """
     m = residual.shape[-2]
+    rows = m * (m + 2)
+    assert fn.shape[0] == rows, (
+        f"the gate projection has M (M + 2) = {rows} rows for {m} streams, "
+        f"got {fn.shape[0]}"
+    )
+    assert hc_scale.numel() == 3 and hc_base.numel() == rows, (
+        f"one `hc_scale` per row group and one `hc_base` per row: 3 and "
+        f"{rows}, got {hc_scale.numel()} and {hc_base.numel()}"
+    )
     flat = residual.double().flatten(-2)
     scale, base = hc_scale.double(), hc_base.double()
     mixes = (flat @ fn.double().t()) * torch.rsqrt(
@@ -385,7 +438,11 @@ def mhc_delayed_seam(
     applies. It applies the previous seam's and publishes its own, so the
     projection that reads the residual does not have to finish before the
     sublayer input can leave. -> (residual [T, M, H], layer input [T, H],
-    pre [T, M], post [T, M], comb [T, M, M]).
+    post [T, M], comb [T, M, M], pre [T, M]).
+
+    The three mixes come back in the order the next seam takes them, so
+    `seam(y, folded, *mixes, fn, ...)` is the chain. Returning them in any
+    other order would make the obvious forwarding silently misroute a mix.
     """
     folded = mhc_post(x, residual, post_mix, comb_mix)
     layer_input = rms_norm(mhc_collapse(folded, pre_mix), norm_weight, norm_eps)
@@ -400,7 +457,7 @@ def mhc_delayed_seam(
         post_mult=post_mult,
         sinkhorn_repeat=sinkhorn_repeat,
     )
-    return folded, layer_input, pre, post, comb
+    return folded, layer_input, post, comb, pre
 
 
 def rope_pairs(
@@ -469,6 +526,13 @@ def mla_decode(
     assert sizes and min(sizes) > 0 and sum(sizes) == keys.shape[0], (
         f"`chunks` splits all {keys.shape[0]} keys into non-empty parts, got {sizes}"
     )
+    order = list(range(len(sizes))) if order is None else list(order)
+    # Same reason as `ordered_sum`: a chunk left out of `order` drops from
+    # the numerator and the denominator together, so the result stays a
+    # finite, normalized-looking attention output and nothing complains.
+    assert sorted(order) == list(range(len(sizes))), (
+        f"`order` is a permutation of the {len(sizes)} chunks, got {order}"
+    )
     logits = (q @ keys.t()) * (scale * LOG2E)
     parts = logits.split(sizes, -1)
     values = keys.split(sizes, 0)
@@ -480,7 +544,7 @@ def mla_decode(
     else:
         denominator = torch.zeros_like(top)
     numerator = torch.zeros_like(q)
-    for c in range(len(sizes)) if order is None else order:
+    for c in order:
         weights = torch.exp2(parts[c] - maxes[c].unsqueeze(-1))
         rescale = torch.exp2(maxes[c] - top)
         denominator = denominator + weights.sum(-1) * rescale

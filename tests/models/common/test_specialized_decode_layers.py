@@ -71,6 +71,15 @@ def test_ordered_sum_order_is_load_bearing_once_it_rounds():
     assert small_first.item() > 1.0
 
 
+@pytest.mark.parametrize("order", [[0, 1], [0, 0, 1, 2], [0, 1, 2, 4]])
+def test_ordered_sum_rejects_an_order_that_is_not_a_permutation(order: list[int]):
+    """A reordering, not a selection. A dropped or repeated term still
+    returns a plausible total, which is the worst thing a yardstick can do,
+    so it is rejected rather than summed."""
+    with pytest.raises(AssertionError, match="permutation"):
+        R.ordered_sum(torch.ones(1, 4, dtype=F64), order=order)
+
+
 # ---------------------------------------------------------------- RMSNorm
 @pytest.mark.parametrize("factor", [2.0**-40, 0.5, 7.0, 2.0**40])
 def test_rms_norm_ignores_its_input_scale(factor: float):
@@ -132,6 +141,28 @@ def test_sinkhorn_eps_only_ever_shrinks_the_sums():
     assert torch.all((sums <= 1.0) & (sums > 1.0 - 1e-5))
 
 
+def test_sinkhorn_eps_is_added_to_the_softmax_not_folded_into_it():
+    """A row whose softmax underflows to exactly zero separates the two
+    readings of `eps`. Added, it floors the entry and the column it sits in
+    still has something to normalize; scaled in as `(1 + eps)` instead, the
+    entry stays exactly zero and takes its column's sum down with it. The
+    floor is part of the definition, not a guard on it."""
+    logits = torch.full((1, 4, 4), -1.0e4, dtype=F64)
+    logits[..., 0] = 0.0
+    underflowed = torch.softmax(logits, dim=-1)
+    assert torch.equal(underflowed[0, :, 1:], torch.zeros(4, 3, dtype=F64))
+    comb = R.sinkhorn(logits, eps=1e-6, repeat=20)
+    assert torch.all(torch.isfinite(comb))
+    assert torch.all(comb > 0.0)
+
+
+def test_sinkhorn_rejects_a_repeat_below_one():
+    """`range(repeat - 1)` is empty at 0 and below, so without the guard
+    asking for no passes silently gets one."""
+    with pytest.raises(AssertionError, match="column passes"):
+        R.sinkhorn(_rand(1, 4, 4, seed=86), eps=0.0, repeat=0)
+
+
 def test_sinkhorn_one_round_is_softmax_then_one_column_pass():
     """`repeat` counts column passes: one means the row softmax and a single
     column normalization, with nothing after it."""
@@ -160,7 +191,7 @@ def test_mhc_post_with_identity_mixes_is_a_plain_residual_add():
     to the residual addition it generalizes."""
     x, residual = _rand(3, 16, seed=9), _rand(3, 4, 16, seed=10)
     identity = torch.eye(4, dtype=F64).expand(3, 4, 4)
-    post = torch.ones(3, 4, 1, dtype=F64)
+    post = torch.ones(3, 4, dtype=F64)
     _close(R.mhc_post(x, residual, post, identity), residual + x.unsqueeze(-2), 4.0)
 
 
@@ -173,7 +204,7 @@ def test_mhc_post_reads_comb_from_the_source_stream():
     comb = torch.zeros(1, 4, 4, dtype=F64)
     comb[0, 0, 1] = 1.0
     folded = R.mhc_post(
-        torch.zeros(1, 8, dtype=F64), residual, comb.new_zeros(1, 4, 1), comb
+        torch.zeros(1, 8, dtype=F64), residual, comb.new_zeros(1, 4), comb
     )
     assert torch.equal(folded[0, 1], residual[0, 0])
     assert torch.equal(folded[0, [0, 2, 3]], torch.zeros(3, 8, dtype=F64))
@@ -196,7 +227,7 @@ def test_mhc_delayed_seam_degenerates_to_rms_norm_of_one_stream():
     folded, layer_input, *_ = R.mhc_delayed_seam(
         x,
         residual,
-        torch.zeros(3, 4, 1, dtype=F64),
+        torch.zeros(3, 4, dtype=F64),
         torch.eye(4, dtype=F64).expand(3, 4, 4),
         pre,
         fn,
@@ -215,7 +246,7 @@ def test_mhc_delayed_seam_mixes_come_from_the_folded_residual():
     non-zero `x` has to move them."""
     residual, x = _rand(3, 4, 16, seed=19), _rand(3, 16, seed=20)
     args = (
-        torch.full((3, 4, 1), 0.5, dtype=F64),
+        torch.full((3, 4), 0.5, dtype=F64),
         R.sinkhorn(_rand(3, 4, 4, seed=21), 0.0, 20),
         torch.full((3, 4), 0.25, dtype=F64),
         _rand(24, 64, seed=22),
@@ -223,9 +254,52 @@ def test_mhc_delayed_seam_mixes_come_from_the_folded_residual():
         _rand(24, seed=24),
     )
     kwargs = _seam_kwargs()
-    _, _, quiet, *_ = R.mhc_delayed_seam(torch.zeros_like(x), residual, *args, **kwargs)
-    _, _, loud, *_ = R.mhc_delayed_seam(x, residual, *args, **kwargs)
-    assert not torch.allclose(quiet, loud)
+    _, _, *quiet = R.mhc_delayed_seam(torch.zeros_like(x), residual, *args, **kwargs)
+    _, _, *loud = R.mhc_delayed_seam(x, residual, *args, **kwargs)
+    for was, now in zip(quiet, loud):
+        assert not torch.allclose(was, now)
+
+
+def test_mhc_seams_chain_into_each_other():
+    """A delayed seam applies the mixes the previous one published, so what a
+    seam returns has to be what the next one takes -- same shapes, same
+    order, nothing reshaped in between. `seam(y, folded, *mixes, ...)` is the
+    whole claim, and it is the one thing no single-seam test can make.
+    """
+    t, m, h = 3, 4, 16
+    fn, scale = _rand(m * (m + 2), m * h, seed=79), _rand(3, seed=80)
+    base, residual = _rand(m * (m + 2), seed=81), _rand(t, m, h, seed=82)
+    kwargs = _seam_kwargs()
+    folded, _, post, comb, pre = R.mhc_delayed_seam(
+        _rand(t, h, seed=83),
+        residual,
+        torch.full((t, m), 0.5, dtype=F64),
+        R.sinkhorn(_rand(t, m, m, seed=84), 0.0, 20),
+        torch.full((t, m), 0.25, dtype=F64),
+        fn,
+        scale,
+        base,
+        **kwargs,
+    )
+    mixes = (post, comb, pre)
+    assert (post.shape, comb.shape, pre.shape) == ((t, m), (t, m, m), (t, m))
+    # Which slot holds which mix, settled against `mhc_mixes` by name. Going
+    # back to the forwarded tuple instead would be circular -- `pre` and
+    # `post` are both [T, M], so a swap lands in a slot of the right shape
+    # and every assertion downstream of it agrees with itself.
+    mix_kwargs = {k: v for k, v in kwargs.items() if k != "norm_eps"}
+    want_pre, want_post, want_comb = R.mhc_mixes(folded, fn, scale, base, **mix_kwargs)
+    assert torch.equal(post, want_post)
+    assert torch.equal(comb, want_comb)
+    assert torch.equal(pre, want_pre)
+    y = _rand(t, h, seed=85)
+    again, layer_input, *_ = R.mhc_delayed_seam(
+        y, folded, *mixes, fn, scale, base, **kwargs
+    )
+    _close(again, R.mhc_post(y, folded, want_post, want_comb), scale=16.0)
+    _close(
+        layer_input, R.rms_norm(R.mhc_collapse(again, want_pre), eps=1e-6), scale=16.0
+    )
 
 
 def test_mhc_mixes_stay_in_their_ranges():
@@ -248,8 +322,34 @@ def test_mhc_mixes_stay_in_their_ranges():
     # At the bottom `pre_eps` is then the whole value, which is what it is
     # for -- a stream the mix has given up on still contributes.
     assert torch.all((pre >= 1e-3) & (pre <= 1.0 + 1e-3))
-    assert torch.all((post > 0.0) & (post <= 2.0))
+    assert torch.all((post >= 0.0) & (post <= 2.0))
     assert torch.all(comb > 0.0)
+
+
+def test_mhc_post_rejects_mixes_of_the_wrong_stream_count():
+    """`post_mix` and `comb_mix` are both indexed by stream, and a mix built
+    for a different M broadcasts into something of a plausible shape instead
+    of stopping."""
+    x, residual = _rand(3, 16, seed=90), _rand(3, 4, 16, seed=91)
+    comb = torch.eye(4, dtype=F64).expand(3, 4, 4)
+    with pytest.raises(AssertionError, match="streams"):
+        R.mhc_post(x, residual, torch.ones(3, 2, dtype=F64), comb)
+    with pytest.raises(AssertionError, match="streams"):
+        R.mhc_post(x, residual, torch.ones(3, 4, dtype=F64), torch.eye(2, dtype=F64))
+
+
+def test_mhc_mixes_rejects_a_gate_projection_of_the_wrong_height():
+    """M (M + 2) rows for M streams. A projection sized for another M slices
+    into the wrong row groups rather than failing."""
+    residual = _rand(3, 4, 16, seed=92)
+    with pytest.raises(AssertionError, match="rows"):
+        R.mhc_mixes(
+            residual,
+            _rand(20, 64, seed=93),
+            _rand(3, seed=94),
+            _rand(24, seed=95),
+            **{k: v for k, v in _seam_kwargs().items() if k != "norm_eps"},
+        )
 
 
 # ---------------------------------------------------------------- RoPE
@@ -422,6 +522,15 @@ def test_mla_rejects_a_split_that_loses_keys():
         R.mla_decode(_rand(2, 8, seed=58), _rand(10, 8, seed=59), 1.0, chunks=[4, 4])
 
 
+def test_mla_rejects_a_combine_order_that_drops_a_chunk():
+    """A chunk missing from `order` leaves both the numerator and the
+    denominator, so the output stays finite and normalized-looking and the
+    only sign anything went wrong is the answer."""
+    q, keys = _rand(2, 8, seed=88), _rand(8, 8, seed=89)
+    with pytest.raises(AssertionError, match="permutation"):
+        R.mla_decode(q, keys, 1.0, chunks=[4, 4], order=[0])
+
+
 # ---------------------------------------------------------------- MoE route
 def test_route_weights_sum_to_the_scaling_factor():
     ids, weights = R.moe_route(_rand(6, 64, seed=60, scale=2.0), topk=6, scale=1.5)
@@ -454,13 +563,19 @@ def test_route_breaks_ties_toward_the_lower_expert_id():
 def test_route_bias_moves_the_picks_but_not_the_weights():
     """`e_score_correction_bias` is a load-balancing knob: it chooses the
     experts and then leaves the arithmetic, so the weights are the unbiased
-    scores of whatever it chose."""
+    scores of whatever it chose.
+
+    The winners have to carry a bias that is not zero, or the biased and
+    unbiased readings agree by construction and the test sees nothing -- so
+    the second assertion is that they would have differed.
+    """
     logits = _rand(4, 8, seed=63, scale=2.0)
     scores = R.sqrt_softplus_score(logits)
-    bias = torch.where(torch.arange(8) < 4, -100.0, 0.0).double()
+    bias = torch.where(torch.arange(8) < 4, -100.0, 3.0).double()
     ids, weights = R.moe_route(logits, bias=bias, topk=4, renormalize=False)
     assert torch.all(ids >= 4)
     _close(weights, scores.gather(-1, ids))
+    assert not torch.allclose(weights, (scores + bias).gather(-1, ids))
 
 
 def test_route_over_every_expert_reduces_to_the_dense_weights():
@@ -565,24 +680,36 @@ def test_unshuffle_scale_inverts_the_documented_shuffle():
 
 
 def test_unshuffle_scale_puts_a_32_row_block_in_one_run():
-    """What the layout is for: the 32 rows and all the columns of one scale
-    block are contiguous, so a few wide loads fetch it."""
+    """What the layout is for: one 32-row block's codes -- both 16-row
+    halves, all of K -- are one contiguous run of stored bytes, so a few wide
+    loads fetch it. Filling the first half of the buffer with one code and
+    the second half with another therefore has to unshuffle into the first
+    32 rows and the last 32 rows, with no mixing."""
     rows, cols = 64, 64
-    block = (torch.arange(rows).view(rows, 1) // 32).expand(rows, cols)
-    shuffled = torch.empty(rows * cols, dtype=torch.int64)
-    order = torch.arange(rows * cols).view(rows // 32, 2, 16, cols // 8, 2, 4)
-    shuffled[order.permute(0, 3, 5, 2, 4, 1).reshape(-1)] = block.reshape(-1)
-    runs = shuffled.view(2, -1)
-    assert torch.equal(runs[0], torch.zeros_like(runs[0]))
-    assert torch.equal(runs[1], torch.ones_like(runs[1]))
+    half = rows * cols // 2
+    stored = torch.cat([torch.zeros(half), torch.ones(half)])
+    logical = R.unshuffle_scale(stored.view(rows, cols).to(torch.int32))
+    assert torch.equal(logical[:32], torch.zeros(32, cols, dtype=torch.int32))
+    assert torch.equal(logical[32:], torch.ones(32, cols, dtype=torch.int32))
 
 
 @pytest.mark.parametrize("rows, cols", [(16, 8), (17, 16), (32, 24)])
 def test_unshuffle_weight_rejects_a_partial_block(rows: int, cols: int):
-    if rows % 16 == 0 and cols % 16 == 0:
-        pytest.skip("that one is a whole block")
     with pytest.raises(AssertionError, match="whole blocks"):
         R.unshuffle_weight(torch.zeros(rows, cols, dtype=torch.int32))
+
+
+def test_unshuffle_scale_rejects_a_partial_block():
+    with pytest.raises(AssertionError, match="shuffle_scale"):
+        R.unshuffle_scale(torch.zeros(48, 16, dtype=torch.int32))
+
+
+def test_mx_quantize_rejects_an_fmax_past_the_format():
+    """The scale code aims at `fmax` and the rounding saturates at the E4M3
+    maximum. Aiming past it clips up to half of every group's range and
+    still returns numbers, so the pair is checked rather than trusted."""
+    with pytest.raises(AssertionError, match="at most 224"):
+        R.mx_quantize(_rand(1, 32, seed=87), 448.0, fnuz=True)
 
 
 def test_unshuffled_mxfp4_dequantizes_to_the_logical_weight():

@@ -38,7 +38,6 @@ steps:
   - tests/models/common/specialized_decode/reference.py
   - tests/models/common/specialized_decode/harness.py
   - tests/models/common/specialized_decode/inputs.py
-  - tests/models/common/test_specialized_decode_layers.py
   - tests/models/deepseek_v41/amd/mono/test_primitives.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
