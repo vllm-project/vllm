@@ -8,6 +8,7 @@ Users of vLLM should always import **only** these wrappers.
 import functools
 import importlib
 import importlib.util
+import math
 
 import torch
 
@@ -175,8 +176,72 @@ def hpc_fuse_moe_blockwise(
     )
 
 
+@functools.cache
+def has_hpc_sm120_moe() -> bool:
+    """Return `True` if the installed HPC-Ops has the SM120 fused MoE."""
+    if not has_hpc():
+        return False
+    try:
+        from hpc import fuse_moe_mxfp8  # noqa: F401
+    except ImportError:
+        logger.warning_once(
+            "The installed hpc package has no SM120 fused MoE; it needs "
+            "a newer https://github.com/Tencent/hpc-ops built for SM120."
+        )
+        return False
+    return True
+
+
+def hpc_fuse_moe_mxfp8_sm120(
+    x: torch.Tensor,
+    x_scale: torch.Tensor | None,
+    gate_up_weight: torch.Tensor,
+    gate_up_weight_scale: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_weight_scale: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_scale: torch.Tensor,
+    rank_ep: int,
+    num_expert_total: int,
+    output: torch.Tensor,
+    swiglu_limit: float | None = None,
+) -> torch.Tensor:
+    """MXFP8 or MXFP4 weight x MXFP8 activation fused MoE on SM120.
+
+    `x` is MXFP8 with its UE8M0 `x_scale`, or BF16 with `x_scale=None`, which
+    is quantized to MXFP8 here. Weights and scales come from
+    `prepare_mx_moe_layer_for_hpc_sm120` in `fused_moe.hpc_moe`.
+    """
+    from hpc import fuse_moe_mxfp8
+
+    if x_scale is None:
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            mxfp8_e4m3_quantize,
+        )
+
+        x, x_scale = mxfp8_e4m3_quantize(x)
+        x_scale = x_scale.view(torch.uint8)
+
+    return fuse_moe_mxfp8(
+        x,
+        x_scale,
+        gate_up_weight,
+        gate_up_weight_scale,
+        down_weight,
+        down_weight_scale,
+        topk_ids,
+        topk_scale,
+        rank_ep,
+        num_expert_total,
+        limit=math.inf if swiglu_limit is None else swiglu_limit,
+        output=output,
+    )
+
+
 __all__ = [
     "has_hpc",
+    "has_hpc_sm120_moe",
     "hpc_fuse_moe",
     "hpc_fuse_moe_blockwise",
+    "hpc_fuse_moe_mxfp8_sm120",
 ]
