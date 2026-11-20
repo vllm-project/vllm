@@ -72,6 +72,7 @@ from vllm.model_executor.models.transformers.utils import (
     decoder_mutates_inputs_embeds,
     get_feature_request_tip,
     has_bidirectional_attention,
+    infer_dynamic_arg_dims,
     init_on_device_without_buffers,
     log_replacement,
     maybe_disable_dynamic_rope_update,
@@ -86,6 +87,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     ShardId,
     WeightsMapper,
+    WeightsTransformFn,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
     spec_decode_needs_target_embed,
@@ -138,6 +140,8 @@ class Base(
 ):
     hf_to_vllm_mapper: WeightsMapper
     supports_aux_hidden_states_over_pp = True
+    _tower_model_names: tuple[str, ...] = ()
+    """Read by `recursive_replace`, so text-only models need this empty default."""
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
@@ -358,14 +362,18 @@ class Base(
     def _decorate_for_torch_compile(self):
         """Decorate the model's decoder class to indicate to vLLM that it
         supports torch compile if `can_enable_torch_compile` is True."""
+        decoder_cls = self._pre_trained_model_classes.decoder
+        # Applied to a PreTrainedModel so every input has a batch dimension
+        dynamic_arg_dims = infer_dynamic_arg_dims(decoder_cls, dim=1)
+        dynamic_arg_dims.pop("attention_mask", None)
+        dynamic_arg_dims.update(
+            input_ids=1,  # shape: [1, seq_len]
+            inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+            position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+        )
         self._decorate_cls_for_torch_compile(
-            cls=self._pre_trained_model_classes.decoder,
-            # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims=DynamicArgDims(
-                input_ids=1,  # shape: [1, seq_len]
-                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
-                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
-            ),
+            cls=decoder_cls,
+            dynamic_arg_dims=dynamic_arg_dims,
             enable_if=can_enable_torch_compile,
             is_encoder=False,
         )
@@ -388,11 +396,6 @@ class Base(
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
             # TODO: Handle WeightConverter to enable layer merging
-
-        # Handle unexpected weights which should be ignored
-        if self.model._keys_to_ignore_on_load_unexpected is not None:
-            for key in self.model._keys_to_ignore_on_load_unexpected:
-                orig_to_new_regex[re.compile(key)] = None
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
@@ -417,7 +420,12 @@ class Base(
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
+        weights_transforms: list[WeightsTransformFn] = []
+        if self.model._keys_to_ignore_on_load_unexpected:
+            weights_transforms.append(self._drop_ignored_unexpected)
+
         self.hf_to_vllm_mapper = WeightsMapper(
+            weights_transforms=weights_transforms,
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
         )
@@ -651,9 +659,14 @@ class Base(
         # Decoder layers are detected as they are built, after their pre-replace hook
         fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
 
+        def _materialise(module: nn.Module, prefix: str) -> nn.Module:
+            """Initialise `module` as `__init__` would, so it can be offloaded early."""
+            self.init_parameters(module)
+            self.keep_in_fp32(module, prefix.removeprefix("model."))
+            return module
+
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
-            """Build this rank's decoder layers one at a time and offload each as
-            soon as it is built, as `make_layers` does."""
+            """Replace this rank's decoder layers, offloading each as it is built."""
             # Record the layers for Eagle3
             for name, _ in layers.named_children():
                 self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
@@ -670,22 +683,29 @@ class Base(
             )
 
             def build_layers():
-                """Must mimic what `__init__` does to the whole model's parameters,
-                because each layer is offloaded as soon as it is yielded."""
                 for i in range(*self._pp_indices()):
                     layer_prefix = f"{prefix}.{i}"
                     self._pre_decoder_layer_replace(layers[i], layer_prefix)
                     fusers.add(layers[i])
                     _replace_child(layers, str(i), layers[i], prefix)
-                    self.init_parameters(layers[i])
-                    self.keep_in_fp32(layers[i], layer_prefix.removeprefix("model."))
-                    yield layers[i]
+                    yield _materialise(layers[i], layer_prefix)
 
             offloader.wrap_modules(build_layers())
+
+        def _replace_tower(tower: nn.Module, prefix: str):
+            """Replace a tower, offloading it whole once it is built."""
+            for child_name, child_module in tower.named_children():
+                _replace_child(tower, child_name, child_module, prefix)
+            if offloader.supports_tower_offload:
+                towers = (_materialise(t, prefix) for t in [tower])
+                offloader.wrap_modules(towers, prefix=prefix)
 
         def _recursive_replace(module: nn.Module, prefix: str):
             if module is decoder_layers:
                 _replace_decoder_layers(module, prefix)
+                return
+            if prefix in self._tower_model_names:
+                _replace_tower(module, prefix)
                 return
             for child_name, child_module in module.named_children():
                 _replace_child(module, child_name, child_module, prefix)
@@ -984,6 +1004,21 @@ class Base(
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def _drop_ignored_unexpected(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Drop weights matching `_keys_to_ignore_on_load_unexpected`.
+
+        Transformers merges these up without prefixes, so a match is only dropped if
+        it has nowhere to go. Parameters are read at load time, after fusers and
+        pipeline parallelism have renamed or removed them."""
+        pattern = re.compile("|".join(self.model._keys_to_ignore_on_load_unexpected))
+        expected = {name for name, _ in named_state(self)}
+        map_name = self.hf_to_vllm_mapper.map_name
+        for name, weight in weights:
+            if not pattern.search(name) or map_name(name) in expected:
+                yield name, weight
 
     @staticmethod
     def check_version(min_version: str, feature: str):
