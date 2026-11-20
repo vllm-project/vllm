@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     RoutingMethodType,
@@ -36,11 +36,8 @@ class MuseSparkRouter(BaseRouter):
         router_output_multiplier: float | None = None,
         router_score_normalization: str = "sigmoid",
         router_score_division_eps: float | None = None,
-        eplb_state: EplbLayerState | None = None,
     ):
-        super().__init__(
-            top_k=top_k, global_num_experts=num_experts, eplb_state=eplb_state
-        )
+        super().__init__(top_k=top_k, global_num_experts=num_experts)
         if router_score_normalization not in ("sigmoid", "softmax"):
             raise ValueError(
                 f"Invalid router_score_normalization: {router_score_normalization}"
@@ -154,10 +151,14 @@ class MuseSparkConsolidatedRoutedExperts(RoutedExperts):
         shard_id: str,
         expert_id: int,
     ) -> None:
-        """Load one logical expert into each of its initial physical replicas."""
-        for physical_id in range(
-            expert_id, self.moe_config.num_experts, self.moe_config.num_logical_experts
-        ):
+        """Load one logical expert into each initial physical slot EPLB assigns it."""
+        num_logical = self.moe_config.num_logical_experts
+        placement = EplbState.build_initial_global_physical_to_logical_map(
+            num_logical, self.moe_config.num_experts - num_logical
+        )
+        for physical_id, logical_id in enumerate(placement):
+            if logical_id != expert_id:
+                continue
             param.weight_loader(
                 param=param,
                 loaded_weight=loaded_weight,

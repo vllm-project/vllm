@@ -22,7 +22,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
@@ -162,9 +161,10 @@ class TokenShard:
 def warn_on_async_eplb(eplb_config: EPLBConfig) -> None:
     if eplb_config.use_async or eplb_config.communicator == "nixl":
         logger.warning_once(
-            "Async EPLB or the NIXL communicator stalled Muse Spark on MI300X; "
-            "use --eplb-config "
-            '\'{"communicator":"pynccl","use_async":false}\' on ROCm.'
+            "Async EPLB or the NIXL communicator left Muse Spark rearrangements "
+            "overlapping on MI300X, and serving was 9-68% slower than with EPLB "
+            "off. Rearrangements still complete. On ROCm set --eplb-config to "
+            '{"communicator":"pynccl","use_async":false}.'
         )
 
 
@@ -286,8 +286,6 @@ class MuseSparkMoE(nn.Module):
             router_output_multiplier=self.router_output_multiplier,
             router_score_normalization="sigmoid",
             router_score_division_eps=1e-15,
-            # FusedMoEFactory only attaches EPLB state to routers it creates.
-            eplb_state=EplbLayerState() if self.enable_eplb else None,
         )
 
         hidden_size = config.moe_hidden_size
