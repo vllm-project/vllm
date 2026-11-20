@@ -552,17 +552,50 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    ("sample_from_anchor", "expected_block_size"),
-    [(False, 5), (True, 4)],
+    ("dflash_flag", "top_level_flag", "expected_block_size"),
+    [
+        (False, None, 5),
+        (True, None, 4),
+        (None, True, 4),
+        (None, False, 5),
+        (True, True, 4),
+    ],
 )
 def test_dflash2_conv_block_matches_query_layout(
-    monkeypatch, sample_from_anchor, expected_block_size
+    monkeypatch, dflash_flag, top_level_flag, expected_block_size
 ):
     """The grouped conv resets per draft block, so its block must be the number
-    of query tokens per request: `1 + K` for fill-in, `K` for anchor-first."""
+    of query tokens per request: `1 + K` for fill-in, `K` for anchor-first.
+    `sample_from_anchor` may be set in `dflash_config` or at the top level."""
     from vllm.config import set_current_vllm_config
     from vllm.model_executor.models.qwen3_dflash2 import DFlash2Qwen3Model
 
+    hf_config = _dflash2_hf_config(dflash_flag, top_level_flag, expected_block_size)
+    current_config, vllm_config = _mock_draft_configs(monkeypatch, hf_config)
+    with set_current_vllm_config(current_config), torch.device("meta"):
+        model = DFlash2Qwen3Model(vllm_config=vllm_config)
+
+    assert model.layers[0].attention_conv.block_size == expected_block_size
+
+
+@pytest.mark.skip_global_cleanup
+def test_dflash2_rejects_conflicting_sample_from_anchor(monkeypatch):
+    """A checkpoint that sets `sample_from_anchor` both in `dflash_config` and at
+    the top level with different values is ambiguous, so it must not load."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dflash2 import DFlash2Qwen3Model
+
+    hf_config = _dflash2_hf_config(True, False, 4)
+    current_config, vllm_config = _mock_draft_configs(monkeypatch, hf_config)
+    with (
+        set_current_vllm_config(current_config),
+        torch.device("meta"),
+        pytest.raises(ValueError, match="Conflicting sample_from_anchor"),
+    ):
+        DFlash2Qwen3Model(vllm_config=vllm_config)
+
+
+def _dflash2_hf_config(dflash_flag, top_level_flag, block_size):
     hf_config = SimpleNamespace(
         vocab_size=1000,
         hidden_size=256,
@@ -579,16 +612,15 @@ def test_dflash2_conv_block_matches_query_layout(
             "selector_top_k": 3,
             "conv_kernel_size": 3,
             "conv_group_size": 2,
-            "block_size": expected_block_size,
-            "sample_from_anchor": sample_from_anchor,
+            "block_size": block_size,
             "use_aux_hidden_state": False,
         },
     )
-    current_config, vllm_config = _mock_draft_configs(monkeypatch, hf_config)
-    with set_current_vllm_config(current_config), torch.device("meta"):
-        model = DFlash2Qwen3Model(vllm_config=vllm_config)
-
-    assert model.layers[0].attention_conv.block_size == expected_block_size
+    if dflash_flag is not None:
+        hf_config.dflash_config["sample_from_anchor"] = dflash_flag
+    if top_level_flag is not None:
+        hf_config.sample_from_anchor = top_level_flag
+    return hf_config
 
 
 @pytest.mark.skip_global_cleanup

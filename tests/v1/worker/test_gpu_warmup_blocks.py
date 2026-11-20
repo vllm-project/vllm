@@ -574,6 +574,8 @@ def _config_without_post_init(
         ),
         # Anchor-first DFlash drafts have no separate bonus query.
         ("dflash", {"dflash_config": {"sample_from_anchor": True}}, NUM_SPEC_STEPS),
+        # Some checkpoints set the flag at the top level, as DSpark does.
+        ("dflash", {"sample_from_anchor": True}, NUM_SPEC_STEPS),
         ("ngram", None, 0),
         ("ngram_gpu", None, 0),
         ("suffix", None, 0),

@@ -62,11 +62,28 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
 
         False (the default) is the fill-in layout: the anchor is the bonus token
         and one mask query per draft token follows it. True is the anchor-first
-        layout, where every query predicts the next token.
+        layout, where every query predicts the next token. Read from
+        `dflash_config`, falling back to the top level of the HF config, where
+        some checkpoints set it as DSpark does.
+
+        Raises:
+            ValueError: If `dflash_config` and the top level set different values.
+
         """
         hf_config = self.spec_config.draft_model_config.hf_config
         dflash_config = getattr(hf_config, "dflash_config", None) or {}
-        return bool(dflash_config.get("sample_from_anchor", False))
+        nested = dflash_config.get("sample_from_anchor")
+        top_level = getattr(hf_config, "sample_from_anchor", None)
+        if (
+            nested is not None
+            and top_level is not None
+            and bool(nested) != bool(top_level)
+        ):
+            raise ValueError(
+                f"Conflicting sample_from_anchor: dflash_config has {nested!r} "
+                f"but the top-level config has {top_level!r}."
+            )
+        return bool(nested if nested is not None else top_level)
 
     @property
     def num_query_tokens(self) -> int:
