@@ -90,10 +90,7 @@ def _first_attention_metadata():
         return None
 
     attn_metadata = get_forward_context().attn_metadata
-    if isinstance(attn_metadata, list):
-        entries = attn_metadata
-    else:
-        entries = [attn_metadata]
+    entries = attn_metadata if isinstance(attn_metadata, list) else [attn_metadata]
 
     for entry in entries:
         if isinstance(entry, dict):
@@ -131,6 +128,7 @@ def _effective_moe_group_size(
     prefix: str,
 ) -> int:
     group_size = layer_config.group_size
+    assert isinstance(group_size, int), "WNA16 only supports integer group_size."
     while intermediate_size % group_size or hidden_size % group_size:
         group_size //= 2
         if group_size < 32:

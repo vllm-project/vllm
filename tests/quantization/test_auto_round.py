@@ -3231,6 +3231,12 @@ def test_e2e_onednn_backends_use_default_xpu_moe(
             from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
                 XPUExpertsWNA16,
             )
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQMoEMethod,
+            )
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Method,
+            )
 
             methods = [
                 module.quant_method
@@ -3238,8 +3244,10 @@ def test_e2e_onednn_backends_use_default_xpu_moe(
                 if isinstance(module, RoutedExperts)
             ]
             assert methods, "model has no routed experts"
-            assert all(method.experts_cls is XPUExpertsWNA16 for method in methods)
-            assert all(method.quant_config.weight_bits == 4 for method in methods)
+            for method in methods:
+                assert isinstance(method, (AutoGPTQMoEMethod, MoeWNA16Method))
+                assert method.experts_cls is XPUExpertsWNA16
+                assert method.quant_config.weight_bits == 4
 
         vllm_model.apply_model(check_model)
         output = vllm_model.generate_greedy(["The capital of France is"], max_tokens=8)
