@@ -59,7 +59,6 @@ from vllm.multimodal.processing.processor import (
     MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
 )
-from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
@@ -1121,24 +1120,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
         self._init_deepstack(vllm_config)
-
-        # Pre-allocate PLE buffer for CUDA graph compatibility.
-        if getattr(self.model.get_decoder(), "hidden_size_per_layer_input", 0):
-            self.check_version("5.21.0", "per-layer input models")
-            if self.pp_group.world_size > 1:
-                raise ValueError(
-                    "Transformers modeling backend does not support pipeline "
-                    "parallelism for per-layer input models."
-                )
-            self.per_layer_inputs = torch.zeros(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                self.text_config.num_hidden_layers,
-                self.text_config.hidden_size_per_layer_input,
-                device=self.device_config.device,
-                dtype=self.model_config.dtype,
-            )
-        else:
-            self.per_layer_inputs = None
+        self._init_per_layer_inputs(vllm_config)
 
     def _init_deepstack(self, vllm_config: "VllmConfig"):
         """DeepStack models add extra vision features to the image tokens after
@@ -1188,6 +1170,46 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # Ignore levels beyond the last decoder layer
         for level, layer in zip(range(self.deepstack_num_levels), layers):
             layer.register_forward_hook(add_deepstack(level))
+
+    def _init_per_layer_inputs(self, vllm_config: "VllmConfig"):
+        """Per-layer embedding models give each decoder layer an extra embedding of
+        every token. Transformers looks them up from `input_ids`, which the model
+        doesn't receive alongside `inputs_embeds`, so we look them up in
+        `embed_input_ids` and pass them from a fixed-address buffer instead."""
+        self.register_buffer("per_layer_inputs", None, persistent=False)
+        decoder = self.model.get_decoder()
+        # Some checkpoints of per-layer embedding architectures disable them
+        size: int = getattr(decoder, "hidden_size_per_layer_input", 0)
+        if not (size and hasattr(decoder, "get_per_layer_inputs")):
+            return
+        self.check_version("5.21.0", "per-layer embedding models")
+        if self.pp_group.world_size > 1:
+            raise ValueError(
+                "Transformers modeling backend does not support pipeline "
+                "parallelism for per-layer embedding models."
+            )
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        num_layers = self.text_config.num_hidden_layers
+        buffer = torch.zeros(1, max_tokens, num_layers, size)
+        # CUDA graphs replay their capture-time input addresses
+        self.register_buffer("per_layer_inputs", buffer, persistent=False)
+
+        def add_per_layer_inputs(module, args, kwargs):
+            if (inputs_embeds := kwargs.get("inputs_embeds")) is not None:
+                num_tokens = inputs_embeds.shape[1]
+                kwargs["per_layer_inputs"] = self.per_layer_inputs[:, :num_tokens]
+            return args, kwargs
+
+        self.model.register_forward_pre_hook(add_per_layer_inputs, with_kwargs=True)
+
+    def _set_per_layer_inputs(
+        self, input_ids: torch.Tensor, is_multimodal: torch.Tensor | None
+    ):
+        if is_multimodal is not None:
+            is_multimodal = is_multimodal.to(input_ids.device, non_blocking=True)
+            input_ids = input_ids.masked_fill(is_multimodal, 0)
+        per_layer_inputs = self.model.get_decoder().get_per_layer_inputs(input_ids)
+        self.per_layer_inputs[0, : len(input_ids)].copy_(per_layer_inputs)
 
     def _find_encoder_classes(
         self, model: "PreTrainedModel"
@@ -1288,28 +1310,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                     enable_if=should_torch_compile_mm_encoder,
                     is_encoder=True,
                 )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
-        per_layer_kwargs: dict[str, torch.Tensor] = {}
-        if self.per_layer_inputs is not None and inputs_embeds is not None:
-            per_layer_kwargs["per_layer_inputs"] = self.per_layer_inputs[
-                None, : len(inputs_embeds)
-            ]
-        model_output = super().forward(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds,
-            **per_layer_kwargs,
-        )
-        return model_output
 
     def get_language_model(self) -> torch.nn.Module:
         """Transformers modeling backend multimodal classes do not contain a separate
@@ -1588,23 +1588,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Cache per-layer embeddings (PLE) for the language model's
-        # forward pass.  During profiling embed_input_ids is not called,
-        # so the pre-allocated zeros are used instead.
         if self.per_layer_inputs is not None:
-            if is_multimodal is not None:
-                ple_input_ids = torch.where(
-                    is_multimodal.to(input_ids.device, non_blocking=True),
-                    torch.zeros_like(input_ids),
-                    input_ids,
-                )
-            else:
-                ple_input_ids = input_ids
-
-            per_layer_inputs = self.model.get_decoder().get_per_layer_inputs(
-                ple_input_ids
-            )
-            self.per_layer_inputs[: per_layer_inputs.shape[0]].copy_(per_layer_inputs)
+            self._set_per_layer_inputs(input_ids, is_multimodal)
 
         has_deepstack = self.deepstack_input_embeds is not None
         has_mm = multimodal_embeddings is not None and len(multimodal_embeddings) > 0
