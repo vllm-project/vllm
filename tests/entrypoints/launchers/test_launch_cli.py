@@ -2500,7 +2500,7 @@ def test_snapshot_materialize_rejects_a_corrupted_payload(tmp_path: Path):
 
     # Same size, different bytes: only the digest catches it.
     blob = _blob_path_of(artifact, kernel)
-    blob.write_bytes(b"corupted kernel")
+    blob.write_bytes(b"corrupted kernel")
     kernel.unlink()
     with pytest.raises(SnapshotAttachmentError, match="differs since capture"):
         materialize_attachments(artifact, captured)

@@ -57,9 +57,9 @@ class SnapshotRuntimeIdentity(BaseModel):
 class SnapshotAttachment(BaseModel):
     """One generated file the artifact reproduces before CRIU reopens it.
 
-    ``digest`` is the sha256 of the captured bytes, or ``"cache"`` for warm
+    `digest` is the sha256 of the captured bytes, or `"cache"` for warm
     state the restore never verifies: a target that already has its own is
-    left alone, and only a missing one is written back. ``size`` is the byte
+    left alone, and only a missing one is written back. `size` is the byte
     count of the copy the artifact holds, checked before a restore installs
     it, so a copy truncated in transit fails the restore and not the engine.
     """

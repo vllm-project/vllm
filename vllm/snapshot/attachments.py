@@ -45,7 +45,7 @@ MAX_TOTAL_BYTES_ENV = "VLLM_SNAPSHOT_ATTACHMENT_MAX_TOTAL_BYTES"
 
 
 def _is_machine_state(path: str) -> bool:
-    """Whether ``path`` names a machine-state root or something inside it."""
+    """Whether `path` names a machine-state root or something inside it."""
     return any(
         path == root or path.startswith(f"{root}{os.sep}")
         for root in _MACHINE_STATE_ROOTS
@@ -77,8 +77,8 @@ def attachment_limits() -> tuple[int, int]:
 class GeneratedFile:
     """A file considered for snapshot capture and its content fingerprint.
 
-    ``fingerprint`` is a SHA-256 hex digest for content verification, or
-    ``None`` when restore never verifies the content. ``required`` marks a
+    `fingerprint` is a SHA-256 hex digest for content verification, or
+    `None` when restore never verifies the content. `required` marks a
     file the restore reopens by path, so capture must fail when it cannot
     carry it instead of skipping it.
     """
@@ -268,7 +268,7 @@ def _walked_cache_files(
 ) -> dict[str, GeneratedFile]:
     """Collect unreferenced cache files for reuse after restore.
 
-    Scan cache directories, skipping files already in ``references`` and
+    Scan cache directories, skipping files already in `references` and
     paths inside the snapshot artifact; an in-place checkpoint keeps every
     unreferenced cache file on the host instead. Record these files without
     fingerprints so restore can reuse existing cache files without content
@@ -349,9 +349,9 @@ def _check_target(path: Path) -> None:
 
 
 def _install(source: Path, target: Path, *, fsync: bool) -> None:
-    """Copy ``source`` onto ``target`` through a same-directory temporary.
+    """Copy `source` onto `target` through a same-directory temporary.
 
-    ``fsync`` publishes the bytes durably; a transient restore target skips
+    `fsync` publishes the bytes durably; a transient restore target skips
     it, because a restore that dies mid-copy rolls the file back anyway.
     """
     # A random name with O_EXCL refuses a symlink parked on it.
@@ -441,7 +441,7 @@ def materialize_attachments(
     """Prepare snapshot attachments at their original paths for restore.
 
     Copy files from the artifact only when the target is missing. For existing
-    files, skip content verification for ``cache`` attachments and require
+    files, skip content verification for `cache` attachments and require
     all other attachments to match their recorded SHA-256 digests.
 
     Return the newly created file paths. On failure, attempt to remove those
