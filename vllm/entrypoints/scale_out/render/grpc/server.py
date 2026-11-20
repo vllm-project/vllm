@@ -23,7 +23,9 @@ def _import_grpc():
         import grpc
         from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
-        from vllm.entrypoints.scale_out.render.grpc import render_pb2_grpc
+        from vllm.entrypoints.scale_out.render.grpc import (  # type: ignore[attr-defined]
+            render_pb2_grpc,
+        )
         from vllm.entrypoints.scale_out.render.grpc.servicer import RenderServicer
     except ImportError as e:
         raise ImportError(
