@@ -1703,6 +1703,32 @@ def test_hisparse_finished_request_leaves_free_copies():
     assert not coordinator.spills_to_send
 
 
+def test_hisparse_finished_copies_do_not_evict_older_prefix():
+    """A finished request's copies are reused before cached prefixes.
+
+    A prefix hit needs the prefix-cached indexer blocks; a copy alone serves
+    nothing. When copies shared the cached LRU order, a later request's copies
+    outlived an earlier prefix's indexer blocks and the prefix was lost.
+    """
+    manager = make_hisparse_kv_cache_manager(64, 32, enable_caching=True)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    num_cached = 0
+    for i, name in enumerate(("prefix", "filler")):
+        tokens = list(range(i * num_tokens, (i + 1) * num_tokens))
+        request = make_request(name, tokens, HISPARSE_BLOCK_SIZE, sha256)
+        assert _allocate_scheduled(manager, request, num_tokens) is not None
+        _publish_hisparse_pages(manager)
+        indexer = manager.get_blocks(name).blocks[1]
+        num_cached += sum(block.block_hash is not None for block in indexer)
+        manager.free(request)
+    pool = manager.block_pool
+    pool.get_new_blocks(pool.get_num_free_blocks() - num_cached)
+
+    prefix = make_request("again", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(prefix)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
+
+
 @pytest.mark.parametrize(
     "status,expected_cached_pages",
     [

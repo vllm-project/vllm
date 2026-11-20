@@ -171,6 +171,10 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Free blocks holding a disposable copy, reused after uncached free
+        # blocks and before prefix-cached ones (see `retain`).
+        self.retained_queue = FreeKVCacheBlockQueue([])
+        self._retained_ids: set[int] = set()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -693,7 +697,10 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        if self._retained_ids:
+            ret = self._popleft_n_with_retained(num_blocks)
+        else:
+            ret = self.free_block_queue.popleft_n(num_blocks)
 
         if self._reuse_watchers:
             self._notify_reuse(ret)
@@ -721,6 +728,27 @@ class BlockPool:
                     self.metrics_collector.on_block_allocated(block)
         return ret
 
+    def _popleft_n_with_retained(self, num_blocks: int) -> list[KVCacheBlock]:
+        """Take uncached free blocks, then retained ones, then cached ones.
+
+        Uncached blocks are prepended to the free queue and cached ones
+        appended, so the uncached ones are the queue's leading run.
+        """
+        queue = self.free_block_queue
+        ret: list[KVCacheBlock] = []
+        while len(ret) < num_blocks and queue.num_free_blocks:
+            head = queue.fake_free_list_head.next_free_block
+            assert head is not None
+            if head.block_hash is not None:
+                break
+            ret.append(queue.popleft())
+        num_retained = min(num_blocks - len(ret), self.retained_queue.num_free_blocks)
+        for block in self.retained_queue.popleft_n(num_retained):
+            self._retained_ids.discard(block.block_id)
+            ret.append(block)
+        ret.extend(queue.popleft_n(num_blocks - len(ret)))
+        return ret
+
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
         for block in blocks:
             watcher = self._reuse_watchers.pop(block.block_id, None)
@@ -731,13 +759,15 @@ class BlockPool:
         self,
         blocks: Iterable[KVCacheBlock],
         on_reuse: Callable[[KVCacheBlock], None],
+        retain: bool = False,
     ) -> None:
         """Release references to blocks that stay readable until reused.
 
-        The blocks become last-resort eviction candidates regardless of prefix
-        caching: they join the tail of the free queue and count as free.
-        `on_reuse` fires when `get_new_blocks` hands a block out (or the
-        cache is reset), so the caller can stop reading it.
+        The blocks count as free. By default they become last-resort eviction
+        candidates regardless of prefix caching, joining the tail of the free
+        queue; with `retain` they join the retained tier instead (see
+        `retain`). `on_reuse` fires when `get_new_blocks` hands a block out (or
+        the cache is reset), so the caller can stop reading it.
         """
         released: list[KVCacheBlock] = []
         for block in blocks:
@@ -746,7 +776,27 @@ class BlockPool:
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
                 released.append(block)
-        self.free_block_queue.append_n(released)
+        if retain:
+            self._append_retained(released)
+        else:
+            self.free_block_queue.append_n(released)
+
+    def retain(self, blocks: Iterable[KVCacheBlock]) -> None:
+        """Move free blocks to the retained tier, the first block reused first.
+
+        Retained blocks hold copies worth less than prefix-cached blocks, so
+        they are reused after uncached free blocks but before cached ones.
+        """
+        moved: list[KVCacheBlock] = []
+        for block in blocks:
+            if block.ref_cnt == 0 and block.block_id not in self._retained_ids:
+                self.free_block_queue.remove(block)
+                moved.append(block)
+        self._append_retained(moved)
+
+    def _append_retained(self, blocks: list[KVCacheBlock]) -> None:
+        self.retained_queue.append_n(blocks)
+        self._retained_ids.update(block.block_id for block in blocks)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
@@ -786,7 +836,11 @@ class BlockPool:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
             if block.ref_cnt == 0:
-                self.free_block_queue.remove(block)
+                if block.block_id in self._retained_ids:
+                    self._retained_ids.remove(block.block_id)
+                    self.retained_queue.remove(block)
+                else:
+                    self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -907,7 +961,9 @@ class BlockPool:
             The number of free blocks.
 
         """
-        return self.free_block_queue.num_free_blocks
+        return (
+            self.free_block_queue.num_free_blocks + self.retained_queue.num_free_blocks
+        )
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
