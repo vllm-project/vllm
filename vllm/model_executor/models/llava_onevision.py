@@ -819,15 +819,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             self.vision_tower, video_pixels_flat
         )
 
-        image_newline = self.image_newline[None, None, :]
+        image_newline = self.image_newline[None, :]
 
         return [
             torch.cat(
                 (
-                    embeds.reshape(1, num_frame * embeddings_flat.shape[1], -1),
+                    embeds.reshape(num_frame * embeddings_flat.shape[1], -1),
                     image_newline,
                 ),
-                dim=1,
+                dim=0,
             )
             for num_frame, embeds in zip(
                 frames_per_video,

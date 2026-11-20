@@ -123,11 +123,14 @@ def sliding_window_layer(
 
 
 def mamba_layer(
-    *, mamba_cache_mode: str = "none", num_speculative_blocks: int = 0, **spec_kwargs
+    *,
+    enable_prefix_caching: bool = False,
+    num_speculative_blocks: int = 0,
+    **spec_kwargs,
 ) -> KVCacheLayerConfig:
     return MambaManager.layer_config(
         MambaSpec(**spec_kwargs),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
     )
 
@@ -213,6 +216,7 @@ class MockOffloadingWorker(OffloadingWorker):
 class MockOffloadingSpec(OffloadingSpec):
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        self.async_init = bool(self.extra_config.get("async_init", False))
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
