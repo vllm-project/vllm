@@ -54,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
     KVCacheSpec,
+    KVQuantMode,
     get_kv_quant_mode,
 )
 
@@ -506,6 +507,13 @@ class Attention(nn.Module, AttentionLayerBase):
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = torch.tensor([])
 
+        if kv_cache_dtype == "kitty" and attn_type == AttentionType.DECODER:
+            from vllm.v1.attention.backends.kitty_attn import KittyResidualCache
+
+            self.kitty_residual = KittyResidualCache(
+                num_kv_heads, head_size, dtype, prefix=f"{prefix}.kitty_residual"
+            )
+
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
@@ -739,6 +747,17 @@ class Attention(nn.Module, AttentionLayerBase):
                 spec, sliding_window=self.sliding_window
             )
         else:
+            state_content_bytes = None
+            if quant_mode == KVQuantMode.KITTY:
+                from vllm.v1.attention.ops.kitty.tiles import (
+                    kitty_d_boost,
+                    kitty_state_content_bytes,
+                )
+
+                d_boost = kitty_d_boost(
+                    self.head_size, vllm_config.attention_config.kitty_boost_ratio
+                )
+                state_content_bytes = kitty_state_content_bytes(self.head_size, d_boost)
             spec = AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -746,6 +765,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                state_content_bytes=state_content_bytes,
             )
             return FullAttentionManager.layer_config(spec)
 
