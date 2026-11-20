@@ -512,11 +512,12 @@ def _use_legacy_tool_call_headers(token_ids: list[int]) -> list[int]:
             index = header_end + 1
             continue
 
+        # Decoded from text tokens, so special-token text here is plain text.
         legacy_header = (
             [start]
-            + encoding.encode(f"assistant to={recipient}")
+            + encoding.encode(f"assistant to={recipient}", disallowed_special=())
             + [channel_token]
-            + encoding.encode(f"{channel} {content_type}")
+            + encoding.encode(f"{channel} {content_type}", disallowed_special=())
             + [message]
         )
         result[index : header_end + 1] = legacy_header

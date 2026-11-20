@@ -16,7 +16,7 @@ EncoderCudaGraphPaddingLogic = Callable[[torch.Tensor, torch.Tensor], None]
 ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderItemSpec:
     """Description of a single encoder input item.
 
@@ -45,7 +45,7 @@ class EncoderItemSpec:
         return self.path_output_tokens.get(path, 0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EncoderCudaGraphPathConfig:
     """Capture policy for one independently replayable encoder path."""
 
@@ -58,7 +58,7 @@ class EncoderCudaGraphPathConfig:
     """Whether a batch may omit this path entirely."""
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderCudaGraphConfig:
     """Configuration for encoder CUDA graph management.
 
@@ -108,7 +108,7 @@ class EncoderCudaGraphConfig:
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderCudaGraphCaptureInputs:
     """Everything needed for one CUDA graph capture.
 
@@ -122,7 +122,7 @@ class EncoderCudaGraphCaptureInputs:
     `graph.replay()` call (buffer identity invariant)."""
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderCudaGraphReplayBuffers:
     """New buffer values for graph replay, computed by the model from
     actual batch inputs.

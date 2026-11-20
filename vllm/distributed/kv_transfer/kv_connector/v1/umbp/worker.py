@@ -34,7 +34,7 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 
 
-@dataclass
+@dataclass(slots=True)
 class _StoreBatch:
     event_id: int
     jobs: dict[str, TransferJobState]

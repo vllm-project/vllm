@@ -98,6 +98,7 @@ TokenizerMode = Literal[
     "hf",
     "glm5_next",
     "alpamayo2_super",
+    "hy_v4",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -187,6 +188,7 @@ class ModelConfig:
     - "alpamayo2_super" uses the "hf" tokenizer with Alpamayo 2 Super's
       trajectory and special tokens added; selected automatically for
       `nvidia/Alpamayo2-Super`.
+    - "hy_v4" uses the HF tokenizer with HYV4 VL chat rendering.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
@@ -196,7 +198,9 @@ class ModelConfig:
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for the `glm5_next` model type
-      (GLM-5.3-Flash).
+      (GLM-5.3-Flash). GLM-5.3-Flash multimodal inputs require the Rust
+      frontend; Python supports text-only inference with image and video
+      limits set to zero.
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -357,7 +361,7 @@ class ModelConfig:
       to load in mistral format.
     - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
-    hf_token: bool | str | None = None
+    hf_token: bool | str | None = Field(default=None, repr=False, exclude=True)
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `hf auth login`
     (stored in `~/.cache/huggingface/token`)."""
@@ -450,7 +454,7 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     language_model_only: InitVar[bool] = False
-    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int | bool]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
@@ -592,7 +596,7 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         language_model_only: bool,
-        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
@@ -792,6 +796,8 @@ class ModelConfig:
                 "KimiK31ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "kimi_k3"
+            elif arch == "HYV4VLForConditionalGeneration":
+                self.tokenizer_mode = "hy_v4"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch in (
@@ -801,7 +807,11 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v4"
             elif arch == "DeepseekV41ForCausalLM":
                 self.tokenizer_mode = "deepseek_v41"
-            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+            elif arch in (
+                "InklingForCausalLM",
+                "InklingForConditionalGeneration",
+                "Inkling2ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
@@ -1431,6 +1441,17 @@ class ModelConfig:
         return convert_type
 
     def _verify_quantization(self) -> None:
+        from vllm.config.quantization import (
+            _DEFERRED_ONLINE_SHORTHANDS,
+            _ONLINE_SHORTHANDS,
+            merge_quantization_config,
+            resolve_quantization_config,
+        )
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        requested_quantization = self.quantization
         supported_quantization = me_quant.QUANTIZATION_METHODS
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
@@ -1444,6 +1465,7 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "inkling2",
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
@@ -1512,13 +1534,56 @@ class ModelConfig:
                     f"({self.quantization})."
                 )
 
+        # Keep the NVFP4 loader selected above, but preserve the requested
+        # MXFP4 conversion as an online overlay.
+        if (
+            quant_cfg is not None
+            and requested_quantization == "mxfp4"
+            and self.quantization == "modelopt_fp4"
+        ):
+            online_args = resolve_quantization_config(
+                requested_quantization, self.quantization_config
+            )
+            # Explicit targets (even {}) replace the shorthand's global defaults.
+            if online_args is None or online_args.targets is None:
+                online_args = merge_quantization_config(
+                    _ONLINE_SHORTHANDS[requested_quantization], online_args
+                )
+            self.quantization_config = online_args
+
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."
                 )
-            current_platform.verify_quantization(self.quantization)
+            online_args = resolve_quantization_config(
+                self.quantization, self.quantization_config
+            )
+            # Activation-only overrides do not replace checkpoint weights.
+            has_online_weights = online_args is not None and (
+                any(
+                    spec is not None and spec.weight is not None
+                    for spec in (online_args.linear, online_args.moe)
+                )
+                or any(
+                    isinstance(target, str) or target.weight is not None
+                    for target in (online_args.targets or {}).values()
+                )
+            )
+            quant_cls = me_quant.get_quantization_config(self.quantization)
+            # Without checkpoint metadata, mxfp4/mxfp8 may still be online
+            # shorthands; keep their existing model-level validation.
+            is_checkpoint_quantization = not issubclass(
+                quant_cls, OnlineQuantizationConfig
+            ) and (
+                quant_cfg is not None
+                or self.quantization not in _DEFERRED_ONLINE_SHORTHANDS
+            )
+            # Layer selection determines which checkpoint methods still execute.
+            defer_platform_check = has_online_weights and is_checkpoint_quantization
+            if not defer_platform_check:
+                current_platform.verify_quantization(self.quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
             if self.allow_deprecated_quantization:
@@ -2544,6 +2609,7 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3_text": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
+    "shieldgemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
 
 

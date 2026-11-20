@@ -10,7 +10,30 @@ DECODE_GPU_ID=${DECODE_GPU_ID:-1}
 MODEL=${MODEL:-"ibm-granite/granite-4.0-h-tiny"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
-ATTENTION_BACKEND=${ATTENTION_BACKEND:-FLASHINFER}
+
+# ── Detect platform (CUDA vs XPU) ──────────────────────────────────
+
+# tail: vLLM logs go to stdout by default.
+GPU_PLATFORM=$(python3 -c 'from vllm.platforms import current_platform; print(current_platform.device_type)' | tail -n1)
+if [[ -z "$GPU_PLATFORM" ]]; then
+  echo "Failed to detect vLLM platform" >&2
+  exit 1
+fi
+
+if [[ "$GPU_PLATFORM" == "xpu" ]]; then
+  GPU_DEVICE_VAR="ZE_AFFINITY_MASK"
+  ATTENTION_BACKEND=${ATTENTION_BACKEND:-FLASH_ATTN}
+  # GPU IDs index into the CI-assigned mask so we stay on allocated devices.
+  if [[ -n "${ZE_AFFINITY_MASK:-}" ]]; then
+    IFS=',' read -r -a AVAILABLE_DEVICES <<< "${ZE_AFFINITY_MASK}"
+    PREFILL_GPU_ID=${AVAILABLE_DEVICES[$PREFILL_GPU_ID]}
+    DECODE_GPU_ID=${AVAILABLE_DEVICES[$DECODE_GPU_ID]}
+  fi
+else
+  GPU_DEVICE_VAR="CUDA_VISIBLE_DEVICES"
+  ATTENTION_BACKEND=${ATTENTION_BACKEND:-FLASHINFER}
+fi
+echo "Detected GPU platform: ${GPU_PLATFORM} (using ${GPU_DEVICE_VAR})"
 
 echo "Running Mamba prefix cache test (GPUs: P=$PREFILL_GPU_ID, D=$DECODE_GPU_ID, model=$MODEL, backend=$ATTENTION_BACKEND)"
 
@@ -48,7 +71,7 @@ fi
 
 # Start prefill instance
 PREFILL_PORT=8001
-CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID \
+env "${GPU_DEVICE_VAR}=${PREFILL_GPU_ID}" \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
@@ -58,14 +81,13 @@ vllm serve "$MODEL" \
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
   --max-model-len 16384 \
   --block-size 128 \
-  --trust-remote-code \
   --enable-prefix-caching \
   --kv-transfer-config "$KV_CONFIG" \
   "${EXTRA_ARGS[@]}" &
 
 # Start decode instance
 DECODE_PORT=8002
-CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID \
+env "${GPU_DEVICE_VAR}=${DECODE_GPU_ID}" \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
 VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
@@ -75,7 +97,6 @@ vllm serve "$MODEL" \
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
   --max-model-len 16384 \
   --block-size 128 \
-  --trust-remote-code \
   --enable-prefix-caching \
   --kv-transfer-config "$KV_CONFIG" \
   "${EXTRA_ARGS[@]}" &

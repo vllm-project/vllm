@@ -35,6 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.utils import (
+    copy_weight_,
     refill_derived,
 )
 from vllm.multimodal.inputs import NestedTensors
@@ -47,8 +48,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
 
-from .qwen2 import Qwen2MLP as Qwen3MLP
-from .qwen3 import Qwen3ForCausalLM
+from .qwen3 import Qwen3ForCausalLM, Qwen3MLP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -80,7 +80,9 @@ def _load_context_kv_rows(
 ) -> None:
     """Weight loader of the MXFP8 context K/V projection: one layer's K or V
     rows, at their offset in the stacked projection."""
-    param.data.narrow(0, row_offset, loaded_weight.shape[0]).copy_(loaded_weight)
+    copy_weight_(
+        param.data.narrow(0, row_offset, loaded_weight.shape[0]), loaded_weight
+    )
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:

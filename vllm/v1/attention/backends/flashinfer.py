@@ -61,6 +61,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
+    async_tensor_h2d,
     canonicalize_singleton_dim_strides,
     get_dtype_size,
     is_strictly_contiguous,
@@ -241,16 +242,16 @@ def _make_xqa_draft_block_mask(
 
 
 def _make_xqa_ragged_draft_block_mask(
-    q_lens: list[int], max_q_len: int, causal: bool, device: torch.device
+    q_lens: torch.Tensor, max_q_len: int, causal: bool, device: torch.device
 ) -> torch.Tensor:
-    """Build a packed XQA draft mask for a ragged batch."""
+    """Build a packed XQA draft mask for a ragged batch from host `q_lens`."""
     num_packed = (max_q_len + 31) // 32
     padded = num_packed * 32
-    q_lens_t = torch.tensor(q_lens, device=device)
-    row_lens = torch.repeat_interleave(q_lens_t, q_lens_t)
-    request_starts = torch.cumsum(q_lens_t, dim=0) - q_lens_t
-    row_starts = torch.repeat_interleave(request_starts, q_lens_t)
-    q_idx = torch.arange(sum(q_lens), device=device) - row_starts
+    q_lens = q_lens.long()
+    row_lens = q_lens.repeat_interleave(q_lens)
+    row_starts = (q_lens.cumsum(0) - q_lens).repeat_interleave(q_lens)
+    q_idx = torch.arange(row_lens.numel()) - row_starts
+    row_lens, q_idx = async_tensor_h2d(torch.stack([row_lens, q_idx]), device)
     kv_idx = torch.arange(padded, device=device).unsqueeze(0)
     bool_mask = kv_idx < row_lens.unsqueeze(1)
     if causal:
@@ -816,14 +817,14 @@ class FlashInferBackend(AttentionBackend):
     forward_includes_kv_cache_update: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
 
 
-@dataclass
+@dataclass(slots=True)
 class FIDecode:
     """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
 
@@ -841,7 +842,7 @@ def _is_xqa_head_dim_supported(head_dim: int) -> bool:
     return 16 <= head_dim <= 256 and head_dim % 16 == 0
 
 
-@dataclass
+@dataclass(slots=True)
 class TRTLLMPrefill:
     """Metadata for the TRTLLM prefill pathway."""
 
@@ -869,7 +870,7 @@ class TRTLLMPrefill:
     """The maximum sequence length for KV Cache."""
 
 
-@dataclass
+@dataclass(slots=True)
 class FlashInferTrtllmAPIDecode:
     """Metadata for XQA and trtllm-gen decode."""
 
@@ -1439,7 +1440,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         qo_indptr_cpu: torch.Tensor,
         num_decodes: int,
         num_decode_tokens: int,
-    ) -> tuple[int, torch.Tensor | None, list[int] | None]:
+    ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
         """Return the query width, ragged offsets, and effective query lengths."""
         if num_decodes == 0 or num_decode_tokens == 0:
             return 1, None, None
@@ -1472,17 +1473,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if q_len_per_req <= 1:
             return 1, None, None
 
-        q_lens = decode_q_lens.tolist()
-        return (
-            q_len_per_req,
-            qo_indptr[: num_decodes + 1],
-            q_lens,
-        )
+        return q_len_per_req, qo_indptr[: num_decodes + 1], decode_q_lens
 
     def _get_decode_mask(
         self,
         q_len_per_req: int,
-        ragged_q_lens: list[int] | None,
+        ragged_q_lens: torch.Tensor | None,
         num_decodes: int,
         causal: bool,
     ) -> torch.Tensor | None:
