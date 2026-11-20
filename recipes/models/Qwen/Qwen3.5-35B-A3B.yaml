@@ -96,6 +96,11 @@ variants:
     vram_minimum_gb: 21
     description: "GPTQ Int4 checkpoint — fits on a single 24GB GPU"
     supported_hardware: [arch:sm90, arch:sm100, arch:sm103, arch:gfx942, arch:gfx950, arc_pro_b60, arc_pro_b70]
+    hardware_overrides:
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
 
   redhat_fp8:
     model_id: "RedHatAI/Qwen3.5-35B-A3B-FP8-dynamic"
