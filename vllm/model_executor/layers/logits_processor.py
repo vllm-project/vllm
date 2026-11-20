@@ -94,6 +94,12 @@ class LogitsProcessor(PluggableLayer):
         # required for RL training-inference consistency.
         model_config = get_current_vllm_config().model_config
         self.head_dtype = model_config.head_dtype if model_config is not None else None
+        masked = model_config.masked_token_ids if model_config is not None else None
+        self.register_buffer(
+            "masked_token_ids",
+            torch.tensor(masked, dtype=torch.long) if masked else None,
+            persistent=False,
+        )
 
     def forward(
         self,
@@ -117,6 +123,8 @@ class LogitsProcessor(PluggableLayer):
 
             if self.scale != 1.0:
                 logits *= self.scale
+            if self.masked_token_ids is not None:
+                logits.index_fill_(-1, self.masked_token_ids, float("-inf"))
         return logits
 
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:

@@ -386,6 +386,9 @@ class ModelConfig:
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
+    masked_token_ids: list[int] | None = None
+    """Token ids whose logits are set to -inf, so they are never sampled, e.g.
+    the lm_head rows past the tokenizer or placeholder tokens."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
@@ -523,6 +526,7 @@ class ModelConfig:
             "skip_mm_profiling",
             "mm_ipc_gpu_memory_gb",
             "checkpoint_prepare_on_startup",
+            "masked_token_ids",
         }
 
         factors = get_compile_factors(self, ignored_factors)
