@@ -55,6 +55,17 @@ _ENABLE_PROMPT_EMBEDS_ERROR: Final[str] = (
 )
 
 
+def _loads_audio_from_video(
+    model_config: ModelConfig, mm_processor_kwargs: dict[str, Any] | None
+) -> bool:
+    """Whether to add each video's audio track as an audio item, with the request's
+    setting taking precedence over the server's."""
+    kwargs = mm_processor_kwargs or {}
+    if (mm_config := model_config.multimodal_config) is not None:
+        kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+    return bool(get_load_audio_from_video(kwargs))
+
+
 class BaseMultiModalContentParser(ABC):
     def __init__(self) -> None:
         super().__init__()
@@ -286,7 +297,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("video", placeholder)
 
         # `load_audio_from_video` is replacing `use_audio_in_video` in Transformers
-        if video_url and get_load_audio_from_video(self._mm_processor_kwargs):
+        if video_url and _loads_audio_from_video(
+            self._tracker.model_config, self._mm_processor_kwargs
+        ):
             audio = self._connector.fetch_audio(video_url) if video_url else None
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
@@ -514,7 +527,9 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("video", placeholder)
 
         # `load_audio_from_video` is replacing `use_audio_in_video` in Transformers
-        if video_url and get_load_audio_from_video(self._mm_processor_kwargs):
+        if video_url and _loads_audio_from_video(
+            self._tracker.model_config, self._mm_processor_kwargs
+        ):
             audio_placeholder = self._tracker.add(
                 "audio", partial(self._audio_with_uuid_async, video_url, uuid)
             )
