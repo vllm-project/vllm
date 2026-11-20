@@ -6195,7 +6195,7 @@ async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
     expect_test::expect![[r#"
         400 BadRequestError: base64 decode error: Invalid symbol 32, offset 3.
         400 BadRequestError: image decode error: The image format could not be determined
-        400 BadRequestError: invalid media URL: file:///etc/hosts"#]]
+        400 BadRequestError: unsupported media scheme: file"#]]
     .assert_eq(&rendered.join("\n"));
 }
 

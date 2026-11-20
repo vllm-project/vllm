@@ -114,7 +114,11 @@ impl MultimodalModelInfo {
             if let Some(rgb_video) = clip.rgb_video() {
                 match rgb_video.frame_refs() {
                     Ok(frame_refs) => {
-                        match processor.preprocess_video_rgb(&frame_refs, &clip_options) {
+                        match processor.preprocess_video_rgb_sampled(
+                            &frame_refs,
+                            &clip_options,
+                            clip.sampling.as_ref(),
+                        ) {
                             Ok(preprocessed) => return Ok(preprocessed),
                             Err(error) => warn!(
                                 error = %error.as_report(),
@@ -411,5 +415,83 @@ mod tests {
         .assert_eq(&sampled_text);
         expect_test::expect!["<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>2.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>4.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>6.0 seconds"]
         .assert_eq(&fallback_text);
+    }
+
+    /// Nemotron's reference layout needs the decoder's source frame indices,
+    /// and the engine embeds the whole replacement.
+    #[tokio::test]
+    async fn nemotron_video_carries_frame_indices_and_embeds_the_whole_replacement() {
+        use llm_multimodal::types::{DecodedRgbFrame, DecodedRgbVideo};
+        use llm_multimodal::{Modality, VideoSamplingInfo, VideoSource};
+
+        use super::super::expand::expand_prompt_token_ids;
+        use super::super::tests::nemotron_omni_info;
+
+        let info = nemotron_omni_info();
+        let frame_len = 3 * 80 * 40;
+        let video = DecodedRgbVideo::new(
+            bytes::Bytes::from(vec![128; frame_len * 4]),
+            (0..4)
+                .map(|index| DecodedRgbFrame {
+                    width: 80,
+                    height: 40,
+                    offset: index * frame_len,
+                    len: frame_len,
+                })
+                .collect(),
+        );
+        let clip = VideoClip::new_rgb_with_sample_fps(
+            video,
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "<hash>".to_string(),
+            1.0,
+        )
+        .with_sampling(Some(VideoSamplingInfo {
+            source_fps: 30.0,
+            frame_indices: vec![0, 30, 60, 90],
+        }));
+        let prepared = info
+            .prepare_videos(vec![Arc::new(clip)], vec![None], ModelDtype::Float32)
+            .await
+            .unwrap();
+
+        let data = &prepared.items[0].data;
+        let Some(MmKwargValue::Tensor(indices)) = data["frames_indices"].data.as_ref() else {
+            panic!("frames_indices should be a tensor");
+        };
+        let indices = indices
+            .data
+            .as_raw_view()
+            .unwrap()
+            .chunks_exact(8)
+            .map(|chunk| i64::from_ne_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(indices, [0, 30, 60, 90]);
+
+        let Some(MmKwargValue::Tensor(duration)) = data["frame_duration_ms"].data.as_ref() else {
+            panic!("frame_duration_ms should be a tensor");
+        };
+        assert_eq!(
+            duration.data.as_raw_view().unwrap()[..],
+            33_i64.to_ne_bytes()
+        );
+
+        // Two tubelets of two frames, stamped with the frames' source times.
+        // An 80x40 frame gets a 22x44 patch grid, or 11x22 tokens.
+        let ids: Vec<u32> =
+            prepared.replacements[0].tokens.iter().map(|&token| token as u32).collect();
+        let text = info.context.tokenizer().decode(&ids, false).unwrap();
+        assert_eq!(text.matches("<image>").count(), 2 * 11 * 22);
+        expect_test::expect![[r#"
+            Frame 1 sampled at 0.00 seconds and frame 2 sampled at 0.99 seconds: <img></img>
+            Frame 3 sampled at 1.98 seconds and frame 4 sampled at 2.97 seconds: <img></img>"#]]
+        .assert_eq(&text.replace("<image>", ""));
+
+        let mut tokens = vec![11, 1030];
+        let ranges = expand_prompt_token_ids(&mut tokens, &[prepared]).unwrap();
+        let range = &ranges[&Modality::Video][0];
+        assert_eq!((range.offset, range.length), (1, ids.len()));
+        assert!(range.is_embed.is_none());
     }
 }

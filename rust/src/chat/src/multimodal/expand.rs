@@ -108,13 +108,22 @@ pub(super) fn expand_prompt_token_ids(
             );
         }
         let range_len = structural_prefix + replacement_len;
-        let is_embed = {
+        // A spec that declares its whole replacement as features is Python's
+        // `PromptUpdateDetails.from_seq`, which leaves `is_embed` unset.
+        let all_features = structural_prefix == 0
+            && matches!(
+                replacement.feature_ranges.as_deref(),
+                Some([range]) if range.offset == 0 && range.length == replacement_len
+            );
+        let is_embed = if all_features {
+            None
+        } else {
             let mut mask = Vec::with_capacity(range_len);
             mask.extend(std::iter::repeat_n(false, structural_prefix));
             mask.extend(
                 replacement.tokens.iter().map(|&token| token as u32 == lane.embed_token_id),
             );
-            WireTensor::from_bool(vec![range_len], mask).map_err(Error::Multimodal)?
+            Some(WireTensor::from_bool(vec![range_len], mask).map_err(Error::Multimodal)?)
         };
 
         let expanded_offset = expanded.len() - structural_prefix;
@@ -122,7 +131,7 @@ pub(super) fn expand_prompt_token_ids(
         ranges.entry(lane.modality).or_default().push(PlaceholderRange {
             offset: expanded_offset,
             length: range_len,
-            is_embed: Some(is_embed),
+            is_embed,
         });
     }
 
@@ -315,6 +324,19 @@ mod tests {
             &ranges[0],
             &[false, true, false, true, false, false, true, false],
         );
+    }
+
+    #[test]
+    fn expand_prompt_tokens_leaves_is_embed_unset_for_an_all_feature_replacement() {
+        let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
+        let replacement = llama4_single_tile_replacement().with_feature_span(0, 5);
+        let prepared = vec![llama4_prepared(vec![replacement])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let range = &ranges[&Modality::Image][0];
+
+        assert_eq!((range.offset, range.length), (1, 5));
+        assert!(range.is_embed.is_none());
     }
 
     #[test]

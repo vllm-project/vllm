@@ -10,7 +10,7 @@
 
 use std::sync::LazyLock;
 
-use llm_multimodal::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
+use llm_multimodal::{EncoderInputFormat, ModelMetadata, ModelProcessorSpec, ModelRegistry};
 
 mod hy_v4_vl;
 mod inkling2;
@@ -36,7 +36,8 @@ const MODEL_TYPE_ALIASES: &[(&str, &str)] = &[
 /// Resolve the model processor spec for one loaded model: a local spec first,
 /// then the `llm-multimodal` registry, through a model type alias if any.
 pub(super) fn lookup_spec(metadata: &ModelMetadata<'_>) -> Option<&'static dyn ModelProcessorSpec> {
-    static LLM_MULTIMODAL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
+    static LLM_MULTIMODAL_REGISTRY: LazyLock<ModelRegistry> =
+        LazyLock::new(|| ModelRegistry::for_format(EncoderInputFormat::Reference));
 
     if let Some(spec) = SPECS.iter().copied().find(|spec| spec.matches(metadata)) {
         return Some(spec);

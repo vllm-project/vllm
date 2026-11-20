@@ -63,7 +63,8 @@ indexmap = { version = "2.13.0", features = ["serde"] }
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/smg", rev = "2787f7cde21e0a2511f481994d731c98109020af", default-features = false }
+# TODO: back to smg-project/smg once smg-project/smg#7137 merges.
+llm-multimodal = { git = "https://github.com/milesial/smg", rev = "e3ed2ef8048d4afc0de040a3c797c7c097deeccb", default-features = false }
 memmap2 = "0.9"
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
