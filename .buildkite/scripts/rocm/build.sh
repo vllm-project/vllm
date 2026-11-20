@@ -165,6 +165,12 @@ label() { docker buildx imagetools inspect "$1" \
 # bake <targets...>  — invoke docker buildx bake with the project HCL
 bake()   { docker buildx bake -f docker/docker-bake-rocm.hcl "$@"; }
 
+# infra_failure <bake-log>  — whether a failed bake hit a fault outside the recipe, which a
+# retried step can get past: a package mirror still failing after apt's own retries.
+infra_failure() {
+  grep -aqE 'E: Failed to fetch [^ ]+ +(408|429|50[0-4]) ' "$1"
+}
+
 # meta <get|set> <key> [value]  — Buildkite build metadata
 meta()   { buildkite-agent meta-data "$@"; }
 
@@ -238,7 +244,7 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 # tag also exists (used by stack: must have both the image and -wheels); then
 # both pinned refs are printed, space-separated.
 ensure() {
-  local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf hb=""
+  local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf log hb=""
   refs=()
   [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag")
   [[ $OWN == false ]] || refs+=("$REPO:$PFX$tag")
@@ -277,10 +283,18 @@ ensure() {
   fi
   # Explicit checks: $(ensure ...) runs in a subshell, where set -e does not apply.
   mf=$(mktemp)
+  log=$(mktemp)
   rc=0
-  TAG=$ref bake --metadata-file "$mf" "$target" >&2 || rc=$?
+  TAG=$ref bake --metadata-file "$mf" "$target" 2>&1 | tee "$log" >&2 || rc=$?
   [[ -z $hb ]] || kill "$hb" 2>/dev/null || true
-  ((rc == 0)) || { rm -f "$mf"; echo "building $ref failed" >&2; return 1; }
+  if ((rc != 0)); then
+    rm -f "$mf"
+    if infra_failure "$log"; then
+      rm -f "$log"; echo "building $ref hit an infrastructure fault; retry the step" >&2; return 75
+    fi
+    rm -f "$log"; echo "building $ref failed" >&2; return 1
+  fi
+  rm -f "$log"
   # The digests this bake pushed (base: stack-<stack>, stack-wheels), not the tags', which by now
   # may hold a concurrent build's push of the same key.
   if ! d=$(pushed "$mf" "${target/#base/stack-$STACK}") \

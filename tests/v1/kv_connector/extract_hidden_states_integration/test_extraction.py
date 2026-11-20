@@ -77,7 +77,7 @@ PREDICTABLE_LLAMA_MODEL_CLS = (
 
 @create_new_process_for_each_test()
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path, monkeypatch
+    predictable_llama_config_path, tmp_path
 ):
     """Test hidden-state extraction with a predictable dummy model.
 
@@ -93,8 +93,6 @@ def test_extract_hidden_states_with_predictable_dummy_model(
        include_output_tokens — verifies per-request kv_transfer_params
        plumbing.
     """
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-
     layer_ids = [5, 2, 10]
     expected_layer_ids = sorted(layer_ids)
     num_layers = len(layer_ids)
