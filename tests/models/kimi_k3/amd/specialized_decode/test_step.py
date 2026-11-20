@@ -151,10 +151,13 @@ def _zero_routed_experts() -> None:
     install = routing.install_routing
 
     def install_routing(runner, *args, **kwargs):
+        zeroed = 0
         for module in runner.model.modules():
             w2 = getattr(module, "w2_weight", None)
             if isinstance(w2, torch.Tensor):
                 w2.data.view(torch.uint8).zero_()
+                zeroed += 1
+        assert zeroed, "no w2_weight tensors found - _zero_routed_experts is a no-op"
         return install(runner, *args, **kwargs)
 
     routing.install_routing = install_routing
@@ -255,6 +258,10 @@ def _check(out: Path, cases, q: int, m1c: bool) -> None:
         for plan in plans:
             assert plan["planned"] and plan["m1"], plan
             assert plan["m1c"] == m1c, plan
+    # measured over 11 runs: err up to 1.7e-3 (3.2e-3 at DCP1 verify), stock vs
+    # stock up to 1.6e-3 (0 below 8 rows); one layer's weights read at the wrong
+    # pitch gave 3.7e-3 (5.1e-3) and up
+    bound = 4e-3 if m1c else 2.5e-3
     for result in results:
         for rank, r in enumerate(result["ranks"]):
             err = r["graph_vs_eager"]["relative_rms"]
@@ -264,4 +271,7 @@ def _check(out: Path, cases, q: int, m1c: bool) -> None:
                 f"(stock vs stock {noise:.2e})"
             )
             assert r["finite"] and r["graph_deterministic"], (result["case"], rank)
-            assert err < (4e-3 if m1c else 2.5e-3), (result["case"], rank, err)
+            # the reference's jitter adds ~noise / sqrt(2) to err in quadrature:
+            # below the bound, it can't fail err on its own
+            assert noise < bound, (result["case"], rank, noise)
+            assert err < bound, (result["case"], rank, err)

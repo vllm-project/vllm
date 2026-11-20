@@ -185,7 +185,7 @@ def _kda_reference(w, nb: int, S: int, L: int, write_idx: int):
 
     prefix, blocks, x = _kda_attn_res(w, nb, write_idx)
     proj = F.linear(x, w["w_in"])
-    mixed_qkv, g2, f_a, beta = proj.split([QKV, PROJ, HD, NH + 4], dim=-1)[:4]
+    mixed_qkv, g2, f_a, beta = proj.split([QKV, PROJ, HD, NH, 4], dim=-1)[:4]
     g1 = F.linear(f_a, w["w_fb"])
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
     qsl = torch.arange(0, S + 1, L, dtype=torch.int32, device="cuda")
@@ -211,7 +211,7 @@ def _kda_reference(w, nb: int, S: int, L: int, write_idx: int):
         k=k,
         v=v,
         raw_g=rearrange(g1, "n (h d) -> 1 n h d", d=HD),
-        raw_beta=beta[:, :NH].unsqueeze(0),
+        raw_beta=beta.unsqueeze(0),
         A_log=w["a_log"],
         dt_bias=w["dt_bias"],
         lower_bound=-5.0,
@@ -341,13 +341,13 @@ def test_k1_matches_vllm_ops(
 
     torch.testing.assert_close(prefix, ref["prefix"], atol=0, rtol=0)
     torch.testing.assert_close(blocks, ref["blocks"], atol=0, rtol=0)
-    # the conv output feeds the recurrence in fp32 here, bf16 in the reference
     errs = {
         "conv_state": _rel_l2(conv_state, ref["conv_state"]),
         "rstate": _rel_l2(rstate, ref["rstate"]),
         "core": _rel_l2(core, ref["core"]),
     }
     assert errs["conv_state"] < 1e-3 and errs["rstate"] < 1e-3, errs
+    assert errs["core"] < 3e-3, errs
     assert _cos(core, ref["core"]) > COS_MIN, errs
 
 
@@ -532,6 +532,7 @@ def test_k1_matches_production_kda(
         "core": _rel_l2(core, want),
     }
     assert errs["conv_state"] < 1e-3 and errs["rstate"] < 3e-3, errs
+    assert errs["core"] < 1e-2, errs
     assert _cos(core, want) > COS_MIN, errs
 
 
@@ -574,10 +575,17 @@ def _check_rows_only(pages, before, slots) -> None:
     assert torch.equal(rest, before), "M1a wrote bytes outside its slots' rows"
 
 
-def _check_cache(pages, ref_pages, slots, off_max: float = 0.05) -> None:
-    """M1a's KV pages against the reference's: the stored tokens' rows (slot
-    >= 0) an E4M3 step off at most, few of their bytes off; every other byte of
-    the pages untouched."""
+def _check_cache(pages, ref_pages, slots, off_max: float = 0.01) -> None:
+    """M1a's KV pages against the reference's. In the stored tokens' rows
+    (slot >= 0), each byte matches or is one E4M3 code away, and at most
+    `off_max` of the bytes differ. Every other byte of the pages is untouched.
+
+    A byte differs only when summation order moves a value across an fp8
+    rounding boundary. Measured: at most 0.35% of the bytes at DCP8 (2 bytes of
+    a rank's single 576-byte row) and 0.011% at DCP1, the same on every run.
+    1% leaves about 3x headroom; a looser bound would let a small systematic
+    error (many bytes one code off) through.
+    """
     s = slots[slots >= 0]
     blk, off = s // MLA_BS, s % MLA_BS
     got, want = _page_view(pages)[blk, off], _page_view(ref_pages)[blk, off]
@@ -636,7 +644,6 @@ def _mla_inputs(S: int, nb: int, rank: int = 0, ranks: int = 1):
         generator=gr,
     )
     w["pages"] = pages
-    w["kv_cache"] = _page_view(pages)
     perm = torch.randperm(nblk * bs, device="cuda", generator=gr)[:S]
     if ranks == 1:
         perm[1::2] = -1
@@ -1657,6 +1664,14 @@ def _k3_router(bias):
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
     c = KimiLinearConfig()
+    routing = (
+        c.moe_router_activation_func,
+        c.moe_renormalize,
+        c.use_grouped_topk,
+        c.num_expert_group,
+        c.topk_group,
+    )
+    assert routing == ("sigmoid", True, True, 1, 1), routing
     with set_current_vllm_config(VllmConfig()):
         return create_fused_moe_router(
             top_k=TOPK,
