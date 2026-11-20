@@ -1562,7 +1562,7 @@ class UMBPStoreConnectorScheduler:
             manager_config=group.manager_config,
             retention_interval=self._retention_interval,
             reachable_boundaries=reachable_boundaries,
-            dcp_world_size=self._dcp_size,
+            dcp_world_size=self._dcp_size if group.dcp_sharded else 1,
         )
         if mask is not None and len(mask) != len(indices):
             raise RuntimeError(
