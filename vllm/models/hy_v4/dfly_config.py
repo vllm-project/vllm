@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedConfig
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
 
 if TYPE_CHECKING:
@@ -182,7 +183,11 @@ def _derive_dfly_config(
 class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
     """HYV4's configuration and implementation of DFly speculative decoding."""
 
-    speculator_class = "vllm.models.hy_v4.nvidia.dfly_speculator.HYV4DFlySpeculator"
+    speculator_class = (
+        "vllm.models.hy_v4.amd.dfly_speculator.HYV4DFlySpeculator"
+        if current_platform.is_rocm()
+        else "vllm.models.hy_v4.nvidia.dfly_speculator.HYV4DFlySpeculator"
+    )
     target_model_type = "hy_v4"
 
     @classmethod
@@ -199,10 +204,6 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
 
     @classmethod
     def verify_target_parallel_config(cls, spec: "SpeculativeConfig") -> None:
-        from vllm.platforms import current_platform
-
-        if current_platform.is_rocm():
-            raise NotImplementedError("HYV4 DFly on ROCm requires a hy_v4_flash target")
         for field in (
             "pipeline_parallel_size",
             "prefill_context_parallel_size",
