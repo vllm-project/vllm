@@ -15,6 +15,11 @@ from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.sampling_params import (
+    MAX_NUM_ALLOWED_TOKEN_IDS,
+    MAX_NUM_LOGIT_BIAS_TOKENS,
+    MAX_NUM_STOP_TOKEN_IDS,
+)
 
 
 @pytest.mark.asyncio
@@ -50,6 +55,36 @@ async def test_out_of_vocab_token_ids():
             await client.completions.create(
                 model=model_name, prompt=[999999], max_tokens=5, temperature=0.0
             )
+
+
+@pytest.mark.asyncio
+async def test_oversized_sampler_lists_do_not_kill_engine():
+    model_name = "openai-community/gpt2"
+    with RemoteOpenAIServer(model_name, ["--enforce-eager"]) as remote_server:
+        client = remote_server.get_async_client()
+
+        oversized_params = [
+            {"allowed_token_ids": list(range(MAX_NUM_ALLOWED_TOKEN_IDS + 1))},
+            {"logit_bias": {str(i): 0.0 for i in range(MAX_NUM_LOGIT_BIAS_TOKENS + 1)}},
+            {
+                "min_tokens": 1,
+                "stop_token_ids": list(range(MAX_NUM_STOP_TOKEN_IDS + 1)),
+            },
+        ]
+        for extra_body in oversized_params:
+            with pytest.raises(openai.BadRequestError, match="exceeds the maximum"):
+                await client.completions.create(
+                    model=model_name,
+                    prompt="hi",
+                    max_tokens=1,
+                    extra_body=extra_body,
+                )
+
+        # EngineCore must still serve requests after the rejected ones.
+        response = await client.completions.create(
+            model=model_name, prompt="hi", max_tokens=1, temperature=0.0
+        )
+        assert response.choices
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])

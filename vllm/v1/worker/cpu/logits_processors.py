@@ -12,15 +12,16 @@ import torch
 
 import vllm.envs as envs
 from vllm import _cpu_ops as ops
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import (
+    MAX_NUM_ALLOWED_TOKEN_IDS,
+    MAX_NUM_LOGIT_BIAS_TOKENS,
+    MAX_NUM_STOP_TOKEN_IDS,
+    SamplingParams,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.worker.cpu.states import CPURequestState
-
-MAX_NUM_ALLOWED_TOKEN_IDS = 1024
-MAX_NUM_LOGIT_BIAS_TOKENS = 1024
-MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 @dataclass(frozen=True, slots=True)

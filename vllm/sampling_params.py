@@ -36,6 +36,18 @@ MAX_LOGPROB_TOKEN_IDS = 256
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
+MAX_NUM_ALLOWED_TOKEN_IDS = 1024
+"""Upper bound on `SamplingParams.allowed_token_ids`. Must match the
+per-request row width allocated by the sampler's `LogitBiasState`."""
+
+MAX_NUM_LOGIT_BIAS_TOKENS = 1024
+"""Upper bound on `SamplingParams.logit_bias`. Must match the per-request
+row width allocated by the sampler's `LogitBiasState`."""
+
+MAX_NUM_STOP_TOKEN_IDS = 128
+"""Upper bound on the stop token ids the sampler masks while `min_tokens`
+is pending. Must match `LogitBiasState`."""
+
 MAX_STRUCTURED_OUTPUT_JSON_NESTING = 64
 """Upper bound on nested objects and arrays in a structured-output JSON schema
 or structural tag. Grammar conversion runs on the API server and its cost grows
@@ -809,6 +821,9 @@ class SamplingParams(
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
+        # Generation config adds EOS ids after verify() has run.
+        self._validate_stop_token_ids_count()
+
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
             return
@@ -1055,8 +1070,21 @@ class SamplingParams(
                     value=self.prompt_logprob_start,
                 )
 
+    def _validate_stop_token_ids_count(self) -> None:
+        if self.min_tokens <= 0:
+            return
+        num_stop_token_ids = len(self.all_stop_token_ids)
+        if num_stop_token_ids > MAX_NUM_STOP_TOKEN_IDS:
+            raise VLLMValidationError(
+                f"stop_token_ids has {num_stop_token_ids} entries, which "
+                f"exceeds the maximum of {MAX_NUM_STOP_TOKEN_IDS}.",
+                parameter="stop_token_ids",
+                value=num_stop_token_ids,
+            )
+
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
-        """Validate stop_token_ids are within vocabulary range."""
+        """Validate stop_token_ids are within vocabulary range and size."""
+        self._validate_stop_token_ids_count()
         if not self.stop_token_ids:
             return
 
@@ -1084,6 +1112,15 @@ class SamplingParams(
         """Validate logit_bias token IDs are within vocabulary range."""
         if not self.logit_bias:
             return
+
+        num_logit_bias = len(self.logit_bias)
+        if num_logit_bias > MAX_NUM_LOGIT_BIAS_TOKENS:
+            raise VLLMValidationError(
+                f"logit_bias has {num_logit_bias} entries, which exceeds "
+                f"the maximum of {MAX_NUM_LOGIT_BIAS_TOKENS}.",
+                parameter="logit_bias",
+                value=num_logit_bias,
+            )
 
         vocab_size = model_config.get_vocab_size()
         invalid_token_ids = [
@@ -1165,6 +1202,15 @@ class SamplingParams(
                 "allowed_token_ids is not None and empty!",
                 parameter="allowed_token_ids",
                 value=allowed_token_ids,
+            )
+
+        num_allowed_token_ids = len(allowed_token_ids)
+        if num_allowed_token_ids > MAX_NUM_ALLOWED_TOKEN_IDS:
+            raise VLLMValidationError(
+                f"allowed_token_ids has {num_allowed_token_ids} entries, which "
+                f"exceeds the maximum of {MAX_NUM_ALLOWED_TOKEN_IDS}.",
+                parameter="allowed_token_ids",
+                value=num_allowed_token_ids,
             )
 
         # allowed_token_ids are client-supplied ids used as column indices

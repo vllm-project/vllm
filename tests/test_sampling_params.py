@@ -8,6 +8,11 @@ import pytest
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import (
+    MAX_NUM_ALLOWED_TOKEN_IDS,
+    MAX_NUM_LOGIT_BIAS_TOKENS,
+    MAX_NUM_STOP_TOKEN_IDS,
+)
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -73,6 +78,59 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "parameter"),
+    [
+        (
+            {"allowed_token_ids": list(range(MAX_NUM_ALLOWED_TOKEN_IDS + 1))},
+            "allowed_token_ids",
+        ),
+        (
+            {"logit_bias": {i: 0.0 for i in range(MAX_NUM_LOGIT_BIAS_TOKENS + 1)}},
+            "logit_bias",
+        ),
+        (
+            {
+                "stop_token_ids": list(range(MAX_NUM_STOP_TOKEN_IDS + 1)),
+                "min_tokens": 1,
+            },
+            "stop_token_ids",
+        ),
+    ],
+)
+def test_sampler_list_caps_rejected_at_admission(kwargs: dict, parameter: str):
+    """Oversized sampler lists fail at admission, not inside the worker."""
+    with pytest.raises(VLLMValidationError, match="exceeds the maximum") as exc:
+        SamplingParams(**kwargs).verify(MockModelConfig(), None, None, None)
+    assert exc.value.parameter == parameter
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"allowed_token_ids": list(range(MAX_NUM_ALLOWED_TOKEN_IDS))},
+        {"logit_bias": {i: 0.0 for i in range(MAX_NUM_LOGIT_BIAS_TOKENS)}},
+        {
+            "stop_token_ids": list(range(MAX_NUM_STOP_TOKEN_IDS)),
+            "min_tokens": 1,
+        },
+    ],
+)
+def test_sampler_list_caps_accept_boundary(kwargs: dict):
+    SamplingParams(**kwargs).verify(MockModelConfig(), None, None, None)
+
+
+def test_generation_config_eos_ids_respect_stop_token_cap():
+    params = SamplingParams(
+        stop_token_ids=list(range(MAX_NUM_STOP_TOKEN_IDS - 1)), min_tokens=1
+    )
+    with pytest.raises(VLLMValidationError, match="exceeds the maximum"):
+        params.update_from_generation_config(
+            {"eos_token_id": [MAX_NUM_STOP_TOKEN_IDS - 1, MAX_NUM_STOP_TOKEN_IDS]},
+            eos_token_id=None,
+        )
 
 
 @pytest.mark.parametrize(
