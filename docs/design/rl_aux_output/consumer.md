@@ -28,7 +28,7 @@ Pass the engine's `AuxOutputConfig.mooncake_config_path`, or `None` to read `MOO
 
 `read_aux_rows(store, keys, field, timeout_s=600.0)` reads the objects of `keys` in order and concatenates one field.
 
-Writes are asynchronous, so an object can still be in flight when the response arrives: the reader waits up to `timeout_s` in total, then raises `BlockObjectStoreError`. Keep `timeout_s` no shorter than the engine's `object_put_stall_timeout_s` (both default to 600 s), since a full or unreachable store can hold writes back that long while the engine keeps running. A timeout does not by itself mean the objects are lost: behind a deep queue the engine can land them later than 600 s. Read again after the engine's next completed pause: every listed object is then in the store or lost, because the engine dropped it at the stall deadline or a store process lost it. The limit is checked between reads: one `get` that blocks, for example after the master died (more than 70 s in our tests), is not interrupted, so give the reading step its own timeout. It raises the same error when an object does not hold the field, for example a field the engine did not enable.
+Writes are asynchronous, so an object can still be in flight when the response arrives: the reader waits up to `timeout_s` in total, then raises `BlockObjectStoreError`. Keep `timeout_s` no shorter than the engine's `object_put_stall_timeout_s` (both default to 600 s), since a full or unreachable store can hold writes back that long while the engine keeps running. A timeout does not by itself mean the objects are lost: behind a deep queue the engine can land them later than 600 s. Read again after every engine that served the session has completed a pause that started after the request stopped; an object still missing then is lost (step 1 below). The limit is checked between reads: one `get` that blocks, for example after the master died (more than 70 s in our tests), is not interrupted, so give the reading step its own timeout. It raises the same error when an object does not hold the field, for example a field the engine did not enable.
 
 Create the store client in a process that does not start an engine afterwards. A Mooncake client created before the engine breaks CUDA initialization in the engine's workers.
 
@@ -57,11 +57,11 @@ The versions are the ones the object names state. Positions the request reused c
 - Each listed object holds the rows of the computation whose KV the request used for those positions, named with the tokens and weight versions of that computation, within the limits.
 - Rows are stored as the engine computed them; nothing is padded, substituted or recomputed by the reader.
 - The keys of a response that lists keys cover `[0, num_tokens - 1)` without gaps. A request that is aborted, or stops while preempted, lists none.
-- After every engine that served a session has completed a pause, every object of the session's stopped requests is in the store, unless the engine dropped it at the stall deadline or a store process lost it.
+- After every engine that served a session has completed a pause, every object of the session's stopped requests is in the store, unless the engine dropped it at the stall deadline, a store process that held it died, or it is behind a store call hung past the stall deadline, when it may still land later.
 
 ## What the trainer must do
 
-1. **Missing objects.** If `read_aux_rows` times out, read again after the engine's next completed pause; an object still missing then is lost, so drop the sample. When ranks read in a collective step, agree on the outcome across ranks before continuing.
+1. **Missing objects.** If `read_aux_rows` times out, read again with `timeout_s=0` after every engine that served the session has completed a pause that started after the request stopped. An object still missing then is lost: the engine dropped it at the stall deadline, a store process that held it died, or it is behind a store call hung past the stall deadline (it may still land; the release of the prefix removes it then). Drop the sample. A lost object stays lost: later requests that hit its KV list the same key and do not write it again, so drop every sample that lists it, retire the session as in step 5 and continue under a new session name, which computes the prefix again. When ranks read in a collective step, agree on the outcome across ranks before continuing.
 2. **Replay.** Truncate to the training sequence's `L - 1` positions. Hook R3 replay where the model computes routing; some MoE implementations call the routing function directly and bypass a router-level hook.
 3. **Behavior logprob.** Use the inline sampled logprob.
 4. **Versions.** Positions of different versions are not interchangeable. Use the versions for staleness weighting or filtering.
@@ -69,13 +69,15 @@ The versions are the ones the object names state. Positions the request reused c
 
 ## Example
 
-`wait_for_pause` returns after the engines' next completed pause and raises if the pause failed. Nothing is dropped silently: a second miss after a completed pause raises. A request that is aborted, or stops while preempted, lists no keys (`aux_output_keys` is `None`) and has no rows, so `load` returns `None` for it. Read only fields the engine enables: a missing field raises the same `BlockObjectStoreError` as a missing object, so this example waits for a pause before its second read raises. `client` in `release` is a `mooncake.store.MooncakeDistributedStore` connected to the object store ([protocol §7](protocol.md#7-pause-and-release)), not the `MooncakeAuxObjectStore` used for reading.
+`wait_for_pause` returns after the engines' next completed pause and raises if the pause failed. A second miss after a completed pause means the objects are lost: `load` returns `LOST`, and the caller drops the sample and retires the session (step 1). A request that is aborted, or stops while preempted, lists no keys (`aux_output_keys` is `None`) and has no rows, so `load` returns `None` for it. Read only fields the engine enables: a missing field raises the same `BlockObjectStoreError` as a missing object, so this example would report it as `LOST`. `client` in `release` is a `mooncake.store.MooncakeDistributedStore` connected to the object store ([protocol §7](protocol.md#7-pause-and-release)), not the `MooncakeAuxObjectStore` used for reading.
 
 ```python
 import numpy as np
 import torch
 from vllm.distributed.aux_output_connector import object_store
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
+
+LOST = object()
 
 
 def load(store, choice, tokens, wait_for_pause):
@@ -87,7 +89,10 @@ def load(store, choice, tokens, wait_for_pause):
         r3 = object_store.read_aux_rows(store, keys, "routed_experts")
     except BlockObjectStoreError:
         wait_for_pause()
-        r3 = object_store.read_aux_rows(store, keys, "routed_experts", timeout_s=0)
+        try:
+            r3 = object_store.read_aux_rows(store, keys, "routed_experts", timeout_s=0)
+        except BlockObjectStoreError:
+            return LOST
     return torch.from_numpy(r3[:n].astype(np.int64))
 
 
