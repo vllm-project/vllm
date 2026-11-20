@@ -316,6 +316,10 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # The number of NaNs in draft logits.
+    # A value greater than 0 indicates that the draft output is corrupted.
+    num_draft_nans_in_logits: int = 0
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

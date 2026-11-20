@@ -307,6 +307,9 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
+    # req_id -> num_nans_in_draft_logits
+    num_draft_nans_in_logits: dict[str, int] | None = None
+
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 

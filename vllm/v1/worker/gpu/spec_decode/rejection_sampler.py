@@ -15,7 +15,11 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     get_num_sampled_and_rejected,
 )
-from vllm.v1.worker.gpu.metrics.logits import get_num_nans
+from vllm.v1.worker.gpu.metrics.logits import (
+    counts_rows_to_requests,
+    get_num_draft_nans,
+    get_num_nans,
+)
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -439,6 +443,34 @@ class RejectionSampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
+        num_draft_nans = None
+        if (
+            self.sampler.compute_nans
+            and draft_logits is not None
+            and draft_logits.row_mapping is None
+        ):
+            # Draft-side NaN statistics, restricted to the verifier's read
+            # set: active (slot, step) pairs of the persistent cache, bonus
+            # rows zeroed (the verifier reads no draft for them), effective
+            # vocab columns, and non-greedy rows (the verifier skips draft
+            # reads for temperature == 0 requests). Sharded caches
+            # (row_mapping not None) are not covered yet.
+            draft_values = draft_logits.values
+            vocab_size = min(logits.shape[1], draft_values.shape[-1])
+            temp_per_row = self.sampler.sampling_states.temperature.gpu[
+                input_batch.expanded_idx_mapping
+            ]
+            row_counts = get_num_draft_nans(
+                draft_values,
+                input_batch.expanded_idx_mapping,
+                input_batch.expanded_local_pos,
+                vocab_size,
+                temp_per_row,
+            )
+            num_draft_nans = counts_rows_to_requests(
+                row_counts, input_batch.cu_num_logits
+            )
+
         draft_sampled, pos = gather_draft_sampled(
             input_batch.input_ids,
             input_batch.positions,
@@ -477,6 +509,7 @@ class RejectionSampler:
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
+            num_draft_nans=num_draft_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             sampling_mask_tensors=sampling_mask_tensors,
