@@ -29,8 +29,7 @@ class KVCacheScaleParameter(torch.nn.Parameter):
     class-level loader.
     """
 
-    # Dummy loading writes the sentinel too: checkpoints without these scales
-    # never overwrite them, so random values would outlive later weight syncs.
+    # Checkpoints may omit these; dummy loading must keep the sentinel.
     dummy_weight_value = -1.0
 
     def __new__(cls) -> "KVCacheScaleParameter":

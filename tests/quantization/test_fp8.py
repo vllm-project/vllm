@@ -1017,7 +1017,7 @@ def test_dummy_load_keeps_kv_cache_scales_of_real_start(method_cls):
     a dummy load: no later weight sync from that checkpoint rewrites them.
     """
 
-    def start(load_format: str) -> torch.nn.Module:
+    def start(dummy: bool) -> torch.nn.Module:
         layer = torch.nn.Module()
         set_default_quant_scales(layer, register_buffer=True)
         layer.kv_cache_dtype = "auto"
@@ -1029,13 +1029,13 @@ def test_dummy_load_keeps_kv_cache_scales_of_real_start(method_cls):
             )
             method = CompressedTensorsKVCacheMethod(config)
         method.create_weights(layer)
-        if load_format == "dummy":
-            loader = DummyModelLoader(LoadConfig(load_format=load_format))
+        if dummy:
+            loader = DummyModelLoader(LoadConfig(load_format="dummy"))
             loader.load_weights(layer, model_config=None)
         method.process_weights_after_loading(layer)
         return layer
 
-    real, dummy = start("auto"), start("dummy")
+    real, dummy = start(False), start(True)
     torch.testing.assert_close(dummy.state_dict(), real.state_dict(), rtol=0, atol=0)
     for name in ("_q_scale_float", "_k_scale_float", "_v_scale_float"):
         assert getattr(dummy, name) == getattr(real, name), name
