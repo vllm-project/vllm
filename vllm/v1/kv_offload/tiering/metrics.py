@@ -115,12 +115,6 @@ class TieringMetricsTracker:
             observed.setdefault(key, time.monotonic() - lookup_duration)
 
     def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
-        """Record stats for a newly registered job.
-
-        Args:
-            job_metadata: The registered job.
-
-        """
         transfer_job = job_metadata.transfer_job
         state = self._tier_states[job_metadata.tier_idx]
         if transfer_job.is_promotion:

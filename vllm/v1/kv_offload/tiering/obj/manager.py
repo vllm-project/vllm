@@ -207,7 +207,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             base_addr, len(self._primary_kv_view), stride
         )
         self._primary_reg = self._agent.register_memory(dram_descriptors, "DRAM")
-        self._block_size_bytes = stride
         all_blocks = [
             (base_addr + i * stride, stride, NIXL_DEV_ID)
             for i in range(len(self._primary_kv_view))
@@ -262,7 +261,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
         nixl_files = [
-            (0, self._block_size_bytes, dev_id, key)
+            (0, self.block_size_bytes, dev_id, key)
             for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)
         ]
         self._next_obj_dev_id += len(nixl_files)

@@ -173,20 +173,21 @@ class TieringTransferJob(TransferJob):
     def is_materialized(self) -> bool:
         return self._keys_chunks is not None
 
-    def cancel(self) -> None:
-        """Refuse later materialization: the request is finished.
-
-        Checked under the manager lock, so it cannot race a tier worker's
-        materialize() call.
+    def maybe_cancel(self) -> bool:
+        """Cancel if not already materialized. Cancellation denies job
+        materialization. Run under manager lock.
         """
+        if self._is_cancelled or self.is_materialized():
+            return False
         self._is_cancelled = True
+        return True
 
     def materialize(self) -> bool:
         if not self.is_promotion:
             # Cascade jobs materialize at construction
             return True
 
-        if self._is_cancelled:
+        if self.is_cancelled:
             return False
 
         assert self._keys_chunks is None and not self._is_alloc_failed, (
@@ -199,6 +200,10 @@ class TieringTransferJob(TransferJob):
             return False
         self._keys_chunks = alloc
         return True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._is_cancelled
 
     @property
     def keys(self) -> Collection[OffloadKey]:
@@ -675,22 +680,27 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = True
         self._process_finished_jobs()
 
+    def _maybe_update_load_sources(
+        self, job_metadata: JobMetadata, failed_keys: Collection[OffloadKey]
+    ):
+        """Update request load sources for failed keys of a transfer job"""
+        transfer_job = job_metadata.transfer_job
+        load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
+        if load_sources is not None:
+            source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
+            for key in failed_keys:
+                if load_sources.get(key) == source:
+                    del load_sources[key]
+
     def _complete_promotion(
         self, job_metadata: JobMetadata, completed_job: JobResult
     ) -> None:
         transfer_job = job_metadata.transfer_job
 
-        def _maybe_update_load_sources(failed_keys: set[OffloadKey]):
-            load_sources = self._request_load_sources.get(
-                transfer_job.req_context.req_id
-            )
-            if load_sources is not None:
-                source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
-                for key in failed_keys:
-                    if load_sources.get(key) == source:
-                        del load_sources[key]
+        if transfer_job.is_cancelled:
+            assert not transfer_job.is_materialized()
+            return
 
-        # Clear in-flight promotion keys book-keeping.
         self._inflight_promotion_keys.difference_update(transfer_job.requested_keys)
 
         if not transfer_job.is_materialized():
@@ -698,7 +708,9 @@ class TieringOffloadingManager(OffloadingManager):
             req_id = transfer_job.req_context.req_id
             if req_id in self._req_state:
                 self._promotion_failed_requests.add(req_id)
-            _maybe_update_load_sources(set(transfer_job.requested_keys))
+            self._maybe_update_load_sources(
+                job_metadata, set(transfer_job.requested_keys)
+            )
             return
 
         if completed_job.success:
@@ -715,7 +727,7 @@ class TieringOffloadingManager(OffloadingManager):
         # primary and were not fetched from the tier for this request; drop
         # their entries so they are reported as host hits.
         already_in_primary = set(transfer_job.requested_keys) - set(transfer_job.keys)
-        _maybe_update_load_sources(failed_keys | already_in_primary)
+        self._maybe_update_load_sources(job_metadata, failed_keys | already_in_primary)
 
         if successful_keys:
             self.primary_tier.complete_write(
@@ -978,11 +990,10 @@ class TieringOffloadingManager(OffloadingManager):
         """Queue a chunk for promotion from a secondary tier to the primary tier.
 
         No primary slots are allocated here. The chunk is recorded in
-        _inflight_promotion_keys (so subsequent lookups within the same step
-        see it as in-flight), and _flush_pending_promotions() later submits
-        one batched job per (tier, request). Primary slots are allocated
-        lazily by TieringTransferJob.materialize(), when the tier first
-        needs them.
+        _inflight_promotion_keys (so subsequent lookups see it as in-flight),
+        and _flush_pending_promotions() later submits one batched job per
+        (tier, request). Primary slots are allocated lazily by
+        TieringTransferJob.materialize(), when the tier first needs them.
 
         Args:
             tier_idx: The secondary tier index to promote from
@@ -1343,21 +1354,38 @@ class TieringOffloadingManager(OffloadingManager):
         self._cancel_request_promotions(req_context.req_id)
         self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
 
+    def _maybe_cancel_promotion(self, job_id: JobId) -> None:
+        job_meta = self._jobs[job_id]
+        transfer_job = job_meta.transfer_job
+        assert transfer_job.is_promotion
+        if transfer_job.maybe_cancel():
+            assert not transfer_job.is_materialized()
+            # Cancellation prevents materialization. Safe to update
+            # inflight promotion keys book-keeping.
+            self._inflight_promotion_keys.difference_update(transfer_job.requested_keys)
+            self._maybe_update_load_sources(job_meta, transfer_job.requested_keys)
+
     def _cancel_request_promotions(self, req_id: str) -> None:
         """Stop a finished request's promotions before they materialize.
 
-        Drops queued (not yet submitted) promotions and cancels in-flight
-        promotion jobs.
+        Drops queued (not yet submitted) promotions and cancels
+        unmaterialized in-flight promotion jobs.
         """
+        cancelled_keys: set[OffloadKey] = set()
+        # Drop pending submissions for the request.
         for tier_idx, pending_by_ctx in list(self._pending_load_submissions.items()):
             entry = pending_by_ctx.pop(req_id, None)
             if entry is not None:
-                self._inflight_promotion_keys.difference_update(entry.keys)
+                cancelled_keys.update(entry.keys)
             if not pending_by_ctx:
                 del self._pending_load_submissions[tier_idx]
+        self._inflight_promotion_keys.difference_update(cancelled_keys)
+
+        # Cancel submitted promotions, that are still unmaterialized
+        # for the request.
         state = self._req_state[req_id]
         for job_id in state.promotion_job_ids:
-            self._jobs[job_id].transfer_job.cancel()
+            self._maybe_cancel_promotion(job_id)
 
     def _maybe_finalize_request(
         self,
