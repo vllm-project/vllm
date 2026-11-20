@@ -2418,12 +2418,13 @@ class rocm_aiter_ops:
     _FLYDSL_SPARSE_MLA_FP8_DECODE = (
         envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE
     )
-    # (device index, has extra list) pairs whose kernels were compiled eagerly.
-    _FLYDSL_SPARSE_MLA_FP8_DECODE_WARM: set[tuple[int, bool]] = set()
+    # (device index, has extra list, MXFP8 output) -> whether the warm-up
+    # compiled the kernels (True) or failed (False, the config stays on Triton).
+    _FLYDSL_SPARSE_MLA_FP8_DECODE_WARM: dict[tuple[int, bool, bool], bool] = {}
     # Query rows sent to the FlyDSL fp8 decode kernel. Triton / FlyDSL time
-    # on MI355X: 0.95 at 1 row, 1.0 at 6, 1.08-1.42 at 12-1024 (not measured
-    # above).
-    _FLYDSL_SPARSE_MLA_FP8_DECODE_ROWS = (6, 1024)
+    # on MI355X: 0.95 at 1 row, 1.02 at 6, 1.08-1.42 at 12-2048 (not
+    # measured above).
+    _FLYDSL_SPARSE_MLA_FP8_DECODE_ROWS = (6, 2048)
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -4350,9 +4351,11 @@ class rocm_aiter_ops:
 
         `kwargs` are `sparse_mla_fwd`'s keyword arguments. The checks read
         host metadata only (shapes, dtypes, strides, the row count), so a
-        CUDA graph records the same choice on every replay. The kernels of a
-        configuration are compiled on its first eager call; under graph
-        capture an uncompiled configuration stays on Triton.
+        CUDA graph records the same choice on every replay; aiter's launcher
+        repeats them, which only costs host time outside full CUDA graphs.
+        The kernels of a configuration (extra list, output mode) are compiled
+        on its first eager call; under graph capture an uncompiled
+        configuration stays on Triton, and so does one whose compile failed.
         """
         if not cls._FLYDSL_SPARSE_MLA_FP8_DECODE or not cls._AITER_ENABLED:
             return False
@@ -4373,22 +4376,37 @@ class rocm_aiter_ops:
         ):
             return False
         has_extra = kwargs.get("extra_kv") is not None
-        key = (q.device.index or 0, has_extra)
-        if key not in cls._FLYDSL_SPARSE_MLA_FP8_DECODE_WARM:
+        mxfp8 = kwargs.get("out_mxfp8") is not None
+        key = (q.device.index or 0, has_extra, mxfp8)
+        warm = cls._FLYDSL_SPARSE_MLA_FP8_DECODE_WARM.get(key)
+        if warm is None:
             if torch.cuda.is_current_stream_capturing():
                 logger.warning_once(
                     "FlyDSL fp8 sparse MLA decode was not compiled before "
                     "CUDA graph capture; this graph uses the Triton kernel."
                 )
                 return False
-            mxfp8 = kwargs.get("out_mxfp8") is not None
-            warmup(q.device, mxfp8=mxfp8, has_extra=has_extra)
-            cls._FLYDSL_SPARSE_MLA_FP8_DECODE_WARM.add(key)
-            logger.info(
-                "FlyDSL fp8 sparse MLA decode: extra list=%s (first call: %d rows)",
-                has_extra,
-                q.shape[0],
-            )
+            try:
+                warmup(q.device, mxfp8=mxfp8, has_extra=has_extra)
+                warm = True
+            except Exception as e:
+                logger.warning_once(
+                    "FlyDSL fp8 sparse MLA decode failed to compile (%s); "
+                    "using the Triton kernel.",
+                    e,
+                )
+                warm = False
+            cls._FLYDSL_SPARSE_MLA_FP8_DECODE_WARM[key] = warm
+            if warm:
+                logger.info(
+                    "FlyDSL fp8 sparse MLA decode: extra list=%s, MXFP8 "
+                    "output=%s (first call: %d rows)",
+                    has_extra,
+                    mxfp8,
+                    q.shape[0],
+                )
+        if not warm:
+            return False
         fwd(
             q,
             kv_buffer,
