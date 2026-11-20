@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -66,8 +66,6 @@ class _HiSparseRequestState:
     unpinned_pages: set[int] = field(default_factory=set)
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
-    # Imported prefix pages eligible for optional GPU restoration.
-    pages_to_promote: int = 0
     # The worker holds this request's residency for every page below
     # synced_pages, except the stale pages changed since it was sent.
     synced_pages: int = 0
@@ -143,6 +141,7 @@ class HiSparseCoordinator:
                 manager.coordinator = self
                 manager.bind_host_pool(num_host_blocks)
         self.transition_watermark = 0
+        self._reserved_blocks: Callable[[], int] = lambda: 0
         if self.resident_managers:
             assert self.host_manager is not None
             assert self.host_group_id is not None
@@ -257,6 +256,11 @@ class HiSparseCoordinator:
             return
         assert self.host_manager is not None
         self.host_manager.block_pool.free_blocks(reversed(blocks))
+
+    def bind_reserved_blocks(self, reserved_blocks: Callable[[], int]) -> None:
+        """Bind the scheduler's count of free blocks promised to in-flight
+        prefills, which optional promotion must leave free."""
+        self._reserved_blocks = reserved_blocks
 
     def get_host_block_pool(self) -> BlockPool | None:
         manager = self.host_manager
@@ -505,9 +509,7 @@ class HiSparseCoordinator:
     # Host publication and spills
     # ------------------------------------------------------------------
 
-    def advance_scheduled(
-        self, requests: Iterable[tuple[str, int]], *, promote_imports: bool = True
-    ) -> None:
+    def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
         """Run the per-step residency work for each scheduled request.
 
         `requests` pairs a request id with the number of tokens computed
@@ -521,13 +523,6 @@ class HiSparseCoordinator:
             self.plan_prefix_materialization(
                 request_id, max(0, num_tokens - self.num_reprefillable_tokens)
             )
-            state = self._get_request_state(request_id)
-            if promote_imports and state.pages_to_promote:
-                pages = self._promote_imported_pages(request_id, state.pages_to_promote)
-                state.pages_to_promote = 0
-                self._plan_page_transfers(
-                    request_id, pages, budget=len(pages), restore=True
-                )
             self.update_residency(request_id)
 
     def plan_prefix_materialization(
@@ -676,22 +671,29 @@ class HiSparseCoordinator:
             # them before promoting the rest.
             self._adopt_pending_copies(request_id, state)
             tail_page = (num_computed_tokens - 1) // block_size
-            self._plan_page_transfers(request_id, (tail_page,), budget=1, restore=True)
-            state.pages_to_promote = tail_page
+            pages = (tail_page, *self._promote_imported_pages(request_id, tail_page))
+            self._plan_page_transfers(
+                request_id, pages, budget=len(pages), restore=True
+            )
         self._publish_host_blocks_if_ready(request_id)
 
     def _promote_imported_pages(self, request_id: str, num_pages: int) -> list[int]:
         """Back an import's first `num_pages` host pages with new GPU pages.
 
         Imports land in the host tier. While the GPU pool has room above the
-        transition watermark, the imported pages are restored into resident
-        pages too, so decode reads them like a locally computed prefix. They are
-        clean copies of durable host pages: the residency policy unpins them,
-        and the pool reclaims them only after every other free block.
+        transition watermark plus the blocks promised to in-flight prefills,
+        the imported pages are restored into resident pages too, so decode
+        reads them like a locally computed prefix. They are clean copies of
+        durable host pages: the residency policy unpins them, and the pool
+        reclaims them only after every other free block.
         """
         assert self.host_manager is not None
         num_managers = len(self.resident_managers)
-        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
+        spare = (
+            self.gpu_pool.get_num_free_blocks()
+            - self.transition_watermark
+            - self._reserved_blocks()
+        )
         host_blocks = self.host_manager.req_to_blocks[request_id]
         num_pages = min(
             num_pages, len(host_blocks), self._num_resident_pages(request_id)

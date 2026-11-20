@@ -153,19 +153,10 @@ class HiSparseConnectorScheduler:
         # Runs first: it plans this step's transfers and residency changes.
         self.coordinator.advance_scheduled(
             (
-                (
-                    request_id,
-                    min(start + count, self.requests[request_id].num_tokens),
-                )
-                for request_id, start, count in scheduled_requests
-            ),
-            # Leave capacity for any prefill that still has unscheduled input.
-            promote_imports=not any(
-                request.num_computed_tokens
-                + scheduler_output.num_scheduled_tokens.get(request_id, 0)
-                < request.num_tokens + request.num_output_placeholders
-                for request_id, request in self.requests.items()
-            ),
+                request_id,
+                min(start + count, self.requests[request_id].num_tokens),
+            )
+            for request_id, start, count in scheduled_requests
         )
         command = self.coordinator.build_offload_command()
         host_block_copies = self.coordinator.take_host_block_copies()

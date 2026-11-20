@@ -393,9 +393,7 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
         draft_kv_lookahead=4,
     )
     scheduler.bind_coordinator(coordinator)
-    request = make_request("request", list(range(104)), HISPARSE_BLOCK_SIZE, sha256)
-    request.num_computed_tokens = 103
-    request.num_output_placeholders = 3
+    request = SimpleNamespace(request_id="request", num_output_placeholders=3)
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = scheduler
     connector.update_state_after_alloc(request, None, 0)
@@ -732,7 +730,6 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert not coordinator.build_offload_command().page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
-    coordinator.advance_scheduled([(request.request_id, num_tokens)])
     # The tail comes first; the pool has room to promote the rest.
     restore, *promotions = coordinator.build_offload_command().page_transfers
     assert len(promotions) == len(source) - 1
@@ -783,9 +780,8 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     host_tail, gpu_tail = source[-1], resident[-1]
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    manager.free(request)
     transfers = coordinator.build_offload_command().page_transfers
-    assert len(transfers) == 1
+    manager.free(request)
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
     coordinator.update_spills(
         {t.transfer_id: 2 for t in transfers}, {t.transfer_id: 1 for t in transfers}
@@ -796,9 +792,10 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     assert not coordinator.has_pending_work()
 
 
-@pytest.mark.parametrize("has_room", [True, False])
-def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
-    """An import lands on host; spare GPU pages bring its whole prefix back."""
+@pytest.mark.parametrize("room", [4, 1, 0])
+def test_hisparse_import_promotes_host_pages_when_pool_has_room(room):
+    """An import lands on host; GPU pages left free above the transition
+    watermark and in-flight prefill reservations bring its prefix back."""
     manager = make_hisparse_kv_cache_manager(256, 16)
     num_tokens = 4 * HISPARSE_BLOCK_SIZE + 1
     request = make_request(
@@ -808,30 +805,22 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
     source, _, resident, _ = manager.get_blocks(request.request_id).blocks
     coordinator = get_hisparse_coordinator(manager)
     pool = coordinator.gpu_pool
-    free_before = pool.get_num_free_blocks()
-    coordinator.finish_host_import(request.request_id, failed=False)
-    coordinator.advance_scheduled(
-        [(request.request_id, num_tokens)], promote_imports=False
-    )
-    transfers = coordinator.build_offload_command().page_transfers
-    assert len(transfers) == 1  # The mandatory tail is independent of promotion.
-    assert pool.get_num_free_blocks() == free_before
-    if not has_room:
-        # Other requests allocate before optional promotion is considered.
-        pool.get_new_blocks(
-            pool.get_num_free_blocks() - coordinator.transition_watermark
-        )
+    reserved = pool.get_num_free_blocks() - coordinator.transition_watermark - room
+    coordinator.bind_reserved_blocks(lambda: reserved)
 
-    coordinator.advance_scheduled([(request.request_id, num_tokens)])
-    transfers += coordinator.build_offload_command().page_transfers
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
     assert all(transfer.restore for transfer in transfers)
-    promoted = range(4) if has_room else range(0)
+    promoted = range(room)
     assert [t.host_block_id for t in transfers] == [
         source[-1].block_id,
         *(source[page].block_id for page in promoted),
     ]
     row = _resident_block_ids(manager, request.request_id)
-    assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
+    assert [block_id != 0 for block_id in row] == [
+        *(page in promoted for page in range(4)),
+        True,
+    ]
     assert [t.resident_block_ids for t in transfers[1:]] == [
         (row[page],) for page in promoted
     ]
@@ -953,7 +942,6 @@ def test_hisparse_aborted_promotion_keeps_pages_until_restored():
     assert allocate_external_prefix(manager, request, num_tokens) is not None
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    coordinator.advance_scheduled([(request.request_id, num_tokens)])
     transfers = coordinator.build_offload_command().page_transfers
     assert len(transfers) == 3
     row = _resident_block_ids(manager, request.request_id)
