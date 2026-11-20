@@ -38,7 +38,6 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 120
   source_file_dependencies:
-  - vllm/model_executor/layers/hierarchical_lm_head.py
   - tests/kernels/test_hierarchical_lm_head.py
   - csrc/
   - tests/kernels/core
