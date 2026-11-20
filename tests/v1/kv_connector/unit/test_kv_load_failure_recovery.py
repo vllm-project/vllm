@@ -228,12 +228,18 @@ def test_sync_load_failure(
     assert scheduler.connector.request_finished.call_count == 2
 
 
-def test_sync_load_failure_resends_prompt_embeds_request(scheduler: Scheduler):
-    """A sync load failure that rolls a request back below its prompt after the
-    workers dropped its prompt_embeds rows preempts it, so it is re-sent with
-    its rows. Its invalid blocks leave the prefix cache, so its resume
-    recomputes them instead of hitting them."""
+@pytest.mark.parametrize("prompt_done", [True, False])
+def test_sync_load_failure_resends_prompt_embeds_request(
+    scheduler: Scheduler, prompt_done: bool
+):
+    """A sync load failure that rolls a request back below the first
+    prompt_embeds row the workers hold preempts it, so it is re-sent with its
+    rows. The workers hold none once its prompt is done, and none below the
+    loaded blocks before. Its invalid blocks leave the prefix cache, so its
+    resume recomputes them instead of hitting them."""
     block_size = scheduler.block_size
+    if not prompt_done:
+        scheduler.max_num_scheduled_tokens = block_size // 2
     init_none_hash(sha256)
     sampling_params = SamplingParams(max_tokens=4)
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
@@ -254,10 +260,9 @@ def test_sync_load_failure_resends_prompt_embeds_request(scheduler: Scheduler):
     scheduler.connector.request_finished.return_value = (False, None)
     scheduler.connector.take_events.return_value = ()
 
-    # The whole prompt is loaded or computed in one step, so its rows are
-    # dropped after it.
     scheduler_output = scheduler.schedule()
     (new_req,) = scheduler_output.scheduled_new_reqs
+    assert new_req.prompt_embeds_offset == 2 * block_size
     invalid_block_ids = {new_req.block_ids[0][0]}
     scheduler.update_from_output(
         scheduler_output,

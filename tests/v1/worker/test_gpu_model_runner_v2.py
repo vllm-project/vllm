@@ -790,6 +790,8 @@ def test_prompt_embeds_held_only_on_first_pp_rank(monkeypatch, is_first_rank):
         req_id="a",
         prompt_embeds=torch.zeros(4, model_config.get_inputs_embeds_size()),
         prompt_is_token_ids=None,
+        prompt_embeds_offset=0,
+        num_computed_tokens=0,
         mm_features=[],
     )
 
