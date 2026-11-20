@@ -102,8 +102,9 @@ def b12x_warmup_token_counts(
 def b12x_plan_capacity(vllm_config: "VllmConfig") -> tuple[int, tuple[int, ...]]:
     """Return the largest row count the scheduler can send to a linear and the
     CUDA graph capture sizes below it. Planning these at load time keeps b12x
-    from preparing an undeclared row count on first use, which would evict
-    kernels already captured in CUDA graphs."""
+    from preparing an undeclared row count on first use after CUDA graph
+    capture. On GB10 that crashed NVFP4 W4A16 Nemotron-3.5-Bolt; it does not
+    reproduce with b12x alone yet, so there is no upstream issue to link."""
     scheduler = vllm_config.scheduler_config
     capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
     capacity = max(
