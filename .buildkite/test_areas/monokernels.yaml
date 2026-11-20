@@ -36,7 +36,8 @@ steps:
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
   - tests/models/common/specialized_decode/reference.py
-  - tests/models/common/specialized_decode/primitives.py
+  - tests/models/common/specialized_decode/harness.py
+  - tests/models/common/specialized_decode/inputs.py
   - tests/models/deepseek_v41/amd/mono/test_primitives.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
@@ -111,7 +112,8 @@ steps:
   - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
   - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
   - tests/models/deepseek_v41/amd/mono/test_primitives.py
-  - tests/models/common/specialized_decode/primitives.py
+  - tests/models/common/specialized_decode/harness.py
+  - tests/models/common/specialized_decode/inputs.py
   - tests/models/common/specialized_decode/reference.py
   commands:
   - >-

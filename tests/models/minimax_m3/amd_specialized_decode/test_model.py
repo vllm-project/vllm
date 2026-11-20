@@ -478,14 +478,13 @@ def test_m31_umbp_restore_keeps_whole_layer_decode(vllm_runner, monkeypatch, tmp
     )
     from vllm import SamplingParams
 
-    monkeypatch.setenv("VLLM_ROCM_MINIMAX_M3_MONO", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
     with vllm_runner(
         "MiniMaxAI/MiniMax-M3.1-Flash",
         skip_tokenizer_init=True,
         tensor_parallel_size=4,
         quantization_config={"moe": "mxfp4"},
-        kernel_config={"moe_backend": "aiter"},
+        kernel_config={"moe_backend": "aiter", "monokernel": True},
         kv_cache_dtype="fp8",
         block_size=128,
         attention_backend="ROCM_AITER_FA",

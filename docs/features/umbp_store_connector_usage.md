@@ -163,7 +163,7 @@ together. A connector capability declaration does not make an unsupported
 checkpoint weight layout compatible with the monokernel.
 
 MiniMax M3.1-Flash's all-sparse layout uses the existing whole-layer decode
-path, enabled by `VLLM_ROCM_MINIMAX_M3_MONO=1`. That path accepts UMBP in
+path, selected by `--monokernel`. That path accepts UMBP in
 embedded and standalone modes under the same canonical-KV contract. It reads
 shared-expert fusion support from the MoE layers. Unlike M3's specialized
 path, whole-layer decode needs matching attention/indexer block IDs: use
@@ -173,11 +173,13 @@ graphs. Prefill and ineligible decode steps still use normal execution.
 On ROCm, the original `MiniMaxAI/MiniMax-M3.1-Flash` checkpoint needs the
 existing `--quantization-config.moe mxfp4` option to convert its NVFP4 routed
 experts to the kernel's supported format, or use a compatible Quark MXFP4
-checkpoint. Attention/dense weights retain their checkpoint format. The
-environment switch can fall back on unsupported configurations; verify the
-`MiniMax-M3 mono decode on: shared expert ...` log and check for later
-`mono decode off` messages. These setup logs do not prove every step used the
-monokernel. M3.1 routing through `--monokernel` is a separate change.
+checkpoint. Attention/dense weights retain their checkpoint format. To require
+decode kernels rather than allowing drafter-only selection, use
+`--additional-config '{"minimax_m3_monokernel": ["decode"]}'`. Startup fails
+if no selected kernel supports the configuration. Verify the
+`MiniMax-M3 --monokernel: whole-layer mono decode` selection log and check for
+later `mono decode off` messages. Setup logs do not prove every step used the
+monokernel.
 
 With KV events enabled, the scheduler verifies residency on every rank before
 publishing a stored-object event. It periodically rechecks tracked objects

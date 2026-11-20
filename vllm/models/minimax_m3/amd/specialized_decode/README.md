@@ -1,7 +1,7 @@
 # MiniMax M3 specialized decode
 
 M3.1-Flash's all-sparse attention layout uses the separate `amd/mono`
-whole-layer path via `VLLM_ROCM_MINIMAX_M3_MONO=1`. Both paths accept UMBP's
+whole-layer path via `--monokernel`. Both paths accept UMBP's
 canonical KV blocks. Whole-layer decode needs
 `--disable-hybrid-kv-cache-manager` to share attention/indexer block IDs;
 the specialized path below keeps the hybrid manager enabled.
@@ -11,6 +11,9 @@ norm and attention followed by one persistent FlyDSL launch for the rest of the
 layer (`mono/ffn.py`): the attention TP all-reduce and residual add, the Gemma
 post-attention norm, the FP32 router and top-4, the shared and routed experts,
 and the MoE TP all-reduce.
+
+`--monokernel` uses this path when the deployment doesn't fit the whole-layer
+mono decode in `../mono`, which needs MXFP8 attention projections.
 
 Milestone one is deliberately narrow:
 
