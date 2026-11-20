@@ -8,6 +8,7 @@ import torch
 from vllm.distributed.engram_pool.memory import CuMem, device_view
 from vllm.distributed.engram_pool.rows import SHARD_BASES, locate
 from vllm.platforms import current_platform
+from vllm.third_party.pynvml import NVMLError
 from vllm.triton_utils import tl, triton
 
 
@@ -82,7 +83,7 @@ class NvlinkTransport:
                     raise RuntimeError("CUDA host NUMA node is unavailable")
                 memory = CuMem(num_bytes, fabric=True, host_numa=host_numa)
                 exported_handle = memory.export_fabric()
-            except RuntimeError as exc:
+            except (RuntimeError, NVMLError) as exc:
                 error = str(exc) or type(exc).__name__
             exchanged = self.group.all_gather(
                 b"E" + error.encode() if error is not None else b"O" + exported_handle

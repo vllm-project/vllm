@@ -1239,7 +1239,7 @@ def test_engram_hash_padding_ignores_other_nodes(tp_size, uniform, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "failure", ["numa", "allocate", "export", "import", "map", "timeout"]
+    "failure", ["numa", "nvml", "allocate", "export", "import", "map", "timeout"]
 )
 def test_egm_startup_failure_propagates(monkeypatch, failure: str) -> None:
     """A rank-local EGM failure reaches both ranks and frees local allocations."""
@@ -1299,6 +1299,10 @@ def test_egm_startup_failure_propagates(monkeypatch, failure: str) -> None:
             self.released.append(handle)
 
     def numa(device):
+        if failure == "nvml" and local.rank == 0:
+            from vllm.third_party.pynvml import NVML_ERROR_NO_PERMISSION, NVMLError
+
+            raise NVMLError(NVML_ERROR_NO_PERMISSION)
         return None if failure == "numa" and local.rank == 0 else 0
 
     monkeypatch.setattr(nvlink, "CuMem", Memory)
