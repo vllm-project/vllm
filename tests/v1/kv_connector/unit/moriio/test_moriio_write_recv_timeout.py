@@ -130,6 +130,7 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
     worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
     worker._write_recv_unreleased = set()
+    worker._write_recv_fence = False
     worker.write_done = set()
 
     def get_finished():
@@ -144,14 +145,20 @@ class _Engine:
     """A decode instance: the real scheduler and one stub worker per TP rank."""
 
     def __init__(
-        self, monkeypatch, tp_size: int, layout: str = "attn", policy: str = "fail"
+        self,
+        monkeypatch,
+        tp_size: int,
+        layout: str = "attn",
+        policy: str = "fail",
+        extra_config: dict | None = None,
+        make_worker=_make_consumer_worker,
     ):
         self.clock = _Clock()
         monkeypatch.setattr(moriio_connector, "time", self.clock)
         config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
-        config.kv_transfer_config.kv_connector_extra_config["write_recv_timeout"] = (
-            TIMEOUT_S
-        )
+        extra = config.kv_transfer_config.kv_connector_extra_config
+        extra["write_recv_timeout"] = TIMEOUT_S
+        extra.update(extra_config or {})
         config.kv_transfer_config.kv_load_failure_policy = policy
         kv_cache_config = _kv_cache_config(layout)
         if layout.endswith("hybrid"):
@@ -170,7 +177,7 @@ class _Engine:
             connector._write_recv_prober.shutdown()
             connector._write_recv_prober = _InlineExecutor()
         self.pool = self.scheduler.kv_cache_manager.block_pool
-        self.workers = [_make_consumer_worker() for _ in range(tp_size)]
+        self.workers = [make_worker() for _ in range(tp_size)]
         # Like the executors: only multi-worker outputs are aggregated.
         self.aggregator = (
             KVOutputAggregator.from_connector(self.scheduler.connector, tp_size)

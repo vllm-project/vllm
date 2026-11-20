@@ -57,9 +57,62 @@ def _positive_finite_timeout(name: str, value: Any) -> float:
     return timeout
 
 
+def _extra_config_flag(value: Any) -> bool:
+    """A boolean from kv_connector_extra_config, which may arrive as a string."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 class MoRIIOTransferAck(NamedTuple):
     transfer_id: TransferId
     consumer_tp_size: int = 1
+
+
+def moriio_engine_key(
+    role: str,
+    host: str,
+    handshake_port: int,
+    tp_rank: int,
+    dp_rank: int,
+    pp_rank: int | None = None,
+) -> str:
+    """Key of a worker's MoRI IOEngine. A peer derives it to fence the worker.
+
+    Pipeline stages need distinct keys, so `pp_rank` is given when PP > 1.
+    """
+    key = f"{role}:{host}:{handshake_port}:tp{tp_rank}:dp{dp_rank}"
+    return key if pp_rank is None else f"{key}:pp{pp_rank}"
+
+
+class WriteProducer(NamedTuple):
+    """One prefill DP rank, with all of its TP ranks, writing into a decode."""
+
+    host: str
+    handshake_port: int
+    # Base notify port; each TP rank listens at an offset from it.
+    notify_port: int
+    # Per-pod local DP rank: the one in the producer's ports and engine keys.
+    dp_rank: int
+    tp_size: int
+
+    def engine_key(self, tp_rank: int) -> str:
+        return moriio_engine_key(
+            "producer", self.host, self.handshake_port, tp_rank, self.dp_rank
+        )
+
+    def notify_endpoint(self, tp_rank: int) -> tuple[str, int]:
+        return self.host, self.notify_port + get_port_offset(self.dp_rank, tp_rank)
+
+
+@dataclass(slots=True)
+class WriteFenceOrder:
+    """Fence one producer and fail every receive it was still writing."""
+
+    fence_id: str
+    producer: WriteProducer
+    # Request id -> transfer id of each receive the fence fails.
+    requests: dict[ReqId, TransferId]
 
 
 @dataclass(slots=True)
@@ -508,6 +561,9 @@ class MoRIIOConstants:
     DEFAULT_RECV_ABORT_TIMEOUT = 120.0
     # Overridable via kv_connector_extra_config["write_recv_timeout"].
     DEFAULT_WRITE_RECV_TIMEOUT = 540.0
+    # Seconds between re-sends of a fence_abort the producer has not
+    # acknowledged. The producer stays fenced until it does.
+    FENCE_ABORT_RESEND_INTERVAL = 10.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -605,6 +661,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.write_recv_timed_out_req_ids: set[ReqId] = set()
+        # WRITE-mode consumer: producers to fence (write_recv_fence).
+        self.write_fence_orders: list[WriteFenceOrder] = []
 
     def __repr__(self):
         return (

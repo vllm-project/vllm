@@ -450,6 +450,7 @@ def _write_done_fields(pp_rank: int, pp_size: int) -> list:
         done_req_ids=[],
         done_remote_allocate_req_dict={},
         waiting_for_transfer_complete=lambda statuses: None,
+        _is_transfer_terminal_locked=lambda transfer_id: False,
         _mark_transfer_terminal_locked=lambda transfer_id: None,
         send_notify=lambda *args, message_type, message_fields=None: sent.append(
             message_fields

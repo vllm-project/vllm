@@ -142,6 +142,7 @@ def _real_wrapper() -> MoRIIOWrapper:
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_write_cache_req_ids = []
     wrapper._write_done_senders = {}
+    wrapper._write_failed_partial = set()
     wrapper.failed_write_cache_req_ids = []
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
@@ -650,6 +651,7 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
     worker._write_recv_unreleased = set()
+    worker._write_recv_fence = False
     worker.get_finished = lambda: (set(), set())  # type: ignore[method-assign]
 
     results = worker.get_transfer_results()

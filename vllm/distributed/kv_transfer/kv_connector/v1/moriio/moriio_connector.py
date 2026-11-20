@@ -49,7 +49,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferBatchState,
     TransferError,
     TransferId,
+    WriteFenceOrder,
+    WriteProducer,
     WriteTask,
+    _extra_config_flag,
     _positive_finite_timeout,
     fill_remote_pod_from_config,
     fold_local_rank,
@@ -57,6 +60,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
+    moriio_engine_key,
     parse_moriio_zmq_address,
     pod_index,
     resolve_host_ip,
@@ -145,6 +149,9 @@ _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
 # A WRITE failure is broadcast to every decode DP rank, so ranks that never
 # see the request would otherwise keep its transfer id forever.
 _MAX_UNMATCHED_WRITE_FAILURES = 4096
+# Fenced transfers remembered: well past the requests that can be in flight at
+# once.
+_MAX_FENCED_TRANSFERS = 65536
 
 
 try:
@@ -845,6 +852,24 @@ class MoRIIOConnectorScheduler:
                     "MoRI-IO WRITE-mode consumer: write_recv_timeout is disabled; "
                     "it requires kv_load_failure_policy='fail'."
                 )
+        # With write_recv_fence, a timeout also fences the producer so the
+        # blocks it was writing can be freed. A fence cuts off the whole
+        # producer, so its other in-flight receives fail along with it.
+        self._write_recv_fence = _extra_config_flag(
+            self.kv_transfer_config.kv_connector_extra_config.get(
+                "write_recv_fence", False
+            )
+        )
+        if self._write_recv_fence and not self._write_recv_timer_enabled:
+            logger.warning(
+                "MoRI-IO: write_recv_fence has no effect without the WRITE-mode "
+                "consumer write_recv_timeout."
+            )
+            self._write_recv_fence = False
+        self._write_recv_producer: dict[ReqId, WriteProducer] = {}
+        self._write_recv_transfer_id: dict[ReqId, TransferId] = {}
+        self._write_fence_orders: list[WriteFenceOrder] = []
+        self._write_fence_seq = 0
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -1113,6 +1138,44 @@ class MoRIIOConnectorScheduler:
             target_port = remote_notify_port + get_port_offset(local_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
+    def _resolve_write_producer(
+        self, request: "Request", remote_dp_rank: int, dp_local: int
+    ) -> WriteProducer | None:
+        """The prefill rank group writing this request, or None if unaddressable."""
+        params = request.kv_transfer_params or {}
+        peer_zmq = get_peer_zmq_from_request_id(request.request_id, is_producer=False)
+        try:
+            if peer_zmq is not None:
+                host, handshake_port, notify_port = parse_moriio_zmq_address(peer_zmq)
+            else:
+                # Sidecar fallback: use explicit params fields.
+                host = params.get("remote_host") or ""
+                handshake_port = int(params.get("remote_handshake_port") or 0)
+                notify_port = int(params.get("remote_notify_port") or 0)
+        except (TypeError, ValueError):
+            return None
+        if not host or not notify_port:
+            return None
+        # The target rank may live on a child pod at a different IP, so resolve
+        # the per-pod host (pod_idx = global // dp_local). Otherwise a notify
+        # for child ranks lands on the master pod and the request hangs in
+        # WAITING_FOR_REMOTE_KVS.
+        remote_hosts = params.get("remote_hosts") or []
+        if dp_local > 0 and remote_hosts:
+            pod_idx = pod_index(remote_dp_rank, dp_local)
+            if 0 <= pod_idx < len(remote_hosts):
+                host = remote_hosts[pod_idx]
+        return WriteProducer(
+            host=host,
+            handshake_port=handshake_port,
+            notify_port=notify_port,
+            # Wide-EP multi-pod: a pod binds notify sockets only for its LOCAL
+            # ranks, so the port offset uses the per-pod local rank (%
+            # dp_local), not the global rank. Single-pod is bit-identical.
+            dp_rank=fold_local_rank(remote_dp_rank, dp_local),
+            tp_size=get_moriio_peer_tp_size(params, self.tp_size),
+        )
+
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -1356,6 +1419,9 @@ class MoRIIOConnectorScheduler:
                     _should_notify = self._global_dp_rank == remote_dp_rank
                 else:
                     _should_notify = self._is_kv_master
+                producer = self._resolve_write_producer(
+                    request, remote_dp_rank, _dp_local
+                )
                 if _should_notify and num_external_tokens == 0:
                     # Nothing left to fetch (full local prefix hit), so release
                     # the producer's blocks instead of sending an empty
@@ -1364,32 +1430,17 @@ class MoRIIOConnectorScheduler:
                         request.request_id, request.kv_transfer_params
                     )
                 elif _should_notify:
-                    peer_zmq = get_peer_zmq_from_request_id(
-                        request.request_id, is_producer=False
-                    )
-                    if peer_zmq is not None:
-                        remote_host, _, remote_notify_port = parse_moriio_zmq_address(
-                            peer_zmq
-                        )
-                    else:
-                        # Sidecar fallback: use explicit params fields.
+                    if producer is None:
                         params = request.kv_transfer_params or {}
-                        remote_host = params.get("remote_host") or ""
-                        try:
-                            remote_notify_port = int(
-                                params.get("remote_notify_port") or 0
-                            )
-                        except (TypeError, ValueError):
-                            remote_notify_port = 0
-                        if not remote_host or not remote_notify_port:
-                            raise ValueError(
-                                f"request {request.request_id!r}: "
-                                f"request_id has no embedded peer "
-                                f"zmq_address and kv_transfer_params is "
-                                f"missing remote_host / remote_notify_port "
-                                f"(got remote_host={remote_host!r}, "
-                                f"remote_notify_port={remote_notify_port!r})"
-                            )
+                        raise ValueError(
+                            f"request {request.request_id!r}: "
+                            f"request_id has no embedded peer "
+                            f"zmq_address and kv_transfer_params is "
+                            f"missing remote_host / remote_notify_port "
+                            f"(got remote_host={params.get('remote_host')!r}, "
+                            f"remote_notify_port="
+                            f"{params.get('remote_notify_port')!r})"
+                        )
 
                     block_notify_list: list[int] | list[list[int]]
                     num_skip_blocks = 0
@@ -1407,36 +1458,15 @@ class MoRIIOConnectorScheduler:
                             blocks.get_unhashed_block_ids_all_groups()[0]
                         )
 
-                    # Wide-EP multi-pod: a pod binds notify sockets only for
-                    # its LOCAL ranks, so the port offset must use the per-pod
-                    # local rank (% dp_local), not the global rank. Single-pod
-                    # is bit-identical (modulus is a no-op).
-                    _remote_dp_rank_for_port = fold_local_rank(
-                        remote_dp_rank, _dp_local
-                    )
-                    # The target rank may live on a child pod at a different IP,
-                    # so resolve the per-pod host (pod_idx = global // dp_local).
-                    # Otherwise a notify for child ranks lands on the master
-                    # pod and the request hangs in WAITING_FOR_REMOTE_KVS.
-                    _notify_host = remote_host
-                    _kvp = request.kv_transfer_params or {}
-                    _remote_hosts = _kvp.get("remote_hosts") or []
-                    if _dp_local > 0 and _remote_hosts:
-                        _pod_idx = pod_index(remote_dp_rank, _dp_local)
-                        if 0 <= _pod_idx < len(_remote_hosts):
-                            _notify_host = _remote_hosts[_pod_idx]
                     # Every prefill TP rank needs the allocation; ports past
                     # the prefill TP size are not bound.
-                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
-                        target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
-                        )
-
+                    for tp_index in range(producer.tp_size):
+                        notify_host, target_port = producer.notify_endpoint(tp_index)
                         self.send_notify_block(
                             req_id=request.request_id,
                             transfer_id=request.kv_transfer_params["transfer_id"],
                             block_notify_list=block_notify_list,
-                            host=_notify_host,
+                            host=notify_host,
                             port=target_port,
                             num_skip_blocks=num_skip_blocks,
                         )
@@ -1448,14 +1478,20 @@ class MoRIIOConnectorScheduler:
                     )
                     self._write_recv_armed_at.setdefault(request.request_id, now)
                     # Every rank holding the request, notifying or not, probes
-                    # the same prefill socket.
-                    peer = self._write_notify_peer(request, remote_dp_rank, _dp_local)
+                    # the same prefill socket, and can fence the prefill.
                     if (
-                        peer is not None
+                        producer is not None
                         and request.request_id not in self._write_recv_peer
                     ):
+                        peer = producer.notify_endpoint(0)
                         self._write_recv_peer[request.request_id] = peer
                         self._write_recv_peer_count[peer] += 1
+                        transfer_id = request.kv_transfer_params.get("transfer_id")
+                        if self._write_recv_fence and transfer_id:
+                            self._write_recv_producer[request.request_id] = producer
+                            self._write_recv_transfer_id[request.request_id] = (
+                                transfer_id
+                            )
 
             # Only trigger 1 KV transfer per request.
 
@@ -1640,6 +1676,9 @@ class MoRIIOConnectorScheduler:
 
         if self._write_recv_timer_enabled:
             meta.write_recv_timed_out_req_ids = self._reap_stale_write_recvs()
+            if self._write_fence_orders:
+                meta.write_fence_orders = self._write_fence_orders
+                self._write_fence_orders = []
 
         return meta
 
@@ -1687,6 +1726,8 @@ class MoRIIOConnectorScheduler:
         for peer in consumed:
             del self._write_recv_probes[peer]
         self._write_recv_timed_out |= expired
+        if self._write_recv_fence and expired:
+            self._order_write_fences(expired)
         for req_id in expired:
             waited = now - self._write_recv_armed_at[req_id]
             self._forget_write_recv(req_id)
@@ -1702,42 +1743,61 @@ class MoRIIOConnectorScheduler:
             )
         return expired
 
-    def _write_notify_peer(
-        self, request: "Request", remote_dp_rank: int, dp_local: int
-    ) -> tuple[str, int] | None:
-        """The notify socket of a WRITE request's prefill, TP rank 0, if known:
-        the address update_state_after_alloc sends its first allocation to."""
-        params = request.kv_transfer_params or {}
-        peer_zmq = get_peer_zmq_from_request_id(request.request_id, is_producer=False)
-        if peer_zmq is not None:
-            host, _, port = parse_moriio_zmq_address(peer_zmq)
-        else:
-            host = params.get("remote_host") or ""
-            try:
-                port = int(params.get("remote_notify_port") or 0)
-            except (TypeError, ValueError):
-                return None
-            if not host or not port:
-                return None
-        remote_hosts = params.get("remote_hosts") or []
-        if dp_local > 0 and remote_hosts:
-            pod = pod_index(remote_dp_rank, dp_local)
-            if 0 <= pod < len(remote_hosts):
-                host = remote_hosts[pod]
-        return host, port + get_port_offset(
-            fold_local_rank(remote_dp_rank, dp_local), 0
-        )
-
     def _forget_write_recv(self, req_id: ReqId) -> None:
         """Stop timing a WRITE receive."""
         self._write_recv_deadline.pop(req_id, None)
         self._write_recv_armed_at.pop(req_id, None)
+        self._write_recv_producer.pop(req_id, None)
+        self._write_recv_transfer_id.pop(req_id, None)
         peer = self._write_recv_peer.pop(req_id, None)
         if peer is not None:
             self._write_recv_peer_count[peer] -= 1
             if self._write_recv_peer_count[peer] <= 0:
                 del self._write_recv_peer_count[peer]
                 self._write_recv_probes.pop(peer, None)
+
+    def _order_write_fences(self, expired: set[ReqId]) -> None:
+        """Order a fence of each producer that let a receive time out.
+
+        The fence cuts every connection from the producer, so all of its other
+        in-flight receives are failed with the timed-out ones. The workers
+        release the blocks of all of them once they fenced the producer. The
+        others keep their timers in case a worker cannot fence safely.
+        """
+        stuck_producers = {
+            self._write_recv_producer[req_id]
+            for req_id in expired
+            if req_id in self._write_recv_producer
+        }
+        for producer in stuck_producers:
+            requests = {
+                req_id: self._write_recv_transfer_id[req_id]
+                for req_id, p in self._write_recv_producer.items()
+                if p == producer
+            }
+            for req_id in requests:
+                self._write_recv_producer.pop(req_id, None)
+                self._write_recv_transfer_id.pop(req_id, None)
+            self._write_fence_seq += 1
+            order = WriteFenceOrder(
+                fence_id=f"{self.engine_id}-fence{self._write_fence_seq}",
+                producer=producer,
+                requests=requests,
+            )
+            self._write_fence_orders.append(order)
+            collateral = sorted(set(requests) - expired)
+            logger.error(
+                "WRITE-mode KV recv timed out from producer %s:%d (dp%d); "
+                "fencing it (%s). Failing %d in-flight request(s), %d of "
+                "them not yet timed out: %s",
+                producer.host,
+                producer.handshake_port,
+                producer.dp_rank,
+                order.fence_id,
+                len(requests),
+                len(collateral),
+                collateral,
+            )
 
     def shutdown(self):
         for path, sock in self.paths.items():
@@ -2172,25 +2232,41 @@ class MoRIIOConnectorWorker:
         self._completed_consumer_notifications: set[TransferId] = set()
 
         role = "producer" if self.is_producer else "consumer"
-        engine_suffix = (
-            f"{self.moriio_config.local_ip}:{self.moriio_config.handshake_port}:"
-            f"tp{self.tp_rank}:dp{self.dp_rank}"
-        )
-        if self.pp_size > 1:
+        self.engine_key = moriio_engine_key(
+            role,
+            self.moriio_config.local_ip,
+            self.moriio_config.handshake_port,
+            self.tp_rank,
+            self.dp_rank,
             # MoRI peers address engines by this key; stages need distinct keys.
-            engine_suffix += f":pp{self.pp_rank}"
+            self.pp_rank if self.pp_size > 1 else None,
+        )
         self.moriio_engine = IOEngine(
-            f"{role}:{engine_suffix}",
+            self.engine_key,
             IOEngineConfig(
                 self.moriio_config.local_ip, self.moriio_config.local_kv_port
             ),
         )
         logger.debug(
             "build MORI IOEngine %s (ip=%s port=%s)",
-            f"{role}:{engine_suffix}",
+            self.engine_key,
             self.moriio_config.local_ip,
             self.moriio_config.local_kv_port,
         )
+        self._write_recv_fence = _extra_config_flag(
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "write_recv_fence", False
+            )
+        )
+        if (
+            self._write_recv_fence
+            and self.mode == MoRIIOMode.WRITE
+            and not hasattr(self.moriio_engine, "fence_remote_engine")
+        ):
+            raise RuntimeError(
+                "kv_connector_extra_config.write_recv_fence needs a MoRI build "
+                "with IOEngine.fence_remote_engine."
+            )
 
         if self._rank == 0 and self.moriio_config.proxy_ip:
             self._heartbeat = self._start_heartbeat()
@@ -2343,6 +2419,24 @@ class MoRIIOConnectorWorker:
         # is preserved.
         self._pending_unmapped_acks: list = []
 
+        # WRITE-mode consumer fences (write_recv_fence).
+        # Producer engine key -> fences that still need the producer's ack
+        # before the key is unfenced.
+        self._fenced_producer_keys: dict[str, set[str]] = {}
+        # fence_id -> (order, TP rank -> producer key not yet acked,
+        # monotonic time the abort was last sent).
+        self._fence_pending: dict[
+            str, tuple[WriteFenceOrder, dict[int, str], float]
+        ] = {}
+        # Receives the fences failed, reported in the next get_transfer_results.
+        self._fence_failed_req_ids: set[ReqId] = set()
+        # Receives a fence settled, while the scheduler maps them: a later
+        # write_done or write_failed must not report them again.
+        self._fence_settled_req_ids: set[ReqId] = set()
+        # Fenced transfers, so a write_done the producer sent before the abort
+        # landed is dropped instead of waiting for a mapping forever.
+        self._fenced_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
+
     def schedule_write_blocks(
         self,
         request_id: ReqId,
@@ -2406,7 +2500,9 @@ class MoRIIOConnectorWorker:
         )
         self._writer.schedule_write(task)
 
-    def _get_built_session(self, remote_engine_id):
+    def _get_built_session(self, remote_engine_id, rebuild: bool = False):
+        if rebuild:
+            self.built_write_session.pop(remote_engine_id, None)
         if remote_engine_id not in self.built_write_session:
             remote_layer_map = self.layer_name_to_remote_kv_cache_metadata[
                 remote_engine_id
@@ -3212,6 +3308,10 @@ class MoRIIOConnectorWorker:
         done_sending, done_recving = set(), set()
 
         if self.is_producer:
+            if self.mode == MoRIIOMode.WRITE:
+                # The write worker also serves decode fence aborts, which can
+                # arrive before this rank scheduled any write.
+                self._writer.ensure_worker_started()
             # pop_finished_req_ids returns release ACKs sent by decode. Keep
             # duplicate ACKs because heterogeneous TP can fan multiple decode
             # ranks into one prefill rank for the same transfer_id.
@@ -3294,9 +3394,16 @@ class MoRIIOConnectorWorker:
             while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
                 pending.popitem(last=False)
             done_recving |= failed_recving
+            if self._write_recv_fence:
+                # A receive a fence settled is not reported again.
+                done_recving -= self._fence_settled_req_ids
+                failed_recving -= self._fence_settled_req_ids
             done_sending |= self._report_write_recv_timeouts(
                 done_recving, failed_recving
             )
+            if self._write_recv_fence:
+                done_sending |= self._report_write_fences(done_recving, failed_recving)
+                self._service_fences()
 
         return KVConnectorTransferResults(
             finished_sending=done_sending,
@@ -3335,6 +3442,156 @@ class MoRIIOConnectorWorker:
                 self._write_recv_unreleased.add(req_id)
         self._write_recv_timed_out = set()
         return released
+
+    def _report_write_fences(
+        self, done_recving: set[ReqId], failed_recving: set[ReqId]
+    ) -> set[ReqId]:
+        """Report the receives this worker's fences failed (`write_recv_fence`).
+
+        The fenced producer can no longer write into this rank. A receive the
+        scheduler timed out and holds is released; one still waiting is
+        reported failed, and so freed; one whose write_done beat the fence
+        completed intact.
+
+        Returns:
+            The receives this worker releases, for finished_sending.
+
+        """
+        live_req_ids = set(self.transfer_id_to_request_id.values())
+        released: set[ReqId] = set()
+        for req_id in self._fence_failed_req_ids & live_req_ids:
+            if req_id in self._write_recv_unreleased:
+                self._write_recv_unreleased.discard(req_id)
+                released.add(req_id)
+            elif req_id in self._write_recv_reported:
+                continue
+            else:
+                done_recving.add(req_id)
+                failed_recving.add(req_id)
+                self._write_recv_reported.add(req_id)
+            self._fence_settled_req_ids.add(req_id)
+        self._fence_failed_req_ids = set()
+        # Reports of fenced transfers whose request is gone wait for no mapping.
+        fenced = self._fenced_transfer_ids.keys()
+        self._unmatched_write_completions -= fenced
+        for transfer_id in fenced & self._unmatched_write_failures.keys():
+            del self._unmatched_write_failures[transfer_id]
+        return released
+
+    def _apply_fence_order(self, order: WriteFenceOrder) -> None:
+        """Fence a producer that let a receive time out, on this rank.
+
+        Its receives are reported failed, which frees their blocks, only if
+        every connection the producer had to this rank is down. Otherwise the
+        blocks stay allocated: the producer could still write into them.
+        """
+        producer = order.producer
+        keys = {tp: producer.engine_key(tp) for tp in range(producer.tp_size)}
+        safe = True
+        endpoints_fenced = 0
+        previously_fenced = False
+        for key in keys.values():
+            previously_fenced |= key in self._fenced_producer_keys
+            self._fenced_producer_keys.setdefault(key, set()).add(order.fence_id)
+            try:
+                result = self.moriio_engine.fence_remote_engine(key)
+            except Exception:
+                logger.exception("MoRI-IO fence of producer %s raised", key)
+                safe = False
+                continue
+            if not result.ok:
+                logger.error(
+                    "MoRI-IO fence of producer %s incomplete: %s", key, result.message
+                )
+                safe = False
+            endpoints_fenced += result.endpoints_fenced
+        if endpoints_fenced == 0 and not previously_fenced:
+            # A rank that had requests in flight from the producer holds a
+            # connection to it, so a fence that found none points at a key that
+            # does not match the producer's engine.
+            logger.error(
+                "MoRI-IO fence %s found no connection from producer keys %s; "
+                "keeping the blocks of its receives allocated.",
+                order.fence_id,
+                sorted(keys.values()),
+            )
+            safe = False
+        if safe:
+            self._fence_failed_req_ids.update(order.requests)
+            for transfer_id in order.requests.values():
+                self._fenced_transfer_ids[transfer_id] = None
+            while len(self._fenced_transfer_ids) > _MAX_FENCED_TRANSFERS:
+                self._fenced_transfer_ids.popitem(last=False)
+        logger.warning(
+            "MoRI-IO fence %s: fenced producer %s:%d dp%d on tp%d (%d "
+            "connection(s)); %s %d receive(s).",
+            order.fence_id,
+            producer.host,
+            producer.handshake_port,
+            producer.dp_rank,
+            self.tp_rank,
+            endpoints_fenced,
+            "failing" if safe else "NOT freeing",
+            len(order.requests),
+        )
+        self._fence_pending[order.fence_id] = (order, keys, 0.0)
+        self._send_fence_aborts()
+
+    def _send_fence_aborts(self) -> None:
+        """Tell each fenced producer rank that has not acked to stop writing."""
+        now = time.monotonic()
+        interval = MoRIIOConstants.FENCE_ABORT_RESEND_INTERVAL
+        for fence_id, (order, keys, last_sent) in self._fence_pending.items():
+            if now - last_sent < interval:
+                continue
+            transfer_ids = list(order.requests.values())
+            for tp in keys:
+                host, port = order.producer.notify_endpoint(tp)
+                self.moriio_wrapper.send_notify(
+                    fence_id,
+                    host,
+                    port,
+                    message_type="fence_abort",
+                    message_fields={
+                        "transfer_ids": transfer_ids,
+                        "consumer_key": self.engine_key,
+                        "reply_host": self.local_ip,
+                        "reply_port": self.moriio_wrapper.notify_port,
+                    },
+                )
+            self._fence_pending[fence_id] = (order, keys, now)
+
+    def _service_fences(self) -> None:
+        """Unfence producers that acked every abort, and re-send the rest."""
+        for fence_id, producer_key in self.moriio_wrapper.pop_fence_acks():
+            pending = self._fence_pending.get(fence_id)
+            if pending is None:
+                continue
+            order, keys, last_sent = pending
+            keys = {tp: key for tp, key in keys.items() if key != producer_key}
+            if keys:
+                self._fence_pending[fence_id] = (order, keys, last_sent)
+                continue
+            del self._fence_pending[fence_id]
+            producer = order.producer
+            for tp in range(producer.tp_size):
+                key = producer.engine_key(tp)
+                fences = self._fenced_producer_keys.get(key)
+                if fences is None:
+                    continue
+                fences.discard(fence_id)
+                if fences:
+                    continue
+                del self._fenced_producer_keys[key]
+                self.moriio_engine.unfence_remote_engine(key)
+                logger.info(
+                    "MoRI-IO producer %s acked fence %s; accepting its "
+                    "connections again.",
+                    key,
+                    fence_id,
+                )
+        if self._fence_pending:
+            self._send_fence_aborts()
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
@@ -3713,6 +3970,10 @@ class MoRIIOConnectorWorker:
             self._write_recv_reported &= live_req_ids
             self._write_recv_unreleased &= live_req_ids
             self._write_recv_timed_out |= metadata.write_recv_timed_out_req_ids
+            if self._write_recv_fence:
+                self._fence_settled_req_ids &= live_req_ids
+                for order in metadata.write_fence_orders:
+                    self._apply_fence_order(order)
             return
 
         # Handshake every referenced remote prefill rank up front, before any
