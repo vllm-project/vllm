@@ -199,11 +199,8 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector supports core lookahead hashing.
-
-        If False, `num_hash_lookahead_tokens` is 0 and block hashes cover only
-        each block's own tokens.
-        """
+        """Whether the connector supports hash lookahead. If False, EAGLE/MTP
+        acceptance may drop."""
         return True
 
     @classmethod
