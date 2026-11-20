@@ -56,6 +56,7 @@ class HYV4FlashVLProcessingInfo(HYV4VLProcessingInfo):
 )
 class HYV4FlashVLForConditionalGeneration(HYV4VLForConditionalGeneration):
     language_model_architecture = "HYV4FlashForCausalLM"
+    language_model_cls = HYV4FlashForCausalLM
     requires_raw_input_tokens = True
     supports_pp = False  # type: ignore[assignment]
     packed_modules_mapping = {
