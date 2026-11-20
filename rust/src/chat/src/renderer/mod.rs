@@ -88,6 +88,11 @@ pub trait ChatRenderer: Send + Sync {
     fn renders_request_chat_template(&self) -> bool {
         false
     }
+
+    /// Whether this renderer honors an explicit reasoning-history policy.
+    fn supports_reasoning_history(&self) -> bool {
+        false
+    }
 }
 
 /// Shared trait-object form of [`ChatRenderer`].
