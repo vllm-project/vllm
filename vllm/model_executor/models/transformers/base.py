@@ -636,7 +636,6 @@ class Base(
             if module is decoder_layers:
                 _replace_decoder_layers(module, prefix)
                 return
-            # Built on meta, so `_mark_tower_model` could not offload them
             if prefix in self._tower_model_names:
                 _replace_tower(module, prefix)
                 return
