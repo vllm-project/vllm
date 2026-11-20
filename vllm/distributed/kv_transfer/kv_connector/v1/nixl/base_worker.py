@@ -472,7 +472,7 @@ class NixlBaseConnectorWorker:
             name
             for group in self.kv_cache_config.kv_cache_groups
             for name, spec in group.kv_cache_specs.items()
-            if isinstance(spec, MLAAttentionSpec)
+            if isinstance(spec, AttentionSpec)
             and spec.cache_role is SparseCacheRole.INDEXER
         ]
         layer_type = cast(type[Any], AttentionLayerBase)
