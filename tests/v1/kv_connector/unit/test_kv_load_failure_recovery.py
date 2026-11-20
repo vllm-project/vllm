@@ -228,6 +228,21 @@ def test_sync_load_failure(
     assert scheduler.connector.request_finished.call_count == 2
 
 
+def _prompt_embeds_request(
+    request_id: str, prompt_embeds: torch.Tensor, block_size: int
+) -> Request:
+    sampling_params = SamplingParams(max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        prompt_embeds=prompt_embeds,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+
+
 @pytest.mark.parametrize("prompt_done", [True, False])
 def test_sync_load_failure_resends_prompt_embeds_request(
     scheduler: Scheduler, prompt_done: bool
@@ -235,28 +250,20 @@ def test_sync_load_failure_resends_prompt_embeds_request(
     """A sync load failure that rolls a request back below the first
     prompt_embeds row the workers hold preempts it, so it is re-sent with its
     rows. The workers hold none once its prompt is done, and none below the
-    loaded blocks before. Its invalid blocks leave the prefix cache, so its
-    resume recomputes them instead of hitting them."""
+    loaded blocks before. Its resume recomputes the invalid blocks: they left
+    the prefix cache, and it skips the connector even though the connector
+    still reports the hit, so it cannot fail the same load again."""
     block_size = scheduler.block_size
     if not prompt_done:
         scheduler.max_num_scheduled_tokens = block_size // 2
     init_none_hash(sha256)
-    sampling_params = SamplingParams(max_tokens=4)
-    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
-    request = Request(
-        request_id="pe",
-        prompt_token_ids=None,
-        sampling_params=sampling_params,
-        pooling_params=None,
-        prompt_embeds=torch.zeros(3 * block_size, 8),
-        block_hasher=get_request_block_hasher(block_size, sha256),
-    )
+    request = _prompt_embeds_request("pe", torch.zeros(3 * block_size, 8), block_size)
     scheduler.add_request(request=request)
     scheduler.connector = create_mock_connector()
-    scheduler.connector.get_num_new_matched_tokens.side_effect = [
-        (2 * block_size, False),
-        (0, False),
-    ]
+    scheduler.connector.get_num_new_matched_tokens.return_value = (
+        2 * block_size,
+        False,
+    )
     scheduler.connector.request_finished.return_value = (False, None)
     scheduler.connector.take_events.return_value = ()
 
@@ -276,6 +283,44 @@ def test_sync_load_failure_resends_prompt_embeds_request(
     assert resent.num_computed_tokens == 0
     assert resent.prompt_embeds is not None
     assert len(resent.prompt_embeds) == 3 * block_size
+
+
+def test_sync_load_failure_resends_prompt_embeds_requests_sharing_a_block(
+    scheduler: Scheduler,
+):
+    """Every prompt_embeds request rolled back below its rows is re-sent, even
+    one sharing the invalid block with another re-sent request: none stays
+    running counting on a preempted request to recompute the block."""
+    block_size = scheduler.block_size
+    # The sharer computes half of its last block, so it still holds its rows.
+    scheduler.max_num_scheduled_tokens = block_size + block_size // 2
+    init_none_hash(sha256)
+    prompt_embeds = torch.randn(3 * block_size, 8)
+    loader = _prompt_embeds_request("a", prompt_embeds, block_size)
+    sharer = _prompt_embeds_request("b", prompt_embeds.clone(), block_size)
+    scheduler.add_request(request=loader)
+    scheduler.add_request(request=sharer)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens({"a": 2 * block_size}, async_load=False)
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    new_loader, new_sharer = scheduler_output.scheduled_new_reqs
+    # The sharer hits the blocks the loader loads.
+    assert new_sharer.block_ids[0][:2] == new_loader.block_ids[0][:2]
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [loader, sharer], invalid_block_ids={new_loader.block_ids[0][0]}
+        ),
+    )
+
+    assert loader.status == RequestStatus.PREEMPTED
+    assert sharer.status == RequestStatus.PREEMPTED
+    assert not scheduler.running
 
 
 @pytest.mark.parametrize(

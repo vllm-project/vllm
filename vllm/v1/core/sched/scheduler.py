@@ -1942,23 +1942,46 @@ class Scheduler(SchedulerInterface):
             request.request_id, 0
         )
 
-    def _resend_rolled_back_prompt_embeds(self, req_ids: set[str]) -> None:
-        """Re-send requests a failed KV load rolled back below the first
+    def _prompt_embeds_rollbacks(
+        self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
+    ) -> dict[str, int]:
+        """Running requests whose first invalid block starts below the first
+        prompt_embeds row the workers hold, mapped to that block's start."""
+        rollbacks: dict[str, int] = {}
+        for request in self.running:
+            offset = self._prompt_embeds_offset(request)
+            if not offset:
+                continue
+            req_id = request.request_id
+            (block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            num_computed = request.num_computed_tokens - num_scheduled_tokens.get(
+                req_id, 0
+            )
+            num_computed_blocks = cdiv(num_computed, self.block_size)
+            for idx, block_id in enumerate(block_ids[:num_computed_blocks]):
+                if block_id in invalid_block_ids:
+                    if idx * self.block_size < offset:
+                        rollbacks[req_id] = idx * self.block_size
+                    break
+        return rollbacks
+
+    def _resend_rolled_back_prompt_embeds(self, rollbacks: dict[str, int]) -> None:
+        """Re-send requests a failed KV load rolls back below the first
         prompt_embeds row the workers hold.
 
         Preempting them sends them to the workers again, rows included, when
-        they resume. The blocks past the rollback hold invalid KV, so they are
-        evicted from the prefix cache first; requests sharing them keep them
-        and recompute them.
+        they resume, and they recompute the lost KV instead of loading it
+        again. The blocks past the rollback hold invalid KV, so they are
+        evicted from the prefix cache first; running requests sharing them
+        recompute them.
         """
         timestamp = time.monotonic()
-        for req_id in req_ids:
+        for req_id, num_computed_tokens in rollbacks.items():
             request = self.requests[req_id]
-            if request.num_computed_tokens >= self._prompt_embeds_offset(request):
-                continue
             (block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
-            first_invalid = request.num_computed_tokens // self.block_size
+            first_invalid = num_computed_tokens // self.block_size
             self.kv_cache_manager.evict_blocks(set(block_ids[first_invalid:]))
+            request.kv_load_failed = True  # Skip KV reads and recompute the KV.
             self.running.remove(request)
             self._preempt_request(request, timestamp, drop_stale_output=True)
 
@@ -4043,12 +4066,22 @@ class Scheduler(SchedulerInterface):
         total_failed_requests = len(async_failed_req_ids)
         total_failed_tokens = num_failed_tokens
 
+        # Requests rolled back below their prompt_embeds rows are re-sent, which
+        # frees their blocks, so the invalid blocks they share must be
+        # recomputed by requests that stay running: leave them out of the scan.
+        prompt_embeds_rollbacks: dict[str, int] = {}
+        running: list[Request] = self.running
+        if self.recompute_kv_load_failures:
+            prompt_embeds_rollbacks = self._prompt_embeds_rollbacks(
+                invalid_block_ids, num_scheduled_tokens
+            )
+            running = [
+                req
+                for req in self.running
+                if req.request_id not in prompt_embeds_rollbacks
+            ]
+
         # handle sync loads (may be cached, collect blocks for eviction)
-        # Requests that may be re-sent for their prompt_embeds go last, so the
-        # invalid blocks they share are recomputed by requests that stay.
-        running = sorted(
-            self.running, key=lambda req: self._prompt_embeds_offset(req) > 0
-        )
         sync_failed_req_ids, num_failed_tokens, sync_blocks_to_evict = (
             self._update_requests_with_invalid_blocks(
                 running, invalid_block_ids, num_scheduled_tokens, evict_blocks=True
@@ -4057,6 +4090,14 @@ class Scheduler(SchedulerInterface):
 
         total_failed_requests += len(sync_failed_req_ids)
         total_failed_tokens += num_failed_tokens
+        for req_id, num_computed_tokens in prompt_embeds_rollbacks.items():
+            request = self.requests[req_id]
+            total_failed_requests += 1
+            total_failed_tokens += (
+                request.num_computed_tokens
+                - num_scheduled_tokens.get(req_id, 0)
+                - num_computed_tokens
+            )
 
         if not total_failed_requests:
             return set()
@@ -4084,9 +4125,9 @@ class Scheduler(SchedulerInterface):
             total_failed_requests,
             total_failed_tokens,
         )
-        self._resend_rolled_back_prompt_embeds(sync_failed_req_ids)
+        self._resend_rolled_back_prompt_embeds(prompt_embeds_rollbacks)
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
-        return sync_failed_req_ids
+        return sync_failed_req_ids | set(prompt_embeds_rollbacks)
