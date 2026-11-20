@@ -1906,7 +1906,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "vllm-project/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo(
+        "BAAI/Emu3-Chat-hf",
+        extras={"qwen2_5_omni": "Qwen/Qwen2.5-Omni-3B"},
+    ),
     "TransformersMultiModalForTranscription": _HfExamplesInfo(
         "microsoft/VibeVoice-ASR-HF"
     ),
@@ -1924,7 +1927,8 @@ _TRANSFORMERS_BACKEND_MODELS = {
         speculative_method="mtp",
     ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct"
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        extras={"qwen3_omni": "Qwen/Qwen3-Omni-30B-A3B-Instruct"},
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
