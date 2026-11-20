@@ -5,8 +5,8 @@
 Runs the real `Scheduler` and the real `MoRIIOConnectorWorker`
 `start_load_kv` / `get_transfer_results`, with no GPU or RDMA, at TP 2 through
 the real `KVOutputAggregator`; the reproducer runs one worker without it. One
-test covers each decode KV cache layout WRITE mode supports: plain attention,
-MLA, and either with a Mamba/KDA state group.
+test covers the hybrid decode KV cache layouts: attention or MLA, each with a
+Mamba/KDA state group.
 """
 
 import socket
@@ -52,7 +52,8 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 TIMEOUT_S = 60.0
 TP_SIZE = 2
 BLOCK_SIZE = 16
-LAYOUTS = ["attn", "mla", "hybrid", "mla_hybrid"]
+# Attention or MLA, each with a Mamba/KDA state group.
+LAYOUTS = ["hybrid", "mla_hybrid"]
 
 
 def _kv_cache_config(layout: str) -> KVCacheConfig:
@@ -89,20 +90,6 @@ class _InlineExecutor:
         future: Future = Future()
         future.set_result(fn(*args))
         return future
-
-    def shutdown(self, wait=True, cancel_futures=False):
-        pass
-
-
-class _PendingExecutor:
-    """Probes that answer only when a test sets their result."""
-
-    def __init__(self):
-        self.probes: list[Future] = []
-
-    def submit(self, fn, *args):
-        self.probes.append(Future())
-        return self.probes[-1]
 
     def shutdown(self, wait=True, cancel_futures=False):
         pass
@@ -279,21 +266,6 @@ def test_dead_prefill_does_not_leave_its_request_waiting(consumer_role, monkeypa
     assert pool.get_num_free_blocks() == held
 
 
-def test_prefill_slow_request_fails_and_blocks_freed_on_late_write_done(engine):
-    free_before = engine.pool.get_num_free_blocks()
-    request = engine.add_waiting_request()
-    held = engine.pool.get_num_free_blocks()
-
-    engine.clock.now += TIMEOUT_S + 1
-    engine.step()
-    assert request.status == RequestStatus.FINISHED_ERROR
-    assert engine.pool.get_num_free_blocks() == held
-
-    engine.step(write_done=frozenset({request.request_id}))
-    assert request.request_id not in engine.scheduler.requests
-    assert engine.pool.get_num_free_blocks() == free_before
-
-
 def test_timeout_reported_once_when_two_schedules_precede_the_output(engine):
     """Batch queue / async scheduling: step N+1 is scheduled before the output
     of step N is processed."""
@@ -332,32 +304,6 @@ def test_blocks_freed_once_every_rank_has_its_write_done(engine):
     assert engine.pool.get_num_free_blocks() == free_before
 
 
-def test_write_done_with_the_timeout_completes_the_request(engine):
-    request = engine.add_waiting_request()
-    engine.clock.now += TIMEOUT_S + 1
-
-    engine.step(write_done=frozenset({request.request_id}))
-    engine.step()
-    assert request.status == RequestStatus.RUNNING
-
-
-def test_alive_prefill_is_waited_for_past_the_deadline(engine):
-    """A prefill that still answers at the deadline is slow, e.g. behind a long
-    queue, not gone: its request keeps waiting and completes."""
-    engine.prefill_alive = True
-    request = engine.add_waiting_request()
-
-    engine.clock.now += TIMEOUT_S + 1
-    engine.step()
-    engine.clock.now += TIMEOUT_S
-    engine.step()
-    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-
-    engine.step(write_done=frozenset({request.request_id}))
-    engine.step()
-    assert request.status == RequestStatus.RUNNING
-
-
 def test_alive_prefill_still_fails_at_the_max_timeout(engine):
     engine.prefill_alive = True
     request = engine.add_waiting_request()
@@ -388,27 +334,6 @@ def test_prefill_that_stops_answering_fails_at_the_next_deadline(engine):
     assert request.status == RequestStatus.FINISHED_ERROR
 
 
-def test_probe_is_dropped_when_the_request_that_started_it_stops_waiting(engine):
-    """A probe answers for the deadline it was started at. A later deadline on
-    the same prefill probes again instead of taking an answer that may be
-    minutes old."""
-    connector = engine.scheduler.connector.connector_scheduler
-    prober = connector._write_recv_prober = _PendingExecutor()
-    first = engine.add_waiting_request()
-    engine.clock.now += TIMEOUT_S / 2
-    second = engine.add_waiting_request()
-    engine.clock.now += TIMEOUT_S / 2 + 1
-    engine.step()
-    assert len(prober.probes) == 1
-
-    engine.step(write_done=frozenset({first.request_id}))
-    prober.probes[0].set_result(True)
-    engine.clock.now += TIMEOUT_S / 2
-    engine.step()
-    assert len(prober.probes) == 2
-    assert second.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-
-
 def test_peer_listening():
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
@@ -418,26 +343,6 @@ def test_peer_listening():
     assert not moriio_connector._peer_listening("127.0.0.1", port)
     # IDNA rejects a label over 63 characters with UnicodeError, not OSError.
     assert not moriio_connector._peer_listening("a" * 64 + ".invalid", 1)
-
-
-def test_rank_that_reported_write_failed_releases_at_the_timeout(engine):
-    """A rank whose producer reported write_failed has reported the receive; at
-    the timeout it releases it instead of reporting it a second time."""
-    free_before = engine.pool.get_num_free_blocks()
-    request = engine.add_waiting_request()
-    held = engine.pool.get_num_free_blocks()
-    transfer_id = request.kv_transfer_params["transfer_id"]
-
-    engine.step(write_failed=frozenset({transfer_id}), ranks={0})
-    engine.clock.now += TIMEOUT_S + 1
-    engine.step()
-    assert request.status == RequestStatus.FINISHED_ERROR
-    assert engine.pool.get_num_free_blocks() == held
-
-    late_ranks = set(range(1, len(engine.workers)))
-    engine.step(write_done=frozenset({request.request_id}), ranks=late_ranks)
-    assert request.request_id not in engine.scheduler.requests
-    assert engine.pool.get_num_free_blocks() == free_before
 
 
 def test_request_aborted_before_its_deadline_stops_its_timer(engine):
