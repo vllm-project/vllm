@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use super::types::CompletionRequest;
+use super::types::{CompletionPrompt, CompletionRequest};
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
@@ -43,6 +43,23 @@ pub(super) fn validate_request_compat(
         .is_some_and(|embeds| !matches!(embeds, Value::Array(embeds) if embeds.is_empty()))
     {
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
+    }
+
+    let batch_size = match &request.prompt {
+        Some(CompletionPrompt::Texts(texts)) => Some(texts.len()),
+        Some(CompletionPrompt::TokenIds(token_ids)) => Some(token_ids.len()),
+        Some(CompletionPrompt::Single(_)) | None => None,
+    };
+    let max_prompts = max_completion_prompts();
+    if let Some(prompt_count) = batch_size
+        && prompt_count > max_prompts
+    {
+        bail_invalid_request!(
+            param = "prompt",
+            "prompt list length {prompt_count} exceeds the maximum allowed count of \
+             {max_prompts}. To increase this limit, set the \
+             VLLM_MAX_COMPLETION_PROMPTS environment variable."
+        );
     }
 
     if let Some(logprobs) = request.logprobs
@@ -104,6 +121,13 @@ pub(super) fn validate_request_compat(
     validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
 
     Ok(())
+}
+
+fn max_completion_prompts() -> usize {
+    std::env::var("VLLM_MAX_COMPLETION_PROMPTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1024)
 }
 
 #[cfg(test)]
