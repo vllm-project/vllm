@@ -164,6 +164,8 @@ CHECK_STRINGS = {
             "normalised by `patch_rope_parameters` in "
             "vllm/transformers_utils/config.py."
         ),
+        # Tests that legacy checkpoint configs are converted
+        allowed_files={"tests/transformers_utils/test_config.py"},
     ),
 }
 

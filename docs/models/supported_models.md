@@ -472,8 +472,6 @@ th {
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `RicursiveForCausalLM` | Ripple | `ricursiveAI/Ripple-65B-Preview`, `ricursiveAI/Ripple-65B-Preview-NVFP4`, etc. | | ✅︎ |
 | `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
-| `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
-| `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |
 | `SolarForCausalLM` | Solar Pro | `upstage/solar-pro-preview-instruct`, etc. | ✅︎ | ✅︎ |
 | `Step1ForCausalLM` | Step-Audio | `stepfun-ai/Step-Audio-EditX`, etc. | ✅︎ | ✅︎ |
 | `Step3p5ForCausalLM` | Step-3.5-flash | `stepfun-ai/Step-3.5-Flash`, etc. | | ✅︎ |
@@ -507,6 +505,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `Phi3ForCausalLM` | Phi-4, Phi-3 | `microsoft/Phi-4-mini-instruct`, `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc. | ✅︎ | ✅︎ |
 | `Qwen2ForCausalLM` | QwQ, Qwen2 | `Qwen/QwQ-32B-Preview`, `Qwen/Qwen2-7B-Instruct`, `Qwen/Qwen2-7B`, etc. | ✅︎ | ✅︎ |
 | `Qwen2MoeForCausalLM` | Qwen2MoE | `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc. | ✅︎ | ✅︎ |
+| `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam-105b`, etc. | ✅︎ | ✅︎ |
+| `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam-30b`, etc. | ✅︎ | ✅︎ |
 | `SeedOssForCausalLM` | SeedOss | `ByteDance-Seed/Seed-OSS-36B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `SmolLM3ForCausalLM` | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` | ✅︎ | ✅︎ |
 | `StableLmForCausalLM` | StableLM | `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc. | ✅︎ | ✅︎ |

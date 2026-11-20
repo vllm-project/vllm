@@ -317,6 +317,7 @@ class ModelArchConfigConvertorBase:
             "mistral_large_4",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
+            "sarvam_mla",
             "bailing_hybrid",
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
