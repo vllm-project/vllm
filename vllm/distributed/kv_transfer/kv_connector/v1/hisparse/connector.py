@@ -109,26 +109,32 @@ class HiSparseConnectorScheduler:
         self.import_step_tokens = import_step_tokens
         self.spec_step_tokens = spec_step_tokens
         self.requests: dict[str, Request] = {}
+        self.loaded_unscheduled: set[str] = set()
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
         self.coordinator = coordinator
 
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
-        assert self.coordinator is not None
+        self.bind_coordinator(
+            get_hisparse_coordinator(
+                kv_cache_manager, import_step_tokens=self.import_step_tokens
+            )
+        )
         self.kv_cache_manager = kv_cache_manager
-        self.coordinator.bind_reserved_blocks(self._inflight_prefill_reserved_blocks)
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Blocks admitted prefills and parked loads still need to finish.
 
         Mirrors the scheduler's `_inflight_prefill_reserved_blocks`, which
-        admission keeps free for them.
+        admission keeps free for them: a parked load stays reserved after its
+        load finishes until it is scheduled, then while it is prefilling.
         """
         return sum(
             self._remaining_blocks(request)
             for request in self.requests.values()
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            or request.request_id in self.loaded_unscheduled
             or (request.status == RequestStatus.RUNNING and request.is_prefill_chunk)
         )
 
@@ -165,6 +171,7 @@ class HiSparseConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> HiSparseConnectorMetadata:
         assert self.coordinator is not None
+        self.loaded_unscheduled.difference_update(scheduler_output.num_scheduled_tokens)
         # HiSparse rebinds worker state every step, so the load must start
         # before the forward rather than being deferred to post-forward.
         scheduler_output.has_sync_kv_loads = True
@@ -241,11 +248,22 @@ class HiSparseConnectorScheduler:
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.coordinator is not None
-        for request_id in connector_output.finished_recving or ():
+        finished_recving = connector_output.finished_recving or ()
+        reserved_blocks = (
+            self._inflight_prefill_reserved_blocks() if finished_recving else 0
+        )
+        for request_id in finished_recving:
+            request = self.requests.get(request_id)
+            if (
+                request is not None
+                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            ):
+                self.loaded_unscheduled.add(request_id)
             self.coordinator.finish_host_import(
                 request_id,
                 failed=request_id in connector_output.failed_recving,
-                restore=request_id in self.requests,
+                restore=request is not None,
+                reserved_blocks=reserved_blocks,
             )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
@@ -320,12 +338,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.bind_coordinator(
-            get_hisparse_coordinator(
-                kv_cache_manager,
-                import_step_tokens=self.connector_scheduler.import_step_tokens,
-            )
-        )
         self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
 
     @property
@@ -465,4 +477,5 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         self.connector_scheduler.requests.pop(request.request_id, None)
+        self.connector_scheduler.loaded_unscheduled.discard(request.request_id)
         return False, None

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -141,7 +141,6 @@ class HiSparseCoordinator:
                 manager.coordinator = self
                 manager.bind_host_pool(num_host_blocks)
         self.transition_watermark = 0
-        self._reserved_blocks: Callable[[], int] = lambda: 0
         if self.resident_managers:
             assert self.host_manager is not None
             assert self.host_group_id is not None
@@ -256,11 +255,6 @@ class HiSparseCoordinator:
             return
         assert self.host_manager is not None
         self.host_manager.block_pool.free_blocks(reversed(blocks))
-
-    def bind_reserved_blocks(self, reserved_blocks: Callable[[], int]) -> None:
-        """Bind the scheduler's count of free blocks promised to in-flight
-        prefills, which optional promotion must leave free."""
-        self._reserved_blocks = reserved_blocks
 
     def get_host_block_pool(self) -> BlockPool | None:
         manager = self.host_manager
@@ -645,16 +639,35 @@ class HiSparseCoordinator:
             self._import_reservations[request_id] = num_pages
 
     def finish_host_import(
-        self, request_id: str, *, failed: bool, restore: bool = True
+        self,
+        request_id: str,
+        *,
+        failed: bool,
+        restore: bool = True,
+        reserved_blocks: int = 0,
     ) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
         if num_tokens is not None and not failed:
-            self.complete_host_import(request_id, num_tokens, restore=restore)
+            self.complete_host_import(
+                request_id,
+                num_tokens,
+                restore=restore,
+                reserved_blocks=reserved_blocks,
+            )
 
     def complete_host_import(
-        self, request_id: str, num_computed_tokens: int, *, restore: bool = True
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+        *,
+        restore: bool = True,
+        reserved_blocks: int = 0,
     ) -> None:
-        """Publish externally populated host pages after connector completion."""
+        """Publish externally populated host pages after connector completion.
+
+        `reserved_blocks` is the GPU blocks the scheduler has promised to
+        in-flight prefills, which optional promotion must leave free.
+        """
         if not self.resident_managers:
             return
         block_size = self.resident_managers[0].block_size
@@ -671,13 +684,18 @@ class HiSparseCoordinator:
             # them before promoting the rest.
             self._adopt_pending_copies(request_id, state)
             tail_page = (num_computed_tokens - 1) // block_size
-            pages = (tail_page, *self._promote_imported_pages(request_id, tail_page))
+            pages = (
+                tail_page,
+                *self._promote_imported_pages(request_id, tail_page, reserved_blocks),
+            )
             self._plan_page_transfers(
                 request_id, pages, budget=len(pages), restore=True
             )
         self._publish_host_blocks_if_ready(request_id)
 
-    def _promote_imported_pages(self, request_id: str, num_pages: int) -> list[int]:
+    def _promote_imported_pages(
+        self, request_id: str, num_pages: int, reserved_blocks: int
+    ) -> list[int]:
         """Back an import's first `num_pages` host pages with new GPU pages.
 
         Imports land in the host tier. While the GPU pool has room above the
@@ -692,7 +710,7 @@ class HiSparseCoordinator:
         spare = (
             self.gpu_pool.get_num_free_blocks()
             - self.transition_watermark
-            - self._reserved_blocks()
+            - reserved_blocks
         )
         host_blocks = self.host_manager.req_to_blocks[request_id]
         num_pages = min(
