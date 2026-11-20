@@ -1108,7 +1108,8 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
 
-        assert config.__class__.__name__ == "NewConfig"
+        # `NewConfig` is the remote-code config, `GteConfig` the native one.
+        assert config.__class__.__name__ in ("NewConfig", "GteConfig")
         assert config.hidden_act == "gelu"
 
         config.hidden_act = "geglu"
@@ -1895,6 +1896,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
+    "GteForSequenceClassification": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
