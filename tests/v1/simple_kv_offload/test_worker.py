@@ -18,7 +18,6 @@ import torch
 import torch.distributed as dist
 
 from vllm.platforms import current_platform
-from vllm.utils.host_memory import unpin_tensor
 
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
@@ -148,11 +147,6 @@ def active_cpu_offload_connector(dist_init):
         assert worker.cpu_kv_caches is not None
         yield active, connector, gpu, worker.cpu_kv_caches["k"]
     finally:
-        if worker._backend is not None:
-            worker._backend.shutdown()
-        if worker.cpu_kv_caches is not None:
-            for tensor in worker.cpu_kv_caches.values():
-                unpin_tensor(tensor)
         ensure_kv_transfer_shutdown()
 
 

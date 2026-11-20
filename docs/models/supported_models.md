@@ -193,6 +193,7 @@ class MyConfig(PreTrainedConfig):
     - You only need to do this for layers which are not present on all pipeline stages
     - vLLM assumes that there will be only one `nn.ModuleList`, which is distributed across the pipeline stages
     - When no `base_model_pp_plan` is provided, the Transformers modelling backend infers the split from the text model's sole `nn.ModuleList`, keeping the parameter-bearing modules around it (input embeddings, final norm) on the first/last stage (depending on declaration order) and parameter-free modules (e.g. rotary embeddings) on every stage
+    - On later pipeline stages, the first local decoder layer receives the previous stage's hidden states directly, so whatever the text model does to its inputs before the `nn.ModuleList` (e.g. learned position embeddings, embedding scaling) is applied only on the first stage
     - The `list` in the first element of the `tuple` contains the names of the input arguments
     - The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
 
@@ -489,7 +490,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `FlexOlmoForCausalLM` | FlexOlmo | `allenai/FlexOlmo-7x7B-1T`, `allenai/FlexOlmo-7x7B-1T-RT`, etc. | ✅︎ | ✅︎ |
 | `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
 | `GlmForCausalLM` | GLM-4 | `zai-org/glm-4-9b-chat-hf`, etc. | ✅︎ | ✅︎ |
-| `GPTBigCodeForCausalLM` | StarCoder, SantaCoder, WizardCoder | `bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, `WizardLM/WizardCoder-15B-V1.0`, etc. | ✅︎ | |
+| `GPTBigCodeForCausalLM` | StarCoder, SantaCoder, WizardCoder | `bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, `WizardLM/WizardCoder-15B-V1.0`, etc. | ✅︎ | ✅︎ |
 | `GPTNeoXForCausalLM` | GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM | `EleutherAI/gpt-neox-20b`, `EleutherAI/pythia-12b`, `OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, etc. | | ✅︎ |
 | `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
 | `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
@@ -667,16 +668,10 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 
 !!! note "HY4 Flash"
 
-    HY4 Flash supports NVIDIA CUDA and AMD ROCm; LoRA and pipeline parallelism
-    are not supported. On ROCm, it has been validated on MI355X (gfx950) with
-    TP8 and supports only BF16 KV storage (`--kv-cache-dtype auto` or
-    `bfloat16`). Set `VLLM_ROCM_USE_AITER=1` and, until vLLM's AITER includes
-    [ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277),
-    `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`: AITER's default sparse MLA
-    decode kernel reads the wrong KV rows once a layer's KV cache exceeds
-    4 GiB, which HY4 Flash's cache layout reaches after a few hundred thousand
-    tokens.
-    Published checkpoints use
+    HY4 Flash supports NVIDIA CUDA and, on AMD ROCm, MI355X (gfx950) only.
+    ROCm requires BF16 KV storage (`--kv-cache-dtype auto` or `bfloat16`) and
+    OCP FP8. LoRA and pipeline parallelism are not supported. Published
+    checkpoints use
     `HYV4FlashForConditionalGeneration`, which vLLM maps to
     `HYV4FlashVLForConditionalGeneration`.
 

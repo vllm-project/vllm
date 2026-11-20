@@ -52,7 +52,7 @@ from vllm.exceptions import (
 )
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -66,6 +66,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
+from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
 from .mm_features import (
     mm_hashes_from_engine_input,
     mm_kwargs_from_features,
@@ -93,6 +94,7 @@ from .protocol import (
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
     OutputMode,
+    RenderedGenerateResponse,
 )
 
 logger = init_logger(__name__)
@@ -175,6 +177,7 @@ class ServingTokens(GenerateBaseServing):
         )
         self.online_renderer = online_renderer
         self.online_derenderer = online_derenderer
+        self.render_lock = asyncio.Lock()
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -220,7 +223,12 @@ class ServingTokens(GenerateBaseServing):
         self,
         request: GenerateRequest,
         raw_request: Request | None = None,
-    ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
+    ) -> (
+        GenerateResponse
+        | RenderedGenerateResponse
+        | ErrorResponse
+        | AsyncGenerator[str, None]
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -454,6 +462,17 @@ class ServingTokens(GenerateBaseServing):
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
         )
+        if (
+            not request.stream
+            and request.output_mode == "tokens"
+            and sampling_params.logprobs is not None
+            and sampling_params.logprobs >= 0
+            and sampling_params.prompt_logprobs is None
+        ):
+            # Keep sample logprobs as rows without decoded tokens, to render
+            # them without a Python object per entry (see logprobs_render).
+            sampling_params.flat_logprobs = True
+            sampling_params._detokenize_logprobs = False
 
         self._log_inputs(
             request_id,
@@ -518,7 +537,7 @@ class ServingTokens(GenerateBaseServing):
         model_name: str,
         request_metadata: RequestResponseMetadata,
         derender_request: ChatCompletionRequest | None = None,
-    ) -> ErrorResponse | GenerateResponse:
+    ) -> ErrorResponse | GenerateResponse | RenderedGenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
@@ -535,6 +554,7 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
+        fragments: dict[int, list[bytes]] = {}  # choice -> rendered logprobs
         tokens_choices: list[GenerateTokensChoice] = []
         text_choices: list[GenerateTextChoice] = []
         derender_choice_fields: list[dict[str, Any]] = []
@@ -556,10 +576,18 @@ class ServingTokens(GenerateBaseServing):
                         tokenizer=tokenizer,
                         top_limit=top_limit,
                     )
+                elif isinstance(out_logprobs, FlatLogprobs) and (
+                    rendered := await render_tokens_logprobs(
+                        token_ids, out_logprobs, self.render_lock
+                    )
+                ):
+                    fragments[len(tokens_choices)] = rendered
+                    logprobs = None
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
-                        top_logprobs=out_logprobs,
+                        # One pass, rather than indexing a FlatLogprobs.
+                        top_logprobs=list(out_logprobs),
                     )
             else:
                 logprobs = None
@@ -672,6 +700,10 @@ class ServingTokens(GenerateBaseServing):
                         delta=False,
                     )
 
+        if fragments:
+            return RenderedGenerateResponse(
+                render_json_with_fragments(response.model_dump(), "logprobs", fragments)
+            )
         return response
 
     def _build_response_fields(
