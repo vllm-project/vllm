@@ -152,11 +152,17 @@ class ThreadPinnedBuffer:
     @staticmethod
     def _allocate(nbytes: int) -> torch.Tensor:
         try:
-            return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+            buffer = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
         except RuntimeError:
             # No pinned memory allocator on this host: a plain buffer still
             # works, it is just slower to copy out of.
-            return torch.empty(nbytes, dtype=torch.uint8)
+            buffer = torch.empty(nbytes, dtype=torch.uint8)
+        if buffer.device.type != "cpu":
+            # Some builds answer a pinned request with an accelerator
+            # tensor (MPS does). The bytes are written through the
+            # buffer's host address, so the buffer has to be host memory.
+            buffer = torch.empty(nbytes, dtype=torch.uint8)
+        return buffer
 
     def read_into(self, fd: int, file_offset: int, offset: int, nbytes: int) -> None:
         """Read *nbytes* at *file_offset* into the buffer at *offset*."""

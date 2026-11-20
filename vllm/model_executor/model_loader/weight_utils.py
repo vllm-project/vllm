@@ -1109,11 +1109,17 @@ def _allocate_host_buffer(nbytes: int) -> torch.Tensor:
     slow, so the caller reuses one buffer across shards.
     """
     try:
-        return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+        buffer = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
     except RuntimeError:
         # No pinned memory allocator on this host: a plain buffer still
         # works, it is just slower to copy out of.
-        return torch.empty(nbytes, dtype=torch.uint8)
+        buffer = torch.empty(nbytes, dtype=torch.uint8)
+    if buffer.device.type != "cpu":
+        # Some builds answer a pinned request with an accelerator tensor
+        # (MPS does). The bytes are read through the buffer's host address,
+        # so the buffer has to be host memory.
+        buffer = torch.empty(nbytes, dtype=torch.uint8)
+    return buffer
 
 
 def _prefetched_checkpoint_files(
