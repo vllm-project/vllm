@@ -9,7 +9,6 @@ use itertools::izip;
 use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptReplacement};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache;
 use super::timing::MM_STAGE_TARGET;
 use super::{AudioModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -37,12 +36,12 @@ impl MultimodalModelInfo {
             modality: Modality::Audio.to_string(),
         })?;
 
-        let (replacements, items) = cache::prepare_cached(
-            self.mm_cache_for(Modality::Audio),
-            izip!(clips, uuids).collect(),
-            async |misses| self.preprocess_audio_batch(support, misses).await,
-        )
-        .await?;
+        let sources = izip!(clips, uuids).collect::<Vec<_>>();
+        let compute = async |misses| self.preprocess_audio_batch(support, misses).await;
+        let (replacements, items) = match self.mm_cache_for(Modality::Audio) {
+            Some(cache) => cache.prepare_cached(sources, compute).await?,
+            None => compute(sources).await?,
+        };
 
         Ok(PreparedMedia {
             modality: Modality::Audio,

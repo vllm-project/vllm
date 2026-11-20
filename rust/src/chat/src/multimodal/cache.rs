@@ -122,6 +122,51 @@ impl MmProcessorCache {
         shadow.insert(key.to_owned(), replacement.clone());
         data
     }
+
+    /// Look up fetched items by client UUID or content hash so only misses
+    /// reach `compute`; computed misses are put into shm and shadowed.
+    pub(super) async fn prepare_cached<M, F>(
+        &self,
+        sources: Vec<(M, Option<String>)>,
+        compute: F,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
+    where
+        M: HashedMedia,
+        F: AsyncFnOnce(
+            Vec<(M, Option<String>)>,
+        ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
+    {
+        let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
+            Vec::with_capacity(sources.len());
+        let mut pending = Vec::new();
+        let mut pending_keys = Vec::new();
+        for (media, uuid) in sources {
+            let key = uuid.clone().unwrap_or_else(|| media.content_hash().to_owned());
+            match self.lookup(&key, uuid.clone()) {
+                Some(hit) => slots.push(Some(hit)),
+                None => {
+                    slots.push(None);
+                    pending_keys.push(key);
+                    pending.push((media, uuid));
+                }
+            }
+        }
+
+        let mut misses = Vec::with_capacity(pending.len());
+        if !pending.is_empty() {
+            let (replacements, mut items) = compute(pending).await?;
+            for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
+                // UUID-keyed items report the UUID as `mm_hash` (Python
+                // parity: `hashes.append(uuid_item)`); for content-keyed
+                // items this is a no-op.
+                item.hash = key.clone();
+                item.data =
+                    self.put_or_inline_and_track(key, replacement, std::mem::take(&mut item.data));
+            }
+            misses = izip!(items, replacements).collect();
+        }
+        Ok(merge_slots(slots, misses))
+    }
 }
 
 /// Fetched media carrying its raw-content hash, used for cache keying.
@@ -149,61 +194,6 @@ impl<T: HashedMedia + ?Sized> HashedMedia for Arc<T> {
     fn content_hash(&self) -> &str {
         (**self).content_hash()
     }
-}
-
-/// Prepare fetched media through an optional cache; `None` prepares everything
-/// inline.
-///
-/// Fetched items are looked up by their cache key — the client UUID when
-/// supplied, otherwise the content hash — so only true misses reach `compute`.
-/// Computed misses are put into shm and shadowed. The result stays
-/// index-aligned with `sources` for placeholder expansion.
-pub(super) async fn prepare_cached<M, F>(
-    cache: Option<&MmProcessorCache>,
-    sources: Vec<(M, Option<String>)>,
-    compute: F,
-) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
-where
-    M: HashedMedia,
-    F: AsyncFnOnce(Vec<(M, Option<String>)>) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
-{
-    let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
-        Vec::with_capacity(sources.len());
-    let mut pending = Vec::new();
-    let mut pending_keys = Vec::new();
-    for (media, uuid) in sources {
-        let key = match (cache, &uuid) {
-            (Some(_), Some(uuid)) => uuid.clone(),
-            _ => media.content_hash().to_owned(),
-        };
-        match cache.and_then(|cache| cache.lookup(&key, uuid.clone())) {
-            Some(hit) => slots.push(Some(hit)),
-            None => {
-                slots.push(None);
-                pending_keys.push(key);
-                pending.push((media, uuid));
-            }
-        }
-    }
-
-    let mut misses = Vec::with_capacity(pending.len());
-    if !pending.is_empty() {
-        let (replacements, mut items) = compute(pending).await?;
-        for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
-            // UUID-keyed items report the UUID as `mm_hash` (Python
-            // parity: `hashes.append(uuid_item)`); for content-keyed
-            // items this is a no-op.
-            item.hash = key.clone();
-            item.data = match cache {
-                Some(cache) => {
-                    cache.put_or_inline_and_track(key, replacement, std::mem::take(&mut item.data))
-                }
-                None => std::mem::take(&mut item.data),
-            };
-        }
-        misses = izip!(items, replacements).collect();
-    }
-    Ok(merge_slots(slots, misses))
 }
 
 /// Reassemble per-modality replacements and items in request order from
