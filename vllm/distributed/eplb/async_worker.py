@@ -30,7 +30,7 @@ def start_async_worker(
     device_index = state.device_index
     assert state.is_async
 
-    if state.parallel_config.eplb_config.use_policy_process and not is_profile:
+    if not is_profile:
         state.policy_process = EplbPolicyProcess(state.policy)
 
     def thread_target() -> None:

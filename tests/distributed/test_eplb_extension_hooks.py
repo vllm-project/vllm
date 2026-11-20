@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+from contextlib import closing
 from dataclasses import dataclass
 
 import pytest
@@ -252,13 +254,16 @@ def model_state(cpu_group):
 
 @pytest.mark.parametrize("use_async", [False, True])
 def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_async):
+    """Custom inputs survive direct calls and async subprocess planning."""
+    worker_pid = os.getpid()
+
     @dataclass
     class Stats(EplbStats):
         metadata: tuple[int, ...] = ()
 
     class Policy(DefaultEplbPolicy):
         def rebalance_experts(self, stats, old_global_expert_indices=None):
-            assert stats is published_stats
+            assert (os.getpid() != worker_pid) is use_async
             assert isinstance(stats, Stats)
             assert stats.metadata == (3, 7)
             assert stats.global_expert_load_window.device.type == "cpu"
@@ -274,40 +279,14 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
     state = _State(Policy())
     if use_async:
         model_state.eplb_stats = published_stats
-        result = run_rebalance_experts(model_state, state, current, None)
+        with closing(EplbPolicyProcess(state.policy)) as state.policy_process:
+            result = run_rebalance_experts(model_state, state, current, None)
     else:
         result = state.policy.rebalance_experts(published_stats, current)
     default_state = EplbState(ParallelConfig(), torch.device("cpu"))
     assert isinstance(default_state.policy, DefaultEplbPolicy)
     expected = default_state.policy.rebalance_experts(published_stats, current)
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
-
-
-def test_async_policy_process_preserves_extended_cpu_stats(model_state):
-    """Async dispatch retains custom stats fields across the process boundary."""
-
-    @dataclass
-    class Stats(EplbStats):
-        metadata: tuple[int, ...] = ()
-
-    class Policy(DefaultEplbPolicy):
-        def rebalance_experts(self, stats, old_global_expert_indices=None):
-            assert isinstance(stats, Stats)
-            assert stats.metadata == (3, 7)
-            assert stats.global_expert_load_window.device.type == "cpu"
-            return super().rebalance_experts(stats, old_global_expert_indices)
-
-    stats = Stats(torch.tensor([[13, 3, 4, 3]]), 6, 1, 1, 2, metadata=(3, 7))
-    current = torch.tensor([[0, 1, 2, 3, 0, 1]])
-    state = _State(Policy())
-    model_state.eplb_stats = stats
-    state.policy_process = EplbPolicyProcess(state.policy)
-    try:
-        actual = run_rebalance_experts(model_state, state, current, None)
-        expected = state.policy.rebalance_experts(stats, current)
-        assert torch.equal(actual, expected)
-    finally:
-        state.policy_process.close()
 
 
 @pytest.mark.parametrize("fail_commit", [False, True])
