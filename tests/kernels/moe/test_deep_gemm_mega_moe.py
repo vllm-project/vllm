@@ -4,7 +4,6 @@
 input staging, and numerics against a dequantized reference for every routed
 format, activation and shared-expert fusion in the feature matrix."""
 
-import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -1354,26 +1353,28 @@ def _quantize(w: torch.Tensor, spec: MegaMoEWeightSpec):
 
 def _round_trip(x: torch.Tensor, quant, nvfp4_scale: float | None = None):
     """What the kernel computes on: x after `quant` (None keeps BF16)."""
-    package = _import_deep_gemm().__name__
-    math = importlib.import_module(f"{package}.utils.math")
-    nvfp4 = importlib.import_module(f"{package}.utils.nvfp4")
+    from vllm.third_party.deep_gemm.utils.math import (
+        cast_back_from_fp8,
+        per_token_cast_to_fp8,
+    )
+    from vllm.third_party.deep_gemm.utils.nvfp4 import (
+        cast_back_from_nvfp4,
+        per_token_cast_to_nvfp4,
+    )
 
     if quant is None:
         return x.bfloat16().float()
     if quant == kNvfp4DynamicToken:
         if nvfp4_scale is not None:
-            q = nvfp4.per_token_cast_to_nvfp4(x, nvfp4_scale)
-            return nvfp4.cast_back_from_nvfp4(*q, nvfp4_scale)
+            q = per_token_cast_to_nvfp4(x, nvfp4_scale)
+            return cast_back_from_nvfp4(*q, nvfp4_scale)
         x = x.bfloat16().float()
         scales = x.abs().amax(-1, keepdim=True).clamp_min(1e-12) / 2688
-        return (
-            nvfp4.cast_back_from_nvfp4(*nvfp4.per_token_cast_to_nvfp4(x / scales))
-            * scales
-        )
+        return cast_back_from_nvfp4(*per_token_cast_to_nvfp4(x / scales)) * scales
     group_k = quant.scale.group_shape.col
     use_ue8m0 = quant.scale.dtype != torch.float32
-    return math.cast_back_from_fp8(
-        *math.per_token_cast_to_fp8(x.bfloat16(), use_ue8m0=use_ue8m0, gran_k=group_k),
+    return cast_back_from_fp8(
+        *per_token_cast_to_fp8(x.bfloat16(), use_ue8m0=use_ue8m0, gran_k=group_k),
         gran_k=group_k,
     )
 
