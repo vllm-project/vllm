@@ -76,6 +76,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1270,6 +1271,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """
         if is_weights_pre_processed():
             super().process_weights_after_loading(layer)
+            return
+
+        # A layer whose KV cache is not quantized (for example one kept in BF16 by
+        # kv_cache_dtype_skip_layers) keeps the unit scales, as in BaseKVCacheMethod.
+        if not is_quantized_kv_cache(layer.kv_cache_dtype):
             return
 
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
