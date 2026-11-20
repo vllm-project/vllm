@@ -41,7 +41,7 @@ use crate::protocol::output::{
 };
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats, UmbpOperation};
+use crate::protocol::stats::{KvConnectorStats, SchedulerStats};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
@@ -4191,7 +4191,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(matches!(
         mooncake_stats,
         KvConnectorStats::Mooncake(stats)
-            if stats.0.contains_key(&MooncakeOperation::LoadGet)
+            if stats.0.contains_key("load_get") && stats.0.contains_key("lookup_lease")
     ));
 
     let mooncake_transfer_stats: KvConnectorStats =
@@ -4205,7 +4205,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         rmp_serde::from_slice(&hex::decode(umbp_stats_hex).unwrap()).unwrap();
     assert!(matches!(
         umbp_stats,
-        KvConnectorStats::Umbp(stats) if stats.0[&UmbpOperation::Store].num_bytes == 4096
+        KvConnectorStats::Umbp(stats) if stats.0["store"].num_bytes == 4096
     ));
 
     let multi_connector_stats: KvConnectorStats =
@@ -4340,10 +4340,14 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
     legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
     legacy_ready.as_object_mut().unwrap().remove("supports_prompt_logprobs");
+    legacy_ready.as_object_mut().unwrap().remove("allow_missing_mm_embeddings");
+    legacy_ready.as_object_mut().unwrap().remove("max_mm_embeds_per_request");
     let legacy_ready: EngineCoreReadyResponse =
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(legacy_ready.supports_prompt_logprobs);
+    assert!(!legacy_ready.allow_missing_mm_embeddings);
+    assert!(legacy_ready.max_mm_embeds_per_request.is_none());
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -4356,6 +4360,8 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
     assert!(ready_response.enable_expert_parallel);
     assert!(!ready_response.supports_prompt_logprobs);
+    assert!(ready_response.allow_missing_mm_embeddings);
+    assert_eq!(ready_response.max_mm_embeds_per_request, Some(16384));
     assert_eq!(
         ready_response.cache_config_info,
         Some(BTreeMap::from([
