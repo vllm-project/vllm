@@ -1154,9 +1154,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         shardq = attn_metadata.shardq
         gathered_context = attn_metadata.dcp_gathered_context
         if gathered_context is not None:
-            # A DCP ShardQ step's prefill rows attend a gathered copy of their
-            # context, which still lacks the step's tokens; every rank holds
-            # all of them.
+            # A DCP ShardQ step's prefill tokens attend a gathered copy of
+            # their context, which still lacks the step's new tokens; every
+            # rank writes all of them.
             num_dcp_decode_tokens = gathered_context.num_decode_tokens
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 k_c_normed[num_dcp_decode_tokens:],
@@ -1227,7 +1227,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 decode_out = None
                 if decode_q.shape[0] and gathered_context is not None:
                     # Decode tokens keep the DCP path.
-                    decode_out = self._dcp_decode_rows(
+                    decode_out = self._forward_dcp_decode(
                         decode_q, kv_cache, attn_metadata, gathered_context
                     )
                 elif decode_q.shape[0]:
@@ -1268,9 +1268,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     query_start_loc = attn_metadata.query_start_loc[
                         : attn_metadata.num_decodes + 1
                     ]
-                # Under PCP+DCP the prefill rows attended over the gathered
-                # KV, so only the decode rows carry an LSE and take part in
-                # the merge.
+                # Under PCP+DCP the prefill rows attended over the gathered KV,
+                # so only the decode rows carry an LSE and take part in the merge.
                 num_merge_rows = lse.shape[0]
                 if use_fused_v_up_proj:
                     assert self.dcp_manager.v_up_proj_combine is not None
@@ -1352,16 +1351,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             output_padded[num_actual_toks:].zero_()
         return output_padded
 
-    def _dcp_decode_rows(
+    def _forward_dcp_decode(
         self,
         q: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: "MLACommonMetadata",
         gathered_context: "DcpShardQContext",
     ) -> torch.Tensor:
-        """The attention output of a DCP ShardQ step's head-sharded leading
-        decode rows, on the DCP path: query gather, the DCP-local partials,
-        LSE combine."""
+        """The attention output of a DCP ShardQ step's leading decode tokens
+        (head-sharded query) on the DCP path: query gather, the DCP-local
+        partials, LSE combine."""
         assert self.dcp_manager is not None
         assert self.dcp_manager.query_gather is not None
         num_decodes = gathered_context.num_decodes
@@ -1402,7 +1401,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         # The first DCP-path step may come late, once the KV cache and the
         # caching allocator hold the memory that its NCCL collectives allocate
-        # on first use. A step whose prefill rows do not fit the workspace
+        # on first use. A step whose prefill requests do not fit the workspace
         # takes the DCP path whole, so reserve a full step.
         assert self.dcp_manager is not None
         shardq_context.warm_up_dcp_fallback(

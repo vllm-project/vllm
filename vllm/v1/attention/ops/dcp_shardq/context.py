@@ -14,21 +14,21 @@ paged formats of the MLA and indexer caches, then scores and attends its slice
 of the query tokens with all heads over the workspace, exactly as TP ShardQ
 does over a replicated cache. No top-k merge and no LSE combine remain.
 
-Per layer, the indexer pushes every rank's owned rows of the step's requests
-into all workspaces (prior-context MLA and indexer rows, plus the indexer rows
-of the new tokens); the MLA layer then writes the new tokens' MLA rows, which
-every rank computes for all tokens, into its own workspace.
+Per layer, the indexer pushes every rank's KV shard of the step's requests
+into all workspaces (the MLA and indexer KV of the prior context, plus the
+indexer KV of the new tokens); the MLA layer then writes the new tokens' MLA
+KV, which every rank computes for all tokens, into its own workspace.
 
 A step runs this way when ShardQ splits its tokens (build_shardq_split) and
-its prefill rows fit the workspace (`max_model_len` tokens of context, plus a
-page per request); a step whose prefill rows need more takes the DCP path
-whole. Its leading
-decode rows (rows of at most `1 + num_speculative_tokens` tokens, which the
-indexer scores on its decode path) keep the DCP path within the step; its
-other rows are sharded, including the short prefill pieces that the sparse
-MLA backend classifies as decodes. The workspace holds the prefill rows'
-requests only. `DcpShardQPlanner` decides, and counts the prefill steps and
-tokens of each path.
+its prefill requests fit the workspace (`max_model_len` tokens of context,
+plus a page per request); a step whose prefill requests need more takes the
+DCP path whole. Its leading decode requests (at most
+`1 + num_speculative_tokens` query tokens each, which the indexer scores on
+its decode path) keep the DCP path within the step; its other requests are
+token-sharded, including the short prefill chunks that the sparse MLA backend
+classifies as decodes. The workspace holds the prefill requests only.
+`DcpShardQPlanner` decides, and counts the prefill steps and tokens of each
+path.
 
 Scope: any sparse MLA layer with a DSA-style fp8 indexer cache, under DCP
 with the DCP group equal to the TP group; nothing here is model-specific.
@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Workspace block tables are padded to whole multiples of this many pages, so
-# their row stride has one Triton specialization.
+# their per-request stride has one Triton specialization.
 TABLE_PAGES_ALIGN = 16
 
 
@@ -77,8 +77,8 @@ TABLE_PAGES_ALIGN = 16
 class ContextLayout:
     """Per-token bytes of a DSA layer's MLA and indexer caches."""
 
-    mla_row_bytes: int
-    index_row_bytes: int
+    mla_token_bytes: int
+    index_token_bytes: int
     index_scale_bytes: int
 
     @classmethod
@@ -105,26 +105,28 @@ class ContextLayout:
             # MXFP4 keys: head_dim / 2 B of E2M1 values and one UE8M0 scale per
             # 32 values (17 / 32 B per dim), pages of the values then the scales
             # (as the fp8 layout).
-            index_row = k_cache.head_dim * 16 // 17
+            index_token_bytes = k_cache.head_dim * 16 // 17
         else:
             # fp8 keys with one 4-byte scale per quant_block values.
-            index_row = k_cache.head_dim * quant_block // (quant_block + 4)
+            index_token_bytes = k_cache.head_dim * quant_block // (quant_block + 4)
         return cls(
-            spec.state_content_size_bytes, index_row, k_cache.head_dim - index_row
+            spec.state_content_size_bytes,
+            index_token_bytes,
+            k_cache.head_dim - index_token_bytes,
         )
 
     @property
     def mla_page_bytes(self) -> int:
-        return PAGE_TOKENS * self.mla_row_bytes
+        return PAGE_TOKENS * self.mla_token_bytes
 
     @property
     def index_page_bytes(self) -> int:
-        return PAGE_TOKENS * (self.index_row_bytes + self.index_scale_bytes)
+        return PAGE_TOKENS * (self.index_token_bytes + self.index_scale_bytes)
 
 
 def workspace_max_tokens(vllm_config: "VllmConfig") -> int:
     """Tokens of context the workspace holds: `max_model_len`, so any one
-    request fits. It costs about `mla_row_bytes + index_row_bytes` (plus
+    request fits. It costs about `mla_token_bytes + index_token_bytes` (plus
     the index scales) per token on each rank, ~0.7 GB per 1M tokens with a
     per-tensor `fp8` cache and ~0.5 GB with `nvfp4_ds_mla`. Call it
     through this module so tests can patch it."""
@@ -192,7 +194,7 @@ def warm_up_dcp_fallback(dcp_manager: "MLADCPManager", num_tokens: int) -> None:
     size, on dummy inputs (once per process and shape).
 
     A DCP ShardQ instance takes most prefill steps off the DCP path, so the
-    steps that keep it (decode rows, few tokens, a full workspace) may come
+    steps that keep it (decodes only, few tokens, a full workspace) may come
     only late, after the KV cache and the caching allocator took the memory.
     Beyond the direct workspaces the DCP path falls back to NCCL collectives,
     which connect their peers and allocate their buffers on first use, and its
@@ -256,15 +258,15 @@ def warm_up_dcp_fallback(dcp_manager: "MLADCPManager", num_tokens: int) -> None:
         # the other one (if any).
         num_seqs = 1
         while num_seqs < 2 * dcp_manager.max_num_seqs and num_seqs <= num_tokens:
-            for rows in (round_up(num_seqs, 16), num_seqs | 1):
-                if rows > num_tokens:
+            for n in (round_up(num_seqs, 16), num_seqs | 1):
+                if n > num_tokens:
                     continue
                 dcp_a2a_lse_reduce(
-                    partial_output[:rows],
-                    partial_lse[:rows],
+                    partial_output[:n],
+                    partial_lse[:n],
                     cp_group=dcp_manager.group,
                     is_lse_base_on_e=dcp_manager.is_lse_base_on_e,
-                    **batch(rows, num_seqs),
+                    **batch(n, num_seqs),
                 )
             num_seqs *= 2
     del gathered_query
@@ -282,46 +284,46 @@ class DcpShardQContext:
     world: int
     rank: int
     pages: int
-    # The step's leading decode rows, which keep the DCP path: its requests
+    # The step's leading decodes, which keep the DCP path: its requests
     # before num_decodes and its tokens before num_decode_tokens.
     num_decodes: int
     num_decode_tokens: int
-    # The prefill rows' requests: int32 sequence lengths and query start
-    # locations, on the device.
+    # The prefill requests: int32 sequence lengths and query start locations,
+    # on the device.
     seq_lens: torch.Tensor
     query_start_loc: torch.Tensor
     # Most local 64-token pages of any prefill request on any rank.
     max_local_pages: int
     # int32 [num_reqs, width]: workspace page of each prefill request's
     # 64-token block, addressed like a paged block table by the step's request
-    # index (width a multiple of TABLE_PAGES_ALIGN; decode rows' rows unused).
+    # index (width a multiple of TABLE_PAGES_ALIGN; the decodes' entries unused).
     block_table: torch.Tensor
     # int64 [num_prefill_tokens]: workspace slot of each new prefill token.
     slot_mapping: torch.Tensor
     # Indexer prefill chunks over the workspace, in the non-DCP form, over
-    # the indexer rows of gather_indices.
+    # the indexer query tokens of gather_indices.
     indexer_chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     # The tokens the indexer scores, in the order their top-k is written:
-    # every decode row in place, then this rank's ShardQ tokens.
+    # every decode token in place, then this rank's ShardQ tokens.
     gather_indices: torch.Tensor
 
     # The workspace's pages of 64 tokens address its views and block table.
     block_size = PAGE_TOKENS
 
-    def _view(self, dtype: torch.dtype, offset: int, row_bytes: int, device):
-        """The workspace pages at `offset` as a [pages, 64, row] cache."""
+    def _view(self, dtype: torch.dtype, offset: int, token_bytes: int, device):
+        """The workspace pages at `offset` as a [pages, 64, token_bytes] cache."""
         storage = _workspace(self.layout, self.pages, device).storage
         return torch.as_strided(
             storage.view(dtype),
-            (self.pages, PAGE_TOKENS, row_bytes),
-            (PAGE_TOKENS * row_bytes, row_bytes, 1),
+            (self.pages, PAGE_TOKENS, token_bytes),
+            (PAGE_TOKENS * token_bytes, token_bytes, 1),
             offset,
         )
 
     def mla_view(self, mla_cache: torch.Tensor) -> torch.Tensor:
         """The workspace's MLA pages, typed as `mla_cache`."""
         layout = self.layout
-        return self._view(mla_cache.dtype, 0, layout.mla_row_bytes, mla_cache.device)
+        return self._view(mla_cache.dtype, 0, layout.mla_token_bytes, mla_cache.device)
 
     def index_view(self, index_cache: torch.Tensor) -> torch.Tensor:
         """The workspace's indexer pages, typed as `index_cache`."""
@@ -329,7 +331,7 @@ class DcpShardQContext:
         return self._view(
             index_cache.dtype,
             self.pages * layout.mla_page_bytes,
-            layout.index_row_bytes + layout.index_scale_bytes,
+            layout.index_token_bytes + layout.index_scale_bytes,
             index_cache.device,
         )
 
@@ -341,7 +343,7 @@ class DcpShardQContext:
         index_block_table: torch.Tensor,
         dst_addrs: torch.Tensor,
     ) -> None:
-        """Copy this rank's rows of the prefill requests of one layer's
+        """Copy this rank's KV shard of the prefill requests from one layer's
         DCP-local paged caches (with the step's kernel block tables) into the
         workspaces at `dst_addrs`."""
         if self.max_local_pages:
@@ -363,7 +365,7 @@ class DcpShardQContext:
                 dst_addrs=dst_addrs,
                 dst_index_offset=self.pages * self.layout.mla_page_bytes,
                 rank=self.rank,
-                index_row_bytes=self.layout.index_row_bytes,
+                index_token_bytes=self.layout.index_token_bytes,
             )
 
     def gather(
@@ -373,9 +375,9 @@ class DcpShardQContext:
         index_cache: torch.Tensor,
         index_block_table: torch.Tensor,
     ) -> torch.Tensor:
-        """Push this rank's rows of one layer into every rank's workspace (see
-        `push`) and return the workspace as the indexer's cache view, once
-        every rank's rows have landed in it."""
+        """Push this rank's KV shard of one layer into every rank's workspace
+        (see `push`) and return the workspace as the indexer's cache view, once
+        every rank's shard has landed in it."""
         index_view = self.index_view(index_cache)
         buffer = _workspace(self.layout, self.pages, index_cache.device)
         # Peers may still read the previous layer from their workspaces.
@@ -399,11 +401,11 @@ def build_dcp_shardq_context(
     device: torch.device,
 ) -> DcpShardQContext | None:
     """The context plan of `split`'s step on DCP rank `rank` of `world`,
-    or None when its prefill rows (the requests after `split`'s decode
+    or None when its prefill requests (the requests after `split`'s decode
     tokens) do not fit the `max_pages` workspace pages.
 
-    Every rank derives the same plan; the push kernel finds each rank's rows
-    from the step's device sequence lengths.
+    Every rank derives the same plan; the push kernel finds each rank's local
+    tokens from the step's device sequence lengths.
     """
     num_reqs = common_attn_metadata.num_reqs
     query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
@@ -414,7 +416,7 @@ def build_dcp_shardq_context(
         return None
     seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
     assert seq_lens_cpu is not None
-    # Exact for prefill rows.
+    # Exact for prefill requests.
     seq_lens_cpu = seq_lens_cpu[:num_reqs]
     qsl = all_qsl[num_decodes:]
     query_lens = np.diff(qsl)
@@ -425,7 +427,7 @@ def build_dcp_shardq_context(
     page_start = np.cumsum(pages) - pages
 
     context_lens = seq_lens - query_lens
-    # Rank 0 holds the most rows: ceil(seq_len / world).
+    # Rank 0 holds the most tokens: ceil(seq_len / world).
     max_local_pages = -(-int(seq_lens.max()) // (world * PAGE_TOKENS))
     # Columns past a request's pages are never addressed.
     width = -(-int(pages.max()) // TABLE_PAGES_ALIGN) * TABLE_PAGES_ALIGN
@@ -435,9 +437,9 @@ def build_dcp_shardq_context(
         page_start * PAGE_TOKENS + context_lens - (qsl[:-1] - qsl[0]), query_lens
     ) + np.arange(int(qsl[-1] - qsl[0]))
 
-    # The indexer scores every decode row in place, then this rank's tokens
+    # The indexer scores every decode token in place, then this rank's tokens
     # compactly, each at its position; the requests' query ranges are
-    # renumbered over those rows (the decodes' stay put).
+    # renumbered over those tokens (the decodes' stay put).
     local_start = int(split.num_tokens_per_rank[:rank].sum())
     local_token_ids = split.token_ids[
         local_start : local_start + int(split.num_tokens_per_rank[rank])
@@ -548,8 +550,8 @@ def register_warmup(layout: ContextLayout, world: int, num_topk_tokens: int) -> 
 
     DCP_CONTEXT_PUSH_KERNEL.register_warmup(
         world=world,
-        mla_row_bytes=layout.mla_row_bytes,
-        index_row_bytes=layout.index_row_bytes,
+        mla_token_bytes=layout.mla_token_bytes,
+        index_token_bytes=layout.index_token_bytes,
         index_scale_bytes=layout.index_scale_bytes,
     )
     _GATHERED_CONTEXT_INDEX_REMAP.register_warmup(num_topk_tokens=num_topk_tokens)
@@ -563,7 +565,7 @@ WORKSPACE = "workspace full"
 
 
 class DcpShardQStats:
-    """Steps with prefill rows, and their prefill tokens, by path: ShardQ, or
+    """Steps with prefill requests, and their prefill tokens, by path: ShardQ, or
     the DCP path and why. Rank 0 logs them at most every
     VLLM_LOG_STATS_INTERVAL seconds, for the steps since its previous report
     and in total, labeled with the layers of the metadata builder that plans
@@ -647,7 +649,7 @@ class DcpShardQPlanner:
     ) -> DcpShardQContext | None:
         """The context plan of a step that runs as a DCP ShardQ step with the
         token split `split` (vllm.v1.attention.ops.shardq.build_shardq_split),
-        or None for the DCP path. A step without prefill rows is not counted.
+        or None for the DCP path. A step without prefill requests is not counted.
 
         The split's decode tokens (requests of at most `max_decode_query_len`
         tokens, which the indexer scores on its decode path) keep the DCP path;

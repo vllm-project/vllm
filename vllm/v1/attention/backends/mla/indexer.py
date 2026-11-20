@@ -996,7 +996,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
     @staticmethod
     def get_decode_threshold(vllm_config: VllmConfig) -> int:
-        """Rows of at most this many query tokens take the decode path."""
+        """Requests of at most this many query tokens take the decode path."""
         speculative_config = vllm_config.speculative_config
         return 1 + (
             speculative_config.num_speculative_tokens if speculative_config else 0
@@ -2054,7 +2054,7 @@ def build_prefill_chunk_metadata(
         ]
         if positions.data_ptr() % 16:
             # The kernel is warmed up for a 16-byte aligned pointer; leading
-            # decode rows shift a chunk's slice off it.
+            # decode tokens shift a chunk's slice off it.
             positions = positions.clone()
 
     total_query_len = int(

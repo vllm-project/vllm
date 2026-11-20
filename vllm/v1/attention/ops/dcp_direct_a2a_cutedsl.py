@@ -12,9 +12,9 @@ its output is bit-identical, in two launches instead of four:
 `push`: one CTA per (token, destination rank). It copies the token's head
     slice for that destination (`heads_per_rank x head_dim`) and its LSE into
     the destination's receive slot, all 16-byte loads in flight before the
-    remote stores. Empty-shard rows send an LSE of `-inf`; their payload is
-    never read by the combine. The last CTA of each destination (a local ticket)
-    publishes the signal after a system-scope fence.
+    remote stores. Tokens with an empty KV shard send an LSE of `-inf`; their
+    payload is never read by the combine. The last CTA of each destination (a
+    local ticket) publishes the signal after a system-scope fence.
 `combine`: one warp per (token, local head). It waits for all sources,
     forms the base-2 LSE weights in source order exactly as the CUDA op does,
     loads all non-zero-weight partials at once and accumulates in FP32. The last
@@ -285,9 +285,9 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
         heads_per_rank = compile_key.heads_per_rank
         head_dim = compile_key.head_dim
         threads = _PUSH_THREADS
-        # 16-byte vectors per (token, destination) row of 16-bit partials.
-        row_vectors = heads_per_rank * head_dim // 8
-        vectors_per_thread = (row_vectors + threads - 1) // threads
+        # 16-byte vectors of one token's 16-bit partials for one destination.
+        token_vectors = heads_per_rank * head_dim // 8
+        vectors_per_thread = (token_vectors + threads - 1) // threads
         source_head_bytes = heads_per_rank * head_dim * 2
 
         @cute.kernel
@@ -334,7 +334,7 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
             payload = cute.make_rmem_tensor((vectors_per_thread * 4,), Uint32)
             for j in cutlass.range_constexpr(vectors_per_thread):
                 vector_idx = tid + Int32(j * threads)
-                if vector_idx < Int32(row_vectors):
+                if vector_idx < Int32(token_vectors):
                     words = _ld_v4(source + Int64(vector_idx) * Int64(16))
                     for k in cutlass.range_constexpr(4):
                         payload[j * 4 + k] = words[k]
@@ -369,7 +369,7 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
 
             for j in cutlass.range_constexpr(vectors_per_thread):
                 vector_idx = tid + Int32(j * threads)
-                if vector_idx < Int32(row_vectors):
+                if vector_idx < Int32(token_vectors):
                     _st_v4(
                         target + Int64(vector_idx) * Int64(16),
                         payload[j * 4],
@@ -597,10 +597,10 @@ class DirectDCPA2ACombineKernel(
                         _trap()
             cute.arch.sync_threads()
 
-            row = cta * Int32(warps) + warp
-            if row < num_tokens * Int32(heads_per_rank):
-                token = row // Int32(heads_per_rank)
-                head = row - token * Int32(heads_per_rank)
+            token_head = cta * Int32(warps) + warp
+            if token_head < num_tokens * Int32(heads_per_rank):
+                token = token_head // Int32(heads_per_rank)
+                head = token_head - token * Int32(heads_per_rank)
                 # Same arithmetic, in the same source order, as the CUDA op.
                 weights = cute.make_rmem_tensor((world_size,), Float32)
                 lse_max = Float32(neg_inf)
@@ -609,7 +609,7 @@ class DirectDCPA2ACombineKernel(
                         (slot + Int64(source)) * Int64(max_num_tokens) + Int64(token)
                     ) * Int64(heads_per_rank) + Int64(head)
                     value = _ld_f32(received_lse + source_item * Int64(4))
-                    # NaN and +inf mark undefined rows (bit test: NaN-safe).
+                    # NaN and +inf mark undefined partials (bit test: NaN-safe).
                     bits = recast_val(value, Int32)
                     magnitude = bits & Int32(0x7FFFFFFF)
                     if magnitude > Int32(0x7F800000) or bits == Int32(0x7F800000):
@@ -636,10 +636,10 @@ class DirectDCPA2ACombineKernel(
                     (world_size * vectors_per_lane * 4,), Uint32
                 )
                 for source in cutlass.range_constexpr(world_size):
-                    source_row = (
+                    source_item = (
                         (slot + Int64(source)) * Int64(max_num_tokens) + Int64(token)
                     ) * Int64(heads_per_rank) + Int64(head)
-                    base = received_output + source_row * Int64(head_dim * 2)
+                    base = received_output + source_item * Int64(head_dim * 2)
                     for j in cutlass.range_constexpr(vectors_per_lane):
                         idx = (source * vectors_per_lane + j) * 4
                         for k in cutlass.range_constexpr(4):
@@ -665,11 +665,11 @@ class DirectDCPA2ACombineKernel(
                                 accumulator[e] += lo * weight
                                 accumulator[e + 1] += hi * weight
 
-                out_row = combined_output + Int64(row) * Int64(head_dim * 2)
+                out_base = combined_output + Int64(token_head) * Int64(head_dim * 2)
                 for j in cutlass.range_constexpr(vectors_per_lane):
                     e = j * 8
                     _st_v4(
-                        out_row + Int64((j * 32 + lane) * 16),
+                        out_base + Int64((j * 32 + lane) * 16),
                         _pack_x2(accumulator[e], accumulator[e + 1], fp16),
                         _pack_x2(accumulator[e + 2], accumulator[e + 3], fp16),
                         _pack_x2(accumulator[e + 4], accumulator[e + 5], fp16),
@@ -697,7 +697,7 @@ class DirectDCPA2ACombineKernel(
             lse_scale: Float32,
             stream,
         ):
-            rows = num_tokens * Int32(heads_per_rank)
+            num_token_heads = num_tokens * Int32(heads_per_rank)
             combine_kernel(
                 received_output,
                 received_lse,
@@ -709,7 +709,7 @@ class DirectDCPA2ACombineKernel(
                 max_num_tokens,
                 lse_scale,
             ).launch(
-                grid=((rows + Int32(warps - 1)) // Int32(warps), 1, 1),
+                grid=((num_token_heads + Int32(warps - 1)) // Int32(warps), 1, 1),
                 block=(warps * 32, 1, 1),
                 stream=stream,
             )

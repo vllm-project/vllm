@@ -3,7 +3,7 @@
 """DCP ShardQ prefill: the gathered context against replicated (TP) caches.
 
 Each DCP rank's paged MLA and indexer caches are built from one replicated
-copy; pushing every rank's rows must rebuild that copy in the workspace byte
+copy; pushing every rank's KV shard must rebuild that copy in the workspace byte
 for byte, and the indexer and the FlashInfer sparse MLA kernels (trtllm-gen and
 prims_ts) must read it exactly as the TP ShardQ path reads the replicated
 caches.
@@ -27,18 +27,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 PAGE = 64
-# The MLA cache's kernel blocks span several pages, as in a packed block row.
+# The MLA cache's kernel blocks span several pages, as in a packed KV cache.
 MLA_BLOCK = 4 * PAGE
 INDEX_HEAD_DIM = 128
 INDEX_HEAD_SIZE = INDEX_HEAD_DIM + 4
 # Value bytes per token of each indexer key format (each adds 4 B of scales):
 # fp8 keys, or MXFP4 keys (E2M1 pairs; four UE8M0 scales per 128 values).
-INDEX_ROW = {"fp8": INDEX_HEAD_DIM, "mxfp4": INDEX_HEAD_DIM // 2}
-INDEX_FORMATS = list(INDEX_ROW)
+INDEX_TOKEN_BYTES = {"fp8": INDEX_HEAD_DIM, "mxfp4": INDEX_HEAD_DIM // 2}
+INDEX_FORMATS = list(INDEX_TOKEN_BYTES)
 TOPK = 2048
 NUM_HEADS = 96
-MLA_ROW = {"fp8": 576, "nvfp4_ds_mla": 352}
-CACHE_DTYPES = list(MLA_ROW)
+MLA_TOKEN_BYTES = {"fp8": 576, "nvfp4_ds_mla": 352}
+CACHE_DTYPES = list(MLA_TOKEN_BYTES)
 FILL = 0xA5
 _needs_prims_ts = pytest.mark.skipif(
     not has_flashinfer_prims_ts_sparse_mla(),
@@ -65,12 +65,14 @@ def _layout(cache_dtype: str, index_format: str = "fp8"):
         ContextLayout,
     )
 
-    return ContextLayout(MLA_ROW[cache_dtype], INDEX_ROW[index_format], 4)
+    return ContextLayout(
+        MLA_TOKEN_BYTES[cache_dtype], INDEX_TOKEN_BYTES[index_format], 4
+    )
 
 
 def _index_entry(layout) -> int:
     """Indexer cache bytes per token (values then scales, in pages)."""
-    return layout.index_row_bytes + layout.index_scale_bytes
+    return layout.index_token_bytes + layout.index_scale_bytes
 
 
 def _page_start(lens) -> np.ndarray:
@@ -79,18 +81,21 @@ def _page_start(lens) -> np.ndarray:
 
 
 def _sections(layout):
-    """(cache, offset in the page, bytes per row) of each per-token section."""
+    """(cache, offset in the page, bytes per token) of each per-token section."""
     return (
-        ("mla", 0, layout.mla_row_bytes),
-        ("index", 0, layout.index_row_bytes),
-        ("index", PAGE * layout.index_row_bytes, layout.index_scale_bytes),
+        ("mla", 0, layout.mla_token_bytes),
+        ("index", 0, layout.index_token_bytes),
+        ("index", PAGE * layout.index_token_bytes, layout.index_scale_bytes),
     )
 
 
-def _row_bytes(page_base: torch.Tensor, rows: torch.Tensor, offset: int, row: int):
-    """Flat byte offsets [len(rows), row] of rows in pages at `page_base`."""
-    base = page_base.long() + offset + rows.long() * row
-    return base[:, None] + torch.arange(row, device=rows.device)
+def _token_byte_offsets(
+    page_base: torch.Tensor, slots: torch.Tensor, offset: int, token_bytes: int
+):
+    """Flat byte offsets [len(slots), token_bytes] of the tokens at `slots` of
+    the pages at `page_base`."""
+    base = page_base.long() + offset + slots.long() * token_bytes
+    return base[:, None] + torch.arange(token_bytes, device=slots.device)
 
 
 def _flat(cache: torch.Tensor) -> torch.Tensor:
@@ -107,22 +112,24 @@ class Replicated:
         num_pages = int(sum(-(-(c + n) // PAGE) for c, n in lens))
         torch.manual_seed(0)
 
-        def cache(row):
-            shape = (num_pages, PAGE, row)
+        def cache(token_bytes):
+            shape = (num_pages, PAGE, token_bytes)
             if fill_random:
                 return torch.randint(0, 256, shape, dtype=torch.uint8, device="cuda")
             return torch.zeros(shape, dtype=torch.uint8, device="cuda")
 
-        self.mla = cache(layout.mla_row_bytes)
+        self.mla = cache(layout.mla_token_bytes)
         self.index = cache(_index_entry(layout))
 
     def token_bytes(self, req: int, tokens: torch.Tensor, section):
         """`section`'s cache and the flat byte offsets of request `req`'s
-        rows of `tokens` in it."""
-        name, offset, row = section
+        `tokens` in it."""
+        name, offset, token_bytes = section
         cache = getattr(self, name)
         pages = int(_page_start(self.lens)[req]) + tokens // PAGE
-        return cache, _row_bytes(pages * cache.stride(0), tokens % PAGE, offset, row)
+        return cache, _token_byte_offsets(
+            pages * cache.stride(0), tokens % PAGE, offset, token_bytes
+        )
 
 
 def _shard(
@@ -136,13 +143,15 @@ def _shard(
     gen = torch.Generator().manual_seed(seed)
     local_lens = [max(c + n - rank + world - 1, 0) // world for c, n in lens]
 
-    def paged(block_tokens, row, pad):
+    def paged(block_tokens, token_bytes, pad):
         blocks = [-(-n // block_tokens) for n in local_lens]
         num_blocks = sum(blocks) + 2
-        stride = block_tokens * row + pad
+        stride = block_tokens * token_bytes + pad
         raw = torch.randint(0, 256, (num_blocks * stride,), dtype=torch.uint8)
         cache = torch.as_strided(
-            raw.cuda(), (num_blocks, block_tokens, row), (stride, row, 1)
+            raw.cuda(),
+            (num_blocks, block_tokens, token_bytes),
+            (stride, token_bytes, 1),
         )
         perm = torch.randperm(num_blocks, generator=gen)
         table = torch.zeros(len(lens), max(max(blocks), 1), dtype=torch.int32)
@@ -152,9 +161,9 @@ def _shard(
             used += n
         return cache, table.cuda()
 
-    # Whole pages apart, as the sparse MLA kernels address the cache in pages
-    # of rows.
-    mla, mla_table = paged(mla_block, layout.mla_row_bytes, layout.mla_page_bytes)
+    # Whole pages apart, as the sparse MLA kernels address the cache in
+    # 64-token pages.
+    mla, mla_table = paged(mla_block, layout.mla_token_bytes, layout.mla_page_bytes)
     index, index_table = paged(PAGE, _index_entry(layout), 80)
     for q, n_local in enumerate(local_lens):
         local = torch.arange(n_local, device="cuda")
@@ -162,12 +171,12 @@ def _shard(
         for section in _sections(layout):
             src_cache, src = rep.token_bytes(q, token, section)
             if section[0] == "mla":
-                cache, rows = mla, local % mla_block
+                cache, slots = mla, local % mla_block
                 base = mla_table[q][local // mla_block].long() * mla.stride(0)
             else:
-                cache, rows = index, local % PAGE
+                cache, slots = index, local % PAGE
                 base = index_table[q][local // PAGE].long() * index.stride(0)
-            dst = _row_bytes(base, rows, section[1], section[2])
+            dst = _token_byte_offsets(base, slots, section[1], section[2])
             _flat(cache)[dst.reshape(-1)] = _flat(src_cache)[src.reshape(-1)]
     return SimpleNamespace(
         mla=mla, mla_table=mla_table, index=index, index_table=index_table
@@ -224,8 +233,8 @@ def _workspace(plan, layout):
     raw = torch.full((nbytes,), FILL, dtype=torch.uint8, device="cuda")
     mla = torch.as_strided(
         raw,
-        (plan.pages, PAGE, layout.mla_row_bytes),
-        (layout.mla_page_bytes, layout.mla_row_bytes, 1),
+        (plan.pages, PAGE, layout.mla_token_bytes),
+        (layout.mla_page_bytes, layout.mla_token_bytes, 1),
     )
     index = torch.as_strided(
         raw,
@@ -237,7 +246,7 @@ def _workspace(plan, layout):
 
 
 def _push_all(rep: Replicated, world: int, num_dst: int = 2):
-    """Push every simulated rank's rows into `num_dst` local workspaces;
+    """Push every simulated rank's KV shard into `num_dst` local workspaces;
     returns them and the plans."""
     layout = rep.layout
     plans = [_build_context(rep.lens, layout, world, r) for r in range(world)]
@@ -256,11 +265,11 @@ def _push_all(rep: Replicated, world: int, num_dst: int = 2):
 
 
 def _check_workspace(
-    ws_mla, ws_index, rep: Replicated, new_mla_rows: bool, fill, num_decodes=0
+    ws_mla, ws_index, rep: Replicated, new_mla_tokens: bool, fill, num_decodes=0
 ):
     """The workspace holds every section of each prefill request's tokens (the
-    requests from `num_decodes` on, in pages of their own; the MLA rows of
-    its new tokens only with `new_mla_rows`); with `fill`, every other
+    requests from `num_decodes` on, in pages of their own; the MLA entries of
+    its new tokens only with `new_mla_tokens`); with `fill`, every other
     byte still holds it."""
     workspaces = {"mla": ws_mla, "index": ws_index}
     expected = {
@@ -273,12 +282,14 @@ def _check_workspace(
     for q, (context, new) in enumerate(rep.lens[num_decodes:], num_decodes):
         tokens = torch.arange(context + new, device="cuda")
         for section in _sections(rep.layout):
-            name, offset, row = section
-            keep = tokens if name == "index" or new_mla_rows else tokens[:context]
+            name, offset, token_bytes = section
+            keep = tokens if name == "index" or new_mla_tokens else tokens[:context]
             cache, src = rep.token_bytes(q, keep, section)
             pages = int(page_start[q - num_decodes]) + keep // PAGE
             stride = workspaces[name].stride(0)
-            dst = _row_bytes(pages * stride, keep % PAGE, offset, row).reshape(-1)
+            dst = _token_byte_offsets(
+                pages * stride, keep % PAGE, offset, token_bytes
+            ).reshape(-1)
             expected[name][dst] = _flat(cache)[src.reshape(-1)]
             written[name][dst] = True
     for name, ws in (("mla", ws_mla), ("index", ws_index)):
@@ -304,9 +315,9 @@ def test_push_rebuilds_context_in_token_order(cache_dtype, index_format, scenari
     rep = Replicated(SCENARIOS[scenario], _layout(cache_dtype, index_format))
     workspaces, _ = _push_all(rep, 8)
     for _, ws_mla, ws_index in workspaces:
-        # Prior context in full, the new tokens' indexer rows, nothing else
-        # (the new MLA rows and page tails stay untouched).
-        _check_workspace(ws_mla, ws_index, rep, new_mla_rows=False, fill=True)
+        # Prior context in full, the new tokens' indexer entries, nothing else
+        # (the new MLA entries and page tails stay untouched).
+        _check_workspace(ws_mla, ws_index, rep, new_mla_tokens=False, fill=True)
 
 
 def test_plan_bounds_and_capacity():
@@ -316,7 +327,7 @@ def test_plan_bounds_and_capacity():
     seq_lens = np.array([c + n for c, n in lens])
     page_start = _page_start(lens)
     # The workspace block table maps each request's pages to its region, in
-    # rows of whole multiples of 16 pages (one Triton specialization).
+    # tables whose width is a multiple of 16 pages (one Triton specialization).
     table = plan.block_table.cpu().numpy()
     assert table.shape[1] % 16 == 0
     for q, pages in enumerate(-(-seq_lens // PAGE)):
@@ -350,15 +361,15 @@ def test_indexer_chunks_read_the_workspace_like_a_replicated_cache(
     seq_lens = [c + n for c, n in lens]
     # This rank's tokens, each at its position in its request.
     qsl = np.r_[0, np.cumsum([n for _, n in lens])]
-    rows = plans[0].gather_indices.cpu().numpy()
-    row_req = np.searchsorted(qsl[1:], rows, side="right")
-    row_pos = rows - qsl[row_req] + np.array([c for c, _ in lens])[row_req]
+    scored = plans[0].gather_indices.cpu().numpy()
+    token_req = np.searchsorted(qsl[1:], scored, side="right")
+    token_pos = scored - qsl[token_req] + np.array([c for c, _ in lens])[token_req]
     assert len(plans[0].indexer_chunks) == 1
     for chunk in plans[0].indexer_chunks:
         # Every key of the chunk's requests, as the TP path gathers them.
         keys = torch.empty(
             chunk.total_seq_lens,
-            layout.index_row_bytes,
+            layout.index_token_bytes,
             dtype=torch.uint8,
             device="cuda",
         )
@@ -379,18 +390,18 @@ def test_indexer_chunks_read_the_workspace_like_a_replicated_cache(
         # Causal bounds of this rank's tokens over the request's whole
         # sequence (no DCP-local form).
         ks, ke = chunk.cu_seqlen_ks.cpu().numpy(), chunk.cu_seqlen_ke.cpu().numpy()
-        starts = chunk.cu_seq_lens.cpu().numpy()[row_req]
+        starts = chunk.cu_seq_lens.cpu().numpy()[token_req]
         np.testing.assert_array_equal(ks, starts)
-        np.testing.assert_array_equal(ke, starts + row_pos + 1)
+        np.testing.assert_array_equal(ke, starts + token_pos + 1)
         assert chunk.total_seq_lens == sum(seq_lens)
 
 
-def test_planner_follows_the_split_decode_rows():
-    """The split's decode rows (at most 1 + num_speculative_tokens tokens,
+def test_planner_follows_the_split_decode_tokens():
+    """The split's decode tokens (at most 1 + num_speculative_tokens tokens,
     which the indexer scores on its decode path) keep the DCP path; the plan
-    covers the rest of the step, a later short row included. Steps that
+    covers the rest of the step, a later short request included. Steps that
     ShardQ does not split keep the DCP path too, counted when they have
-    prefill rows."""
+    prefill tokens."""
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerMetadataBuilder,
     )
@@ -429,14 +440,14 @@ def test_planner_follows_the_split_decode_rows():
     assert context.num_decodes == 2
     assert context.num_decode_tokens == threshold + 1
     assert context.world == world and context.rank == rank
-    # This rank's tokens follow the decode rows in place.
-    rows = context.gather_indices.cpu().numpy()
-    np.testing.assert_array_equal(rows[: threshold + 1], np.arange(threshold + 1))
-    assert len(rows) - threshold - 1 == _split(long, world).num_tokens_per_rank[rank]
-    # A short row after the first prefill row is a prefill row.
+    # This rank's tokens follow the decode tokens in place.
+    scored = context.gather_indices.cpu().numpy()
+    np.testing.assert_array_equal(scored[: threshold + 1], np.arange(threshold + 1))
+    assert len(scored) - threshold - 1 == _split(long, world).num_tokens_per_rank[rank]
+    # A short request after the first prefill request is a prefill request.
     context = plan([*long, (500, threshold)], num_decodes=0)
     assert context is not None and context.num_decodes == 0
-    # Not split: decode rows alone are not counted, prefill rows are.
+    # Not split: decode tokens alone are not counted, prefill tokens are.
     assert plan(decodes) is None
     assert plan([*decodes, *long]) is None
     assert {path: c[0] for path, c in planner.stats.total.items()} == {
@@ -480,8 +491,8 @@ def _fp8_query(num_tokens: int, num_heads: int) -> torch.Tensor:
     return q.to(torch.float8_e4m3fn)
 
 
-def _real_rows(rep: Replicated, cache_dtype: str):
-    """Write real MLA and indexer rows of every token into `rep`; returns
+def _real_kv(rep: Replicated, cache_dtype: str):
+    """Write real MLA and indexer entries of every token into `rep`; returns
     the new tokens' latents (to write them as forward_impl does)."""
     from vllm import _custom_ops as ops
     from vllm.models.kimi_k3.nvidia.ops.dsa_indexer import (
@@ -500,7 +511,7 @@ def _real_rows(rep: Replicated, cache_dtype: str):
     scale = torch.ones(1, dtype=torch.float32, device="cuda")
     ops.concat_and_cache_mla(kv_c, k_pe, rep.mla, slots, cache_dtype, scale)
     norm = torch.ones(INDEX_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
-    # The insert also clears that many top-k rows.
+    # The insert also clears that many top-k.
     scratch = torch.empty(len(slots), TOPK, dtype=torch.int32, device="cuda")
     indexer_k_norm_quant_insert(
         torch.randn(len(slots), INDEX_HEAD_DIM, device="cuda").bfloat16(),
@@ -562,7 +573,7 @@ def _decode_query_direction() -> torch.Tensor:
 
 
 def _random_topk(lens) -> tuple[torch.Tensor, torch.Tensor]:
-    """Random causal top-k of every new token (-1 pads short rows) and the
+    """Random causal top-k of every new token (-1 pads short requests) and the
     request of each new token."""
     positions = np.concatenate([np.arange(c, c + n) for c, n in lens])
     req_id = np.repeat(np.arange(len(lens)), [n for _, n in lens])
@@ -576,7 +587,7 @@ def _random_topk(lens) -> tuple[torch.Tensor, torch.Tensor]:
 
 @pytest.mark.parametrize(("cache_dtype", "kernel"), KERNEL_CASES)
 def test_attention_over_workspace_matches_replicated_cache(cache_dtype, kernel):
-    """New MLA rows written through the plan's slot mapping complete the
+    """New MLA entries written through the plan's slot mapping complete the
     workspace; the kernel then attends it bit-identically to the replicated
     cache, through the same block table."""
     from vllm import _custom_ops as ops
@@ -587,14 +598,14 @@ def test_attention_over_workspace_matches_replicated_cache(cache_dtype, kernel):
 
     lens, world = SCENARIOS["page_tails"], 8
     rep = Replicated(lens, _layout(cache_dtype), fill_random=False)
-    kv_c, k_pe, scale = _real_rows(rep, cache_dtype)
+    kv_c, k_pe, scale = _real_kv(rep, cache_dtype)
     workspaces, plans = _push_all(rep, world, num_dst=1)
     _, ws_mla, ws_index = workspaces[0]
     # The step's new tokens, as forward_impl writes them on every rank.
     ops.concat_and_cache_mla(
         kv_c, k_pe, ws_mla, plans[0].slot_mapping, cache_dtype, scale
     )
-    _check_workspace(ws_mla, ws_index, rep, new_mla_rows=True, fill=True)
+    _check_workspace(ws_mla, ws_index, rep, new_mla_tokens=True, fill=True)
 
     topk, req_id = _random_topk(lens)
     q = _fp8_query(topk.shape[0], NUM_HEADS)
@@ -629,7 +640,7 @@ def test_attention_over_workspace_matches_replicated_cache(cache_dtype, kernel):
 
 
 # A Kimi K3.1 DSA layer at DeepSeek-V2-Lite's MLA sizes (16 heads, NoPE latent
-# rows with the 64-dim RoPE slot), on the model config the builders read.
+# with the 64-dim RoPE slot), on the model config the builders read.
 LAYER_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 LAYER_HEADS = 16
 LAYER_BLOCK = 4 * PAGE
@@ -638,8 +649,8 @@ LAYER_BLOCK = 4 * PAGE
 LAYER_LENS = [(3000, 1100), (0, 2200), (700, 1500)]
 # Prefill steps that run as DCP ShardQ steps. A reordered batch starts with
 # its pieces of at most 1024 tokens, the leading ones of which the sparse MLA
-# backend takes as (uniform) decodes; the indexer takes them as prefill rows,
-# except one-token decode rows, which keep the DCP path in a mixed step.
+# backend takes as (uniform) decodes; the indexer takes them as prefill tokens,
+# except one-token decode tokens, which keep the DCP path in a mixed step.
 # Every sequence is longer than the top-k, so dense MHA never applies.
 LAYER_STEPS = {
     "long_pieces": LAYER_LENS,
@@ -745,7 +756,7 @@ def _layer_forward(layer, q, kv_c, k_pe, kv_cache, metadata, q_dcp_replicated=No
 
 
 def _min_topk_recall(topk: torch.Tensor, ref: torch.Tensor) -> float:
-    """The smallest share of a row's `ref` keys that `topk` selects."""
+    """The smallest share of a token's `ref` keys that `topk` selects."""
     keys = torch.sort(topk, dim=1).values.contiguous()
     at = torch.searchsorted(keys, ref.contiguous()).clamp(max=keys.shape[1] - 1)
     found = ((keys.gather(1, at) == ref) & (ref >= 0)).sum(1).float()
@@ -755,7 +766,7 @@ def _min_topk_recall(topk: torch.Tensor, ref: torch.Tensor) -> float:
 def _indexer_topk(
     indexer, mla_name, config, topk_buffer, inputs, mla_metadata, index_metadata
 ):
-    """A DSA layer's indexer: the top-k of a step's rows (of this rank's
+    """A DSA layer's indexer: the top-k of a step's tokens (of this rank's
     tokens on a ShardQ step) into the buffer, which the fused prologue clears
     first."""
     from vllm.forward_context import create_forward_context, override_forward_context
@@ -779,10 +790,10 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
     (the sparse_attn_indexer op, on the indexer builder's metadata) gathers
     the context and scores this rank's tokens over it, and
     MLAAttention.forward_impl over the gathered context (with the new tokens'
-    rows it writes there) matches the DCP path it replaces, top-k included,
-    without compiling any kernel; a mixed step's decode rows keep the DCP
+    KV it writes there) matches the DCP path it replaces, top-k included,
+    without compiling any kernel; a mixed step's decode tokens keep the DCP
     path. Steps with too few prefill tokens or beyond the workspace keep the
-    DCP path, the builder counts each path, steps without prefill rows are not
+    DCP path, the builder counts each path, steps without prefill tokens are not
     counted, and a replicated query is ignored. Interleave-64 DCP and
     disaggregated decode instances keep DCP ShardQ off.
     """
@@ -896,7 +907,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
             )
             for name, lens in LAYER_STEPS.items():
                 rep = Replicated(lens, _layout(cache_dtype), fill_random=False)
-                kv_c, k_pe, _ = _real_rows(rep, cache_dtype)
+                kv_c, k_pe, _ = _real_kv(rep, cache_dtype)
                 num_decodes = _leading(lens, 1)
                 num_decode_tokens = sum(n for _, n in lens[:num_decodes])
                 expected_decode_topk = _separable_decode_keys(rep, num_decodes)
@@ -916,7 +927,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 index_weights = torch.randn(
                     num_tokens, 32, device="cuda", dtype=torch.bfloat16
                 )
-                # The decode rows' queries along the separating direction.
+                # The decode tokens' queries along the separating direction.
                 index_q[:num_decode_tokens] = _decode_query_direction().bfloat16()
                 index_weights[:num_decode_tokens] = 1.0
                 hidden = torch.empty(num_tokens, 256, device="cuda").bfloat16()
@@ -947,8 +958,8 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 assert metadata.num_decodes == _leading(
                     lens, builder.reorder_batch_threshold
                 ), name
-                # The indexer scores the one-token rows as decodes, the rest
-                # as prefill rows.
+                # The indexer scores the one-token requests as decodes, the rest
+                # as prefill tokens.
                 assert index_metadata.num_decode_tokens == num_decode_tokens, name
                 shardq = metadata.shardq
                 assert shardq is not None and shardq.gathered_context is not None, name
@@ -956,14 +967,14 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 assert shardq.num_decode_tokens == num_decode_tokens
                 assert sum(shardq.num_tokens_per_rank) == num_tokens - num_decode_tokens
 
-                # DCP ShardQ: the indexer gathers the prefill rows' context
-                # and writes the top-k rows of this rank's prefill tokens after
-                # the decode rows, which it scores on the DCP path in place.
+                # DCP ShardQ: the indexer gathers the prefill tokens' context
+                # and writes the top-k of this rank's prefill tokens after
+                # the decode tokens, which it scores on the DCP path in place.
                 score(metadata, index_metadata)
                 local = num_decode_tokens + shardq.local_token_ids
-                num_rows = num_decode_tokens + len(shardq.local_token_ids)
+                num_scored = num_decode_tokens + len(shardq.local_token_ids)
                 decode_topk = topk_buffer[:num_decode_tokens].clone()
-                local_topk = topk_buffer[num_decode_tokens:num_rows].clone()
+                local_topk = topk_buffer[num_decode_tokens:num_scored].clone()
                 out = forward(metadata).clone()
                 torch.accelerator.synchronize()
                 monitoring[0] = False
@@ -976,18 +987,18 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 # The keys of the DCP path's cross-rank top-k merge, up to the
                 # order of near-tied (bf16) scores at the top-k boundary.
                 assert _min_topk_recall(local_topk, dcp_topk[local]) > 0.99, name
-                # The decode rows' top-k, on both paths: exactly the keys that
+                # The decode tokens' top-k, on both paths: exactly the keys that
                 # score positive.
-                for topk_rows in (decode_topk, dcp_topk[:num_decode_tokens]):
+                for topk in (decode_topk, dcp_topk[:num_decode_tokens]):
                     assert torch.equal(
-                        torch.sort(topk_rows, dim=1).values, expected_decode_topk
+                        torch.sort(topk, dim=1).values, expected_decode_topk
                     ), name
-                # The prefill rows' MLA rows are complete in the workspace.
+                # The prefill tokens' MLA entries are complete in the workspace.
                 _check_workspace(
                     shardq.gathered_context.mla_view(shard.mla),
                     shardq.gathered_context.index_view(shard.index),
                     rep,
-                    new_mla_rows=True,
+                    new_mla_tokens=True,
                     fill=False,
                     num_decodes=num_decodes,
                 )
@@ -995,7 +1006,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 q_rep = get_tp_group().all_gather(q, dim=1)
                 assert torch.equal(forward(metadata, q_rep), out)
 
-                # The DCP path over the same keys: every rank's top-k rows.
+                # The DCP path over the same keys: every rank's top-k.
                 topk = torch.zeros_like(dcp_topk)
                 topk[local] = local_topk + 1
                 torch.distributed.all_reduce(topk, group=get_tp_group().device_group)
@@ -1034,14 +1045,14 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 snapshot[0],
                 snapshot[1],
                 rep,
-                new_mla_rows=True,
+                new_mla_tokens=True,
                 fill=False,
                 num_decodes=context.num_decodes,
             )
 
             # Steps that keep the DCP path (each fits the workspace): fewer
             # than sparse_mla_shard_q_min_tokens prefill tokens (after a
-            # decode row), which ShardQ does not split, and decode rows alone,
+            # decode token), which ShardQ does not split, and decode tokens alone,
             # which are not counted.
             for lens, path in (
                 ([(100, 1), (3000, 600), (2900, 300)], dcp.NO_SPLIT),
@@ -1232,7 +1243,7 @@ def _profile_worker(rank, world, init_file, cache_dtype, kernel):
                 ),
             )
             # The NCCL query gather and A2A of a whole step on the DCP path (a
-            # step whose prefill rows do not fit the ShardQ workspace): every
+            # step whose prefill tokens do not fit the ShardQ workspace): every
             # local head's query, and every head's partial outputs (and LSEs),
             # of every token.
             fallback_tokens = profile_tokens
@@ -1252,7 +1263,7 @@ def _profile_worker(rank, world, init_file, cache_dtype, kernel):
             jit_monitor.activate()
 
             rep = Replicated(lens, _layout(cache_dtype), fill_random=False)
-            kv_c, k_pe, _ = _real_rows(rep, cache_dtype)
+            kv_c, k_pe, _ = _real_kv(rep, cache_dtype)
             shard = _shard(rep, world, rank, seed=rank, mla_block=LAYER_BLOCK)
             q = torch.randn(
                 num_tokens, local_heads, 192, device="cuda", dtype=torch.bfloat16
@@ -1330,7 +1341,7 @@ def test_profile_run_warms_the_dcp_path(cache_dtype, kernel, tmp_path):
     ],
 )
 def test_context_layout_of_the_indexer_cache_format(fp4, entry, split):
-    """The gathered indexer rows follow the indexer cache's format: fp8 keys (128 B
+    """The gathered indexer entries follow the indexer cache's format: fp8 keys (128 B
     + one 4 B scale) or MXFP4 keys (head_dim / 2 B of E2M1 values + one UE8M0
     scale per 32 values, the Kimi K3.1 default on SM100), values then scales."""
     from types import SimpleNamespace
@@ -1348,5 +1359,5 @@ def test_context_layout_of_the_indexer_cache_format(fp4, entry, split):
     )
     layout = ContextLayout.from_layer(spec, indexer)
     assert layout is not None
-    assert (layout.index_row_bytes, layout.index_scale_bytes) == split
+    assert (layout.index_token_bytes, layout.index_scale_bytes) == split
     assert layout.index_page_bytes == 64 * entry

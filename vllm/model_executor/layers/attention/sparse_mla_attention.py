@@ -284,8 +284,8 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     cp_kv_cache_interleave_size: int = 1
     # Index of the first query token's top-k in the top-k buffer.
     topk_start: int = 0
-    # The KV cache holds every DCP rank's rows (a DCP ShardQ step's gathered
-    # context), so the top-k converts without the DCP filter.
+    # The KV cache holds every DCP rank's KV shard (a DCP ShardQ step's
+    # gathered context), so the top-k converts without the DCP filter.
     kv_gathered: bool = False
 
 
@@ -480,7 +480,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             ),
             get_max_prefill_buffer_size(vllm_config),
             envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-            # Rows the indexer scores as decodes keep the DCP path.
+            # Requests the indexer scores as decodes keep the DCP path.
             decode_query_len,
             self.dcp_world_size,
             get_dcp_group().rank_in_group,
@@ -603,7 +603,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         gathered_context = None
         if self.dcp_shardq is not None:
-            # Under DCP, a step whose prefill rows do not fit the gathered
+            # Under DCP, a step whose prefill requests do not fit the gathered
             # context workspace keeps the DCP path whole.
             gathered_context = self.dcp_shardq.plan(common_attn_metadata, shardq_split)
             if gathered_context is None:

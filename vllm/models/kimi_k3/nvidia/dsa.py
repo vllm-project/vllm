@@ -297,7 +297,7 @@ class KimiK3DSAIndexer(nn.Module):
             return None
         if prefill.shardq_gather_indices is not None:
             return prefill.shardq_gather_indices
-        # Under DCP the MLA layer's gathered context plans the rows.
+        # Under DCP the MLA layer's gathered context plans the tokens.
         dcp_shardq = dcp_shardq_context(forward_context, self.k_cache.prefix)
         return None if dcp_shardq is None else dcp_shardq[1].gather_indices
 

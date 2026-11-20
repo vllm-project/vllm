@@ -818,7 +818,7 @@ def sparse_attn_indexer(
     # nvidia path, _fused_norm_rope_kernel already cleared the same
     # [:num_tokens, :topk] region earlier in this forward, so skip the redundant
     # fill. Neither does a decode-only step into a topk_tokens-wide buffer: the
-    # decode top-k writes each row in full, -1 past a short row.
+    # decode top-k writes every token's top-k in full, -1 past a short context.
     decode_fills_all = (
         not has_prefill
         and num_decode_tokens == hidden_states.shape[0]
@@ -836,9 +836,9 @@ def sparse_attn_indexer(
         if dcp_world_size > 1 and (
             dcp_shardq := dcp_shardq_context(forward_context, k_cache_prefix)
         ):
-            # A DCP ShardQ step scores its prefill rows over a gathered copy
+            # A DCP ShardQ step scores its prefill tokens over a gathered copy
             # of their keys, as a non-DCP ShardQ step does: no top-k merge
-            # across ranks. Its decode rows keep the DCP decode path.
+            # across ranks. Its decode tokens keep the DCP decode path.
             mla_layer_name, gathered_context = dcp_shardq
             assert num_decode_tokens == gathered_context.num_decode_tokens
             prefill_kv_cache = gathered_context.gather(
@@ -909,6 +909,8 @@ def sparse_attn_indexer(
                     chunk.local_cu_seq_lens,
                 )
 
+            row_start, row_end = chunk.token_start, chunk.token_end
+
             # PCP + DCP KV all-gather.
             deinterleave_idx = chunk.pcp_deinterleave_idx
             if deinterleave_idx is not None:
@@ -926,13 +928,13 @@ def sparse_attn_indexer(
                     out_scales,
                 )
 
-            chunk_rows = slice(chunk.token_start, chunk.token_end)
-            q_slice = prefill_q[chunk_rows]
+            q_slice = prefill_q[row_start:row_end]
             q_scale_slice = (
-                prefill_q_scale[chunk_rows] if prefill_q_scale is not None else None
+                prefill_q_scale[row_start:row_end]
+                if prefill_q_scale is not None
+                else None
             )
-            chunk_weights = prefill_weights[chunk_rows]
-            topk_indices = topk_indices_buffer[chunk_rows, :topk_tokens]
+            topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
@@ -954,7 +956,7 @@ def sparse_attn_indexer(
                     q_slice,
                     k_quant,
                     fused_mqa_topk_key_scales(k_scale),
-                    chunk_weights,
+                    prefill_weights[row_start:row_end],
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_indices,
@@ -979,8 +981,7 @@ def sparse_attn_indexer(
                 # rows).
                 for sub in range(0, q_slice.shape[0], dense_rows):
                     rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))
-                    rows_ks = cu_seqlen_ks[rows]
-                    rows_ke = cu_seqlen_ke[rows]
+                    tokens = slice(row_start + rows.start, row_start + rows.stop)
                     if current_platform.is_xpu():
                         if q_scale_slice is not None:
                             raise RuntimeError(
@@ -990,26 +991,26 @@ def sparse_attn_indexer(
                             q_slice_cast[rows],
                             k_quant_cast,
                             k_scale_cast,
-                            chunk_weights[rows],
-                            rows_ks,
-                            rows_ke,
+                            prefill_weights[tokens],
+                            cu_seqlen_ks[rows],
+                            cu_seqlen_ke[rows],
                         )
-                        row_starts = rows_ks
-                        row_ends = rows_ke
+                        row_starts = cu_seqlen_ks[rows]
+                        row_ends = cu_seqlen_ke[rows]
                     else:
-                        q_scale_rows, rows_weights = mqa_logits_mx_inputs(
+                        q_scale_rows, chunk_weights = mqa_logits_mx_inputs(
                             q_slice_cast[rows],
                             q_scale_slice[rows] if q_scale_slice is not None else None,
-                            chunk_weights[rows],
+                            prefill_weights[tokens],
                             logits_dtype,
                         )
-                        row_ends = rows_ke - rows_ks
+                        row_ends = cu_seqlen_ke[rows] - cu_seqlen_ks[rows]
                         logits = fp8_fp4_mqa_logits(
                             (q_slice_cast[rows], q_scale_rows),
                             (k_quant_cast, k_scale_cast),
-                            rows_weights,
-                            rows_ks,
-                            rows_ke,
+                            chunk_weights,
+                            cu_seqlen_ks[rows],
+                            cu_seqlen_ke[rows],
                             chunk.max_seqlen_k,
                             logits_dtype=logits_dtype,
                         )
@@ -1023,14 +1024,12 @@ def sparse_attn_indexer(
                         )
                         if not use_deep_select:
                             logits = as_fp32_logits(logits, row_ends)
+                    num_rows = logits.shape[0]
                     if candidate_blocks is not None:
                         # Two-level selection (v4.1): the candidate source
                         # publishes its top blocks; later indexers mask their
                         # scores to them. Both before the row top-k.
-                        chunk_candidates = candidate_blocks[
-                            chunk.token_start + rows.start : chunk.token_start
-                            + rows.stop
-                        ]
+                        chunk_candidates = candidate_blocks[tokens]
                         if candidate_write:
                             _select_candidate_blocks(
                                 logits,
