@@ -42,7 +42,10 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -63,7 +66,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -246,6 +249,22 @@ class OffloadingConnectorScheduler:
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
             if group.host_resident in offload_pool_kinds
         )
+        self._swa_prefix_groups: frozenset[int] = frozenset()
+        transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if (
+            transfer_config is not None
+            and transfer_config.kv_connector == "OffloadingConnector"
+            and self.config.dcp_world_size == 1
+            and not any(
+                group.prefix_replay_tokens or group.host_resident
+                for group in kv_cache_config.kv_cache_groups
+            )
+        ):
+            self._swa_prefix_groups = frozenset(
+                config.group_idx
+                for config in self.config.kv_group_configs
+                if config.manager_cls is SlidingWindowManager
+            )
         self.manager: OffloadingManager = spec.get_manager()
         # Under async_init the engine serves without offloading until every
         # worker has reported ready.
@@ -294,6 +313,7 @@ class OffloadingConnectorScheduler:
         self._current_batch_jobs_to_flush: set[int] = set()
         # GPU block IDs allocated in the current engine step
         self._current_batch_allocated_block_ids: set[int] = set()
+        self._unconfirmed_swa_prefixes: dict[tuple[ReqId, int], list[int]] = {}
         # if GPU prefix caching is enabled,
         # Track loaded chunks to avoid redundant loads.
         self._chunks_being_loaded: set[OffloadKey] | None = (
@@ -1103,12 +1123,34 @@ class OffloadingConnectorScheduler:
         # Include allocations made by other connectors in a MultiConnector.
         # Full-attention prefix hits were touched, not allocated.
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
+        check_swa_prefix = (
+            self._swa_prefix_groups
+            and num_locally_computed_tokens > 0
+            and num_external_tokens == 0
+            and request.status == RequestStatus.WAITING
+            and request.num_computed_tokens == 0
+            and request.num_preemptions == 0
+            and not request.resumable
+        )
         for group_idx, group_blocks in enumerate(blocks.blocks):
             if group_idx not in self._groups_sharing_offload_pool:
                 continue
             num_prefix_blocks = self._num_prefix_blocks(
                 group_idx, num_locally_computed_tokens
             )
+            if check_swa_prefix and group_idx in self._swa_prefix_groups:
+                block_size = self._group_configs_by_id[group_idx].tokens_per_block
+                num_prefix_blocks = num_locally_computed_tokens // block_size
+                if num_prefix_blocks:
+                    # Lookup precedes admission. Defer this prefix until the
+                    # scheduled table confirms which blocks were adopted.
+                    prefix_key = (request.request_id, group_idx)
+                    if prefix_key not in self._unconfirmed_swa_prefixes:
+                        self._unconfirmed_swa_prefixes[prefix_key] = [
+                            block.block_id for block in group_blocks[:num_prefix_blocks]
+                        ]
+                    else:
+                        num_prefix_blocks = 0
             self._current_batch_allocated_block_ids.update(
                 block.block_id
                 for block in group_blocks[num_prefix_blocks:]
@@ -1247,12 +1289,38 @@ class OffloadingConnectorScheduler:
             self._chunks_being_loaded.update(keys_to_load)
         req_status.partial_tail_boundary = None
 
+    def _confirm_swa_prefixes(
+        self, scheduler_output: SchedulerOutput
+    ) -> dict[tuple[ReqId, int], int]:
+        if not self._unconfirmed_swa_prefixes:
+            return {}
+
+        new_reqs = {req.req_id: req for req in scheduler_output.scheduled_new_reqs}
+        confirmed = {}
+        for (req_id, group_idx), prefix in self._unconfirmed_swa_prefixes.items():
+            req = new_reqs.get(req_id)
+            block_size = self._group_configs_by_id[group_idx].tokens_per_block
+            if (
+                req is not None
+                and group_idx < len(req.block_ids)
+                and len(prefix) == req.num_computed_tokens // block_size
+                and prefix == req.block_ids[group_idx][: len(prefix)]
+            ):
+                confirmed[req_id, group_idx] = len(prefix)
+            else:
+                self._current_batch_allocated_block_ids.update(
+                    block_id for block_id in prefix if block_id != 0
+                )
+        self._unconfirmed_swa_prefixes.clear()
+        return confirmed
+
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
         """Update request states from the Scheduler's output."""
         # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.
         new_block_ids_end: dict[str, tuple[int, ...]] = {}
+        swa_prefixes = self._confirm_swa_prefixes(scheduler_output)
 
         for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
@@ -1284,6 +1352,12 @@ class OffloadingConnectorScheduler:
                     num_prefix_blocks = self._num_prefix_blocks(
                         group_idx, local_prefix_tokens
                     )
+                    if is_full_table:
+                        # Skip only this request's hit. A different request's
+                        # allocation of the same ID still needs a fence.
+                        num_prefix_blocks = swa_prefixes.get(
+                            (req_id, group_idx), num_prefix_blocks
+                        )
                     self._current_batch_allocated_block_ids.update(
                         bid for bid in group_blocks[num_prefix_blocks:] if bid != 0
                     )
@@ -1303,18 +1377,11 @@ class OffloadingConnectorScheduler:
             block_state = scheduler_output.kv_connector_block_state
             for req_id, req_status in self._req_status.items():
                 ends = new_block_ids_end.get(req_id)
-                for i, grp_idx in enumerate(self._sliding_window_groups):
-                    group_state = req_status.group_states[grp_idx]
-                    current_groups = (
-                        # Connector state can outlive core's request table after
-                        # finish, preemption, or reset.
-                        block_state.resolve_block_ids(req_id)
-                        if block_state is not None
-                        else ()
-                    )
-                    group_state = req_status.group_states[grp_idx]
+                current_groups = None
+                for i, config_group_idx in enumerate(self._sliding_window_groups):
+                    group_state = req_status.group_states[config_group_idx]
                     first_live_idxs = (
-                        handler.first_live_chunk_idx(req_status, grp_idx)
+                        handler.first_live_chunk_idx(req_status, config_group_idx)
                         for handler in self._store_handlers.values()
                     )
                     start = (
@@ -1325,20 +1392,25 @@ class OffloadingConnectorScheduler:
                         * blocks_per_chunk
                     )
                     end = ends[i] if ends is not None else len(group_state.block_ids)
-                    config = self.config.kv_group_configs[grp_idx]
-                    current = (
-                        current_groups[config.group_idx]
-                        if config.group_idx < len(current_groups)
-                        # No live core table is available for this group.
-                        else ()
-                    )
+                    group_id = self.config.kv_group_configs[config_group_idx].group_idx
                     for pos in range(start, end):
                         block_id = group_state.block_ids[pos]
                         if block_id not in self._current_batch_allocated_block_ids:
                             continue
+                        if current_groups is None:
+                            # A finished request can outlive its core block table.
+                            current_groups = (
+                                block_state.resolve_block_ids(req_id)
+                                if block_state is not None
+                                else ()
+                            )
                         # The connector may retain positions that core has
                         # already removed from the live table.
-                        if pos < len(current) and current[pos] == block_id:
+                        if (
+                            group_id < len(current_groups)
+                            and pos < len(current_groups[group_id])
+                            and current_groups[group_id][pos] == block_id
+                        ):
                             continue
                         group_state.block_ids[pos] = 0
 
