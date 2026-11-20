@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, attention residuals, relative-bias attention, short convolutions, and a bundled DSpark speculator."
   date_added: 2026-11-12
-  date_updated: 2026-11-17
+  date_updated: 2026-11-20
   difficulty: intermediate
   tasks:
     - multimodal
@@ -15,17 +15,14 @@ meta:
     - thinkingmachines/Inkling-Small
   hardware:
     gb200: verified
+    h200: supported
 
 model:
   model_id: "thinkingmachines/Inkling-2-Small"
   # Inkling2ForConditionalGeneration is not in v0.34.0; the next release at the earliest.
   min_vllm_version: "0.35.0"
   nightly_required: true
-  docker_image: "vllm/vllm-openai:inkling-2-small"
-  install:
-    docker:
-      note: "Serve from the `vllm/vllm-openai:inkling-2-small` image; no pip wheel is available yet."
-    pip: false
+  docker_image: "vllm/vllm-openai:nightly"
   architecture: moe
   parameter_count: "594B"
   active_parameters: "17B"
@@ -57,12 +54,24 @@ opt_in_features:
 variants:
   default:
     precision: nvfp4
+    # Hopper runs the NVFP4/MXFP8 experts as W4A16/W8A16 (Humming GEMMs).
+    precision_hardware:
+      brand: NVIDIA
     vram_minimum_gb: 473
-    description: "Routed experts in NVFP4 (layers 0-39) and MXFP8 (layers 40-47) with activations quantized to the same format; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~393 GB on disk including the 3.2 GB DSpark draft."
+    supported_hardware:
+      - h200
+      - arch:sm100
+      - arch:sm103
+    description: "Routed experts in NVFP4 (layers 0-39) and MXFP8 (layers 40-47); attention, routers, attention-residual queries and the LM head in BF16/FP32. ~393 GB on disk including the 3.2 GB DSpark draft. Blackwell quantizes expert activations to the same format; Hopper keeps them in BF16 (W4A16/W8A16)."
 
 compatible_strategies:
   - single_node_tp
   - multi_node_tp
+
+# H200 has no cross-node NVLink for pure multi-node TP.
+strategy_hardware:
+  multi_node_tp:
+    hopper: unsupported
 
 hardware_overrides: {}
 
@@ -80,6 +89,13 @@ strategy_overrides:
           - "262144"
           - "--max-num-seqs"
           - "256"
+      # 4x H200 leaves ~40 GiB less per GPU for KV cache than a GB200 tray.
+      hopper:
+        extra_args:
+          - "--max-model-len"
+          - "131072"
+          - "--max-num-seqs"
+          - "256"
   # Two trays (TP8) serve the full 1M context. --no-numa-bind works around a
   # headless-node startup crash with vLLM's default NUMA binding.
   multi_node_tp:
@@ -94,7 +110,7 @@ troubleshooting:
   - title: "To serve at least one request with the model's max seq len (1048576), (64.47 GiB KV cache is needed, which is larger than the available KV cache memory"
     when:
       strategies: [single_node_tp]
-    body: "A 1M-token request does not fit on one 4-GPU tray. Keep `--max-model-len 262144` at TP4, or use the multi-node TP strategy with 2 nodes (TP8) for the full 1M context."
+    body: "A 1M-token request does not fit at TP4. Keep `--max-model-len 262144` on a GB200 tray (`131072` on 4x H200), or use the multi-node TP strategy with 2 GB200 nodes (TP8) for the full 1M context."
   - title: "AssertionError: Executable was changed during NUMA binding context"
     when:
       strategies: [multi_node_tp]
@@ -126,7 +142,8 @@ guide: |
 
   ## Runtime
 
-  Use the `vllm/vllm-openai:inkling-2-small` image until Inkling 2 Small support is in a vLLM release.
+  Inkling 2 Small is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
+  nightly wheel until it is in a vLLM release.
 
   ## Configurations
 
@@ -134,6 +151,10 @@ guide: |
 
   - **One tray, TP4:** contexts up to 262,144 tokens.
   - **Two trays, TP8:** the full 1,048,576-token context.
+
+  On Hopper, run TP4 on H200 with contexts up to 131,072 tokens. Hopper has no FP4/FP8
+  block-scaled tensor cores, so the experts run as W4A16 (NVFP4) and W8A16 (MXFP8) GEMMs
+  with BF16 activations. GSM8K is 0.976 at TP4, the same as the reference.
 
   LoRA adapters are supported on the attention projections and the routed experts. Expert
   adapters need BF16 expert weights; with the NVFP4/MXFP8 experts of this checkpoint, use
