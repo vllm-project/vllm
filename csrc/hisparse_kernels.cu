@@ -445,6 +445,59 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   }
   __syncthreads();
 
+  // With valid_counts, each row's valid attention indices are packed to its
+  // front in column order (the triton_convert contract), so the counts can
+  // bound the kernel as topk_length even when the input rows have holes.
+  // hot_indices is free scratch once the phases above are done.
+  const auto pack_valid_to_front = [&]() {
+    if (valid_counts == nullptr || attention_indices == nullptr) return;
+    const int num_chunks = (top_k + kWarpSize - 1) / kWarpSize;
+    const int iters = (num_chunks + NUM_WARPS - 1) / NUM_WARPS;
+    for (int row = first_row; row < end_row; ++row) {
+      int32_t* row_attention =
+          attention_indices + static_cast<int64_t>(row) * attention_row_stride;
+      int32_t* scratch = hot_indices + static_cast<int64_t>(row) * top_k;
+      __syncthreads();
+      for (int i = tid; i < top_k; i += blockDim.x) {
+        scratch[i] = row_attention[i];
+      }
+      for (int i = tid; i < num_chunks + 1; i += blockDim.x) {
+        s_chunk_off[i] = 0;
+      }
+      __syncthreads();
+      int running = 0;
+      for (int iter = 0; iter < iters; ++iter) {
+        const int chunk_idx = warp_id + iter * NUM_WARPS;
+        const bool has_chunk = chunk_idx < num_chunks;
+        const int i = chunk_idx * kWarpSize + lane_id;
+        const int32_t value = has_chunk && i < top_k ? scratch[i] : -1;
+        const bool valid = value >= 0;
+        int local_off = 0;
+        if (has_chunk) {
+          const unsigned int mask = __ballot_sync(0xFFFFFFFF, valid);
+          local_off = __popc(mask & lanes_before);
+          if (lane_id == 0) s_chunk_off[chunk_idx + 1] = __popc(mask);
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+          running =
+              warp_inclusive_scan(s_chunk_off, lane_id, iter * NUM_WARPS + 1,
+                                  num_chunks + 1, running);
+        }
+        __syncthreads();
+        if (valid) row_attention[s_chunk_off[chunk_idx] + local_off] = value;
+      }
+      __syncthreads();
+      const int count = s_chunk_off[num_chunks];
+      for (int i = count + tid; i < top_k; i += blockDim.x) {
+        row_attention[i] = -1;
+      }
+      if (tid == 0) {
+        valid_counts[static_cast<int64_t>(row) * valid_count_stride] = count;
+      }
+    }
+  };
+
   // Phase 1: translate every row's request-relative positions in one pass,
   // resolve resident rows directly, and count the host-backed positions.
   // s_chunk_off holds per-row valid counts until phase 2.
@@ -517,6 +570,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     for (int row = first_row + tid; row < end_row; row += blockDim.x) {
       if (swap_counts != nullptr) swap_counts[row] = 0;
     }
+    pack_valid_to_front();
     return;
   }
 
@@ -833,6 +887,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       row_lru[i] = s_lru_out[i - remaining_evictable - total_misses];
     }
   }
+  pack_valid_to_front();
 }
 
 // Prefill staging: copy the planned host rows (miss_mask != 0) into the
@@ -1254,6 +1309,11 @@ void hisparse_resolve_residency(
   STD_TORCH_CHECK(max_union_rows > 0 && max_union_rows <= hot_size,
                   "max_union_rows must be in [1, hot_size], got ",
                   max_union_rows);
+  STD_TORCH_CHECK(
+      !(valid_counts.has_value() && attention_indices.has_value()) ||
+          top_k <= hot_size,
+      "packing attention indices needs top_k <= hot_size, got top_k=", top_k,
+      " hot_size=", hot_size);
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t fixed_smem_bytes =
       sizeof(int32_t) * (3 * num_buffer_chunks + 2 + kResidencyCounters) +
