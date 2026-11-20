@@ -283,16 +283,10 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
     def get_mm_max_tokens_per_item(
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
-        config = self.get_hf_config()
         # Upper bound: the pooler outputs max_soft_tokens slots per image.
         # After padding is stripped the actual count is ≤ this value, but
         # vLLM needs the max for memory planning.
-        tokens_per_image = config.vision_config.default_output_length
-        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
-        val, _ = _get_max_soft_tokens(merged_kwargs)
-        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
-            tokens_per_image = val
-        tokens: dict[str, int] = {"image": tokens_per_image}
+        tokens: dict[str, int] = {"image": self.get_max_image_soft_tokens()}
         if self.has_audio():
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
@@ -305,6 +299,13 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
+
+    def get_max_image_soft_tokens(self) -> int:
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        val, _ = _get_max_soft_tokens(merged_kwargs)
+        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+            return val
+        return self.get_hf_config().vision_config.default_output_length
 
     def get_dummy_size_for_soft_tokens(self, max_soft_tokens: int) -> tuple[int, int]:
         vision_cfg = self.get_hf_config().vision_config
@@ -523,10 +524,8 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         num_audios = mm_counts.get("audio", 0)
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
-        max_image_tokens = self.info.get_mm_max_tokens_per_item(seq_len, mm_counts)
-        assert max_image_tokens is not None
         img_width, img_height = self.info.get_dummy_size_for_soft_tokens(
-            max_image_tokens["image"]
+            self.info.get_max_image_soft_tokens()
         )
 
         data: dict[str, Any] = {

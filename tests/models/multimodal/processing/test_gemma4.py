@@ -9,6 +9,7 @@ import pytest
 import torch
 from PIL import Image as PILImage
 
+from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
@@ -35,6 +36,7 @@ from ...utils import build_model_context
 
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
+EMBEDDING_GEMMA2_MODEL_ID = "google/embeddinggemma-2"
 DIFFUSION_GEMMA_MODEL_ID = "google/diffusiongemma-26B-A4B-it"
 
 
@@ -192,28 +194,32 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
 
 
 @pytest.mark.parametrize(
-    "mm_processor_kwargs", [None, {"max_soft_tokens": 70}, {"max_soft_tokens": 1120}]
+    ("mm_processor_kwargs", "max_soft_tokens"),
+    [(None, 280), ({"max_soft_tokens": 70}, 70), ({"max_soft_tokens": 1120}, 1120)],
 )
-@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
-def test_dummy_image_reaches_image_budget(
-    model_id: str, mm_processor_kwargs: dict[str, object] | None
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, EMBEDDING_GEMMA2_MODEL_ID])
+def test_dummy_image_reaches_max_soft_tokens(
+    model_id: str,
+    mm_processor_kwargs: dict[str, object] | None,
+    max_soft_tokens: int,
 ):
-    ctx = build_model_context(
+    model_config = ModelConfig(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt={"image": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     tokens = processor.info.get_mm_max_tokens_per_item(
-        seq_len=ctx.model_config.max_model_len,
+        seq_len=model_config.max_model_len,
         mm_counts={"image": 1},
     )
     dummy = processor.get_dummy_mm_inputs({"image": 1})
     num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["image"])
 
     assert tokens is not None
-    assert num_embeds == tokens["image"]
+    assert num_embeds == max_soft_tokens
+    assert num_embeds <= tokens["image"]
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
