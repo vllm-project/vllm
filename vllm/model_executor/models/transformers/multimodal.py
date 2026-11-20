@@ -1064,8 +1064,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 )
             )
             for encoder_cls, modalities in modalities_by_encoder.items():
-                # Towers are built on meta, so `recursive_replace` offloads them once
-                # materialised
+                # Built on meta, so `recursive_replace` offloads them when materialised
                 tower = self._mark_tower_model(
                     vllm_config, modalities, targets=encoder_cls, auto_offload=False
                 )
