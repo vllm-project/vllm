@@ -385,6 +385,13 @@ class KVCacheManager:
             return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
+        for group_blocks, hit, manager in zip(
+            computed, per_group_hits, coordinator.single_type_managers
+        ):
+            if hit < num_local and isinstance(manager, SlidingWindowManager):
+                # The connector loads only blocks the request does not share,
+                # so a shared block that a lagging hit ends in would stay stale.
+                del group_blocks[hit // manager.block_size :]
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local

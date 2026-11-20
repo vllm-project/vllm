@@ -2543,6 +2543,69 @@ def test_hybrid_dflash_drafter_group_gets_partial_hash_hits(
     assert draft_cow == (first_read_block <= 3)
 
 
+@pytest.mark.parametrize(
+    "window_manager_config",
+    [
+        SlidingWindowManager.config(sliding_window=6),
+        DFlashSlidingWindowManager.config(sliding_window=6, num_speculative_tokens=2),
+    ],
+    ids=["sliding_window", "dflash"],
+)
+def test_connector_lookup_drops_lagging_window_group_partial_block(
+    window_manager_config,
+):
+    """A connector lookup reports the full-attention hit, and the connector
+    loads only blocks the request does not share. A window group whose hit
+    ends inside a block must leave that shared block out, or its tokens past
+    the group's hit stay stale."""
+    hash_block_size = 2
+    block_size = 4 * hash_block_size
+    manager = _full_mamba_window_manager(
+        block_size, hash_block_size, window_manager_config, retention_interval=0
+    )
+    # A 27-token prompt leaves a window-group entry at 26 inside block 3.
+    req0 = make_request("0", list(range(27)), hash_block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 26, 0, computed_blocks) is not None
+    req0.num_computed_tokens = 26
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 1) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    # A longer prompt caches full attention through block 4; its window-group
+    # block 3 is evicted.
+    req1 = make_request("1", list(range(40)), hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert (
+        manager.allocate_slots(req1, 40 - num_computed, num_computed, computed_blocks)
+        is not None
+    )
+    window_block = manager.get_blocks("1").blocks[2][3]
+    manager.free(req1)
+    manager.new_step_starts()
+    if not window_block.is_null:
+        manager.evict_blocks({window_block.block_id})
+
+    req2 = make_request("2", list(range(34)), hash_block_size, sha256)
+    blocks, num_local, _, hit_diverged = manager.get_computed_blocks_for_connector(req2)
+    assert num_local == 32 and hit_diverged
+    assert len(blocks.blocks[2]) == 3
+
+    # An async load of token 32 fills the blocks the request does not share.
+    new_blocks = manager.allocate_slots(
+        req2,
+        1,
+        num_local,
+        blocks,
+        num_external_computed_tokens=1,
+        delay_cache_blocks=True,
+    )
+    assert new_blocks is not None
+    window_blocks = manager.get_blocks("2").blocks[2]
+    assert not window_blocks[3].is_null and window_blocks[3].block_hash is None
+
+
 @pytest.mark.parametrize("prefix_match_unit", [2, None])
 @pytest.mark.parametrize("extra_group", [None, "sliding_window", "chunked_local"])
 def test_resolved_cache_hit_alignment_matches_coordinator(
