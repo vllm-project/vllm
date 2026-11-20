@@ -455,14 +455,12 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     """
 
     model_cls = DeepseekV32Model
-    # A class attribute, because the quant config holds this dict by reference
-    # and `DeepseekV2ForCausalLM.__init__` adds `fused_qkv_a_proj` to it.
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "wk_weights_proj": ["wk", "weights_proj"],
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        self.packed_modules_mapping = {
+            **self.packed_modules_mapping,
+            "wk_weights_proj": ["wk", "weights_proj"],
+        }
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
