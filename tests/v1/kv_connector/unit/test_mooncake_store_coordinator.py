@@ -34,7 +34,7 @@ def _group(layer_names, layer: KVCacheLayerConfig, **kwargs) -> KVCacheGroup:
 def _mamba_align(block_size=32):
     return MambaManager.layer_config(
         MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
 
 
