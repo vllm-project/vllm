@@ -45,7 +45,7 @@ vllm serve <model-path> \
 
 ### Fused GEMM-collective
 
-`fuse_gemm_comms` (a.k.a. async TP) fuses the SP collectives with the adjacent
+`fuse_gemm_comms` fuses the SP collectives with the adjacent
 GEMMs (AllGather+GEMM and GEMM+ReduceScatter) so communication overlaps with
 compute. It requires `enable`:
 

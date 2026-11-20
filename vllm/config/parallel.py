@@ -261,7 +261,7 @@ class SequenceParallelConfig:
     batches. 0 means SP is always active whenever enabled."""
     fuse_gemm_comms: bool = False
     """Fuse the SP collectives with the adjacent GEMMs (AllGather+GEMM and
-    GEMM+ReduceScatter, a.k.a. async TP) where the layer's quant method has
+    GEMM+ReduceScatter) where the layer's quant method has
     a fused kernel; otherwise fall back to plain collectives. Requires
     `enable`."""
 
