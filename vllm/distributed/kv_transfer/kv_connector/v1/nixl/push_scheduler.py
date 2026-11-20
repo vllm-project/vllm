@@ -42,7 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import is_full_attention_spec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -126,7 +126,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 or parallel_config.prefill_context_parallel_size != 1
                 or parallel_config.decode_context_parallel_size != 1
                 or len(transfer_groups) != 1
-                or not is_full_attention_spec(transfer_groups[0].kv_cache_spec)
+                or not issubclass(transfer_groups[0].manager_cls, FullAttentionManager)
             ):
                 # Chunked push is used only in the configurations it is tested
                 # in; the others push requests whole.
@@ -401,7 +401,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         block_state = scheduler_output.kv_connector_block_state
         assert block_state is not None
         group = self.kv_cache_config.transfer_groups[0]
-        block_size = group.kv_cache_spec.block_size
+        block_size = group.block_size
 
         for (
             req_id,
