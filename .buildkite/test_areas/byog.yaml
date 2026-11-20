@@ -1,0 +1,14 @@
+group: BYOG
+depends_on:
+  - image-build-cpu
+steps:
+- label: ":computer: (CPU) BYOG Harness Unit & Contract Tests"
+  key: byog-cpu-tests
+  timeout_in_minutes: 15
+  device: cpu-small
+  source_file_dependencies:
+    - tools/byog/
+    - tests/byog/
+    - .buildkite/test_areas/byog.yaml
+  commands:
+    - PYTHONPATH=/vllm-workspace pytest -v -s -c byog/pytest.ini byog/
