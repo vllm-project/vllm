@@ -35,7 +35,26 @@ vllm serve DSA_MODEL --attention-config.hisparse_config.host_pool_gib 64
 
 vLLM then configures the KV connectors: `HiSparseConnector`, and with prefix
 caching an `OffloadingConnector` for the indexer cache, splitting the budget
-between them (see [Indexer KV offloading](#indexer-kv-offloading)).
+between them (see [Indexer KV offloading](#indexer-kv-offloading)). The split
+depends on the model's page sizes and is reported at startup. For example, a
+GLM-5.3 deployment logs 60.22 GiB for the HiSparse host pool and 3.77 GiB for
+the indexer tier, so the flag above is roughly equivalent to:
+
+```bash
+vllm serve DSA_MODEL --kv-transfer-config '{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {"connectors": [
+    {"kv_connector": "HiSparseConnector", "kv_role": "kv_both",
+     "kv_connector_extra_config": {"host_pool_gib": 60.22}},
+    {"kv_connector": "OffloadingConnector", "kv_role": "kv_both",
+     "kv_connector_extra_config": {"cpu_bytes_to_use": 4048000000}}
+  ]}
+}'
+```
+
+The flag sizes the indexer tier by token count rather than bytes, so the two
+pools always cover the same tokens.
 
 For P/D, keep the NIXL `--kv-transfer-config` and add the same flag; vLLM
 composes its connectors with yours through `MultiConnector`:
