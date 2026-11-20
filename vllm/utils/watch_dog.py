@@ -3,7 +3,9 @@
 import faulthandler
 import os
 import subprocess
+import sys
 import threading
+import traceback
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator
@@ -62,6 +64,7 @@ class ThreadedWatchDog(WatchDog):
         self.active = True
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self.main_thread_id = 0
 
     def feed(self) -> None:
         self.last_feed_time = time.monotonic()
@@ -106,7 +109,16 @@ class ThreadedWatchDog(WatchDog):
             )
 
     def dump_stack(self, reason: str) -> None:
-        self.dump_to_file(faulthandler.dump_traceback, reason)
+        def dump_stack_to_file(file):
+            frames = sys._current_frames()
+            for tid, frame in frames.items():
+                name = ""
+                if tid == self.main_thread_id:
+                    name = " (Main)"
+                file.write(f"--- {name}thread {tid} ---")
+                traceback.print_stack(frame, file=file)
+
+        self.dump_to_file(dump_stack_to_file, reason)
 
     def dump_py_spy(self, reason: str) -> None:
         def dump_py_spy_to_file(file):
@@ -147,6 +159,7 @@ class ThreadedWatchDog(WatchDog):
         if self.thread is not None and self.thread.is_alive():
             return
         self.stop_event.clear()
+        self.main_thread_id = threading.get_ident()
         self.thread = threading.Thread(target=self._check_loop, daemon=True)
         self.feed()
         self.thread.start()
@@ -192,6 +205,5 @@ def start_watch_dog(
     )
     faulthandler.enable(all_threads=True)
     _watch_dog = ThreadedWatchDog(name, watchdog_config, logger)
-    _watch_dog.set_handler(_watch_dog.dump_py_spy)
     _watch_dog.start()
     return _watch_dog
