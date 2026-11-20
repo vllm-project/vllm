@@ -10,7 +10,8 @@ import queue
 import sys
 import threading
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import create_requests, create_scheduler, mock_kv
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     circular_buffer_layer,
     make_kv_cache_group,
@@ -26,8 +28,10 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     mamba_layer,
     sliding_window_layer,
 )
+from tests.v1.kv_connector.unit.utils import create_model_runner_output
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     transfer_engine_registry,
 )
@@ -63,14 +67,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler impor
     _partial_tail_non_mamba_puts,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    maybe_convert_block_hash,
+)
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     MambaSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.request import Request, RequestStatus
 
 
 @pytest.fixture(autouse=True)
@@ -211,7 +223,7 @@ def _make_store_sending_thread(
         db.set_block_len([256])
         token_databases = [db]
     thread = mooncake_store_worker.KVCacheStoreSendingThread(
-        store=store,
+        store_service=mooncake_store_worker.MooncakeStoreService(store),
         token_databases=token_databases,
         block_size=block_size,
         coord=coord,
@@ -225,7 +237,7 @@ def _make_store_sending_thread(
         supports_group_ids=supports_group_ids,
         record_operation=record_operation,
     )
-    thread.request_queue.task_done = MagicMock()
+    thread.request_queue.task_done = MagicMock(wraps=thread.request_queue.task_done)
     return thread
 
 
@@ -250,7 +262,7 @@ def _make_store_recving_thread(
         hash_block_size=16,
     )
     thread = mooncake_store_worker.KVCacheStoreRecvingThread(
-        store=store,
+        store_service=mooncake_store_worker.MooncakeStoreService(store),
         token_databases=[token_database],
         block_size=16,
         tp_rank=tp_rank,
@@ -744,7 +756,7 @@ def test_tp_shared_receiving_reads_each_local_store_shard():
         hash_block_size=16,
     )
     thread = mooncake_store_worker.KVCacheStoreRecvingThread(
-        store=store,
+        store_service=mooncake_store_worker.MooncakeStoreService(store),
         token_databases=[db],
         block_size=16,
         tp_rank=0,
@@ -1538,7 +1550,7 @@ def test_partial_tail_offload_honors_active_pressure_gate():
 def test_partial_tail_put_failure_activates_pressure_gate():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.return_value = [256, -200, 256]
+    store.batch_put_from_multi_buffers.return_value = [256, -200, 256, 256]
     thread = _make_partial_tail_send_thread(store)
 
     _run_store_req(
@@ -2080,11 +2092,11 @@ def test_failed_existence_check_skips_put_and_completes_save(
     assert stats.data["save_exists"][0]["status"] == status
 
 
-@pytest.mark.parametrize("error", [-900, -901, -1401])
-def test_failed_put_still_completes_save(error: int) -> None:
+@pytest.mark.parametrize("results", [[-900, -900], [-901, -901], [-1401, -1401], []])
+def test_failed_put_still_completes_save(results: list[int]) -> None:
     store = MagicMock()
     store.batch_is_exist.return_value = [0, 0]
-    store.batch_put_from_multi_buffers.return_value = [error, error]
+    store.batch_put_from_multi_buffers.return_value = results
     stats = MooncakeStoreConnectorStats()
     thread = _make_store_sending_thread(store, record_operation=stats.record_operation)
     req = _make_store_req("failed-put", [b"a0", b"a1"])
@@ -2095,6 +2107,7 @@ def test_failed_put_still_completes_save(error: int) -> None:
     assert thread.take_completed_saves() == {req.store_job_id: 1}
     assert stats.reduce()["save_put_failed_keys"] == 2
     assert stats.data["save_put"][0]["status"] != "ok"
+    assert thread._saved_offset.get(req.req_id, 0) == 0
 
 
 def test_store_sending_thread_reports_job_when_the_preamble_raises():
@@ -2761,7 +2774,7 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 1
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
 
 
 def test_recv_thread_skips_split_when_budget_holds_all_keys():
@@ -2822,7 +2835,7 @@ def test_recv_thread_partial_load_failure_reports_block_ids_without_hma():
     thread._handle_request(_make_load_req("req-a", [b"h0", b"h1"], token_len=32))
 
     assert thread.get_and_clear_block_ids_with_load_errors() == {0}
-    assert thread.get_and_clear_failed_requests() == set()
+    assert thread.get_and_clear_failed_requests() == {"req-a"}
     assert thread.get_and_clear_finished_requests() == {"req-a"}
 
 
@@ -4596,6 +4609,7 @@ def _make_bare_worker(
     worker.cache_config = MagicMock()
     worker.cache_config.num_gpu_blocks = num_gpu_blocks
     worker.store = MagicMock()
+    worker.store_service = mooncake_store_worker.MooncakeStoreService(worker.store)
     worker.store.register_buffer.return_value = 0
     worker.kv_role = kv_role
     worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
@@ -4609,7 +4623,6 @@ def _make_bare_worker(
     worker.kv_send_thread = None
     worker.kv_recv_threads = []
     worker.num_recv_threads = 1
-    worker.recv_request_queue = queue.Queue()
     worker._device_regions = {}
     worker._released_regions = set()
     worker.finished_store_req = set()
@@ -5657,7 +5670,7 @@ def test_start_load_kv_queues_async_load():
     w.start_load_kv(meta)
 
     assert req.load_spec.token_len == 32
-    assert w.recv_request_queue.get_nowait() is req
+    assert w.store_service.load_queue.get_nowait() is req
 
 
 def test_putting_consumer_queues_decode_save():
@@ -6423,16 +6436,19 @@ def test_worker_get_kv_connector_stats_resets_after_read():
     assert worker.get_kv_connector_stats() is None
 
 
-def test_lookup_records_mooncake_metrics():
+@pytest.mark.parametrize("results", [[1, 1], [-900, -900], [1, -901], []])
+def test_lookup_records_results_and_failure_status(results):
     worker = _make_bare_worker()
-    worker.store.batch_is_exist.return_value = [1, 1]
-
+    worker.store.batch_is_exist.return_value = results
     result = worker.lookup(33, [b"a0", b"a1"])
     stats = worker.get_kv_connector_stats()
-
-    assert result.hit_length == 32
-    assert isinstance(stats, MooncakeStoreConnectorStats)
-    assert len(stats.data["lookup_exists"]) == 1
+    failed = len(results) != 2 or any(value < 0 for value in results)
+    if failed:
+        assert result is None
+        assert stats.data["lookup_exists"][0]["status"] != "ok"
+    else:
+        assert result.hit_length == 32
+        assert stats.data["lookup_exists"][0]["status"] == "ok"
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
 
 
@@ -6495,3 +6511,135 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+@contextlib.contextmanager
+def _blocked_sdk(
+    store: MagicMock,
+    method: str,
+    result: list[int],
+    run: Callable[[], object],
+    *,
+    keys: list[str] | None = None,
+) -> Iterator[None]:
+    entered, release = threading.Event(), threading.Event()
+    sdk_call = getattr(store, method)
+
+    def blocked(requested_keys: list[str], *_: object) -> list[int]:
+        if keys is not None and requested_keys != keys:
+            return sdk_call.return_value
+        entered.set()
+        assert release.wait(5)
+        return result
+
+    sdk_call.side_effect = blocked
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run)
+        try:
+            assert entered.wait(5)
+            yield
+        finally:
+            release.set()
+            future.result(timeout=5)
+
+
+def _parked_load() -> tuple[
+    Scheduler, Request, int, list[KVCacheBlock], SchedulerOutput
+]:
+    scheduler = create_scheduler(num_blocks=16, use_kv_connector=mock_kv(32, True))
+    scheduler.recompute_kv_load_failures = True
+    (request,) = create_requests(1, num_tokens=64, req_ids=["load"])
+    scheduler.add_request(request)
+    free_before = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    output = scheduler.schedule()
+    blocks = list(scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0])
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    return scheduler, request, free_before, blocks, output
+
+
+@pytest.mark.parametrize(
+    "failure,request_level_errors",
+    [("sdk_error", False), ("exception", True), ("planning_error", False)],
+)
+def test_failed_get_frees_hbm_and_request_recomputes(
+    failure: str, request_level_errors: bool, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    scheduler, request, free_before, old_blocks, output = _parked_load()
+    pool = scheduler.kv_cache_manager.block_pool
+    store = MagicMock()
+    if failure == "exception":
+        store.batch_get_into_multi_buffers.side_effect = RuntimeError("unavailable")
+    else:
+        store.batch_get_into_multi_buffers.return_value = [-900, -900]
+    receiver = _make_store_recving_thread(store, is_hma_required=request_level_errors)
+    load = _make_load_req(request.request_id, [b"h0", b"h1"], token_len=32)
+    load.block_ids = ([block.block_id for block in old_blocks],)
+    if failure == "planning_error":
+        monkeypatch.setattr(
+            receiver.coord,
+            "load_mask",
+            MagicMock(side_effect=RuntimeError("invalid load plan")),
+        )
+    receiver._handle_request(load)
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    first_rank = create_model_runner_output(
+        [],
+        finished_recving=receiver.get_and_clear_finished_requests(),
+        failed_recving=receiver.get_and_clear_failed_requests(),
+        invalid_block_ids=receiver.get_and_clear_block_ids_with_load_errors(),
+    )
+    combined = aggregator.aggregate([first_rank, create_model_runner_output([])])
+    scheduler.update_from_output(output, combined)
+    assert all(block.ref_cnt > 0 for block in old_blocks)
+    waiting_output = scheduler.schedule()
+    combined = aggregator.aggregate(
+        [
+            create_model_runner_output([], finished_recving={request.request_id}),
+            create_model_runner_output([]),
+        ]
+    )
+    scheduler.update_from_output(waiting_output, combined)
+    # Defer a new lookup so promotion exposes the release before recompute
+    # allocates replacement blocks (possibly reusing the very same IDs).
+    scheduler.connector.get_num_new_matched_tokens = lambda *_: (None, False)
+    scheduler.schedule()
+    assert all(block.ref_cnt == 0 for block in old_blocks)
+    assert pool.get_num_free_blocks() == free_before
+    scheduler.connector.get_num_new_matched_tokens = lambda *_: (0, False)
+    retried = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert retried.num_scheduled_tokens[request.request_id] == 64
+    assert retried.scheduled_new_reqs[0].num_computed_tokens == 0
+    assert store.batch_get_into_multi_buffers.call_count == (
+        0 if failure == "planning_error" else 1
+    )
+
+
+def test_aborted_request_keeps_hbm_until_native_get_returns(monkeypatch):
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    scheduler, request, free_before, blocks, output = _parked_load()
+    store = MagicMock()
+    receiver = _make_store_recving_thread(store)
+    load = _make_load_req(request.request_id, [b"h0", b"h1"], token_len=32)
+    load.block_ids = ([block.block_id for block in blocks],)
+    with _blocked_sdk(
+        store,
+        "batch_get_into_multi_buffers",
+        [-900, -900],
+        lambda: receiver._handle_request(load),
+    ):
+        scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+        assert all(block.ref_cnt > 0 for block in blocks)
+        assert receiver.get_and_clear_finished_requests() == set()
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(
+            [],
+            finished_recving=receiver.get_and_clear_finished_requests(),
+            failed_recving=receiver.get_and_clear_failed_requests(),
+            invalid_block_ids=receiver.get_and_clear_block_ids_with_load_errors(),
+        ),
+    )
+    assert all(block.ref_cnt == 0 for block in blocks)
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == free_before
