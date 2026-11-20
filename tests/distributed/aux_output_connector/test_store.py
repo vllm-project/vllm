@@ -3474,6 +3474,48 @@ def test_session_object_writer_sends_a_removal_deferred_as_the_queue_empties(
         assert _run_within(writer.close) is None
 
 
+def test_session_object_writer_drain_keeps_the_writes_behind_a_put_that_returned(
+    monkeypatch,
+):
+    now = [0.0]
+    entered = threading.Event()
+    release = threading.Event()
+    late: list[int] = []
+
+    def monotonic():
+        if threading.current_thread().name == "drain" and not late:
+            late.append(1)
+            release.set()
+            deadline = time.monotonic() + 10
+            while writer._busy_since is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            now[0] = 2.0
+        return now[0]
+
+    def put(keys):
+        if keys[0] == "job/s/tail/0":
+            entered.set()
+            release.wait(30)
+
+    client, writer = _timed_writer(put, 1.0, 4)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        assert entered.wait(10)
+        writer.add_tail("job/s/tail/1", rows, {})
+        monkeypatch.setattr(
+            session_objects_module, "time", SimpleNamespace(monotonic=monotonic)
+        )
+        draining = threading.Thread(target=writer.drain, name="drain", daemon=True)
+        draining.start()
+        draining.join(10)
+        assert not draining.is_alive()
+    finally:
+        release.set()
+        assert _run_within(writer.close) is None
+    assert list(client.objects) == ["job/s/tail/0", "job/s/tail/1"]
+
+
 def test_session_object_writer_close_stops_retrying():
     attempts = []
     client, writer = _timed_writer(lambda keys: attempts.append(keys), 600.0, 1)
