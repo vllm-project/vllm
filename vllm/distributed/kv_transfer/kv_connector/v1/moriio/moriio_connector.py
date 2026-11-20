@@ -3485,13 +3485,13 @@ class MoRIIOConnectorWorker:
         every connection the producer had to this rank is down. Otherwise the
         blocks stay allocated: the producer could still write into them.
         """
+        assert self.moriio_engine is not None
         producer = order.producer
         keys = {tp: producer.engine_key(tp) for tp in range(producer.tp_size)}
         safe = True
         endpoints_fenced = 0
-        previously_fenced = False
+        known = False
         for key in keys.values():
-            previously_fenced |= key in self._fenced_producer_keys
             self._fenced_producer_keys.setdefault(key, set()).add(order.fence_id)
             try:
                 result = self.moriio_engine.fence_remote_engine(key)
@@ -3499,19 +3499,26 @@ class MoRIIOConnectorWorker:
                 logger.exception("MoRI-IO fence of producer %s raised", key)
                 safe = False
                 continue
+            endpoints_fenced += result.endpoints_fenced
+            # A key this engine never had a connection with has nothing to
+            # cut: with equal TP, a decode rank only hears from one producer
+            # rank. Older MoRI does not say, so a connection found stands in.
+            if not getattr(result, "peer_known", result.endpoints_fenced > 0):
+                continue
+            known = True
             if not result.ok:
                 logger.error(
                     "MoRI-IO fence of producer %s incomplete: %s", key, result.message
                 )
                 safe = False
-            endpoints_fenced += result.endpoints_fenced
-        if endpoints_fenced == 0 and not previously_fenced:
-            # A rank that had requests in flight from the producer holds a
-            # connection to it, so a fence that found none points at a key that
-            # does not match the producer's engine.
+        if not known:
+            # A rank that had requests in flight from the producer had a
+            # connection with it, so when no key is known, the keys do not
+            # match the producer's engines, and the producer is not fenced.
+            # Asked of every fence, so a wrong key never counts as fenced.
             logger.error(
-                "MoRI-IO fence %s found no connection from producer keys %s; "
-                "keeping the blocks of its receives allocated.",
+                "MoRI-IO fence %s: this engine never had a connection with "
+                "producer keys %s; keeping the blocks of its receives allocated.",
                 order.fence_id,
                 sorted(keys.values()),
             )
@@ -3563,6 +3570,7 @@ class MoRIIOConnectorWorker:
 
     def _service_fences(self) -> None:
         """Unfence producers that acked every abort, and re-send the rest."""
+        assert self.moriio_engine is not None
         for fence_id, producer_key in self.moriio_wrapper.pop_fence_acks():
             pending = self._fence_pending.get(fence_id)
             if pending is None:

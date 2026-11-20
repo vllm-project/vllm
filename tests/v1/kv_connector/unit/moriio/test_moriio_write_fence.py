@@ -97,17 +97,24 @@ class FakeEngine:
 
     def fence_remote_engine(self, key: str):
         self.fenced.append(key)
-        return self.results.get(
-            key, SimpleNamespace(ok=True, endpoints_fenced=1, message="")
-        )
+        return self.results.get(key, _fence_result())
 
     def unfence_remote_engine(self, key: str) -> bool:
         self.unfenced.append(key)
         return True
 
 
-def _fence_result(ok: bool = True, endpoints_fenced: int = 1):
-    return SimpleNamespace(ok=ok, endpoints_fenced=endpoints_fenced, message="x")
+def _fence_result(ok: bool = True, endpoints_fenced: int = 1, peer_known: bool = True):
+    return SimpleNamespace(
+        ok=ok and peer_known,
+        endpoints_fenced=endpoints_fenced,
+        peer_known=peer_known,
+        message="x",
+    )
+
+
+# What MoRI returns for a key it never had a connection with.
+NEVER_SEEN = _fence_result(endpoints_fenced=0, peer_known=False)
 
 
 def _recording_wrapper() -> MoRIIOWrapper:
@@ -467,8 +474,8 @@ def test_fence_tells_every_producer_rank_to_abort():
 
 @pytest.mark.parametrize(
     "result",
-    [_fence_result(ok=False), _fence_result(endpoints_fenced=0)],
-    ids=["a-connection-could-not-be-fenced", "no-connection-found"],
+    [_fence_result(ok=False), NEVER_SEEN],
+    ids=["a-connection-could-not-be-fenced", "no-key-ever-seen"],
 )
 def test_unsafe_fence_reports_nothing(result):
     engine = FakeEngine(
@@ -489,12 +496,49 @@ def test_unsafe_fence_reports_nothing(result):
 def test_fence_without_connections_on_one_rank_is_safe():
     """With equal TP each decode rank only holds a connection to one producer
     rank; the fence of the other key finds nothing and that is fine."""
-    engine = FakeEngine({PRODUCER.engine_key(1): _fence_result(endpoints_fenced=0)})
+    engine = FakeEngine({PRODUCER.engine_key(1): NEVER_SEEN})
     worker = _fence_worker(engine)
 
     _apply(worker, _order())
 
     assert worker.get_transfer_results().failed_recving == {"stuck", "collateral"}
+
+
+def test_a_known_producer_whose_connections_are_gone_is_safe_to_fence():
+    """A second fence finds nothing left to cut, as the first one cut it all;
+    the producer is still known, so its receives may be freed."""
+    engine = FakeEngine(
+        {
+            PRODUCER.engine_key(0): _fence_result(endpoints_fenced=0),
+            PRODUCER.engine_key(1): NEVER_SEEN,
+        }
+    )
+    worker = _fence_worker(engine)
+
+    _apply(worker, _order())
+
+    assert worker.get_transfer_results().failed_recving == {"stuck", "collateral"}
+
+
+@pytest.mark.parametrize(
+    "result",
+    # MoRI before peer_known reported such a key ok, with nothing fenced.
+    [NEVER_SEEN, SimpleNamespace(ok=True, endpoints_fenced=0, message="")],
+    ids=["mori-says-unknown", "older-mori"],
+)
+def test_a_key_never_seen_is_never_taken_for_fenced(result):
+    """Keys that match no engine of the producer stay unsafe on every fence,
+    not only the first: the real producer is not fenced and may still write."""
+    engine = FakeEngine({PRODUCER.engine_key(tp): result for tp in range(2)})
+    worker = _fence_worker(engine)
+    mapping = {**MAPPING, "xfer-late": "late"}
+
+    _apply(worker, _order("f1"), mapping=mapping)
+    _apply(worker, _order("f2", late="xfer-late"), mapping=mapping)
+    results = worker.get_transfer_results()
+
+    assert results.failed_recving == set()
+    assert results.finished_recving == set()
 
 
 def test_write_done_that_beat_the_fence_is_reported_as_success():
@@ -748,7 +792,7 @@ def test_abort_drops_the_transfers_resets_the_connection_and_acks(role):
     )
 
 
-def test_resent_abort_is_reacked_without_another_reset(role):
+def test_resent_abort_is_acked_again_without_another_reset(role):
     role(moriio_common.ROLE.PRODUCER)
     writer, wrapper = _producer_writer()
     abort = {
