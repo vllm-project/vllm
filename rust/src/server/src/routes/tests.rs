@@ -7650,6 +7650,29 @@ async fn completions_empty_allowed_token_ids_returns_openai_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn completions_empty_text_prompt_returns_openai_error() {
+    let (mut app, _engine_task) = test_app().await;
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(json["error"]["param"], "prompt");
+    assert_eq!(
+        json["error"]["message"],
+        "Either prompt or prompt_embeds must be provided and non-empty."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_return_json_response() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app

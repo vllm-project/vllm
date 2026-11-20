@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_text::Prompt;
+
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
@@ -15,6 +17,14 @@ pub(super) fn validate_request_compat(
     // `vllm-bench` random workload compatibility, so unsupported legacy
     // completions features fail early here.
     served_model_names.check(request.model.as_deref())?;
+
+    // Same check and message as Python's CompletionRequest.
+    if matches!(&request.prompt, Prompt::Text(text) if text.is_empty()) {
+        bail_invalid_request!(
+            param = "prompt",
+            "Either prompt or prompt_embeds must be provided and non-empty."
+        );
+    }
 
     if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
     {
@@ -259,6 +269,19 @@ mod tests {
             };
             assert!(validate_request_compat(&request, &served_names(&["served-model"])).is_ok());
         }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_empty_text_prompt() {
+        let names = served_names(&["Qwen/Qwen1.5-0.5B-Chat"]);
+        let request: CompletionRequest =
+            serde_json::from_value(json!({"prompt": ""})).expect("parse request");
+        assert!(validate_request_compat(&request, &names).is_err());
+
+        // Python rejects only the empty string, so whitespace is still a prompt.
+        let request: CompletionRequest =
+            serde_json::from_value(json!({"prompt": " "})).expect("parse request");
+        assert!(validate_request_compat(&request, &names).is_ok());
     }
 
     #[test]
