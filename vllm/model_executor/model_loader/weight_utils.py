@@ -16,9 +16,9 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any
 
 import filelock
 import huggingface_hub.constants
@@ -55,6 +55,7 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.cpu_resource_utils import get_available_memory
+from vllm.utils.file_utils import atomic_writer as atomic_writer
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -109,49 +110,6 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
     # mode 0o666 is required for the filelock to be shared across users
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name), mode=0o666)
     return lock
-
-
-@contextmanager
-def atomic_writer(
-    filepath: str | Path, mode: str = "w", encoding: str | None = None
-) -> Generator[IO]:
-    """Context manager that provides an atomic file writing routine.
-
-    The context manager writes to a temporary file and, if successful,
-    atomically replaces the original file.
-
-    Args:
-        filepath (str or Path): The path to the file to write.
-        mode (str): The file mode for the temporary file (e.g., 'w', 'wb').
-        encoding (str): The encoding for text mode.
-
-    Yields:
-        file object: A handle to the temporary file.
-
-    """
-    # Create a temporary file in the same directory as the target file
-    # to ensure it's on the same filesystem for an atomic replace.
-    temp_dir = os.path.dirname(filepath)
-    temp_fd, temp_path = tempfile.mkstemp(dir=temp_dir)
-
-    try:
-        # Open the temporary file for writing
-        with os.fdopen(temp_fd, mode=mode, encoding=encoding) as temp_file:
-            yield temp_file
-
-        # If the 'with' block completes successfully,
-        # perform the atomic replace.
-        os.replace(temp_path, filepath)
-
-    except Exception:
-        logger.exception(
-            "Error during atomic write. Original file '%s' not modified", filepath
-        )
-        raise
-    finally:
-        # Clean up the temporary file if it still exists.
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 def _natural_sort_key(filepath: str) -> list:
@@ -290,6 +248,9 @@ def get_quant_config(
         if (
             model_config.quantization == "modelopt_mixed"
             and "quantized_layers" not in hf_quant_config
+        ) or (
+            # Inkling2's per-tensor precisions are only in hf_quant_config.json.
+            model_config.quantization == "inkling2" and "model" not in hf_quant_config
         ):
             pass  # fall through to file-based loading below
         else:
@@ -588,6 +549,33 @@ def download_safetensors_index_file_from_hf(
             logger.info("No %s found in remote.", index_file)
 
 
+def get_safetensors_files_in_index(hf_folder: str, index_file: str) -> list[str] | None:
+    """Return the files the safetensors index lists, or None without an index.
+
+    The files may sit in a subdirectory, like tensors/, and may be missing.
+    Raises ValueError if the index lists a file outside hf_folder.
+    """
+    index_file_name = os.path.join(hf_folder, index_file)
+    if not os.path.isfile(index_file_name):
+        return None
+    # model.safetensors.index.json is a mapping from keys in the
+    # torch state_dict to safetensors file holding that weight.
+    with open(index_file_name) as f:
+        weight_map = json.load(f)["weight_map"]
+    files = {os.path.join(hf_folder, name) for name in weight_map.values()}
+    # Compare paths without resolving links: Hub snapshot files link to blobs
+    # outside the snapshot folder.
+    folder = os.path.abspath(hf_folder)
+    outside = [
+        f
+        for f in sorted(files)
+        if os.path.commonpath([folder, os.path.abspath(f)]) != folder
+    ]
+    if outside:
+        raise ValueError(f"{index_file} lists files outside {hf_folder}: {outside}")
+    return sorted(files)
+
+
 # For models like Mistral-7B-v0.3, there are both sharded
 # safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
@@ -596,30 +584,18 @@ def download_safetensors_index_file_from_hf(
 def filter_duplicate_safetensors_files(
     hf_weights_files: list[str], hf_folder: str, index_file: str
 ) -> list[str]:
-    # model.safetensors.index.json is a mapping from keys in the
-    # torch state_dict to safetensors file holding that weight.
-    index_file_name = os.path.join(hf_folder, index_file)
-    if not os.path.isfile(index_file_name):
+    weight_files_in_index = get_safetensors_files_in_index(hf_folder, index_file)
+    if weight_files_in_index is None:
         return hf_weights_files
-
-    # Iterate through the weight_map (weight_name: safetensors files)
-    # to identify weights that we should use.
-    with open(index_file_name) as f:
-        weight_map = json.load(f)["weight_map"]
-    weight_files_in_index = set()
-    for weight_name in weight_map:
-        weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
     # Check if files referenced in model.safetensors.index.json actually exist.
     # Raise error if any file is missing.
-    hf_weights_files_set = set(hf_weights_files)
-    missing_files = weight_files_in_index - hf_weights_files_set
+    missing_files = {f for f in weight_files_in_index if not os.path.isfile(f)}
     if missing_files:
         raise FileNotFoundError(
             f"Weight files referenced in index but missing: {missing_files}"
         )
-    # Filter out any fields that are not found in the index file.
-    hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
-    return hf_weights_files
+    # Take the files from the index, which may list some in a subdirectory.
+    return weight_files_in_index
 
 
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
@@ -909,7 +885,19 @@ def drop_checkpoint_cache(
         return
     for checkpoint_dir in checkpoint_dirs:
         dropped_bytes = 0
-        for path in checkpoint_dir.glob("*.safetensors"):
+        paths = set(checkpoint_dir.glob("*.safetensors"))
+        # The index may list shards in a subdirectory, like tensors/.
+        try:
+            index_files = get_safetensors_files_in_index(
+                str(checkpoint_dir), SAFE_WEIGHTS_INDEX_NAME
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not read the safetensors index in %s: %s", checkpoint_dir, exc
+            )
+            index_files = None
+        paths.update(Path(f) for f in index_files or () if os.path.isfile(f))
+        for path in paths:
             try:
                 with path.open("rb") as file:
                     os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
