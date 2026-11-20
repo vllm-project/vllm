@@ -25,3 +25,20 @@ steps:
   commands:
     - cd tests
     - pytest -v -s v1/shutdown -k "not (test_llm_model_error and 2-True) and not (test_async_llm_startup_error and -2)"
+
+- label: ":intel: (BMG) Distributed DCP Direct A2A"
+  key: distributed-dcp-direct-a2a-tests-2-gpus
+  timeout_in_minutes: 30
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/v1/attention/ops/cp_common.py
+  - vllm/v1/attention/ops/dcp.py
+  - vllm/distributed/
+  - tests/distributed/test_dcp_direct_a2a_lse_reduce.py
+  commands:
+    - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference

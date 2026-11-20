@@ -29,6 +29,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
@@ -1316,6 +1317,15 @@ def get_direct_dcp_a2a_workspace(
     if not direct_cp_enabled(
         group, dtype, envs.VLLM_USE_DIRECT_DCP_A2A, _A2A_SUPPORTED_DTYPES
     ):
+        return None
+    # XPU kernels ship in vllm-xpu-kernels; older releases lack this op.
+    if current_platform.is_xpu() and not hasattr(
+        torch.ops._C, "direct_dcp_a2a_lse_reduce"
+    ):
+        logger.warning_once(
+            "Direct DCP A2A is disabled because the installed kernels do not "
+            "provide direct_dcp_a2a_lse_reduce."
+        )
         return None
     return DirectDCPA2AWorkspace(
         group.device_group,

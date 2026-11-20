@@ -32,6 +32,12 @@ except ImportError:
     symm_mem_available = False
 
 
+def _symm_mem_device_type():
+    from torch._C._autograd import DeviceType
+
+    return DeviceType.XPU if current_platform.is_xpu() else DeviceType.CUDA
+
+
 @functools.cache
 def _symm_mem_spans_group(group: GroupCoordinator) -> bool:
     """Probe whether the group has NVLS symmetric memory."""
@@ -41,11 +47,14 @@ def _symm_mem_spans_group(group: GroupCoordinator) -> bool:
     if topology is SymmetricMemoryTopology.UNSUPPORTED:
         return False
     try:
-        from torch._C._autograd import DeviceType
         from torch._C._distributed_c10d import _SymmetricMemory
 
-        device = torch.device("cuda", torch.accelerator.current_device_index())
-        if not _SymmetricMemory.has_multicast_support(DeviceType.CUDA, device.index):
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
+        if not _SymmetricMemory.has_multicast_support(
+            _symm_mem_device_type(), device.index
+        ):
             return False
         probe = symm_mem.empty(8, dtype=torch.uint8, device=device)
         probe.zero_()
@@ -73,7 +82,7 @@ def direct_cp_enabled(
         return False
     if use_direct is None and (
         not symm_mem_available
-        or not current_platform.is_cuda()
+        or not (current_platform.is_cuda() or current_platform.is_xpu())
         or (supported_dtypes is not None and dtype not in supported_dtypes)
     ):
         return False
@@ -135,7 +144,8 @@ class DirectCPWorkspace:
                 [view[ubatch].data_ptr() for view in views]
                 for ubatch in range(self.num_ubatches)
             ],
-            dtype=torch.int64,
+            # Level Zero device addresses can exceed 2**63.
+            dtype=torch.uint64 if current_platform.is_xpu() else torch.int64,
             device=self.device,
         )
         self._allocations.append((storage, handle, views))
@@ -149,11 +159,10 @@ class DirectCPWorkspace:
         else:
             return disabled
         try:
-            from torch._C._autograd import DeviceType
             from torch._C._distributed_c10d import _SymmetricMemory
 
             if not _SymmetricMemory.has_multicast_support(
-                DeviceType.CUDA, storage.device.index
+                _symm_mem_device_type(), storage.device.index
             ):
                 return disabled
             multicast_base = handle.multicast_ptr

@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -28,6 +29,12 @@ def _has_multicast_support() -> bool:
         return _SymmetricMemory.has_multicast_support(DeviceType.CUDA, 0)
     except Exception:
         return False
+
+
+def _graph_api():
+    if current_platform.is_xpu():
+        return torch.xpu.XPUGraph, torch.xpu.graph
+    return torch.cuda.CUDAGraph, torch.cuda.graph
 
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
@@ -834,9 +841,9 @@ def test_distributed_direct_kv_gather_matches_reference(world_size: int):
 def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(current_platform.device_type, local_rank)
     torch.accelerator.set_device_index(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend=current_platform.dist_backend)
     try:
         from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
@@ -1063,8 +1070,9 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         partial_lse = lse_layout(partial_lse)
         torch.accelerator.synchronize()
         active_ubatch[0] = 1
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
+        graph_cls, graph_ctx = _graph_api()
+        graph = graph_cls()
+        with graph_ctx(graph):
             actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
         for _ in range(3):
             graph.replay()
