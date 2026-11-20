@@ -46,9 +46,11 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     SeedAddress,
+    discover_seed_topology,
     mirror_device_indices,
     parse_seed_addresses,
     peer_cache_config,
+    preflight_seed_sources,
     seed_address,
 )
 from vllm.usage.usage_lib import UsageContext
@@ -144,10 +146,11 @@ def _validate_seed_args(
             "Unix --weight-cache-seed requires one target socket per local "
             f"GPU; expected {local_world_size}, got {len(addresses)}"
         )
-    if remote_seed and len(addresses) != nnodes:
+    if remote_seed and len(addresses) > 1 and world_size % len(addresses) != 0:
         raise ValueError(
-            "Remote --weight-cache-seed requires one host:base_port per source "
-            f"node in node_rank order; expected {nnodes}, got {len(addresses)}"
+            "Multi-host --weight-cache-seed passes one host:base_port per "
+            f"source node, so its count ({len(addresses)}) must divide "
+            f"the world size ({world_size})"
         )
     # A token only protects the TCP planes: the listener and a remote source.
     has_remote = (
@@ -260,10 +263,13 @@ class PreloadSubcommand(CLISubcommand):
             "weights from its rank-matched source. For same-host CUDA IPC, "
             "pass one target Unix socket per local GPU (comma separated, in "
             "device order); draft daemons use the corresponding *_draft.sock "
-            "paths. For cross-host Mooncake RDMA, pass one host:base_port per "
-            "source node (comma separated, in node_rank order); each rank "
-            "selects its node's address and dials base_port + group offset + "
-            "its global rank.",
+            "paths. For cross-host Mooncake RDMA, a single host:base_port "
+            "discovers every source rank's address, supporting any source "
+            "node layout; legacy sources fall back to that host with "
+            "base_port + group offset + global rank. Alternatively, pass one "
+            "host:base_port per source node (comma separated, in node_rank "
+            "order); each rank selects its node's address and uses the same "
+            "port arithmetic.",
         )
         parser.add_argument(
             "--warmup-cache-stores",
@@ -420,6 +426,25 @@ class PreloadSubcommand(CLISubcommand):
             # source replica does not use, inferred from the source's GPUs.
             mirror_devices = mirror_device_indices(seed_addresses, local_world_size)
 
+        # A single remote host:base_port names a source replica whose
+        # per-rank daemon addresses are discovered before any daemon
+        # spawns. A legacy source (no topology kind) returns None and the
+        # spawn loop falls back to the single-host seed_address arithmetic.
+        discovered_maps = None
+        if len(seed_addresses) == 1 and mirror_devices is None:
+            seed_endpoint = seed_addresses[0]
+            if isinstance(seed_endpoint, tuple):
+                # Validated above: a remote seed requires a token.
+                assert args.seed_token is not None
+                discovered_maps = discover_seed_topology(
+                    seed_endpoint,
+                    args.seed_token,
+                    world_size,
+                    need_draft=len(groups) > 1,
+                )
+                if discovered_maps is not None:
+                    preflight_seed_sources(discovered_maps, args.seed_token, world_size)
+
         procs: list[BaseProcess] = []
         serving: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
@@ -429,14 +454,21 @@ class PreloadSubcommand(CLISubcommand):
             for local_rank, dp_rank, pp_rank, tp_rank in placements:
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
                 offset = port_offset + global_rank
-                peer_source = seed_address(
-                    seed_addresses,
-                    local_rank,
-                    global_rank,
-                    port_offset,
-                    node_rank=node_rank,
-                    is_draft=is_draft,
-                )
+                peer_source: SeedAddress | None
+                if discovered_maps is not None:
+                    # Topology discovery already resolved every source
+                    # rank's address; bypass the seed_address arithmetic.
+                    peer_source = discovered_maps[group_index][global_rank]
+                else:
+                    peer_source = seed_address(
+                        seed_addresses,
+                        local_rank,
+                        global_rank,
+                        port_offset,
+                        world_size=world_size,
+                        node_rank=node_rank if len(seed_addresses) > 1 else 0,
+                        is_draft=is_draft,
+                    )
                 source: str | tuple[str, int] | None
                 if peer_source is not None:
                     daemon_config = peer_cache_config(config, is_draft=is_draft)

@@ -93,6 +93,7 @@ import signal
 import socket
 import time
 from collections.abc import Callable, Iterable
+from typing import Any
 
 import torch
 
@@ -157,8 +158,12 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
     WEIGHT_COPY_LEASE_TIMEOUT_S,
     WeightShardSeed,
 )
+from vllm.model_executor.model_loader.weight_cache.weight_seed.topology import (
+    ReplicaTopology,
+)
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
+from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -255,11 +260,42 @@ class WeightCacheDaemon:
         if is_draft:
             # The engine builds the draft as the only pipeline stage.
             self.cache_key = replace(self.cache_key, pp_size=1, pp_rank=0)
+        # Registered late because it serves world_size and cache_key, assigned
+        # after the SeedTransport was built; requests are answered by kind, so
+        # seedable order does not matter.
+        self.topology_seed = ReplicaTopology(self.world_size, is_draft, self.cache_key)
+        self.d2d._seedables.append(self.topology_seed)
 
     def warmup(self) -> None:
         """Run each warmup cache's pass (adopting remote caches via D2D)."""
         for cache in self.warmup_caches:
             cache.warmup(self, self.d2d)
+
+    def gather_listener_map(self) -> None:
+        """Collect the group's dialable D2D endpoints into the topology seed.
+
+        Runs on the live world group before release_distributed. Every rank
+        participates, including draft PP ranks that do not serve a model.
+        A daemon without a remote listener (Unix sockets only) has nothing
+        to report.
+        """
+        listen = self.seed_config.listen
+        if listen is None:
+            return
+        host, port = listen
+        if host in ("0.0.0.0", "::"):
+            # A wildcard binds every NIC; report the primary one, like the
+            # Mooncake session does (see weight_seed/mooncake.py).
+            host = get_ip()
+        gathered: list[Any] = [None] * self.world_size
+        torch.distributed.all_gather_object(
+            gathered,
+            (self.global_rank, host, port),
+            group=get_world_group().cpu_group,
+        )
+        self.topology_seed.set_ranks(
+            {rank: (peer_host, peer_port) for rank, peer_host, peer_port in gathered}
+        )
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.device_index)
@@ -605,6 +641,8 @@ def _run_daemon(
         warmup_cache_stores=warmup_cache_stores,
     )
     daemon.load_model()
+    # Every rank joins the topology gather before non-serving draft PP ranks exit.
+    daemon.gather_listener_map()
     if not daemon.serves_model:
         daemon.release_distributed()
         return

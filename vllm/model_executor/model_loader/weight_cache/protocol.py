@@ -20,8 +20,8 @@ import stat
 import struct
 import tempfile
 import time
-from dataclasses import dataclass, fields
-from typing import Any, Literal, NamedTuple
+from dataclasses import asdict, dataclass, fields
+from typing import Any, Literal, NamedTuple, TypeVar, get_origin
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
@@ -55,6 +55,8 @@ MAX_MSG_SIZE = 1 << 34
 # warmup cache tables, the flat cache-key dataclass, storage manifests, and
 # an RDMA seed (a session string plus integer regions).
 MAX_JSON_MSG_SIZE = 1 << 26
+
+_DataclassT = TypeVar("_DataclassT")
 
 
 def _current_uid() -> int:
@@ -498,6 +500,27 @@ def parse_seed_address(address: str) -> str | tuple[str, int]:
     if "/" in address or ":" not in address:
         return os.path.expanduser(address)
     return split_host_port(address)
+
+
+def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
+    """Rebuild a flat dataclass from untrusted JSON, coercing tuples back."""
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object for {cls.__name__}")
+    declared = {f.name: f for f in fields(cls)}  # type: ignore[arg-type]
+    unknown = set(payload) - set(declared)
+    if unknown:
+        raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
+    values = {}
+    for name, value in payload.items():
+        if isinstance(value, list) and get_origin(declared[name].type) is tuple:
+            value = tuple(value)
+        values[name] = value
+    return cls(**values)
+
+
+def dataclass_to_json(instance: Any) -> dict[str, Any]:
+    """Render a flat dataclass for the remote control plane."""
+    return asdict(instance)
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:

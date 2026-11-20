@@ -1778,6 +1778,367 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     assert json.loads(target.read_text()) == table
 
 
+def test_seed_address_single_remote_host_dials_base_plus_rank():
+    """One host:base_port keeps the existing dial rule on every rank."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        parse_seed_addresses,
+        seed_address,
+    )
+
+    addresses = parse_seed_addresses("source.example.com:9000")
+    for rank in range(8):
+        assert seed_address(addresses, rank, rank, 10) == (
+            "source.example.com",
+            9010 + rank,
+        )
+
+
+def test_seed_address_multi_host_maps_contiguous_rank_blocks():
+    """Each node's contiguous global-rank block dials that node's entry."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        parse_seed_addresses,
+        seed_address,
+    )
+
+    addresses = parse_seed_addresses("node0:8000,node1:9000")
+    for rank in range(4):
+        assert seed_address(addresses, rank, rank, 5, node_rank=0) == (
+            "node0",
+            8005 + rank,
+        )
+    for rank in range(4, 8):
+        assert seed_address(addresses, rank, rank, 5, node_rank=1) == (
+            "node1",
+            9005 + rank,
+        )
+
+
+def test_seed_address_multi_host_one_entry_per_rank():
+    """One entry per node: every rank resolves through its node rank."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        parse_seed_addresses,
+        seed_address,
+    )
+
+    addresses = parse_seed_addresses("node0:8000,node1:9000")
+    assert seed_address(addresses, 0, 0, node_rank=0) == ("node0", 8000)
+    assert seed_address(addresses, 1, 1, node_rank=1) == ("node1", 9001)
+
+
+def _validate_seed_addresses(
+    value: str, *, world_size: int = 2, nnodes: int = 1, local_world_size: int = 2
+) -> None:
+    from argparse import Namespace
+
+    from vllm.entrypoints.cli.preload import _validate_seed_args
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        parse_seed_addresses,
+    )
+
+    args = Namespace(
+        seed_listen_host=None,
+        seed_listen_port=None,
+        seed_source_host=None,
+        seed_source_port=None,
+        weight_cache_seed=value,
+        seed_token="test-token" if ":" in value else None,
+    )
+    _validate_seed_args(
+        args,
+        world_size=world_size,
+        num_groups=1,
+        nnodes=nnodes,
+        local_world_size=local_world_size,
+        addresses=parse_seed_addresses(value),
+    )
+
+
+def test_remote_seed_address_count_must_divide_world_size():
+    with pytest.raises(ValueError, match="must divide the world size"):
+        _validate_seed_addresses("node0:8000,node1:9000", world_size=3)
+
+
+def test_seed_address_rejects_mixed_socket_and_remote_forms():
+    with pytest.raises(ValueError, match="cannot mix Unix socket paths"):
+        _validate_seed_addresses("/tmp/source.sock,127.0.0.1:9000")
+
+
+def test_seed_address_unix_socket_forms_unchanged():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        parse_seed_addresses,
+        seed_address,
+    )
+
+    assert seed_address(parse_seed_addresses(None), 0, 0) is None
+    assert seed_address(parse_seed_addresses(""), 0, 0) is None
+    addresses = parse_seed_addresses("/tmp/a.sock,/tmp/b.sock")
+    assert seed_address(addresses, 1, 3) == "/tmp/b.sock"
+    assert seed_address(addresses, 0, 0, is_draft=True) == "/tmp/a_draft.sock"
+    with pytest.raises(ValueError, match="one target socket per local GPU"):
+        _validate_seed_addresses("/tmp/a.sock")
+
+
+def _topology_test_key():
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+    )
+
+    return WeightCacheKey(
+        checkpoint="ckpt",
+        model_arch="Arch",
+        tp_size=2,
+        tp_rank=0,
+        dtype="bf16",
+        quantization=None,
+        quant_config_hash="h",
+        rope_parameters_hash="r",
+        kv_cache_dtype="auto",
+        kv_cache_dtype_skip_layers=(),
+        revision=None,
+        vllm_version="v",
+    )
+
+
+def _start_topology_listener(token, *, world_size=2, is_draft=False, port=0):
+    """Bind a real loopback D2D listener serving one ReplicaTopology."""
+    from vllm.model_executor.model_loader.weight_cache.transport import (
+        SeedConfig,
+        SeedTransport,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.topology import (
+        ReplicaTopology,
+    )
+
+    topology = ReplicaTopology(world_size, is_draft, _topology_test_key())
+    transport = SeedTransport(
+        [topology], SeedConfig(listen=("127.0.0.1", port), token=token)
+    )
+    address = transport.start_listener()
+    assert address is not None
+    return transport, topology, address
+
+
+def test_replica_topology_resolve():
+    """Resolve reports the gathered rank map with string keys, [host, port]."""
+    from dataclasses import asdict
+
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.topology import (
+        ReplicaTopology,
+    )
+
+    key = _topology_test_key()
+    topology = ReplicaTopology(world_size=2, is_draft=False, cache_key=key)
+    # The listener map is gathered after startup; resolve refuses earlier.
+    with pytest.raises(ValueError, match="has no remote listener"):
+        topology.resolve({})
+    topology.set_ranks({0: ("node0", 9000), 1: ("node1", 9001)})
+    payload = topology.resolve({})
+    assert payload == {
+        "world_size": 2,
+        "is_draft": False,
+        "cache_config": asdict(key),
+        "ranks": {"0": ["node0", 9000], "1": ["node1", 9001]},
+    }
+    # A resolved payload round-trips through the target-side validation.
+    assert topology.validate_payload(payload) == payload
+
+
+def test_replica_topology_validate_payload_rejects_malformed():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.topology import (
+        ReplicaTopology,
+    )
+
+    topology = ReplicaTopology(
+        world_size=2, is_draft=False, cache_key=_topology_test_key()
+    )
+    topology.set_ranks({0: ("node0", 9000), 1: ("node1", 9001)})
+    good = topology.resolve({})
+    bad_payloads = [
+        "not a dict",
+        {**good, "world_size": None},
+        {**good, "world_size": 0},
+        {**good, "world_size": "2"},
+        {**good, "world_size": True},
+        {**good, "is_draft": "no"},
+        {**good, "cache_config": None},
+        {**good, "ranks": None},
+        {**good, "ranks": {"x": ["node0", 9000]}},
+        {**good, "ranks": {"0": ["node0", "9000"]}},
+        {**good, "ranks": {"0": [9000, "node0"]}},
+        {**good, "ranks": {"0": ["node0"]}},
+    ]
+    for bad in bad_payloads:
+        with pytest.raises(ValueError):
+            topology.validate_payload(bad)
+
+
+def test_discover_seed_topology_and_preflight():
+    """One source address resolves every rank's listener; all are probed."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        discover_seed_topology,
+        preflight_seed_sources,
+    )
+
+    token = "topo-test-token"
+    transport0, topology0, address0 = _start_topology_listener(token)
+    transport1, topology1, address1 = _start_topology_listener(token)
+    try:
+        ranks = {0: address0, 1: address1}
+        topology0.set_ranks(ranks)
+        topology1.set_ranks(ranks)
+        maps = discover_seed_topology(address0, token, world_size=2, need_draft=False)
+        assert maps == {0: ranks}
+        preflight_seed_sources(maps, token, world_size=2)
+    finally:
+        transport0.close()
+        transport1.close()
+
+
+def _start_target_and_draft(token, world_size=2):
+    """A target listener plus a draft listener at rank0_port + world_size."""
+    for _ in range(50):
+        transport0, topology0, address0 = _start_topology_listener(
+            token, world_size=world_size
+        )
+        try:
+            transport1, topology1, address1 = _start_topology_listener(
+                token,
+                world_size=world_size,
+                is_draft=True,
+                port=address0[1] + world_size,
+            )
+        except OSError:
+            # The derived draft port was taken; draw a fresh base port.
+            transport0.close()
+            continue
+        return transport0, topology0, address0, transport1, topology1, address1
+    raise RuntimeError("No base port with a free port at +world_size")
+
+
+def test_discover_seed_topology_with_draft_group():
+    """need_draft resolves the draft group at rank0's port + world_size."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        discover_seed_topology,
+        preflight_seed_sources,
+    )
+
+    token = "topo-draft-token"
+    transports = _start_target_and_draft(token)
+    transport0, topology0, address0, transport1, topology1, address1 = transports
+    try:
+        topology0.set_ranks({0: address0, 1: address0})
+        topology1.set_ranks({0: address1, 1: address1})
+        maps = discover_seed_topology(address0, token, world_size=2, need_draft=True)
+        assert maps == {
+            0: {0: address0, 1: address0},
+            1: {0: address1, 1: address1},
+        }
+        preflight_seed_sources(maps, token, world_size=2)
+    finally:
+        transport0.close()
+        transport1.close()
+
+
+def test_discover_seed_topology_legacy_source_returns_none():
+    """A source without the topology kind gets the single-host fallback."""
+    from vllm.model_executor.model_loader.weight_cache.transport import (
+        SeedConfig,
+        SeedTransport,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        discover_seed_topology,
+    )
+
+    token = "topo-legacy-token"
+    transport = SeedTransport([], SeedConfig(listen=("127.0.0.1", 0), token=token))
+    address = transport.start_listener()
+    assert address is not None
+    try:
+        maps = discover_seed_topology(address, token, world_size=2, need_draft=False)
+        assert maps is None
+    finally:
+        transport.close()
+
+
+def test_discover_seed_topology_wrong_token():
+    """A token mismatch names --seed-token in the error."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        discover_seed_topology,
+    )
+
+    transport, topology, address = _start_topology_listener("right-token")
+    topology.set_ranks({0: address, 1: address})
+    try:
+        with pytest.raises(RuntimeError, match="--seed-token"):
+            discover_seed_topology(
+                address, "wrong-token", world_size=2, need_draft=False
+            )
+    finally:
+        transport.close()
+
+
+def test_discover_seed_topology_unreachable():
+    """A dead port names the unreachable address in the error."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        discover_seed_topology,
+    )
+
+    address = ("127.0.0.1", get_open_port())
+    with pytest.raises(
+        RuntimeError, match=f"Cannot reach the seed source at {address[0]}:"
+    ) as excinfo:
+        discover_seed_topology(address, "t", world_size=2, need_draft=False)
+    assert str(address[1]) in str(excinfo.value)
+
+
+def test_discover_seed_topology_world_size_mismatch():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        discover_seed_topology,
+    )
+
+    token = "topo-ws-token"
+    transport, topology, address = _start_topology_listener(token, world_size=4)
+    topology.set_ranks({rank: address for rank in range(4)})
+    try:
+        with pytest.raises(RuntimeError, match="world size of 4"):
+            discover_seed_topology(address, token, world_size=2, need_draft=False)
+    finally:
+        transport.close()
+
+
+def test_discover_seed_topology_missing_rank():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        discover_seed_topology,
+    )
+
+    token = "topo-partial-token"
+    transport, topology, address = _start_topology_listener(token)
+    topology.set_ranks({0: address})
+    try:
+        with pytest.raises(RuntimeError, match="no address for rank"):
+            discover_seed_topology(address, token, world_size=2, need_draft=False)
+    finally:
+        transport.close()
+
+
+def test_preflight_seed_sources_dead_rank():
+    """Preflight names the group, rank, and address of a dead source daemon."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        preflight_seed_sources,
+    )
+
+    token = "topo-preflight-token"
+    transport, topology, address = _start_topology_listener(token)
+    topology.set_ranks({0: address, 1: address})
+    dead = ("127.0.0.1", get_open_port())
+    try:
+        with pytest.raises(RuntimeError, match="group 0 rank 1") as excinfo:
+            preflight_seed_sources({0: {0: address, 1: dead}}, token, world_size=2)
+        assert f"{dead[0]}:{dead[1]}" in str(excinfo.value)
+    finally:
+        transport.close()
+
+
 def _wait_for_previous_engines() -> None:
     import torch
 
@@ -2007,6 +2368,151 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
             )
             mirror_outputs = generate(
                 vllm_runner, engine_case, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not has_mooncake(),
+    reason="Multi-host weight seeding requires Mooncake TransferEngine",
+)
+def test_d2d_weight_seeding_multi_host(vllm_runner, monkeypatch):
+    """A multi-host --weight-cache-seed list seeds every rank from its own
+    host:base_port entry.
+
+    Both replicas run on this host at tp=2, but the exchange goes through the
+    token-authenticated TCP listener exactly as a cross-host seed would. The
+    mirror passes two comma-separated loopback entries, so global rank g
+    resolves to entry g and dials base_port + g — the source rank g's
+    listener. Identical outputs with fallback disabled prove the mirrored
+    weights are real.
+    """
+    monkeypatch.setenv("MC_FORCE_TCP", "1")
+    _wait_for_previous_engines()
+
+    case = replace(
+        QWEN_CASE,
+        llm_kwargs={**QWEN_CASE.llm_kwargs, "tensor_parallel_size": 2},
+    )
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    token = "d2d-multi-host-test-token"
+    base_port = get_open_port()
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=2,
+        extra_args=[
+            *case.daemon_args,
+            "--seed-listen-host",
+            "127.0.0.1",
+            "--seed-listen-port",
+            str(base_port),
+            "--seed-token",
+            token,
+        ],
+    ) as source:
+        source.wait_until_ready()
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[
+                *case.daemon_args,
+                "--weight-cache-seed",
+                f"127.0.0.1:{base_port},127.0.0.1:{base_port}",
+                "--seed-token",
+                token,
+            ],
+        ) as mirror:
+            mirror.wait_until_ready()
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over \w+ in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == 2, mirror.logs
+            assert all(int(storages) > 1 for storages, _ in transfers)
+            # Remote copies are latency-dominated; bound stalls, not bandwidth.
+            assert all(float(seconds) < 10.0 for _, seconds in transfers)
+            mirror_outputs = generate(
+                vllm_runner, case, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not has_mooncake(),
+    reason="Weight seed topology discovery requires Mooncake TransferEngine",
+)
+def test_d2d_weight_seeding_single_address_discovery(vllm_runner, monkeypatch):
+    """A single host:base_port seed address resolves the source's per-rank
+    daemon addresses through topology discovery and preflight.
+
+    Same setup as test_d2d_weight_seeding_multi_host (both replicas on this
+    host at tp=2 over the token-authenticated TCP listener), but the mirror
+    passes only the rank-0 address. On loopback the legacy base+rank dial
+    arithmetic would reach the same daemons, so the decisive assertions are
+    the launcher's discovery and preflight log lines, which only the new
+    path emits. Identical outputs with fallback disabled prove the mirrored
+    weights are real.
+    """
+    monkeypatch.setenv("MC_FORCE_TCP", "1")
+    _wait_for_previous_engines()
+
+    case = replace(
+        QWEN_CASE,
+        llm_kwargs={**QWEN_CASE.llm_kwargs, "tensor_parallel_size": 2},
+    )
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    token = "d2d-discovery-test-token"
+    base_port = get_open_port()
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=2,
+        extra_args=[
+            *case.daemon_args,
+            "--seed-listen-host",
+            "127.0.0.1",
+            "--seed-listen-port",
+            str(base_port),
+            "--seed-token",
+            token,
+        ],
+    ) as source:
+        source.wait_until_ready()
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[
+                *case.daemon_args,
+                "--weight-cache-seed",
+                f"127.0.0.1:{base_port}",
+                "--seed-token",
+                token,
+            ],
+        ) as mirror:
+            mirror.wait_until_ready()
+            # The launcher resolved every source rank's address from the
+            # single seed address and probed them all before spawning.
+            assert "Discovered seed source topology: 2 rank(s)" in mirror.logs
+            assert "Preflighted 2 source daemon(s) across 1 group(s)" in mirror.logs
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over \w+ in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == 2, mirror.logs
+            assert all(int(storages) > 1 for storages, _ in transfers)
+            # Remote copies are latency-dominated; bound stalls, not bandwidth.
+            assert all(float(seconds) < 10.0 for _, seconds in transfers)
+            mirror_outputs = generate(
+                vllm_runner, case, mirror.socket_dir, fallback=False
             )
 
     assert mirror_outputs == baseline_outputs
