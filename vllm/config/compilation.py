@@ -1574,6 +1574,15 @@ class CompilationConfig:
             return "+rotary_embedding" in self.custom_ops
         return self.is_custom_op_enabled("rotary_embedding")
 
+    def enable_custom_op_by_default(self, op: str) -> None:
+        """Enable `op` unless `custom_ops` already enables or disables it.
+
+        Idempotent, because `VllmConfig.__post_init__` runs again on every
+        `replace()` and shares this config with the original.
+        """
+        if f"+{op}" not in self.custom_ops and f"-{op}" not in self.custom_ops:
+            self.custom_ops.append(f"+{op}")
+
     def resolve_cudagraph_mode_and_sizes(
         self,
         min_cg_support: "AttentionCGSupport",
