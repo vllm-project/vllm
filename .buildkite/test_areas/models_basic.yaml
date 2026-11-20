@@ -378,8 +378,8 @@ steps:
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
-    # amd_specialized_decode/ is gated on gfx950 and run by the mi355_8 step
-    # :amd: (MI355) GLM-5.3-Flash Mono Decode Kernel.
+    # amd_specialized_decode/ is gated on gfx950 and run by its MI355 step in
+    # monokernels.yaml.
     - pytest -v -s models/glm5next --ignore=models/glm5next/amd_specialized_decode
   mirror:
     amd:
