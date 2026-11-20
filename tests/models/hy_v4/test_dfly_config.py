@@ -62,7 +62,7 @@ def test_hyv4_dfly_rocm_accepts_vl_targets(monkeypatch):
 def test_hyv4_dfly_rocm_rejects_text_only_targets(monkeypatch):
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: True)
-    with pytest.raises(NotImplementedError, match="HYV4 VL or HYV4 Flash target"):
+    with pytest.raises(NotImplementedError, match="HYV4 VL target"):
         HYV4DFlySpeculatorConfig.verify_target_parallel_config(
             _spec(architecture="HYV4ForCausalLM")
         )

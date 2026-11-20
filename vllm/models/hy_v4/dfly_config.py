@@ -215,9 +215,7 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
                 "HYV4VLForConditionalGeneration"
                 not in spec.target_model_config.architectures
             ):
-                raise NotImplementedError(
-                    "HYV4 DFly on ROCm requires a HYV4 VL or HYV4 Flash target"
-                )
+                raise NotImplementedError("HYV4 DFly on ROCm requires a HYV4 VL target")
         for field in (
             "pipeline_parallel_size",
             "prefill_context_parallel_size",
