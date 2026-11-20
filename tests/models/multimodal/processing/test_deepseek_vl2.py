@@ -13,6 +13,7 @@ from tokenizers.models import WordLevel
 from transformers import TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -74,14 +75,14 @@ def test_image_preprocessing_budget(
         inputs = {"prompt": prompt, "images": images}
 
     tensor_bytes = view_count * 3 * 16 * 16 * 4
-    limit = "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"
-    monkeypatch.setenv(limit, str(2 * tensor_bytes - 1))
+    limit = "VLLM_MAX_MEDIA_PREPROCESSING_BYTES"
+    monkeypatch.setattr(envs, limit, 2 * tensor_bytes - 1)
     with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
         processor(**inputs)
 
-    monkeypatch.setenv(limit, str(2 * tensor_bytes))
+    monkeypatch.setattr(envs, limit, 2 * tensor_bytes)
     at_limit = processor(**inputs)
-    monkeypatch.setenv(limit, "0")
+    monkeypatch.setattr(envs, limit, 0)
     unlimited = processor(**inputs)
     assert len(at_limit["pixel_values"]) + len(at_limit.get("images_crop", ())) == (
         view_count
@@ -114,7 +115,7 @@ def test_http_rejects_image_preprocessing_over_budget(tmp_path):
     with RemoteLaunchRenderServer(
         model,
         ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
-        env_dict={"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": "27000"},
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "27000"},
     ) as server:
         for route in ("v1/chat/completions/render", "tokenize"):
             for images, expected_status in ((content, 400), (content[:1], 200)):

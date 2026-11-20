@@ -25,7 +25,7 @@ def validate_image_tensor_budget(
     images: Sequence[HfImageItem], view_pixels: Iterable[int]
 ) -> None:
     """Bound the tensors and their stacked copies before processing images."""
-    limit = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+    limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
     if limit <= 0:
         return
 
@@ -39,6 +39,6 @@ def validate_image_tensor_budget(
         if required_bytes > limit:
             raise VLLMValidationError(
                 "Image preprocessing exceeds "
-                f"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES={limit}.",
+                f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
                 parameter="image",
             )
