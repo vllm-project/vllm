@@ -12,9 +12,12 @@ import random
 import openai
 import pytest
 import pytest_asyncio
+import requests
+import torch
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 
 
 def _generate_random_text(word_count: int) -> str:
@@ -449,4 +452,31 @@ async def test_chunked_processing_response_format(
     # (default behavior for most embedding models)
     assert 0.8 < vector_norm < 1.2, (
         f"Vector norm should be reasonable, actual: {vector_norm}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_pooling_endpoint_with_chunked_processing(
+    server_with_chunked_processing: RemoteOpenAIServer,
+    client_with_chunked_processing: openai.AsyncOpenAI,
+    model_name: str,
+):
+    """/pooling does not chunk, but must still work on a chunked-processing
+    server and match /v1/embeddings for inputs within max_model_len."""
+    text = "Artificial intelligence technology is changing our world."
+    response = requests.post(
+        server_with_chunked_processing.url_for("pooling"),
+        json={"model": model_name, "input": text, "encoding_format": "float"},
+    )
+    response.raise_for_status()
+    poolings = PoolingResponse.model_validate(response.json())
+
+    embeddings = await client_with_chunked_processing.embeddings.create(
+        model=model_name, input=[text], encoding_format="float"
+    )
+    assert torch.allclose(
+        torch.tensor(poolings.data[0].data),
+        torch.tensor(embeddings.data[0].embedding),
+        atol=1e-6,
     )
