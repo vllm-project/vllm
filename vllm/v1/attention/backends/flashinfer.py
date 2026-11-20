@@ -3,7 +3,6 @@
 """Attention layer with FlashInfer."""
 
 import inspect
-import math
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -50,7 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import LOG2E, tl, triton
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_xqa_batch_decode_with_kv_cache,
@@ -114,7 +113,6 @@ FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
-LOG2E = math.log2(math.e)
 logger = init_logger(__name__)
 
 # The mm-prefix (PrefixLM) prefill wrapper evaluates causal OR per-request
@@ -2229,6 +2227,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
 
 class FlashInferImpl(AttentionImpl):
+    # fp32 FP8-KV decode scales and their per-query-dtype views.
+    _decode_scales: torch.Tensor | None = None
+    _decode_scale_views: tuple | None = None
+    _xqa_device_scales = False
+
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
 
@@ -2305,10 +2308,6 @@ class FlashInferImpl(AttentionImpl):
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
         self.o_sf_scale: float | None = None
-        # fp32 decode scales for an FP8 KV cache, refilled in place after each
-        # load so FULL CUDA graphs follow a weight update: bmm1 * log2e for a
-        # BF16 / FP8 query, bmm2, then bmm1 for a BF16 / FP8 query (XQA).
-        self._decode_scales: torch.Tensor | None = None
         # XQA derives its kernel scales from tensor ones with extra ops, so it
         # takes them only when weight updates are enabled.
         self._xqa_device_scales = (
@@ -2385,20 +2384,22 @@ class FlashInferImpl(AttentionImpl):
         else:
             self.sinks.copy_(source_sinks)
 
-    # Only an FP8 query was quantized with the layer's q scale.
     def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
         if not self.kv_cache_dtype.startswith("fp8"):
             return
-        bmm1 = self.scale * layer._k_scale_float
-        bmm1_fp8_q = bmm1 * layer._q_scale_float
-        scales = (bmm1 * LOG2E, bmm1_fp8_q * LOG2E, layer._v_scale_float)
+        bmm1 = [self.get_xqa_bmm1_scale(layer, d) for d in (torch.bfloat16, FP8_DTYPE)]
         new = torch.tensor(
-            (*scales, bmm1, bmm1_fp8_q),
+            [*(b * LOG2E for b in bmm1), layer._v_scale_float, *bmm1],
             dtype=torch.float32,
             device=layer._k_scale.device,
         )
-        refill_derived(self, "_decode_scales", new)
+        # Refilled in place, so FULL CUDA graphs and these views follow updates.
+        scales = refill_derived(self, "_decode_scales", new)
+        self._decode_scale_views = tuple(
+            (scales[i : i + 1], scales[3 + i : 4 + i], scales[2:3]) for i in (0, 1)
+        )
 
+    # Only an FP8 query was quantized with the layer's q scale.
     def get_q_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype) -> float:
         if q_data_type in (torch.float8_e4m3fn, torch.float8_e5m2):
             return layer._q_scale_float
@@ -2995,14 +2996,15 @@ class FlashInferImpl(AttentionImpl):
                     )
                     decode_query = canonicalize_singleton_dim_strides(decode_query)
 
-                fp8_q = int(attn_metadata.q_data_type_decode == FP8_DTYPE)
-                scales = self._decode_scales
+                # Device (bmm1 * log2e, XQA bmm1, bmm2) for this query dtype.
+                views = self._decode_scale_views
+                if views is not None:
+                    views = views[attn_metadata.q_data_type_decode == FP8_DTYPE]
                 if decode_with_xqa:
                     xqa_bmm1_scale: float | torch.Tensor
                     xqa_bmm2_scale: float | torch.Tensor
-                    if scales is not None and self._xqa_device_scales:
-                        xqa_bmm1_scale = scales[3 + fp8_q : 4 + fp8_q]
-                        xqa_bmm2_scale = scales[2:3]
+                    if views is not None and self._xqa_device_scales:
+                        _, xqa_bmm1_scale, xqa_bmm2_scale = views
                     else:
                         self.frozen_kv_scales = "full_graph"
                         xqa_bmm1_scale = self.get_xqa_bmm1_scale(
@@ -3079,9 +3081,8 @@ class FlashInferImpl(AttentionImpl):
                     )
 
                 bmm1_scale_log2 = None
-                if scales is not None and output_scale is None:
-                    bmm1_scale_log2 = scales[fp8_q : fp8_q + 1]
-                    bmm2_scale = scales[2:3]
+                if views is not None and output_scale is None:
+                    bmm1_scale_log2, _, bmm2_scale = views
                 else:
                     # Host scales, or a fused output quant's host o_scale.
                     self.frozen_kv_scales = "full_graph"

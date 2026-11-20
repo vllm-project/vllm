@@ -794,9 +794,8 @@ class AttentionImplBase(ABC, Generic[T]):
     # override it per instance, depending on the kv-cache layout.
     supports_dense_mha_prefill: bool = True
 
-    # Set when decode keeps the q/k/v scales it saw at startup: "full_graph" if
-    # FULL CUDA graphs capture them as host values, "always" if it caches them.
-    # A weight update that changes them is then refused.
+    # Set when decode keeps its startup q/k/v scales ("full_graph": host values
+    # in FULL CUDA graphs; "always": cached); updates changing them are refused.
     frozen_kv_scales: Literal["full_graph", "always"] | None = None
     # Which of "q", "k", "v" are frozen; None for all of them.
     frozen_kv_scale_names: frozenset[str] | None = None

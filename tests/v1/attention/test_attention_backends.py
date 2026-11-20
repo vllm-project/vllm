@@ -1231,8 +1231,6 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
     impl = object.__new__(flashinfer_backend.FlashInferImpl)
     impl.scale = 1.0
     impl.kv_cache_dtype = "auto"
-    impl._decode_scales = None
-    impl._xqa_device_scales = False
     impl.is_kvcache_nvfp4 = False
     impl.head_size = 16
     impl.dcp_world_size = 1

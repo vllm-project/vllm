@@ -43,24 +43,22 @@ def _check_frozen_kv_scales(model: torch.nn.Module) -> None:
     from vllm.config import get_current_vllm_config_or_none
 
     startup = model.__dict__.get("_startup_kv_scales", {})
+    config = get_current_vllm_config_or_none()
+    full_graphs = (
+        config is not None
+        and config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+    )
     for name, scales in _kv_scales(model).items():
-        if name not in startup:
-            continue
         impls = model.get_submodule(name).impl.get_impl_variants()
-        frozen = {impl.frozen_kv_scales for impl in impls}
-        if "always" not in frozen:
-            config = get_current_vllm_config_or_none()
-            if "full_graph" not in frozen or config is None:
-                continue
-            if not config.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                continue
-        names = set().union(
-            *(
-                impl.frozen_kv_scale_names or "qkv"
-                for impl in impls
-                if impl.frozen_kv_scales
-            )
-        )
+        frozen = [
+            impl
+            for impl in impls
+            if impl.frozen_kv_scales == "always"
+            or (impl.frozen_kv_scales == "full_graph" and full_graphs)
+        ]
+        if name not in startup or not frozen:
+            continue
+        names = set().union(*(impl.frozen_kv_scale_names or "qkv" for impl in frozen))
         # Layerwise reload rounds scales to BF16; ignore that.
         if all(
             math.isclose(new, old, rel_tol=2**-8)
@@ -83,7 +81,8 @@ def start_reload(model: torch.nn.Module) -> None:
     """Begin a weight update in the configured mode."""
     global _weight_update_active
     # The KV scales FULL CUDA graphs captured at startup, kept across updates.
-    model.__dict__.setdefault("_startup_kv_scales", _kv_scales(model))
+    if "_startup_kv_scales" not in model.__dict__:
+        model.__dict__["_startup_kv_scales"] = _kv_scales(model)
     if reloads_directly(model):
         begin_direct_reload(model)
     else:

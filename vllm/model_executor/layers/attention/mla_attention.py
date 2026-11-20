@@ -3096,6 +3096,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     takes_device_bmm_scales: ClassVar[bool] = False
     _use_device_bmm_scales = False
     _bmm_scales_device: torch.Tensor | None = None
+    _bmm_scale_views: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def __init__(
         self,
@@ -3122,9 +3123,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
-        # fp32 device bmm scales, refilled in place after each load, let FULL
-        # CUDA graphs follow a weight update. FlashInfer adds a `bmm1 * log2e`
-        # op per call for them, so only when updates are enabled.
+        # Device bmm scales let FULL CUDA graphs follow updates; FlashInfer adds
+        # a `bmm1 * log2e` op per call for them, so only with weight updates.
         self._use_device_bmm_scales = (
             self.takes_device_bmm_scales
             and is_quantized_kv_cache(kv_cache_dtype)
@@ -3148,15 +3148,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 dtype=torch.float32,
                 device=layer._k_scale.device,
             )
-            refill_derived(self, "_bmm_scales_device", new)
+            scales = refill_derived(self, "_bmm_scales_device", new)
+            self._bmm_scale_views = (scales[0:1], scales[1:2])
 
     def bmm_scales(
         self, layer: AttentionLayer
     ) -> tuple[float, float] | tuple[torch.Tensor, torch.Tensor]:
         """Device bmm scales when set, else host floats that FULL CUDA graphs
         keep from capture."""
-        if self._bmm_scales_device is not None:
-            return self._bmm_scales_device[0:1], self._bmm_scales_device[1:2]
+        if self._bmm_scale_views is not None:
+            return self._bmm_scale_views
         self.frozen_kv_scales = "full_graph"
         return self.host_bmm_scales(layer)
 
