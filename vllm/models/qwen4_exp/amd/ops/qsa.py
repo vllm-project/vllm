@@ -1079,14 +1079,12 @@ def qsa_sparse_paged_attention(
     block_m = triton.next_power_of_2(group_size)
     base_programs = q.shape[0] * k_cache.shape[2]
     cdna_version = get_cdna_version()
-    cdna_bf16 = cdna_version in (3, 4) and not is_fp8
+    cdna_bf16 = cdna_version in (3, 4) and k_cache.dtype == torch.bfloat16
     if cdna_bf16:
         # tl.dot with fewer than 16 rows is slow on CDNA3/4; pad the head group.
         block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
 
-    # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
-    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
     if cdna_bf16 and base_programs >= 32:
         # Narrow tiles, one warp, and enough splits for about 2048 programs.
         # CDNA4 decode prefers about 1024 programs with four warps.
@@ -1096,6 +1094,9 @@ def qsa_sparse_paged_attention(
         if cdna_version == 4 and base_programs <= 128:
             target_splits = triton.next_power_of_2(-(-1024 // base_programs))
             partial_warps = 4
+    # The shared profiles were tuned on GB300 for the Qwen-Air TP1, TP2, and TP4
+    # attention shapes. Narrow tiles favor decode; wide tiles improve throughput
+    # for prefill.
     elif base_programs <= small_profile_limit:
         block_n, target_splits, partial_warps = 16, 64, 4
     elif base_programs < 32:

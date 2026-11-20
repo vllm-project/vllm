@@ -25,6 +25,7 @@ from vllm.models.qwen4_exp.amd.qsa_indexer import (
     apply_qsa_rmsnorm,
     apply_qsa_rope,
 )
+from vllm.models.qwen4_exp.common.qsa_indexer import QSAIndexerMetadataBuilder
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -518,12 +519,21 @@ def test_qsa_mqa_paged_matches_reference(
 
 @requires_qsa_kernels
 @pytest.mark.parametrize("single_row_decode", [False, True], ids=["tiled", "rows"])
+@pytest.mark.parametrize(
+    ("page_size", "compress_ratio", "table_width"),
+    [(16, 4, 24), (8, 4, 24), (16, 8, 24)],
+    ids=["p16_c4", "p8_c4", "p16_c8"],
+)
 def test_qsa_select_bounds_columns_to_max_seq_len(
-    monkeypatch: pytest.MonkeyPatch, single_row_decode: bool
+    monkeypatch: pytest.MonkeyPatch,
+    single_row_decode: bool,
+    page_size: int,
+    compress_ratio: int,
+    table_width: int,
 ) -> None:
-    # The longest request (64 tokens) sees exactly cdiv(64, 4) = 16 compressed
-    # blocks, and its last one gets the top score, so a bound one column short
-    # changes the selection.
+    # The longest request (64 tokens) sees exactly cdiv(64, compress_ratio)
+    # compressed blocks, and its last one gets the top score, so a bound one
+    # column short changes the selection.
     monkeypatch.setattr(
         qsa_ops, "_ROWS_KERNEL_PROFILES", {qsa_ops.get_cdna_version(): (32, 32, 4)}
     )
@@ -536,7 +546,9 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
 
     monkeypatch.setattr(qsa_ops, "qsa_mqa_paged", mqa_paged)
     generator = torch.Generator(device="cuda").manual_seed(0)
-    page_size, compress_ratio, table_width, token_topk = 16, 4, 24, 8
+    token_topk = 8
+    num_columns = -(-64 // compress_ratio)
+    last_block = num_columns - 1
     lengths = torch.tensor([64, 5, 33, 8, 47, 12, 60], device="cuda", dtype=torch.int32)
     num_requests = lengths.numel()
     num_pages = num_requests * table_width + 8
@@ -545,7 +557,8 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
     page_table = torch.randperm(
         num_pages, device="cuda", dtype=torch.int32, generator=generator
     )[: num_requests * table_width].view(num_requests, table_width)
-    k_cache[page_table[0, 0], 15, 0] = 4 * q[0].sum(dim=0)
+    last_page = page_table[0, last_block // page_size]
+    k_cache[last_page, last_block % page_size, 0] = 4 * q[0].sum(dim=0)
     args = (
         q,
         k_cache,
@@ -564,23 +577,23 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
         *args, single_row_decode=single_row_decode, max_seq_len=64
     )
 
-    assert scored_columns == [table_width * page_size, 16]
-    assert ((expected[0] >= 15 * compress_ratio) & (expected[0] < 64)).any()
+    assert scored_columns == [table_width * page_size, num_columns]
+    assert ((expected[0] >= last_block * compress_ratio) & (expected[0] < 64)).any()
     # top-k emits the selected blocks in unspecified order.
     torch.testing.assert_close(
         actual.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0
     )
 
 
+@requires_qsa_kernels
 @pytest.mark.parametrize(
-    ("num_prefills", "decode_query_len", "single_row_decode"),
-    [(0, 1, True), (1, 1, False), (0, 4, False)],
+    ("query_lens", "single_row_decode"),
+    [([1, 1, 1], True), ([1, 1, 5], False), ([4, 4, 4], False)],
     ids=["decode", "mixed", "spec-decode"],
 )
 def test_qsa_indexer_forwards_selection_metadata(
     monkeypatch: pytest.MonkeyPatch,
-    num_prefills: int,
-    decode_query_len: int,
+    query_lens: list[int],
     single_row_decode: bool,
 ) -> None:
     seen: dict[str, Any] = {}
@@ -590,22 +603,40 @@ def test_qsa_indexer_forwards_selection_metadata(
         return args[-1]
 
     monkeypatch.setattr(qsa_ops, "qsa_select_paged_tokens", select)
+    device = torch.device("cuda")
+    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
+    builder.compress_ratio = 1
+    # Up to 4 tokens per request count as decode, as with 3 speculative tokens.
+    builder.reorder_batch_threshold = 4
+    builder.is_circular_buffer = False
+    builder.storage_block_size = 64
+    builder.token_to_req_buffer = torch.empty(16, dtype=torch.int32, device=device)
+    builder.slot_mapping_buffer = torch.empty(16, dtype=torch.int64, device=device)
+    builder.logical_positions_buffer = torch.empty(16, dtype=torch.int64, device=device)
+    builder.visible_blocks_buffer = torch.empty(16, dtype=torch.int32, device=device)
+    builder.k_work_metadata_buffer = torch.empty(0, 2, dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, *query_lens]).cumsum(0).to(torch.int32)
+    num_tokens = sum(query_lens)
+    common = SimpleNamespace(
+        num_actual_tokens=num_tokens,
+        num_reqs=len(query_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=77,
+        query_start_loc=query_start_loc.to(device),
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([40, 77, 23], dtype=torch.int32, device=device),
+        slot_mapping=torch.arange(num_tokens, device=device),
+        block_table_tensor=torch.empty((3, 0), dtype=torch.int32, device=device),
+    )
+    metadata = builder.build(0, common)  # type: ignore[arg-type]
     indexer = SimpleNamespace(
         compressed_key_cache=SimpleNamespace(kv_cache=None),
         token_topk=8,
         compress_ratio=4,
     )
-    metadata = SimpleNamespace(
-        block_table=None,
-        token_to_req=None,
-        logical_positions=None,
-        seq_lens=None,
-        num_prefills=num_prefills,
-        decode_query_len=decode_query_len,
-        max_seq_len=1234,
-    )
+
     QSAIndexer._select(indexer, None, metadata, None)  # type: ignore[arg-type]
-    assert seen == {"single_row_decode": single_row_decode, "max_seq_len": 1234}
+    assert seen == {"single_row_decode": single_row_decode, "max_seq_len": 77}
 
 
 @requires_qsa_kernels
