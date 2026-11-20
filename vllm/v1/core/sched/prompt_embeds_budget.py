@@ -38,11 +38,17 @@ class PromptEmbedsBudget:
 
     A request reserves the rows it is sent, those of positions not computed
     yet, and releases them once its prompt is computed, preempted or freed.
+
+    Attributes:
+        max_num_rows: Rows the workers may hold at once, summed over requests.
+        num_rows: Rows reserved now, summed over requests.
+
     """
 
     def __init__(self, max_num_rows: int) -> None:
         self.max_num_rows = max_num_rows
         self.num_rows = 0
+        # req_id -> rows reserved by the request, for requests holding rows.
         self._rows: dict[str, int] = {}
 
     def fits(self, request: Request, num_computed_tokens: int) -> bool:

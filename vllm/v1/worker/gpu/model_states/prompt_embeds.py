@@ -93,7 +93,8 @@ class PromptEmbedsState:
     def _release(self, req_id: str) -> None:
         tensors = self.gpu_tensors.pop(req_id, None)
         if tensors is not None:
-            self.num_rows -= tensors[0].shape[0]
+            embeds, _ = tensors
+            self.num_rows -= embeds.shape[0]
 
     def apply_staged_writes(self) -> None:
         self.embeds_ptrs.copy_to_uva()

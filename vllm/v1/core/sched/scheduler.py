@@ -1923,6 +1923,8 @@ class Scheduler(SchedulerInterface):
         for request in list(self.running):
             offset = self.prompt_embeds_budget.offset(request)
             if not offset:
+                # No prompt embeds, or the workers hold them from position 0:
+                # no rollback goes below them.
                 continue
             req_id = request.request_id
             (block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
@@ -1939,6 +1941,9 @@ class Scheduler(SchedulerInterface):
                 None,
             )
             if first_invalid is None or first_invalid * self.block_size >= offset:
+                # No invalid computed block, or the rollback to the first one
+                # stays within the held rows: the scan in _handle_invalid_blocks
+                # rolls the request back in place.
                 continue
             self.kv_cache_manager.evict_blocks(set(block_ids[first_invalid:]))
             request.kv_load_failed = True  # Skip KV reads and recompute the KV.
