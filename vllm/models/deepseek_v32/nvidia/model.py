@@ -28,13 +28,11 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLP,
     DeepseekV2MoE,
-    _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     copy_pp_buffers,
-    get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -79,10 +77,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.use_mha = False
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-        )
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         self.self_attn = DeepseekV32Attention(
             vllm_config=vllm_config,
@@ -190,10 +185,7 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-        )
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
@@ -331,11 +323,14 @@ class DeepseekV32Model(torch.nn.Module):
             attn_in = None
 
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
-            # PP send/recv needs TP-replicated tensors; reduce the partial sum.
-            hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
+            # PP send/recv needs full-token, TP-replicated tensors.
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states + residual)
+                hidden_states = hidden_states[:full_num_tokens]
+            else:
+                hidden_states = residual + tensor_model_parallel_all_reduce(
+                    hidden_states
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -366,15 +361,13 @@ class DeepseekV32Model(torch.nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # DSA-only: MLA (fused_qkv_a_proj) + the fused indexer wk/weights_proj +
-        # routed experts. No MHA (qkv_proj) or ROCm shared-expert-fusion paths.
+        # DSA-only: MLA (fused_qkv_a_proj) + routed experts. No MHA (qkv_proj)
+        # or ROCm shared-expert-fusion paths.
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
         ]
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -385,29 +378,13 @@ class DeepseekV32Model(torch.nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
-        # weight/scale pair across load_weights() calls; keep the pending
-        # buffer on the model so pairs survive the call boundary.
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             # MTP / nextn layers are loaded by the MTP model, not here.
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
-                continue
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -480,6 +457,10 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     model_cls = DeepseekV32Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        self.packed_modules_mapping = {
+            **self.packed_modules_mapping,
+            "wk_weights_proj": ["wk", "weights_proj"],
+        }
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)

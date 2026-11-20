@@ -43,6 +43,11 @@ class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
 
+    positions_depend_on_encoder: bool = False
+    """Whether the positions this state prepares depend on encoder outputs.
+    Only the first PP stage runs the encoder, so later stages take the
+    positions from it."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -119,6 +124,11 @@ class ModelState(ABC):
         return tuple(supported_tasks)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        return None
+
+    def get_mrope_position_delta(self, req_index: int) -> int | None:
+        """M-RoPE position delta of the request at `req_index`, or None if the
+        model does not use M-RoPE."""
         return None
 
     def remove_request(self, req_id: str) -> None:

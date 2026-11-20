@@ -56,13 +56,12 @@ class _StubSpeculativeConfig:
     method = "dspark"
     max_num_new_slots_for_drafting = 0
     enable_adaptive_verification = False
-    speculator_config = SimpleNamespace(speculator_class="DSparkSpeculator")
+    speculator_config = SimpleNamespace(
+        speculator_class="DSparkSpeculator", num_hash_lookahead_tokens=0
+    )
 
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
-
-    def use_eagle_block_drop(self) -> bool:
-        return False
 
 
 def _builder(

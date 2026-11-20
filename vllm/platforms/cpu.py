@@ -171,7 +171,9 @@ class CpuPlatform(Platform):
                     and selected_backend != AttentionBackendEnum.AMX_MLA
                 ):
                     logger.info("Cannot use %s backend on CPU.", selected_backend)
-                logger.info_once("Using %s backend.", AttentionBackendEnum.AMX_MLA.name)
+                logger.debug_once(
+                    "Using %s backend.", AttentionBackendEnum.AMX_MLA.name
+                )
                 return AttentionBackendEnum.AMX_MLA.get_path()
             # Reference MLA implementation on CPU. Performance is not the
             # goal here; the backend simply wires the CPU decode kernel
@@ -183,7 +185,7 @@ class CpuPlatform(Platform):
                 AttentionBackendEnum.AMX_MLA,
             ):
                 logger.info("Cannot use %s backend on CPU.", selected_backend)
-            logger.info_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
+            logger.debug_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
