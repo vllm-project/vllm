@@ -205,7 +205,9 @@ class HiSparseConnectorScheduler:
         assert self.coordinator is not None
         for request_id in connector_output.finished_recving or ():
             self.coordinator.finish_host_import(
-                request_id, failed=request_id in connector_output.failed_recving
+                request_id,
+                failed=request_id in connector_output.failed_recving,
+                restore=request_id in self.requests,
             )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
@@ -277,6 +279,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             get_hisparse_coordinator(
                 kv_cache_manager,
                 import_step_tokens=self.connector_scheduler.import_step_tokens,
+                num_reprefillable_tokens=self._vllm_config.num_reprefillable_tokens,
             )
         )
 

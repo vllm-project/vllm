@@ -150,6 +150,7 @@ MoEBackend = Literal[
     "hpc",
     "emulation",
     "rdna3",
+    "rdna3_int4_int8",
 ]
 
 FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"
@@ -326,7 +327,8 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
-    requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
+    requests, with bf16 MoE activations instead of the checkpoint's MXFP4;
+    MiniMax-M3 at TP4 on MI355X, including its 7-token DSpark draft). A
     deployment that cannot run it is refused at startup.
 
     Same switch as `--additional-config '{"decode_backend":
@@ -351,7 +353,7 @@ class KernelConfig:
       mega-kernel with NVFP4 or MXFP4 weights on Blackwell (SM100/SM103,
       where MXFP4 checkpoints are requantized to NVFP4 at load, or SM107,
       where MXFP4 runs with MXFP8 activations), or with block-FP8 (128x128)
-      weights on Hopper; requires expert parallelism and NVSHMEM
+      or MXFP4 weights on Hopper; requires expert parallelism and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
@@ -372,6 +374,10 @@ class KernelConfig:
       (moe_gemm_a4w4) MoE kernel (ROCm gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
     - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
+    - "rdna3_int4_int8": Int4 MoE decode with int8 activations per 32 values
+      on RDNA3/RDNA3.5 (ROCm gfx11) for up to 64 tokens, Triton WNA16
+      otherwise; auto-selected for `quantization_config.moe.activation`
+      `int8_per_group_32`
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.

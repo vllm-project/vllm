@@ -286,17 +286,15 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
     ]
 
-    with pytest.raises(openai.BadRequestError):
-        response = await client.embeddings.create(
+    with pytest.raises(openai.BadRequestError) as err:
+        await client.embeddings.create(
             model=model_name,
             input=input_texts,
             extra_body={"truncate_prompt_tokens": 8193},
         )
-        assert "error" in response.object
-        assert (
-            "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please request a smaller truncation size." in response.message
-        )
+    assert err.value.status_code == 400
+    error_message = err.value.response.json()["error"]["message"]
+    assert "Please request a smaller truncation size." in error_message
 
 
 @pytest.mark.asyncio
