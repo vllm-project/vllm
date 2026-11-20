@@ -587,24 +587,17 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
 
-def get_mamba_prefill_checkpoint_position(
+def get_reusable_prefix_length(
     num_tokens: int,
-    hash_block_size: int,
-    drop_eagle_block: bool,
-    num_hash_lookahead_tokens: int = 0,
+    num_hash_lookahead_tokens: int,
+    alignment_tokens: int = 1,
 ) -> int:
-    """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Leave tokens for logits recomputation and the checkpoint's hash.
-    # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = (
-        num_tokens
-        if drop_eagle_block
-        else num_tokens - max(1, num_hash_lookahead_tokens)
-    )
-    checkpoint_position = proof_limit // hash_block_size * hash_block_size
-    if drop_eagle_block:
-        checkpoint_position -= hash_block_size
-    return max(checkpoint_position, 0)
+    """Bound prefix reuse by known tokens, reserving logits and hash lookahead.
+
+    This does not establish that the corresponding KV has been computed or cached.
+    """
+    token_limit = max(0, num_tokens - max(1, num_hash_lookahead_tokens))
+    return token_limit // alignment_tokens * alignment_tokens
 
 
 def is_mamba_prefill_checkpoint_valid(
@@ -699,8 +692,6 @@ class KVCacheGroup:
     block_size: int
     # Whether DCP shards the group's token positions across ranks
     dcp_sharded: bool = False
-    # Whether this group holds draft layers and takes the EAGLE last-block drop.
-    is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
     # Whether this group is part of the externally transferable KV state.
@@ -812,9 +803,6 @@ class PrefixLookupGroup(NamedTuple):
     manager_config: ManagerConfig
     block_size: int
     group_ids: list[int]
-    use_eagle: bool = False
-    """Whether the lookup takes the EAGLE last-block drop, which applies to
-    every member since they are looked up jointly. Set by the coordinator."""
 
     @property
     def manager_cls(self) -> type[SingleTypeKVCacheManager]:
@@ -829,10 +817,7 @@ def prefix_lookup_groups(
     for i, g in enumerate(groups):
         if not g.prefix_cacheable:
             continue
-        # A lookup takes the EAGLE last-block drop if any member does, so only
-        # groups with equal layouts share one. TODO: drop with the EAGLE drop.
-        layout = g.distinct_specs[0] if len(g.distinct_specs) == 1 else i
-        key = (g.manager_config, g.block_size, g.dcp_sharded, layout)
+        key = (g.manager_config, g.block_size, g.dcp_sharded)
         lookup = lookups.setdefault(
             key, PrefixLookupGroup(g.manager_config, g.block_size, [])
         )
