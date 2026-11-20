@@ -1926,6 +1926,77 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
     assert mirror_outputs == baseline_outputs
 
 
+def _oversized_compile_cache(tmp_path: Path) -> Path:
+    """A sparse cubin directory one byte over the compiled-cache bundle limit."""
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
+        BUNDLE_LIMIT,
+    )
+
+    cache_dir = tmp_path / "cubins"
+    cache_dir.mkdir()
+    with (cache_dir / "oversized.cubin").open("wb") as stream:
+        stream.truncate(BUNDLE_LIMIT + 1)
+    return cache_dir
+
+
+# Needs only one GPU; the marker selects it in the Distributed Preload step.
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=1)
+def test_preload_survives_oversized_compile_cache(vllm_runner, tmp_path):
+    """A source daemon without a shared store never scans its compiled cache,
+    so an oversized one cannot stop it from serving weights."""
+    from vllm.model_executor.model_loader.weight_cache.transport import (
+        SeedConfig,
+        SeedTransport,
+    )
+
+    seed_port = get_open_port()
+    case = ModelCase(
+        model="Qwen/Qwen3-0.6B",
+        prompts=["The capital of France is", "Hello, my name is"],
+        llm_kwargs=dict(
+            enforce_eager=True,
+            max_model_len=512,
+            max_num_batched_tokens=512,
+            gpu_memory_utilization=0.3,
+            kv_cache_memory_bytes=128 << 20,
+            attention_config={"backend": "TRITON_ATTN"},
+            enable_flashinfer_autotune=False,
+        ),
+    )
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=1,
+        extra_args=[
+            "--disable-flashinfer-autotune",
+            "--attention-backend",
+            "TRITON_ATTN",
+            "--max-model-len",
+            "512",
+            "--seed-listen-host",
+            "127.0.0.1",
+            "--seed-listen-port",
+            str(seed_port),
+            "--seed-token",
+            "test-token",
+        ],
+        env_extra={
+            "FLASHINFER_CUBIN_DIR": str(_oversized_compile_cache(tmp_path)),
+            "FLASHINFER_WORKSPACE_BASE": str(tmp_path / "workspace"),
+        },
+    ) as daemon:
+        daemon.wait_until_ready(timeout_s=180)
+        assert "Cannot publish compile cache" not in daemon.logs
+        transport = SeedTransport(
+            seed_config=SeedConfig(source=("127.0.0.1", seed_port), token="test-token")
+        )
+        assert transport.request({"kind": "compile_cache", "version": 1}) == {
+            "status": "miss"
+        }
+        outputs = generate(vllm_runner, case, daemon.socket_dir, fallback=False)
+        assert all(text for _, texts in outputs for text in texts)
+
+
 def test_compile_cache_bundle_round_trip(tmp_path):
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
         _bundle,
@@ -2054,15 +2125,44 @@ def test_compile_cache_shared_store_round_trip(tmp_path, monkeypatch):
 
 
 def test_compile_cache_resolve_without_stores_is_a_miss(tmp_path, monkeypatch):
+    """Without a shared store the source skips the scan, so even an oversized
+    cache cannot fail its startup."""
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
         CompileArtifactWarmupCache,
     )
 
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
-    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(_oversized_compile_cache(tmp_path)))
     source = CompileArtifactWarmupCache()
+    source.prepare()
+    assert source.resolve({"version": 1}) is None
+
+
+@pytest.mark.parametrize("failure", ["oversized", "put"])
+def test_compile_cache_publish_failure_is_a_miss(tmp_path, monkeypatch, failure):
+    """A bundle the source cannot collect or publish is a miss, not a startup
+    error."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+        STORE_BACKENDS,
+        DiskArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+        CompileArtifactWarmupCache,
+    )
+
+    store_root = tmp_path / "store"
+    if failure == "oversized":
+        cache_dir = _oversized_compile_cache(tmp_path)
+    else:
+        cache_dir = tmp_path / "cubins"
+        cache_dir.mkdir()
+        (cache_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
+        # A file where the store expects its root directory fails every put.
+        store_root.touch()
+    monkeypatch.setitem(
+        STORE_BACKENDS, "disk", lambda: DiskArtifactStore("compile_cache", store_root)
+    )
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(cache_dir))
+    source = CompileArtifactWarmupCache(store_names=["disk"])
     source.prepare()
     assert source.resolve({"version": 1}) is None
 
