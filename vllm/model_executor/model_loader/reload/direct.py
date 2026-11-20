@@ -104,10 +104,7 @@ def direct_reload_enabled() -> bool:
         if config is None or config.weight_transfer_config is None:
             return False
         reason: str | None
-        if config.weight_transfer_config.backend == "sparse_nccl":
-            # it writes runtime tensors in place, never through start/finish_reload
-            reason = "the sparse_nccl weight-transfer backend"
-        elif config.lora_config is not None:
+        if config.lora_config is not None:
             # a LoRA model's lm_head is not loaded again by every update
             reason = "LoRA"
         else:
