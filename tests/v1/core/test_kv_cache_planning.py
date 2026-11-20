@@ -2268,8 +2268,6 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         draft_model_config=SimpleNamespace(
             hf_config=SimpleNamespace(), architectures=[]
         ),
-        use_eagle=lambda: True,
-        use_dflash=lambda: method == "dflash",
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,
