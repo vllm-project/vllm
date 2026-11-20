@@ -89,6 +89,16 @@ _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
 
+# TODO: Drop `use_audio_in_video` once the minimum Transformers version no
+# longer accepts it
+_AUDIO_IN_VIDEO_KWARGS = ("load_audio_from_video", "use_audio_in_video")
+
+
+def _get_audio_in_video(kwargs: Mapping[str, object]) -> object | None:
+    """Fused audio-in-video setting, preferring `load_audio_from_video`."""
+    values = (kwargs.get(name) for name in _AUDIO_IN_VIDEO_KWARGS)
+    return next((value for value in values if value is not None), None)
+
 
 def _get_embed_token_id(
     replacement_ids: torch.Tensor, preferred: int | None = None
@@ -178,7 +188,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def _fuses_audio_into_video(self) -> bool:
-        return bool(self.ctx.get_merged_mm_kwargs({}).get("use_audio_in_video"))
+        return bool(_get_audio_in_video(self.ctx.get_merged_mm_kwargs({})))
 
     def _get_audio_sampling_rate(self) -> float:
         sub = self._get_audio_processor()
@@ -969,15 +979,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         assert isinstance(prompt_text, str)
 
         use_audio_in_video = self.info._fuses_audio_into_video
-        override = hf_kwargs.get("use_audio_in_video")
+        override = _get_audio_in_video(hf_kwargs)
         if override is not None and bool(override) != use_audio_in_video:
             raise ValueError(
-                "use_audio_in_video is a server-level setting and cannot be "
+                "load_audio_from_video is a server-level setting and cannot be "
                 "overridden per request; pass it in --mm-processor-kwargs instead."
             )
         if use_audio_in_video:
-            # Transformers renamed this to `load_audio_from_video`
-            hf_kwargs = {**hf_kwargs, "use_audio_in_video": False}
+            hf_kwargs = {**hf_kwargs, **dict.fromkeys(_AUDIO_IN_VIDEO_KWARGS, False)}
         item_counts = mm_items.get_all_counts()
         num_audios = item_counts.get("audio", 0)
         num_videos = item_counts.get("video", 0)

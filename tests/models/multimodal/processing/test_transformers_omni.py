@@ -194,7 +194,7 @@ def test_omni_audio_in_video_shares_one_span():
         ModelConfig(
             model=model_id,
             model_impl="transformers",
-            mm_processor_kwargs={"use_audio_in_video": True},
+            mm_processor_kwargs={"load_audio_from_video": True},
         )
     )
     mm_data = {"audio": [_audio(20.0)], "video": [_video(num_frames=2)]}
