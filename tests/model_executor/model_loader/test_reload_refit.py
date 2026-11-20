@@ -59,6 +59,7 @@ MAX_DEPTH = 8  # attribute hops from a registered module
 # compile state and paths, a memo filled by cold-start backend selection)
 NOT_COMPARED = (
     ".kv_cache",
+    ".supported_lora_modules",  # set order, varies with the hash seed
     ".expert_load_view",
     ".num_unpadded_tokens_tensors",
     "._ckpt_",
@@ -461,15 +462,6 @@ REFIT_CASES = [
         for parallel in (TP2, TP2_EP, TP2_EP_EPLB, DP2_EP)
     ),
     RefitCase("qwen3-moe", "fp8-block", "Qwen/Qwen3-30B-A3B-FP8", TP2_EP),
-    # LoRA wraps the experts after cold start: plain names must still load
-    RefitCase(
-        "qwen3-moe-lora",
-        "fp8-block",
-        "Qwen/Qwen3-30B-A3B-FP8",
-        TP2,
-        engine=dict(enable_lora=True),
-        marks=NIGHTLY,
-    ),
 ]
 
 

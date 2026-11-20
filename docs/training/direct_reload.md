@@ -63,3 +63,6 @@ arrives, and an update that delivers only one of them fails at finish.
 
 The NCCL weight transfer load plan (`use_load_plan`) requires direct reload and
 refuses online quantization.
+
+With LoRA enabled, MoE models do not reload their experts from plain
+checkpoint names yet: the update fails at finish.

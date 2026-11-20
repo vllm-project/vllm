@@ -198,7 +198,6 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         model._required_params = loaded
         return
     preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
-
     params = {
         _unwrapped(n): p for n, p in model.named_parameters(remove_duplicate=False)
     }
@@ -207,7 +206,7 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         n
         for n in map(_unwrapped, required)
         if params.get(n, n) not in delivered
-        and not any(fnmatchcase(n, _unwrapped(p)) for p in preserved)
+        and not any(fnmatchcase(n, p) for p in preserved)
     )
     if missing:
         raise RuntimeError(
