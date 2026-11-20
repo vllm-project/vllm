@@ -65,6 +65,40 @@ def _saved_tensor(tensor: torch.Tensor) -> bytes:
     return buffer.getvalue()
 
 
+@pytest.mark.parametrize(
+    "model, hidden_size, input_size, buffer_size",
+    [
+        ("facebook/opt-350m", 1024, 512, 512),
+        ("facebook/opt-125m", 768, 768, 768),
+        ("openai/clip-vit-base-patch32", 512, 512, 1024),
+        ("google/siglip-base-patch16-224", 768, 768, 1024),
+    ],
+)
+def test_prompt_embeds_input_width(model, hidden_size, input_size, buffer_size):
+    """OPT uses its token width; dual encoders retain their text input width."""
+    from vllm.config import ModelConfig
+
+    config = ModelConfig(
+        model=model,
+        dtype="float32",
+        enable_prompt_embeds=True,
+    )
+    if "opt-" not in model:
+        config.hf_text_config.projection_dim = buffer_size
+    assert config.get_hidden_size() == hidden_size
+    assert config.get_inputs_embeds_size() == buffer_size
+
+    tensor = torch.randn(4, input_size)
+    loaded = safe_load_prompt_embeds(config, _encode(_saved_tensor(tensor)))
+    torch.testing.assert_close(loaded, tensor)
+
+    wrong_size = hidden_size if hidden_size != input_size else input_size + 1
+    with pytest.raises(VLLMValidationError, match="does not match"):
+        safe_load_prompt_embeds(
+            config, _encode(_saved_tensor(torch.randn(4, wrong_size)))
+        )
+
+
 UNPARSABLE_PAYLOADS = [
     pytest.param(b"", id="empty"),
     pytest.param(b"\x80", id="single-byte"),
@@ -159,5 +193,27 @@ def test_a_payload_that_is_not_base64_is_still_a_client_error(model_config):
     """Positive control: the base64 stage already answered 400 and still does."""
     with pytest.raises(ValueError) as excinfo:
         safe_load_prompt_embeds(model_config, b"!!!!not base64!!!!")
+
+    assert int(create_error_response(excinfo.value).error.code) == 400
+
+
+def test_a_str_payload_loads_like_bytes(model_config):
+    """Chat parsers pass the base64 `str` from the request without encoding it,
+    so a `str` payload must load to the same tensor as its bytes."""
+    tensor = torch.randn(3, model_config.get_hidden_size(), dtype=torch.float32)
+    encoded = _encode(_saved_tensor(tensor))
+
+    from_str = safe_load_prompt_embeds(model_config, encoded.decode())
+
+    torch.testing.assert_close(
+        from_str, safe_load_prompt_embeds(model_config, encoded), rtol=0, atol=0
+    )
+
+
+def test_a_non_ascii_str_payload_is_a_client_error(model_config):
+    """Without the `str.encode` copy, base64 decoding must still reject
+    non-ASCII input with an error that answers 400."""
+    with pytest.raises(ValueError) as excinfo:
+        safe_load_prompt_embeds(model_config, "QUJDé")
 
     assert int(create_error_response(excinfo.value).error.code) == 400

@@ -55,6 +55,8 @@ def test_max_truncation_size(vllm_model):
 
     prompt_tokens = vllm_output[0].prompt_token_ids
 
+    # Pooling requests emit an embedding rather than generated tokens, so -1
+    # truncates to the full context length.
     assert len(prompt_tokens) == max_model_len
 
 

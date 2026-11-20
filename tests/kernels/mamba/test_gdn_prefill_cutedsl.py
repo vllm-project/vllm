@@ -10,10 +10,14 @@ import torch.nn.functional as F
 from vllm.platforms import current_platform
 
 if not (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    current_platform.is_cuda()
+    and (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(110)
+    )
 ):
     pytest.skip(
-        reason="GDN CuteDSL prefill requires CUDA SM10x.",
+        reason="GDN CuteDSL prefill requires CUDA SM10x or SM11x.",
         allow_module_level=True,
     )
 
@@ -30,9 +34,13 @@ from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
 )
 
 
+# 160 v-heads exceeds the SM count of current GPUs (B200: 148, Thor: 20).
+@pytest.mark.parametrize("num_v_heads", [8, 160])
 @pytest.mark.parametrize("num_seqs", [1, 5, 257])
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
-def test_gdn_chunk_cutedsl_correctness(num_seqs: int, state_dtype: torch.dtype):
+def test_gdn_chunk_cutedsl_correctness(
+    num_seqs: int, state_dtype: torch.dtype, num_v_heads: int
+):
     rng_cpu = torch.Generator("cpu").manual_seed(1234)
     rng = torch.Generator("cuda").manual_seed(2345)
 
@@ -42,7 +50,6 @@ def test_gdn_chunk_cutedsl_correctness(num_seqs: int, state_dtype: torch.dtype):
     total_tokens = int(cu_seqlens[-1].item())
 
     num_k_heads = 4
-    num_v_heads = 8
     head_k_dim = 128
     head_v_dim = 128
     dtype = torch.bfloat16

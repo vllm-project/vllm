@@ -106,9 +106,20 @@ def get_fuser(module: nn.Module, fuser_cls: type[F]) -> "F | None":
 class Fusers(UserDict):
     """Mapping from module class and shape to fusers, for all fusable modules."""
 
-    def __init__(self, model: nn.Module, vllm_config: "VllmConfig"):
+    def __init__(
+        self, model: nn.Module, vllm_config: "VllmConfig", skip: nn.Module | None = None
+    ):
         self.vllm_config = vllm_config
-        super().__init__({key(m): get_fusers(m) for m in model.modules()})
+        super().__init__()
+        self.add(model, skip)
+
+    def add(self, module: nn.Module, skip: nn.Module | None = None):
+        """Detect the fusers of `module` and its submodules, except `skip`'s."""
+        if module is skip:
+            return
+        self.data[key(module)] = get_fusers(module)
+        for child in module.children():
+            self.add(child, skip)
 
     def __getitem__(self, m: nn.Module) -> list[BaseFuser]:
         """The fusers this instance can take, in the order to apply them."""

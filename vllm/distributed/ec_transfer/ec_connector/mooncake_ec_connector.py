@@ -120,6 +120,12 @@ class ECMooncakeConnector(ECConnectorBase):
         assert self._scheduler is not None
         return self._scheduler.request_finished(request)
 
+    def reset(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.reset()
+        if self._worker is not None:
+            self._worker.reset()
+
     def shutdown(self) -> None:
         if self._closed:
             return

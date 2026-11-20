@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton unified attention with different K/V head dimensions (DiffKV).
 
-This is a slimmed fork of ``triton_unified_attention.py`` for models like
+This is a slimmed fork of `triton_unified_attention.py` for models like
 MiMo-V2.5 where the V tensor's head dimension differs from K's.  The KV cache
-is the same packed layout used by ``FlashAttentionDiffKVBackend``:
+is the same packed layout used by `FlashAttentionDiffKVBackend`:
 
     kv_cache: [num_blocks, block_size, num_kv_heads, head_size_qk + head_size_v]
 
-We slice ``key_cache = kv_cache[..., :head_size_qk]`` and
-``value_cache = kv_cache[..., head_size_qk:]`` on the host, so the kernel
+We slice `key_cache = kv_cache[..., :head_size_qk]` and
+`value_cache = kv_cache[..., head_size_qk:]` on the host, so the kernel
 takes two cache pointers but with two distinct head sizes.
 
 Both 2D and 3D launches are supported:
@@ -18,7 +18,7 @@ Both 2D and 3D launches are supported:
     decode batches.
   - 3D: one program per (q-block, kv-head, segm); each program covers a
     KV slice and writes per-segment partials (max/expsum/output).  A
-    follow-up ``kernel_reduce_segments_diffkv`` combines them.  Selected
+    follow-up `kernel_reduce_segments_diffkv` combines them.  Selected
     for decode-only batches whose 2D grid would under-fill the GPU.
 """
 
@@ -45,6 +45,13 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 logger = init_logger(__name__)
 
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
+
+# Whole-verify split-KV grouping: one program covers all q tokens of a
+# spec-decode verify request (BLOCK_M = q_len * GQA group, capped at 128).
+_SPEC_3D_MAX_Q = 16
+_SPEC_3D_BLOCK_M = 128
+_SPEC_3D_NUM_WARPS = 8
+_SPEC_3D_TILE = 16
 
 
 @triton.jit
@@ -290,6 +297,9 @@ def kernel_unified_attention_diffkv(
             acc,
             mask=dim_mask_v[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
         )
+        # A row whose keys are all masked in this segment ends at M=0, L=0;
+        # -inf makes reduce_segments treat that segment as absent.
+        M = tl.where(L > 0.0, M, float("-inf"))
         store_segm_reduce_scalars(
             segm_max_ptr,
             segm_expsum_ptr,
@@ -338,8 +348,8 @@ def kernel_reduce_segments_diffkv(
 ):
     """Combine per-segment partials into the final softmax output.
 
-    Mirrors ``reduce_segments`` from triton_unified_attention.py but
-    indexes V's head size (``HEAD_SIZE_V``) instead of the shared one.
+    Mirrors `reduce_segments` from triton_unified_attention.py but
+    indexes V's head size (`HEAD_SIZE_V`) instead of the shared one.
     """
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -365,6 +375,8 @@ def kernel_reduce_segments_diffkv(
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
     overall_max = tl.max(segm_max)
+    # Graph-capture dummy lengths can leave a query with no causal keys.
+    overall_max = tl.where(overall_max > float("-inf"), overall_max, 0.0)
 
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
     segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
@@ -439,29 +451,53 @@ def unified_attention_diffkv(
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
-
-    total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+    launch_kw: dict[str, int] = {}
 
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
 
     # Decide between 2D and 3D launch.  Mirrors the standard launcher:
     # 3D requires preallocated softmax buffers, decode-only batches, and
     # a small number of sequences (otherwise 2D already saturates the SM).
+    # Spec-decode verify batches (q_len <= _SPEC_3D_MAX_Q, full attention)
+    # also take 3D: their 2D grid is only q_blocks x kv_heads programs, each
+    # walking the whole context.  Sliding-window layers stay 2D: their loop
+    # is already window-bounded.
+    spec_3d = (
+        1 < max_seqlen_q <= _SPEC_3D_MAX_Q
+        and sliding_window_val == 0
+        and softmax_segm_output is not None
+        and q.shape[0] <= softmax_segm_output.shape[0]
+    )
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or (max_seqlen_q > 1 and not spec_3d)
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )
 
+    spec_tile: int | None = None
+    if use_3d and spec_3d and _SPEC_3D_BLOCK_M > BLOCK_M:
+        spec_bm = min(
+            _SPEC_3D_BLOCK_M,
+            triton.next_power_of_2(max_seqlen_q * num_queries_per_kv),
+        )
+        if spec_bm > BLOCK_M and spec_bm % num_queries_per_kv == 0:
+            BLOCK_M = spec_bm
+            launch_kw["num_warps"] = _SPEC_3D_NUM_WARPS if BLOCK_M >= 128 else 4
+            spec_tile = _SPEC_3D_TILE
+    BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+    total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers
     # smaller tiles to expose more parallelism along the KV dim.
     tile_size = 32 if not use_3d else (16 if q.element_size() >= 2 else 32)
+    if spec_tile is not None:
+        tile_size = spec_tile
 
     grid: tuple[Any, ...]
     if use_3d:
@@ -530,6 +566,7 @@ def unified_attention_diffkv(
         BLOCK_M=BLOCK_M,
         NUM_SEGMENTS_PER_SEQ=num_segments,
         IS_3D=use_3d,
+        **launch_kw,
     )
 
     if use_3d:

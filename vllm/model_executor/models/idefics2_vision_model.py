@@ -45,9 +45,8 @@ from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Idefics2VisionEmbeddings(nn.Module):
-    """This is a modified version of `siglip.modelign_siglip.SiglipVisionEmbeddings
-    ` to enable images of variable
-    resolution.
+    """This is a modified version of `siglip.modelign_siglip.SiglipVisionEmbeddings`
+    to enable images of variable resolution.
 
     The modifications are adapted from [Patch n' Pack: NaViT, a Vision
     Transformer for any Aspect Ratio and Resolution](https://arxiv.org/abs/2307.06304)

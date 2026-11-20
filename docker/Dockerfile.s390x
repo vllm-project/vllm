@@ -1,6 +1,6 @@
 # Base UBI image for s390x architecture
 ARG BASE_UBI_IMAGE_TAG=9.6
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS base
 
 # Install basic dependencies
@@ -34,7 +34,7 @@ ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 RUN microdnf install -y \
-    python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel  && \
+    python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip && \
     python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel uv && microdnf clean all
 
 FROM python-install AS rust
@@ -70,13 +70,13 @@ RUN curl -LO https://github.com/gperftools/gperftools/releases/download/gperftoo
 
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VISION_VERSION=v0.28.0
+ARG TORCH_VISION_VERSION=v0.29.0
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    uv pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder
@@ -158,23 +158,26 @@ RUN microdnf install -y pkgconf-pkg-config xz && \
 
 # Torchcodec video decoder (no s390x wheels; CPU / FFmpeg only s390x does not support audio decoding).
 FROM python-install AS torchcodec-builder
-ARG TORCHCODEC_VERSION=v0.14.0
+ARG TORCHCODEC_VERSION=v0.17.0
 WORKDIR /tmp
 ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+# Image decoders are left out (TORCHCODEC_BUILD_IMAGE=0) so the build doesn't
+# need libjpeg/libpng/libwebp; vLLM decodes images with Pillow in that case.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=ffmpeg-build,source=/usr/local,target=/usr/local \
     git clone --depth 1 --branch ${TORCHCODEC_VERSION} \
         https://github.com/pytorch/torchcodec.git && \
     cd torchcodec && \
-    uv pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu && \
-    uv pip install pybind11 setuptools wheel && \
+    uv pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install pybind11 scikit-build-core && \
     pybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" && \
     export pybind11_DIR CMAKE_PREFIX_PATH="${pybind11_DIR}:${CMAKE_PREFIX_PATH}" && \
     export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 && \
     export TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR=1 && \
-    export TORCHCODEC_CMAKE_BUILD_DIR="${PWD}/build" && \
-    python setup.py bdist_wheel
+    export TORCHCODEC_BUILD_IMAGE=0 && \
+    export BUILD_VERSION="${TORCHCODEC_VERSION#v}" && \
+    python -m pip wheel --no-build-isolation --no-deps -w dist .
 
 # Build OpenCV from source for s390x
 FROM python-install AS opencv-builder

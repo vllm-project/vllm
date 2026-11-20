@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Layout dispatch tests for ``QwenGatedDeltaNetAttention._forward_core_rocm``.
+"""Layout dispatch tests for `QwenGatedDeltaNetAttention._forward_core_rocm`.
 
-The AITER fused reshape+conv kernel learned Qwen3.5's flat ``[q|k|v|z]``
+The AITER fused reshape+conv kernel learned Qwen3.5's flat `[q|k|v|z]`
 packing in https://github.com/ROCm/aiter/pull/3251, so flat-layout models take
 the decode fast path too instead of falling back to the generic path.
 
 The dispatch tests run host-side with recording stubs. The prefill numerical
 tests exercise the production ChunkGatedDeltaRule wrapper on ROCm against a
 token-wise Torch reference, including ragged state and output-buffer layouts.
+The backend selection tests mock the device and op to check when the HIP
+prefill backend is chosen.
 """
 
 from __future__ import annotations
 
 import types
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -42,6 +45,7 @@ def _make_metadata(
     num_prefills: int = 0,
     num_decodes: int = 2,
     spec_sequence_masks: torch.Tensor | None = None,
+    **fields,
 ):
     """Only the fields the dispatch condition reads carry meaningful values."""
     return GDNAttentionMetadata(
@@ -53,15 +57,17 @@ def _make_metadata(
         num_spec_decode_tokens=0,
         num_actual_tokens=num_prefills + num_decodes,
         spec_sequence_masks=spec_sequence_masks,
+        **fields,
     )
 
 
 def _make_layer(gqa_interleaved_layout: bool):
-    """Stub layer running the real ``_forward_core_rocm``, recording dispatch."""
+    """Stub layer running the real `_forward_core_rocm`, recording dispatch."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
     layer.gqa_interleaved_layout = gqa_interleaved_layout
     layer.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
+    layer.use_aiter_fused_gdn_decode = False
 
     layer.calls = []
     layer._forward_core_decode_aiter = lambda **kw: layer.calls.append("aiter")
@@ -101,7 +107,7 @@ def test_pure_decode_takes_the_fast_path(gqa_interleaved_layout: bool) -> None:
 
 @pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
 def test_layout_string_matches_the_packing(gqa_interleaved_layout: bool) -> None:
-    """The value handed to the kernel's ``qkvz_layout`` parameter."""
+    """The value handed to the kernel's `qkvz_layout` parameter."""
     layer = _make_layer(gqa_interleaved_layout)
     expected = "interleaved" if gqa_interleaved_layout else "flat"
     assert layer.qkvz_layout == expected
@@ -122,6 +128,15 @@ def test_non_pure_decode_batches_use_the_generic_path(
 ) -> None:
     layer = _make_layer(gqa_interleaved_layout)
     assert _run(layer, _make_metadata(**meta_kwargs)) == "generic"
+
+
+@pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
+def test_ds_conv_state_uses_the_generic_path(gqa_interleaved_layout: bool) -> None:
+    layer = _make_layer(gqa_interleaved_layout)
+    with patch.object(
+        qwen_gdn_linear_attn, "is_conv_state_dim_first", return_value=True
+    ):
+        assert _run(layer, _make_metadata()) == "generic"
 
 
 def _prefill_reference(q, k, v, g, beta, initial_state, lengths):
@@ -159,11 +174,15 @@ def _prefill_reference(q, k, v, g, beta, initial_state, lengths):
     [(torch.bfloat16, False), (torch.float32, False), (torch.float32, True)],
     ids=["ragged-bf16-state", "ragged-fp32-state", "correlated-keys"],
 )
+@pytest.mark.parametrize("backend", ["triton", "hip"])
 @torch.inference_mode()
-def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
+def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated, backend):
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
         ChunkGatedDeltaRule,
+    )
+    from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
+        is_hip_gdn_available,
     )
     from vllm.third_party.flash_linear_attention.ops.index import (
         prepare_chunk_indices,
@@ -172,18 +191,25 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
 
     if not torch.cuda.is_available():
         pytest.skip("ROCm prefill numerics require a GPU")
+    if backend == "hip" and not is_hip_gdn_available():
+        pytest.skip("The HIP GDN prefill kernel requires RDNA3.5")
     # Only the config is needed for production backend selection; no weights.
     config = VllmConfig(
         model_config=ModelConfig(
             model="Qwen/Qwen3.5-0.8B",
             revision="2fc06364715b967f1860aea9cf38778875588b17",
             max_model_len=1024,
-        )
+        ),
+        # auto picks AITER FlyDSL on gfx942/gfx950; this pins the path.
+        additional_config={"gdn_prefill_backend": backend},
     )
     with set_current_vllm_config(config):
         prefill = ChunkGatedDeltaRule()
-    assert prefill.gdn_prefill_backend == "triton"
-    assert prefill._forward_method == prefill.forward_native
+    assert prefill.gdn_prefill_backend == backend
+    expected_forward = (
+        prefill.forward_hip if backend == "hip" else prefill.forward_native
+    )
+    assert prefill._forward_method == expected_forward
 
     torch.manual_seed(1234)
     lengths = [64] if correlated else [1, 63, 64, 65, 129]
@@ -249,3 +275,173 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
     no_buffer_output, no_buffer_state = prefill(**kwargs)
     torch.testing.assert_close(no_buffer_output, output, atol=0, rtol=0)
     torch.testing.assert_close(no_buffer_state, final_state, atol=0, rtol=0)
+
+
+def _make_backend_config(
+    backend: str | None,
+    *,
+    head_k_dim: int = 128,
+    head_v_dim: int = 128,
+    dtype: torch.dtype = torch.bfloat16,
+):
+    return SimpleNamespace(
+        additional_config={} if backend is None else {"gdn_prefill_backend": backend},
+        model_config=SimpleNamespace(
+            dtype=dtype,
+            hf_text_config=SimpleNamespace(
+                linear_key_head_dim=head_k_dim,
+                linear_value_head_dim=head_v_dim,
+            ),
+        ),
+    )
+
+
+def _resolve_prefill_backend(config, *, gfx1151: bool = True, available: bool = True):
+    # Imported here: vllm.platforms.rocm resolves the GPU arch on import.
+    import vllm.platforms.rocm as rocm_platform
+
+    with (
+        patch.object(rocm_platform, "on_mi3xx", return_value=False),
+        patch.object(rocm_platform, "on_gfx1151", return_value=gfx1151),
+        patch.object(
+            qwen_gdn_linear_attn, "is_hip_gdn_available", return_value=available
+        ),
+    ):
+        return qwen_gdn_linear_attn._resolve_gdn_prefill_backend(config)[1]
+
+
+@pytest.mark.parametrize("backend", [None, "auto", "hip"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_hip_prefill_backend_selected_on_gfx1151(backend, dtype):
+    config = _make_backend_config(backend, dtype=dtype)
+    assert _resolve_prefill_backend(config) == "hip"
+
+
+def test_auto_prefill_backend_stays_on_triton_off_gfx1151():
+    """Auto is limited to gfx1151, the only RDNA3.5 part run on hardware."""
+    assert _resolve_prefill_backend(_make_backend_config("auto"), gfx1151=False) == (
+        "triton"
+    )
+    assert _resolve_prefill_backend(_make_backend_config("hip"), gfx1151=False) == (
+        "hip"
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"head_k_dim": 64}, {"head_v_dim": 64}, {"dtype": torch.float32}],
+)
+@pytest.mark.parametrize("backend", ["auto", "hip"])
+def test_hip_prefill_backend_unsupported_model_uses_triton(backend, overrides):
+    config = _make_backend_config(backend, **overrides)
+    assert _resolve_prefill_backend(config) == "triton"
+
+
+def test_hip_prefill_backend_without_kernel():
+    """Auto falls back to Triton; an explicit request fails closed."""
+    assert (
+        _resolve_prefill_backend(_make_backend_config("auto"), available=False)
+        == "triton"
+    )
+    with pytest.raises(RuntimeError, match="'hip'"):
+        _resolve_prefill_backend(_make_backend_config("hip"), available=False)
+
+
+@pytest.mark.parametrize(
+    ("ratio", "qkvz_layout", "state_dtype"),
+    [
+        (3, "flat", torch.float32),
+        (3, "flat", torch.bfloat16),
+        (2, "interleaved", torch.float32),
+    ],
+)
+# Key heads per rank of a 16-key-head model at TP 8..1; the kernel supports
+# K = V = 128 only.
+@pytest.mark.parametrize("heads", [2, 4, 8, 16])
+@pytest.mark.parametrize("decodes", [1, 6, 33, 64])
+@torch.inference_mode()
+def test_fused_decode_matches_unfused(
+    ratio, qkvz_layout, state_dtype, heads, decodes, default_vllm_config
+):
+    """The fused AITER decode (conv1d + recurrence + gated RMSNorm) matches the
+    unfused AITER decode followed by `RMSNormGated`, output and both states."""
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateShapeCalculator,
+    )
+
+    if not qwen_gdn_linear_attn.GDN_AITER_FUSED_DECODE_AVAILABLE:
+        pytest.skip("needs AITER's fused GDN decode kernel (gfx950)")
+    torch.manual_seed(0)
+    dim = 128
+    v_heads = heads * ratio
+    qkv_dim = (2 * heads + v_heads) * dim
+    conv_shape, ssm_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        1, heads, v_heads, dim, dim, 4
+    )
+    pool = 2 * decodes + 1
+    conv_state = 0.05 * torch.randn(pool, *conv_shape, device="cuda").bfloat16()
+    ssm_state = (0.05 * torch.randn(pool, *ssm_shape, device="cuda")).to(state_dtype)
+    qkvz = (0.1 * torch.randn(decodes, qkv_dim + v_heads * dim)).bfloat16().cuda()
+    ba = (0.1 * torch.randn(decodes, 2 * v_heads)).bfloat16().cuda()
+    norm = RMSNormGated(
+        dim, eps=1e-6, norm_before_gate=True, activation="silu", device="cuda"
+    ).bfloat16()
+    norm.weight.uniform_(0.5, 1.5)
+    layer = types.SimpleNamespace(
+        prefix=PREFIX,
+        qkvz_layout=qkvz_layout,
+        tp_size=1,
+        num_k_heads=heads,
+        num_v_heads=v_heads,
+        head_k_dim=dim,
+        head_v_dim=dim,
+        key_dim=heads * dim,
+        value_dim=v_heads * dim,
+        activation="silu",
+        A_log=0.1 * torch.randn(v_heads, device="cuda"),
+        dt_bias=0.1 * torch.randn(v_heads, device="cuda").bfloat16(),
+        conv1d=types.SimpleNamespace(
+            weight=(0.1 * torch.randn(qkv_dim, 1, 4)).bfloat16().cuda(), bias=None
+        ),
+        norm=norm,
+        _aiter_fused_conv_bias=torch.zeros(
+            qkv_dim, device="cuda", dtype=torch.bfloat16
+        ),
+    )
+    for name in (
+        "_forward_core_rocm",
+        "_forward_core_decode_aiter",
+        "_forward_core_decode_aiter_fused",
+    ):
+        method = getattr(QwenGatedDeltaNetAttention, name)
+        setattr(layer, name, types.MethodType(method, layer))
+    meta = _make_metadata(
+        num_decodes=decodes,
+        non_spec_query_start_loc=torch.arange(
+            decodes + 1, device="cuda", dtype=torch.int32
+        ),
+        non_spec_state_indices_tensor=torch.randperm(pool - 1, device="cuda")[
+            :decodes
+        ].int()
+        + 1,
+    )
+    ctx = types.SimpleNamespace(attn_metadata={PREFIX: meta})
+
+    results = []
+    for fused in (True, False):
+        layer.use_aiter_fused_gdn_decode = fused
+        layer.kv_cache = (conv_state.clone(), ssm_state.clone())
+        out = torch.empty(decodes, v_heads, dim, device="cuda", dtype=torch.bfloat16)
+        z = None if fused else torch.empty_like(out)
+        with patch.object(
+            qwen_gdn_linear_attn, "get_forward_context", return_value=ctx
+        ):
+            layer._forward_core_rocm(qkvz=qkvz, ba=ba, z_out=z, core_attn_out=out)
+        # forward_cuda: the Triton kernel ROCm enables for unquantized models.
+        results.append((out if fused else norm.forward_cuda(out, z), *layer.kv_cache))
+
+    # The fused kernel rounds a few steps differently from the unfused kernels:
+    # about 1 bf16 ULP on the output and 1e-4 on the state.
+    for actual, expected, atol in zip(*results, (4e-3, 0.0, 1e-3)):
+        torch.testing.assert_close(actual, expected, atol=atol, rtol=1.6e-2)

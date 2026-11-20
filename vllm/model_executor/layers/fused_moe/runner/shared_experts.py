@@ -6,6 +6,7 @@ from enum import IntEnum
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -57,6 +58,15 @@ class SharedExperts(torch.nn.Module):
 
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
 
+        # With fully-sharded LoRA the shared experts' LoRA layers issue TP
+        # collectives themselves, so they must not run on the aux stream
+        # (see _disable_shared_experts_overlap).
+        vllm_config = get_current_vllm_config_or_none()
+        lora_config = vllm_config.lora_config if vllm_config is not None else None
+        self._lora_fully_sharded = (
+            lora_config is not None and lora_config.fully_sharded_loras
+        )
+
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
@@ -81,6 +91,15 @@ class SharedExperts(torch.nn.Module):
         # Disable shared expert overlap if:
         #   - we are using eplb with non-safe backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
+        #   - we are using fully-sharded LoRA: the shared experts' LoRA layers
+        #     all-gather / all-reduce across TP, and so does the routed
+        #     experts' fused MoE LoRA kernel on the main stream. Two
+        #     collectives in flight on the same communicator from different
+        #     streams become independent branches under CUDA graph capture,
+        #     and replay order is not guaranteed to match across ranks, which
+        #     deadlocks NCCL (https://github.com/vllm-project/vllm/issues/60845).
+        if self._lora_fully_sharded:
+            return True
 
         # Both these comm backends have been shown to be safe for shared expert overlap.
         _EPLB_OVERLAP_SAFE_BACKENDS = (
