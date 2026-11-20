@@ -473,7 +473,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
     "csrc/attention/merge_attn_states.cu"
     "csrc/sampler.cu"
-    "csrc/topk.cu"
+    "csrc/attention/dsa/topk/top_k_per_row.cu"
+    "csrc/attention/dsa/topk/topk.cu"
     "csrc/mamba/selective_scan_fwd.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
@@ -648,9 +649,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/cooperative_topk.cu")
+        "csrc/attention/dsa/topk/cooperative_topk.cu")
       set_gencode_flags_for_srcs(
-        SRCS "csrc/cooperative_topk.cu"
+        SRCS "csrc/attention/dsa/topk/cooperative_topk.cu"
         CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
     endif()
 
@@ -1182,10 +1183,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # clusters. The mixes and norms of its kernels must not contract into FMAs.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
-      "10.0f;10.3f" "${CUDA_ARCHS}")
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
-      "10.0a;10.3a" "${CUDA_ARCHS}")
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(INKLING2_KERNEL_ARCHS)
     set(INKLING2_KERNEL_SRCS
@@ -1253,7 +1254,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_MQA_TOPK_ARCHS)
-    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set(FUSED_MQA_TOPK_SRC "csrc/attention/dsa/fused_mqa_topk/fused_mqa_topk.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_MQA_TOPK_SRC}"
       CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
@@ -1665,7 +1666,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_int4_n2.cu"
     "csrc/rocm/skinny_gemms_int4_n3.cu"
     "csrc/rocm/skinny_gemms_int4_n4.cu"
-    "csrc/rocm/skinny_gemms_int4_n5.cu")
+    "csrc/rocm/skinny_gemms_int4_n5.cu"
+    "csrc/rocm/skinny_gemms_int4_n6.cu"
+    "csrc/rocm/skinny_gemms_int4_n7.cu"
+    "csrc/rocm/skinny_gemms_int4_n8.cu")
   set(VLLM_SKINNY_INT8_SRC
     "csrc/rocm/skinny_gemms_int8_api.cu"
     "csrc/rocm/skinny_gemms_int8_n1.cu"
@@ -1823,6 +1827,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/rdna35_gdn_chunked.cu")
   endif()
 
+  # The W4A8 MoE decode kernel supports every gfx11 GPU (gfx1100-gfx1103,
+  # gfx1150, gfx1151), so it does not need gfx1100 in the target list.
+  set(VLLM_ROCM_HAS_GFX11 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+")
+    set(VLLM_ROCM_HAS_GFX11 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/moe_w4a8_decode_rdna3.cu")
+  endif()
+
   # RDNA3.5 attention kernels (gfx1151 only).
   set(VLLM_ROCM_HAS_RDNA_ATTN OFF)
   if("gfx1151" IN_LIST VLLM_GPU_ARCHES)
@@ -1872,6 +1885,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_ROCM_HAS_RDNA_ATTN)
     target_link_libraries(_rocm_C PRIVATE _rocm_C_rdna_attn)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_ATTN)
+  endif()
+  if(VLLM_ROCM_HAS_GFX11)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX11)
   endif()
 endif()
 

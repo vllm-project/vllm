@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
@@ -141,12 +142,26 @@ def page_rope(
     return x * cos + torch.cat((-b, a), -1) * sin
 
 
+def _fixed_order_cumsum(x: torch.Tensor) -> torch.Tensor:
+    """Scan each row with the same addition order for every batch shape."""
+    offset = 1
+    while offset < x.shape[-1]:
+        x = torch.cat((x[..., :offset], x[..., :-offset] + x[..., offset:]), dim=-1)
+        offset *= 2
+    return x
+
+
 def entmax15(x: torch.Tensor) -> torch.Tensor:
     x = (x - x.amax(-1, keepdim=True)) / 2
     ordered = x.sort(-1, descending=True).values
     rho = torch.arange(1, x.shape[-1] + 1, device=x.device).float()
-    mean = ordered.cumsum(-1) / rho
-    mean_sq = ordered.square().cumsum(-1) / rho
+    squared = ordered.square()
+    if envs.VLLM_BATCH_INVARIANT:
+        sums, sums_sq = _fixed_order_cumsum(torch.stack((ordered, squared))).unbind()
+    else:
+        sums, sums_sq = ordered.cumsum(-1), squared.cumsum(-1)
+    mean = sums / rho
+    mean_sq = sums_sq / rho
     delta = ((1 - rho * (mean_sq - mean.square())) / rho).clamp(min=0)
     tau = mean - delta.sqrt()
     support = (tau <= ordered).sum(-1, keepdim=True).clamp(min=1)
