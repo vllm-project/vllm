@@ -131,8 +131,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         mqa_q: torch.Tensor,
         num_actual: int,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self._fp8_kv:
+        if self._fp8_kv_needs_view:
             # fp8 KV: mqa_q is the full [ql_nope; q_pe] packed as fp8.
+            # fp8_ds_mla takes the bf16 (ql_nope, q_pe) tuple instead.
             return mqa_q[:num_actual]
 
         return (ql_nope[:num_actual], mqa_q[:num_actual])
@@ -296,7 +297,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_n_head_scale,
             has_indexer=index_q is not None,
             index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_kv and not use_mha,
+            quantize_mqa=self._fp8_kv_needs_view and not use_mha,
         )
 
         if index_q is not None:
