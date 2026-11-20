@@ -351,6 +351,7 @@ def _record_moe_routing(model: torch.nn.Module) -> None:
     from vllm.models.inkling2.nvidia.loop import Inkling2LoopDecoderLayer
     from vllm.models.inkling2.nvidia.moe import Inkling2MoE
     from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups
+    from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
     calls: list[torch.Tensor] = []
     model.routing_calls = calls
@@ -360,7 +361,9 @@ def _record_moe_routing(model: torch.nn.Module) -> None:
         gate = moe.gate
         logits = linear_k_groups(args[0].contiguous(), gate.weight)
         ids = torch.topk(logits.sigmoid() + gate.bias, gate.topk).indices
-        calls.append(ids.sort(-1).values.cpu())
+        # The test's own reference copy; CI runs with VLLM_GPU_SYNC_CHECK=error.
+        with gpu_sync_allowed():
+            calls.append(ids.sort(-1).values.cpu())
 
     for module in model.modules():
         if isinstance(module, Inkling2LoopDecoderLayer):
