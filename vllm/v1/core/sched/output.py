@@ -58,6 +58,8 @@ class NewRequestData:
     lora_request: LoRARequest | None
     # All the tokens to prefill: the prompt, plus any generated tokens on resume.
     prefill_token_ids: list[int]
+    # Rows of prompt positions from `prompt_embeds_offset` on, not from 0:
+    # row `i` is position `prompt_embeds_offset + i`. Same for the flags below.
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
     # Prompt position of the first row of `prompt_embeds`: rows below it were

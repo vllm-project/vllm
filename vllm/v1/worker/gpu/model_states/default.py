@@ -135,6 +135,12 @@ class DefaultModelState(ModelState):
             return None
         return self.rope_state.get_prefill_delta(req_index)
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.max_num_rows = prompt_embeds_budget_rows(
+                max_model_len, self.scheduler_config
+            )
+
     def remove_request(self, req_id: str) -> None:
         if self.mm_prefix_ranges is not None:
             self.mm_prefix_ranges.pop(req_id, None)

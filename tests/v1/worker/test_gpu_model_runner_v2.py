@@ -801,6 +801,40 @@ def test_prompt_embeds_held_only_on_first_pp_rank(monkeypatch, is_first_rank):
     assert ("a" in state.prompt_embeds_state.gpu_tensors) == is_first_rank
 
 
+def test_prompt_embeds_limit_follows_auto_fit_max_model_len():
+    """Auto-fit shortens max_model_len after the model state is built. The
+    workers' prompt_embeds limit must shrink with it, as the scheduler's budget
+    does, or its check misses rows the scheduler never budgeted."""
+    model_config = ModelConfig(
+        model="facebook/opt-125m", dtype="float32", enable_prompt_embeds=True
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+            max_model_len=64,
+            is_encoder_decoder=False,
+        ),
+    )
+    hidden_size = model_config.get_inputs_embeds_size()
+    model = _EmbeddingModel(32, hidden_size)
+    state = DefaultModelState(vllm_config, model, None, torch.device("cpu"))
+
+    state.update_max_model_len(32)
+
+    new_req_data = SimpleNamespace(
+        req_id="a",
+        prompt_embeds=torch.zeros(32 + 16 + 1, hidden_size),
+        prompt_is_token_ids=None,
+        prompt_embeds_offset=0,
+        num_computed_tokens=0,
+        mm_features=[],
+    )
+    with pytest.raises(RuntimeError, match="exceed the prompt_embeds budget"):
+        state.add_request(0, new_req_data)
+
+
 def test_speculator_request_hooks(gpu_model_runner_for_requests):
     runner = gpu_model_runner_for_requests
     slots = runner.req_states.req_id_to_index
