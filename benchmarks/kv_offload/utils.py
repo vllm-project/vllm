@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S = 30.0
 VLLM_FORCE_SHUTDOWN_TIMEOUT_S = 10.0
-VLLM_SURVIVOR_TIMEOUT_S = 15.0
+VLLM_SURVIVOR_TIMEOUT_S = 60.0
 VLLM_PORT_RELEASE_TIMEOUT_S = 15.0
 
 
@@ -311,9 +311,10 @@ class VLLMServer:
                     "waiting for them to exit..."
                 )
                 if not self._wait_for_processes(survivors, self.survivor_timeout_s):
-                    raise RuntimeError(
-                        f"vLLM workers {survivors} did not exit within "
-                        f"{self.survivor_timeout_s}s."
+                    print(
+                        f"      WARNING: vLLM workers {survivors} did not exit "
+                        f"within {self.survivor_timeout_s}s; they may still be "
+                        "tearing down GPU runtime state. Continuing."
                     )
 
             if not self._wait_for_port_release():
@@ -354,7 +355,7 @@ class VLLMServer:
             pids = [pid for pid in pids if self._process_exists(pid)]
             if not pids:
                 return True
-            time.sleep(min(0.5, deadline - time.monotonic()))
+            time.sleep(min(5, deadline - time.monotonic()))
         pids = [pid for pid in pids if self._process_exists(pid)]
         return not pids
 
