@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MXFP4 indexer key store for the FP32 output of the low-batch ``wk`` GEMM.
+"""MXFP4 indexer key store for the FP32 output of the low-batch `wk` GEMM.
 
-``indexer_k_norm_rope_store`` (``common/ops/indexer_k_store.py``) takes the
-BF16 output of the ``wk`` GEMM. The low-batch ``ll_bf16`` kernel returns its
+`indexer_k_norm_rope_store` (`common/ops/indexer_k_store.py`) takes the
+BF16 output of the `wk` GEMM. The low-batch `ll_bf16` kernel returns its
 FP32 accumulation instead. This copy of the store kernel's MXFP4 path rounds
 each row to BF16 as it loads it, so it writes the keys the shared kernel
 writes for that row's BF16 GEMM output, without a separate cast launch.
@@ -25,8 +25,8 @@ def indexer_k_norm_rope_store_fp32(
     kv_slot_mapping: torch.Tensor,
     compress_ratio: int,
 ) -> None:
-    """``indexer_k_norm_rope_store`` into an MXFP4 cache for an FP32 ``k_pre``
-    ([num_tokens, 128], the FP32 ``wk(latent)``)."""
+    """`indexer_k_norm_rope_store` into an MXFP4 cache for an FP32 `k_pre`
+    ([num_tokens, 128], the FP32 `wk(latent)`)."""
     num_tokens = kv_slot_mapping.numel()
     assert k_pre.ndim == 2 and k_pre.shape[1] == 128
     assert k_pre.dtype == torch.float32 and k_pre.stride(1) == 1

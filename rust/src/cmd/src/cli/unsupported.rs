@@ -117,6 +117,14 @@ impl UnsupportedArgs {
             }
         }
 
+        // `vllm serve` passes frontend args via `--args-json` without populating
+        // env-backed defaults into the JSON payload, so `clap`'s `env` attribute
+        // alone would not catch `VLLM_MAX_TOKENIZE_TOKENS` when launched through
+        // the Python entrypoint. Check the process environment explicitly here.
+        if std::env::var("VLLM_MAX_TOKENIZE_TOKENS").is_ok_and(|v| !v.trim().is_empty()) {
+            unsupported.push("VLLM_MAX_TOKENIZE_TOKENS");
+        }
+
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
             let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
@@ -189,17 +197,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
 
-    /// Skip initialization of tokenizer and detokenizer. Expects valid
-    /// `prompt_token_ids` and `None` for prompt from the input. The generated
-    /// output will contain token ids.
-    #[arg(
-        long,
-        visible_alias = "no-skip-tokenizer-init",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub skip_tokenizer_init: Option<Unsupported>,
-
     /// If `True`, enables passing text embeddings as inputs via the
     /// `prompt_embeds` key.
     ///
@@ -212,19 +209,6 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_prompt_embeds: Option<Unsupported>,
-
-    /// The token to use as HTTP bearer authorization for remote files. If
-    /// `True`, will use the token generated when running `hf auth login`
-    /// (stored in `~/.cache/huggingface/token`).
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub hf_token: Option<Unsupported>,
-
-    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
-    /// used with `--generation-config auto`, the override parameters will be
-    /// merged with the default config from the model. If used with
-    /// `--generation-config vllm`, only the override parameters are used.
-    #[arg(long)]
-    pub override_generation_config: Option<Unsupported>,
 
     /// IOProcessor plugin name to load at model startup
     #[arg(long)]
@@ -261,16 +245,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_elastic_ep: Option<Unsupported>,
 
-    /// This feature is work in progress and no prefill optimization takes place
-    /// with this flag enabled currently.
-    #[arg(
-        long,
-        visible_alias = "no-kv-sharing-fast-prefill",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub kv_sharing_fast_prefill: Option<Unsupported>,
-
     /// If `True`, LoRA support for the tower (vision encoder) and connector
     /// of multimodal models will be enabled. This is an experimental feature
     /// and currently only supports some MM models such as the Qwen VL series.
@@ -285,11 +259,6 @@ pub struct EngineUnsupportedArgs {
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,
-
-    /// Arguments to be forwarded to the model's processor for multi-modal data,
-    /// e.g., image processor.
-    #[arg(long)]
-    pub mm_processor_kwargs: Option<Unsupported>,
 
     /// The size (in GiB) of the multi-modal processor cache.
     #[arg(long)]
@@ -321,10 +290,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_ipc_gpu_memory_gb: Option<Unsupported>,
 
-    /// Dictionary mapping specific modalities to LoRA model paths.
-    #[arg(long)]
-    pub default_mm_loras: Option<Unsupported>,
-
     /// Target URL to which OpenTelemetry traces will be sent.
     #[arg(long)]
     pub otlp_traces_endpoint: Option<Unsupported>,
@@ -346,8 +311,11 @@ pub struct EngineUnsupportedArgs {
 
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub aggregate_engine_logging: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend's periodic stats line always
+    /// aggregates across engines.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1, hide = true)]
+    pub aggregate_engine_logging: Option<Noop>,
 }
 
 /// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but
@@ -405,10 +373,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub tool_server: Option<Unsupported>,
 
-    /// Path to logging config JSON file for both vllm and uvicorn
-    #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
-    pub log_config_file: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -418,47 +382,11 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_server_load_tracking: Option<Noop>,
 
-    /// If set to True, including usage on every request.
-    #[arg(
-        long,
-        visible_alias = "no-enable-force-include-usage",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_force_include_usage: Option<Unsupported>,
-
-    /// If set to True, log the stack trace of error responses
-    #[arg(
-        long,
-        // env = "VLLM_SERVER_DEV_MODE",
-        visible_alias = "no-log-error-stack",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub log_error_stack: Option<Unsupported>,
-
-    /// If set to True, only enable the Tokens In<>Out endpoint.
-    /// This is intended for use in a Disaggregated Everything setup.
-    #[arg(
-        long,
-        visible_alias = "no-tokens-only",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub tokens_only: Option<Unsupported>,
-
-    /// Controls the `system_fingerprint` field on responses: `full`, `hash`,
-    /// `custom`, or `none`.
-    #[arg(long)]
-    pub fingerprint_mode: Option<Unsupported>,
-
-    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
-    #[arg(long)]
-    pub fingerprint_value: Option<Unsupported>,
-
     /// Log level for uvicorn.
-    #[arg(long)]
-    pub uvicorn_log_level: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend does not run uvicorn.
+    #[arg(long, hide = true)]
+    pub uvicorn_log_level: Option<Noop>,
 
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
@@ -500,15 +428,24 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub h11_max_header_count: Option<Unsupported>,
 
+    /// Maximum number of tokens allowed in /tokenize, /detokenize, and
+    /// /v1/messages/count_tokens requests.
+    #[arg(long)]
+    pub max_tokenize_tokens: Option<Unsupported>,
+
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
         visible_alias = "no-enable-offline-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_offline_docs: Option<Unsupported>,
+    pub enable_offline_docs: Option<Noop>,
 
     /// If set, run pooling score MaxSim on GPU in the API server process.
     /// Can significantly improve late-interaction scoring performance.

@@ -22,11 +22,11 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""MXFP8 GEMM on 32x32 block-scaled weights for gfx950 (``tl.dot_scaled``).
+"""MXFP8 GEMM on 32x32 block-scaled weights for gfx950 (`tl.dot_scaled`).
 
-``y = x @ w.T`` with an MXFP8 activation (e4m3 values, one E8M0 scale per
-row and 32 K, ``[M, K / 32]``) and an e4m3 weight whose E8M0 scales stay in
-the checkpoint's 32x32 blocks, ``[N / 32, K / 32]``, instead of being
+`y = x @ w.T` with an MXFP8 activation (e4m3 values, one E8M0 scale per
+row and 32 K, `[M, K / 32]`) and an e4m3 weight whose E8M0 scales stay in
+the checkpoint's 32x32 blocks, `[N / 32, K / 32]`, instead of being
 expanded to every row. Each weight scale byte is then read once per 32 output
 rows, and small-M shapes can use the packed kernel below.
 
@@ -42,7 +42,7 @@ the last program of each output tile to finish, in split order, so the result
 does not depend on scheduling. Otherwise a second launch reduces them.
 
 The packed kernel and the in-launch split-K reduction on one XCD
-(``_split_tile``, ``_sum_splits``, ``_split_counters``, ``_k_partition``) are
+(`_split_tile`, `_sum_splits`, `_split_counters`, `_k_partition`) are
 adapted from the group32 GEMM in ROCm/aiter#5750.
 """
 
@@ -875,16 +875,41 @@ def _launch(
         )
 
 
+# AITER's FlyDSL GEMMs (picked per M from its tuned table) address each buffer
+# with 32-bit offsets, so larger M runs in row chunks.
+FLYDSL_MAX_BYTES = 1 << 31
+
+
+def _aiter_gemm(x, x_scale, weight_preshuffled, weight_scale, out) -> None:
+    from aiter import gemm_a8w8_blockscale_bpreshuffle
+
+    M, K = x.shape
+    e8m0 = torch.float8_e8m0fnu
+    rows = FLYDSL_MAX_BYTES // max(K, out.element_size() * out.shape[1])
+    for m0 in range(0, M, rows):
+        gemm_a8w8_blockscale_bpreshuffle(
+            x[m0 : m0 + rows],
+            weight_preshuffled,
+            x_scale[m0 : m0 + rows].view(e8m0),
+            weight_scale.view(e8m0),
+            out.dtype,
+            out=out[m0 : m0 + rows],
+        )
+
+
 def _rocm_mxfp8_block32_gemm_impl(
     x: torch.Tensor,
     x_scale: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M, K = x.shape
     out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
-    if M > 0:
+    if M > 0 and weight_preshuffled is not None:
+        _aiter_gemm(x, x_scale, weight_preshuffled, weight_scale, out)
+    elif M > 0:
         _launch(x, x_scale, weight, weight_scale, out, _config(M, weight.shape[0], K))
     return out
 
@@ -895,6 +920,7 @@ def _rocm_mxfp8_block32_gemm_fake(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
 
@@ -914,8 +940,9 @@ def rocm_mxfp8_block32_gemm(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``x @ weight.T`` for MXFP8 ``x`` and a 32x32 block-scaled MXFP8 weight.
+    """`x @ weight.T` for MXFP8 `x` and a 32x32 block-scaled MXFP8 weight.
 
     Args:
         x: [M, K] e4m3 activation, contiguous.
@@ -923,13 +950,15 @@ def rocm_mxfp8_block32_gemm(
         weight: [N, K] e4m3 weight, contiguous.
         weight_scale: [ceil(N / 32), K / 32] E8M0 (uint8) weight block scales.
         out_dtype: Output dtype.
+        weight_preshuffled: `weight` (16, 16)-preshuffled, possibly `weight`
+            itself; given, AITER's tuned FlyDSL GEMMs serve every M.
 
     Returns:
         The [M, N] product.
 
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm(
-        x, x_scale, weight, weight_scale, out_dtype
+        x, x_scale, weight, weight_scale, out_dtype, weight_preshuffled
     )
 
 
@@ -951,15 +980,16 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``x @ weight.T`` for raw bf16/fp16 ``x`` and a 32x32 block-scaled
-    MXFP8 weight, quantizing ``x`` inside the GEMM at tiny M.
+    """`x @ weight.T` for raw bf16/fp16 `x` and a 32x32 block-scaled
+    MXFP8 weight, quantizing `x` inside the GEMM at tiny M.
 
     M <= 8 with a packed tile config (every tuned M <= 8 tier is packed)
     runs one launch whose K loop computes the per-32-block E8M0 scale and
-    the e4m3 cast exactly as ``_mxfp8_quant_triton_kernel`` and feeds
-    ``tl.dot_scaled`` from registers -- bit-identical output to
-    ``mxfp8_e4m3_quantize`` + ``rocm_mxfp8_block32_gemm`` with one launch
+    the e4m3 cast exactly as `_mxfp8_quant_triton_kernel` and feeds
+    `tl.dot_scaled` from registers -- bit-identical output to
+    `mxfp8_e4m3_quantize` + `rocm_mxfp8_block32_gemm` with one launch
     fewer on the decode critical path. Everything else (larger M,
     non-packed tiles, or non-contiguous or non-bf16/fp16 x) runs the stock
     two-launch path with identical results. The branch is inside this
@@ -968,6 +998,10 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
     M, K = x.shape
     out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
     if M <= 0:
+        return out
+    if weight_preshuffled is not None:
+        x_q, x_scale = mxfp8_e4m3_quantize(x)
+        _aiter_gemm(x_q, x_scale, weight_preshuffled, weight_scale, out)
         return out
     cfg = _config(M, weight.shape[0], K)
     eligible = (
@@ -1014,6 +1048,7 @@ def _rocm_mxfp8_block32_gemm_quant_fake(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
 
@@ -1032,12 +1067,14 @@ def rocm_mxfp8_block32_gemm_quant(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``x @ weight.T`` for a raw bf16/fp16 ``x`` [M, K] and a 32x32
-    block-scaled MXFP8 ``weight`` [N, K] with ``weight_scale``
+    """`x @ weight.T` for a raw bf16/fp16 `x` [M, K] and a 32x32
+    block-scaled MXFP8 `weight` [N, K] with `weight_scale`
     [N / 32, K / 32]. Tiny-M batches quantize inside the packed GEMM (see
-    ``_rocm_mxfp8_block32_gemm_quant_impl``).
+    `_rocm_mxfp8_block32_gemm_quant_impl`). `weight_preshuffled` as in
+    `rocm_mxfp8_block32_gemm`.
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm_quant(
-        x, weight, weight_scale, out_dtype
+        x, weight, weight_scale, out_dtype, weight_preshuffled
     )

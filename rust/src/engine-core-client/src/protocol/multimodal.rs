@@ -85,6 +85,21 @@ pub struct PlaceholderRange {
     pub is_embed: Option<WireTensor>,
 }
 
+impl PlaceholderRange {
+    /// The number of positions that take embeddings, like Python's
+    /// `get_num_embeds()`. The `is_embed` mask must be stored inline.
+    pub fn num_embeds(&self) -> Result<usize, String> {
+        let Some(mask) = &self.is_embed else {
+            return Ok(self.length);
+        };
+        let mask = mask
+            .data
+            .as_raw_view()
+            .ok_or_else(|| "is_embed mask must be stored inline".to_string())?;
+        Ok(mask.iter().filter(|&&b| b != 0).count())
+    }
+}
+
 /// A dictionary of processed keyword arguments to pass to the model,
 /// corresponding to a single item in `MultiModalDataItems`.
 ///
@@ -138,6 +153,22 @@ impl MmFeatureSpec {
             is_embed.extract_aux_frame(aux_frames, threshold);
         }
     }
+
+    /// Resolve tensor buffers sent in auxiliary frames, the inverse of
+    /// [`Self::extract_aux_frames`].
+    pub(crate) fn resolve_aux_frames(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        if let Some(data) = &mut self.data {
+            for elem in data.values_mut() {
+                if let Some(value) = &mut elem.data {
+                    value.resolve_aux_frames(frames)?;
+                }
+            }
+        }
+        if let Some(is_embed) = &mut self.mm_position.is_embed {
+            is_embed.resolve_aux_frame(frames)?;
+        }
+        Ok(())
+    }
 }
 
 impl MmFieldElem {
@@ -150,6 +181,15 @@ impl MmFieldElem {
 }
 
 impl MmKwargValue {
+    /// Recursively resolve tensor buffers sent in auxiliary frames.
+    fn resolve_aux_frames(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        match self {
+            Self::Tensor(tensor) => tensor.resolve_aux_frame(frames),
+            Self::List(values) => values.iter_mut().try_for_each(|v| v.resolve_aux_frames(frames)),
+            Self::Int(_) | Self::Float(_) => Ok(()),
+        }
+    }
+
     /// Recursively extract large tensor buffers from this nested value.
     fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         match self {
@@ -301,10 +341,26 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
+    use crate::protocol::tensor::WireArrayData;
 
     fn encode_value<T: Serialize>(value: &T) -> Value {
         let bytes = rmp_serde::to_vec_named(value).expect("encode value");
         rmpv::decode::read_value(&mut Cursor::new(bytes)).expect("decode value")
+    }
+
+    #[test]
+    fn num_embeds_counts_embed_positions() {
+        let mut range = PlaceholderRange {
+            offset: 3,
+            length: 4,
+            is_embed: None,
+        };
+        assert_eq!(range.num_embeds(), Ok(4));
+        range.is_embed =
+            Some(WireTensor::from_bool(vec![4], vec![true, false, true, false]).unwrap());
+        assert_eq!(range.num_embeds(), Ok(2));
+        range.is_embed.as_mut().unwrap().data = WireArrayData::AuxIndex(1);
+        assert!(range.num_embeds().is_err());
     }
 
     #[test]

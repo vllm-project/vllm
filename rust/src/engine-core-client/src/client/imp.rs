@@ -17,32 +17,23 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
+use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
 };
-use crate::client::stream::EngineCoreStreamOutput;
+use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::{
     EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
 };
-use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};
+use crate::protocol::{encode_msgpack, msgpack_zero_copy_threshold};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
-
-const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";
-const DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD: usize = 256;
-
-fn msgpack_zero_copy_threshold() -> usize {
-    std::env::var(MSGPACK_ZERO_COPY_THRESHOLD_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD)
-}
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
@@ -58,6 +49,9 @@ pub(crate) struct ClientInner {
     /// Whether the connected engines record stats. See
     /// [`crate::EngineCoreClientConfig::engine_stats_enabled`].
     engine_stats_enabled: bool,
+    /// The engines' `max_loras`, reported as the `max_lora` label of
+    /// `vllm:lora_requests_info`.
+    max_loras: u32,
     /// Scheduler-stats metric handles, present only when engines record stats
     /// so that gauges are not exported with values no engine ever reports.
     scheduler_stats_recorder: Option<SchedulerStatsRecorder>,
@@ -66,6 +60,9 @@ pub(crate) struct ClientInner {
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
     health_tx: watch::Sender<bool>,
+    /// Whether the engines can accept and process new requests, maintained
+    /// around the control calls this client sends.
+    readiness: Arc<Readiness>,
 }
 
 impl ClientInner {
@@ -89,6 +86,9 @@ impl ClientInner {
                 Some((engine, handles))
             })
             .collect();
+        // Every engine reports the same `max_loras`, validated before the
+        // client is built.
+        let max_loras = engines[0].ready_response.max_loras;
         Self {
             input_send,
             handle,
@@ -97,12 +97,14 @@ impl ClientInner {
             client_index,
             msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
             engine_stats_enabled,
+            max_loras,
             scheduler_stats_recorder,
             iteration_metrics,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
+            readiness: Arc::new(Readiness::new()),
         }
     }
 
@@ -260,9 +262,21 @@ impl ClientInner {
         self.health_tx.subscribe()
     }
 
+    pub fn readiness(&self) -> &Arc<Readiness> {
+        &self.readiness
+    }
+
     /// Call a typed utility method on every engine. See
     /// [`crate::EngineCoreClient::call_utility`].
-    pub async fn call_utility<T, A>(self: &Arc<Self>, method: &str, args: A) -> Result<Vec<T>>
+    ///
+    /// A control call passes its `recheck` guard, which the call holds until
+    /// the engines reply.
+    pub async fn call_utility<T, A>(
+        self: &Arc<Self>,
+        method: &str,
+        args: A,
+        recheck: Option<RecheckGuard>,
+    ) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
@@ -295,6 +309,7 @@ impl ClientInner {
         let inner = self.clone();
         let method_name = method.to_string();
         let call = self.handle.spawn(async move {
+            let _recheck = recheck;
             let outputs = join_all(calls.into_iter().map(|(engine_id, call_id, rx, payload)| {
                 let mut input_send = inner.input_send.clone();
                 let method_name = &method_name;
@@ -328,6 +343,12 @@ impl ClientInner {
             }
         };
         outputs.into_iter().map(|output| output?.into_typed_result(method)).collect()
+    }
+
+    /// Ask every engine whether it can accept and process new requests.
+    pub async fn is_inference_ready(self: &Arc<Self>) -> Result<bool> {
+        let ready: Vec<bool> = self.call_utility("is_inference_ready", (), None).await?;
+        Ok(ready.into_iter().all(|ready| ready))
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a
@@ -368,11 +389,28 @@ impl ClientInner {
         &self,
         engine_id: &EngineId,
         mut payload: EngineCoreRequest,
-    ) -> Result<()> {
+        stream: EngineCoreOutputStream,
+    ) -> Result<EngineCoreOutputStream> {
         let aux_frames = payload.extract_aux_frames(self.msgpack_zero_copy_threshold);
         let payload = Bytes::from(encode_msgpack(&payload)?);
-        self.send_encoded_to_engine(engine_id, EngineCoreRequestType::Add, payload, aux_frames)
-            .await
+        let mut input_send = self.input_send.clone();
+        let engine_id = engine_id.clone();
+
+        self.handle
+            .spawn(async move {
+                // If the caller cancels, dropping the stream must enqueue Abort
+                // after Add, not while this detached send is still pending.
+                transport::send_message(
+                    &mut input_send,
+                    &engine_id,
+                    EngineCoreRequestType::Add.to_frame(),
+                    payload,
+                    aux_frames,
+                )
+                .await?;
+                Ok(stream)
+            })
+            .await?
     }
 
     async fn send_encoded_to_engine(
@@ -524,7 +562,7 @@ pub(crate) async fn run_output_dispatcher_loop(
 ) {
     // LoRA phases come from request lifecycle events, which engines only emit
     // when they record stats.
-    let mut lora_info = inner.engine_stats_enabled.then(LoraInfoExporter::default);
+    let mut lora_info = inner.engine_stats_enabled.then(|| LoraInfoExporter::new(inner.max_loras));
 
     let result: Result<()> = async {
         loop {
@@ -626,10 +664,16 @@ pub(crate) async fn run_output_dispatcher_loop(
 
 #[cfg(test)]
 mod tests {
-    use zeromq::{RouterSocket, Socket};
+    use std::time::Duration;
+
+    use tokio::runtime::Builder;
+    use tokio::time::timeout;
+    use zeromq::{DealerSocket, RouterSocket, Socket, SocketRecv, SocketSend};
 
     use super::*;
+    use crate::client::output_channel::output_channel;
     use crate::mock_engine::default_ready_response;
+    use crate::protocol::sampling::EngineCoreSamplingParams;
 
     async fn test_inner() -> ClientInner {
         let mut socket = RouterSocket::new();
@@ -646,6 +690,72 @@ mod tests {
                 ready_response: default_ready_response(),
             }],
         )
+    }
+
+    #[test]
+    fn cancelling_add_defers_abort_until_send_completes() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let send_runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut router = RouterSocket::new();
+            let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap();
+            let mut dealer = DealerSocket::new();
+            dealer.connect(&endpoint.to_string()).await.unwrap();
+            dealer.send("ready".into()).await.unwrap();
+            let ready = router.recv().await.unwrap().into_vec();
+            let engine_id = EngineId::from(ready[0].to_vec());
+            let (input_send, _) = router.split();
+            let inner = ClientInner::new(
+                input_send,
+                send_runtime.handle().clone(),
+                "test-model".to_string(),
+                0,
+                false,
+                &[ConnectedEngine {
+                    engine_id: engine_id.clone(),
+                    ready_response: default_ready_response(),
+                }],
+            );
+            let (abort_tx, mut abort_rx) = mpsc::unbounded_channel();
+            let (_output_tx, output_rx) = output_channel(NonZeroU32::MIN);
+            let stream = EngineCoreOutputStream::new("req-1".to_string(), 0, abort_tx, output_rx);
+            let request = EngineCoreRequest {
+                request_id: "req-1".to_string(),
+                prompt_token_ids: Some(vec![1].into()),
+                sampling_params: Some(EngineCoreSamplingParams::for_test()),
+                ..Default::default()
+            };
+            let mut send = Box::pin(inner.send_request_to_engine(&engine_id, request, stream));
+
+            // The send runtime is not running yet, so cancellation happens
+            // after spawning the send but before Add can enter the socket queue.
+            assert!(futures::poll!(send.as_mut()).is_pending());
+            drop(send);
+            assert!(matches!(
+                abort_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
+            let abort = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        send_runtime.block_on(async {
+                            timeout(Duration::from_secs(5), abort_rx.recv()).await.unwrap().unwrap()
+                        })
+                    })
+                    .join()
+                    .unwrap()
+            });
+            assert_eq!(abort.request_id, "req-1");
+            let add = timeout(Duration::from_secs(5), dealer.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .into_vec();
+            assert_eq!(add[0], EngineCoreRequestType::Add.to_frame());
+            let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+            assert_eq!(request.request_id, abort.request_id);
+        });
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

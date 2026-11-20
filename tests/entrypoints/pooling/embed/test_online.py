@@ -30,7 +30,7 @@ from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
 input_text = "The best thing about vLLM is that it supports many different models"
@@ -286,17 +286,15 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
     ]
 
-    with pytest.raises(openai.BadRequestError):
-        response = await client.embeddings.create(
+    with pytest.raises(openai.BadRequestError) as err:
+        await client.embeddings.create(
             model=model_name,
             input=input_texts,
             extra_body={"truncate_prompt_tokens": 8193},
         )
-        assert "error" in response.object
-        assert (
-            "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please request a smaller truncation size." in response.message
-        )
+    assert err.value.status_code == 400
+    error_message = err.value.response.json()["error"]["message"]
+    assert "Please request a smaller truncation size." in error_message
 
 
 @pytest.mark.asyncio

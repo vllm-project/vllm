@@ -103,9 +103,16 @@ decodes with exactly the values the trainer encoded with. They are not per-round
 `update_weights` fields.
 
 !!! note "Memory"
-    The rotating buffers are live for the whole transfer:
-    `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
-    defaults). Lower `packed_buffer_size_bytes` if that is too much headroom.
+    Each side holds a buffer of up to `packed_buffer_size_bytes` per rotating
+    buffer, so up to `packed_buffer_size_bytes * packed_num_buffers` (2 GiB at
+    the defaults); it is smaller for small transfers. On the trainer, each
+    buffer starts at 64 MiB (or its first bytes, if more) and doubles as
+    needed; while growing, the old buffer is briefly held too and may stay
+    reserved by PyTorch's caching allocator. The workers size each receive
+    buffer to its chunk. Lower `packed_buffer_size_bytes` if that is too much
+    headroom. CPU-resident sources work but are copied synchronously, which is
+    slower. A non-contiguous tensor split across chunks also needs a contiguous
+    copy of its full size on the trainer while it is sent.
 
 ### Metadata and `iter_full()` must agree
 
@@ -225,10 +232,12 @@ that broadcasts that update, so one start/finish lifecycle can carry updates
 from several trainer ranks.
 
 - Unpacked: one broadcast per tensor.
-- Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
-  order; broadcast a chunk as soon as its size **exceeds**
-  `packed_buffer_size_bytes` (the crossing tensor stays in the chunk), then the
-  remainder.
+- Packed: lay the tensors' `t.contiguous().view(-1).view(torch.uint8)` bytes
+  out in `names` order as one stream, each tensor starting at a multiple of 16,
+  and cut it every `packed_buffer_size_bytes` (rounded down to 16); a tensor
+  crossing a cut is split there; an empty tensor adds no padding. Broadcast
+  each chunk as soon as it is full (or only alignment padding would fit),
+  ending at its last byte, then the rest; a chunk of no bytes is not sent.
 
 Trainer-side communicators without vLLM:
 
@@ -297,7 +306,7 @@ for patches in patch_chunks:
 client.finish_weight_update()
 ```
 
-Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still uses `O(N)` staging through the native loader, and the caller owns export/diff state and restart or reseed after a partial failure.
+Sparse NCCL sends only `O(nnz)` indices and values, in batches of at most 512 MiB (a larger patch travels alone). Workers validate and apply each batch before receiving the next, so an invalid batch fails after earlier ones landed. Checkpoint application still uses `O(N)` staging through the native loader, and the caller owns export/diff state and restart or reseed after a partial failure.
 
 [`rlhf_sparse_nccl.py`](../../../examples/rl/rlhf_sparse_nccl.py) demonstrates per-expert checkpoint patches with a Qwen3 MoE TP2/EP2 engine.
 
@@ -319,3 +328,4 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 - [RLHF with NCCL + FSDP2 and expert parallelism](../../../examples/rl/rlhf_nccl_fsdp_ep.py) - Multi-rank trainer: every FSDP rank builds an engine and joins the `full_tensor()` gather while only rank 0 touches the wire
 - [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Qwen3 MoE per-expert checkpoint updates with one trainer GPU and two TP2/EP2 inference GPUs
 - [RLHF with async weight syncing (offline, Ray)](../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model; uses an in-process `AsyncLLMEngine` with `RayVLLMWeightSyncClient`
+- [Checkpoint publisher and weight-update verifier](https://github.com/vllm-project/vllm/tree/vllm-state-transition-verifier/tools/state_transition_verifier) - On the `vllm-state-transition-verifier` branch. Pushes a local Hugging Face checkpoint into a running `vllm serve` over NCCL without a trainer, with fixed-token and GSM8K checks before and after the update; use it to verify weight updates for a new model before wiring up an RL framework. Get it with `git fetch origin vllm-state-transition-verifier && git checkout FETCH_HEAD -- tools/state_transition_verifier`, then start from `tools/state_transition_verifier/README.md`

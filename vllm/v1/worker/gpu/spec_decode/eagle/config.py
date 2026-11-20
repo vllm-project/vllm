@@ -37,6 +37,8 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     supported_options = frozenset({"draft_lm_head_quantization"})
     uses_target_hidden_states = True
     supports_watermarking = True
+    # Draft KV depends on the tokens the drafter reads ahead.
+    draft_kv_depends_on_lookahead = True
 
     @classmethod
     def matches(cls, spec: SpeculativeConfig) -> bool:
@@ -55,14 +57,6 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     @property
     def num_lookahead_tokens(self) -> int:
         return self.num_speculative_tokens
-
-    @property
-    def max_num_new_slots_for_drafting(self) -> int:
-        if self.spec_config.parallel_drafting:
-            # P-EAGLE (V1 model runner only): the existing query is reused; only
-            # masked queries need new slots.
-            return self.num_speculative_tokens - 1
-        return 0
 
 
 class Eagle3SpeculatorConfig(EagleSpeculatorConfig):

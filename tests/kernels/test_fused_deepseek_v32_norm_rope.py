@@ -95,9 +95,9 @@ def layer_norm(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor) -> torch.Tenso
 def rope(
     x: torch.Tensor, pos: torch.Tensor, cos_sin: torch.Tensor, interleave: bool
 ) -> torch.Tensor:
-    """Apply RoPE to the first ``rot_dim`` elements of x's last dim.
+    """Apply RoPE to the first `rot_dim` elements of x's last dim.
 
-    x: [..., head_dim] fp32. ``cos_sin`` is [max_pos, rot_dim]. ``interleave``
+    x: [..., head_dim] fp32. `cos_sin` is [max_pos, rot_dim]. `interleave`
     selects adjacent-pair (GLM) vs split-half NeoX (DeepSeek-V3.2) layout.
     """
     rot = cos_sin.shape[-1]

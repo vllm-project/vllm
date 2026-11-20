@@ -49,9 +49,9 @@ def test_serialize_messages() -> None:
 def test_normalize_openresponses_input_item_stamps_type() -> None:
     """A typeless assistant item must keep its role and content.
 
-    ``type`` is optional in the OpenResponses schema, but filling in
-    ``id``/``status`` without it makes the item match ``ItemReference`` in the
-    input union, which collapses it to ``{"id": ...}`` and silently drops the
+    `type` is optional in the OpenResponses schema, but filling in
+    `id`/`status` without it makes the item match `ItemReference` in the
+    input union, which collapses it to `{"id": ...}` and silently drops the
     assistant turn from the conversation. Regression test for that.
     """
     item = {
@@ -109,6 +109,17 @@ def test_input_item_parsing_leaves_non_assistant_items_alone() -> None:
     request = ResponsesRequest.model_validate({"input": [item]})
 
     assert request.input == [item]
+
+
+def test_input_list_validation_stops_at_first_invalid_item() -> None:
+    valid_item = {"role": "user", "content": "hello"}
+    invalid_item = {"type": "message", "role": "user"}
+    with pytest.raises(ValidationError) as first:
+        ResponsesRequest(input=[valid_item, invalid_item])
+    with pytest.raises(ValidationError) as multiple:
+        ResponsesRequest(input=[valid_item, invalid_item, invalid_item])
+
+    assert multiple.value.error_count() == first.value.error_count()
 
 
 def test_custom_tool_grammar_format_rejected() -> None:

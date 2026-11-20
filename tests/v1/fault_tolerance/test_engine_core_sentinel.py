@@ -14,7 +14,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 
 def _model_output(kv_connector_output: KVConnectorOutput | None) -> ModelRunnerOutput:
-    output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+    output = ModelRunnerOutput(req_ids=[])
     output.kv_connector_output = kv_connector_output
     return output
 
@@ -31,7 +31,9 @@ def _done_future(result=None, exception=None) -> Future:
 def _make_sentinel(batch_queue: deque) -> tuple[EngineCoreSentinel, MagicMock]:
     scheduler = MagicMock()
     sentinel = EngineCoreSentinel.__new__(EngineCoreSentinel)
-    sentinel.engine = SimpleNamespace(batch_queue=batch_queue, scheduler=scheduler)
+    sentinel.engine = SimpleNamespace(
+        batch_queue=batch_queue, scheduler=scheduler, deferred_step=None
+    )
     return sentinel, scheduler
 
 
@@ -66,3 +68,13 @@ def test_drain_batch_queue_drops_failures_and_empty_outputs():
 
     assert not batch_queue
     scheduler.update_from_output.assert_not_called()
+
+
+def test_drain_batch_queue_clears_deferred_step():
+    """A step deferred before the fault would block all further scheduling."""
+    sentinel, _ = _make_sentinel(deque())
+    sentinel.engine.deferred_step = (SchedulerOutput.make_empty(), Future())
+
+    sentinel._drain_batch_queue()
+
+    assert sentinel.engine.deferred_step is None
