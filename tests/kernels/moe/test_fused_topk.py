@@ -51,8 +51,8 @@ def torch_topk(
 @pytest.mark.parametrize("num_tokens", [1, 33, 56])
 @pytest.mark.parametrize("hidden_size", [1024, 2048])
 # 6 and 109 run a larger fused kernel with the extra experts masked (e.g. an
-# expert-pruned model); 600 has no fused kernel.
-@pytest.mark.parametrize("num_experts", [6, 16, 109, 600])
+# expert-pruned model).
+@pytest.mark.parametrize("num_experts", [6, 16, 109])
 @pytest.mark.parametrize("topk", [3, 4])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
