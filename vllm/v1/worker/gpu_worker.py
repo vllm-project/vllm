@@ -1522,12 +1522,14 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        pp_schema = self.model_runner.pp_transport_schema
         if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
             intermediate_tensors = self._pp_transport.recv(get_pp_group())
         elif forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
+                    all_gather_tensors=pp_schema.recv_all_gather_tensors,
                 )
             )
             assert tensor_dict is not None
@@ -1568,6 +1570,7 @@ class Worker(WorkerBase):
             handles = get_pp_group().isend_tensor_dict(
                 output.tensors,
                 all_gather_group=get_tp_group(),
+                all_gather_tensors=pp_schema.send_all_gather_tensors,
             )
             self._pp_send_work = handles[1:]
 

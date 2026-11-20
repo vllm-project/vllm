@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
 
-import torch
 import torch.nn as nn
 
 from vllm.config import SpeculativeConfig
+from vllm.distributed.pp_transport.schema import (
+    PPTransportSchema,
+    PPTransportTensorSpec,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsEagle3,
@@ -49,26 +52,42 @@ def verify_supports_aux_hidden_states_over_pp(model: nn.Module, method: str) -> 
 
 
 def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
-    from vllm.distributed.parallel_state import model_parallel_is_initialized
+    from vllm.distributed.parallel_state import (
+        get_pp_group,
+        model_parallel_is_initialized,
+    )
 
     if not model_parallel_is_initialized():
         return
     decoder = get_eagle_decoder(model)
     if decoder is None or not decoder.supports_aux_hidden_states_over_pp:
         return
-    upstream_keys, _ = decoder.aux_hidden_state_slot_keys()
-    if not upstream_keys:
+    upstream_keys, local_keys = decoder.aux_hidden_state_slot_keys()
+    if not upstream_keys and not local_keys:
         return
 
     hidden_size = cast(nn.Module, decoder).config.hidden_size
+    schema = getattr(model, "pp_transport_schema", None)
+    if schema is None:
+        schema = model.pp_transport_schema = PPTransportSchema()
+    spec = PPTransportTensorSpec((hidden_size,))
+    for key in (*upstream_keys, *local_keys):
+        schema.register_tensor(
+            key,
+            spec,
+            receive=key in upstream_keys,
+            send=not get_pp_group().is_last_rank,
+        )
+    if not upstream_keys:
+        return
+
     make_empty = model.make_empty_intermediate_tensors
 
     def make_empty_with_aux(batch_size, dtype, device):
         tensors = make_empty(batch_size, dtype, device)
         for key in upstream_keys:
-            tensors[key] = torch.zeros(
-                (batch_size, hidden_size), dtype=dtype, device=device
-            )
+            if key not in tensors.tensors:
+                tensors[key] = spec.allocate(batch_size, dtype, device, schema.tp_size)
         return tensors
 
     model.make_empty_intermediate_tensors = make_empty_with_aux

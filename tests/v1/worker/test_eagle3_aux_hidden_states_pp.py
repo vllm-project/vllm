@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from vllm.distributed import parallel_state
+from vllm.distributed.pp_transport.fields import PPTransportField
+from vllm.distributed.pp_transport.schema import PPTransportTensorSpec
 from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.mimo import MiMoModel
 from vllm.models.minimax_m3.nvidia import model as minimax_m3
@@ -67,6 +69,16 @@ def test_aux_layers_are_sorted_and_deduplicated():
     model = EagleModelMixin()
     model._set_aux_hidden_state_layers((48, 3, 90, 24, 48))
     assert model.aux_hidden_state_layers == (3, 24, 48, 90)
+
+
+@pytest.mark.parametrize("prefix", ["aux_hidden_states_", "downstream.aux_"])
+def test_aux_field_names_preserve_downstream_prefix(prefix):
+    model = EagleModelMixin()
+    model.AUX_HIDDEN_STATE_KEY = prefix
+    tensor = torch.ones(2, 4)
+    packed = model.pack_local_aux_hidden_states([tensor])
+    assert set(packed) == {f"{prefix}0"}
+    assert packed[PPTransportField.aux_hidden_state(0, prefix=prefix)] is tensor
 
 
 def test_pp_stage_does_not_retake_previous_stage_last_tap(monkeypatch):
@@ -295,6 +307,32 @@ def _pp_handler(target):
     handler = PPHandler.__new__(PPHandler)
     handler.configure_aux_hidden_state_relay(target)
     return handler
+
+
+@pytest.mark.parametrize("start,end", [(0, 2), (2, 4), (4, 6)])
+def test_aux_schema_registers_stage_directions(minimax_pp_stage, start, end):
+    model, target = minimax_pp_stage(start, end, (1, 3, 5), world_size=3)
+    upstream, local = model.aux_hidden_state_slot_keys()
+    schema = target.pp_transport_schema
+    assert set(schema.recv_specs) == set(upstream)
+    expected_send = set((*upstream, *local)) if end != 6 else set()
+    assert set(schema.send_specs) == expected_send
+    buffers = schema.make_empty_intermediate_tensors(8, torch.bfloat16, "cpu")
+    assert set(buffers.tensors) == set(upstream)
+    for buffer in buffers.tensors.values():
+        assert buffer.shape == (8, 6144)
+        assert buffer.dtype == torch.bfloat16
+        assert torch.count_nonzero(buffer) == 0
+    assert schema.recv_all_gather_tensors == schema.send_all_gather_tensors == {}
+    for key in upstream:
+        with pytest.raises(ValueError, match="already registered"):
+            schema.register_tensor(key, PPTransportTensorSpec((6144,)), send=False)
+    if end != 6:
+        for key in (*upstream, *local):
+            with pytest.raises(ValueError, match="already registered"):
+                schema.register_tensor(
+                    key, PPTransportTensorSpec((6144,)), receive=False
+                )
 
 
 @pytest.mark.parametrize("taps", [(0, 3, 6), (0, 1, 3), (4, 5, 6)])
