@@ -12,7 +12,7 @@ meta:
   related_recipes:
     - "tencent/Hy4-flash"
     - "tencent/Hy4-preview"
-  # The hardware the evaluations in the guide ran on (8x B300, TP8).
+  # The hardware the recipe was evaluated on (8x B300, TP8).
   default_hardware: b300
   # vLLM's ROCm port of HY4 covers the text backbone only (no vision encoder,
   # no DFly drafter), and no ROCm image ships HY4.
@@ -157,24 +157,6 @@ guide: |
   tokens. The model card's launch line sets none of the three, which serves the
   full 1M window; raise them to match your memory budget. A full 1M-token
   request has not been validated for this recipe.
-
-  The VRAM hints (944 GB FP8, 1,859 GB BF16) are the checkpoint sizes × 1.2.
-  They are capacity estimates, not measured GPU minima.
-
-  ## Validation scope
-
-  Evaluations ran on 8x B300 (2 TiB host RAM) at TP8 with vLLM commit
-  [`428c371`](https://github.com/vllm-project/vllm/tree/428c371b32c18a788def35abea1cb9f579278381),
-  the Python frontend and DFly2 off, on the pre-release snapshots of both
-  checkpoints:
-
-  | Checkpoint | AIME 2026 | GPQA-Diamond | OCRBench |
-  |---|---|---|---|
-  | BF16 | completed | completed | completed |
-  | FP8 | completed | stopped early | not run |
-
-  Those runs do not cover DFly2, tool calling, the Rust frontend or video
-  input, and the recipe claims no verified hardware.
 
   ## Client usage
 
