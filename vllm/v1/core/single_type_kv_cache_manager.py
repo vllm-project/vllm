@@ -1282,13 +1282,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_size: int,
         sliding_window: int,
         hash_block_size: int,
+        first_read_token: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Longest hash-aligned hit whose whole window is still cached.
 
         A cached entry for the prefix hash at `end` (a full block ending there
         or a partial entry) holds the KV of every token before `end` in its
         block, so it serves any hit `p <= end` in that block. The hit also
-        needs every full block intersecting `[p - sliding_window + 1, p)`.
+        needs every full block intersecting `[p - sliding_window + 1, p)`,
+        or `[first_read_token, p)` when that is given.
         The block table stays physical: blocks below the window are null and
         the last block may be partial.
         """
@@ -1299,6 +1301,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         while max_hit > 0:
             # The block holding the hit's last token.
             end_idx = (max_hit - 1) // block_size
+            if (
+                first_read_token is not None
+                and end_idx < first_read_token // block_size
+            ):
+                # No block up to the hit is read, so none needs to be cached.
+                null_blocks = [block_pool.null_block] * (end_idx + 1)
+                return tuple(list(null_blocks) for _ in kv_cache_group_ids), max_hit
             end_block = None
             for end_units in range(
                 min((end_idx + 1) * scale_factor, max_end_units),
@@ -1314,8 +1323,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 max_hit = end_idx * block_size
                 continue
             hit_length = min(max_hit, end_units * hash_block_size)
-            first_idx = max(0, hit_length - sliding_window + 1)
-            first_idx //= block_size
+            first_idx = (
+                max(0, hit_length - sliding_window + 1)
+                if first_read_token is None
+                else first_read_token
+            ) // block_size
             window: list[list[KVCacheBlock]] = []
             for i in range(first_idx, (hit_length - 1) // block_size + 1):
                 cached = (
@@ -1531,9 +1543,6 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
     recomputed.
     """
 
-    # Hits stay block-aligned; `find_longest_cache_hit` reads block hashes.
-    supports_fine_grained_hash_lookup: ClassVar[bool] = False
-
     @dataclass(frozen=True, slots=True)
     class Params(SlidingWindowManager.Params):
         num_speculative_tokens: int = 0
@@ -1617,6 +1626,19 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         self._num_null_prefix_blocks.pop(request_id, None)
         return super().pop_blocks_for_free(request_id)
 
+    def _has_partial_local_hit(
+        self,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+    ) -> bool:
+        # A hit below the drafter's reads leaves its partial block null.
+        return (
+            super()._has_partial_local_hit(
+                new_computed_blocks, num_local_computed_tokens
+            )
+            and not new_computed_blocks[-1].is_null
+        )
+
     def _num_unbacked_leading_blocks(self, num_tokens_main_model: int) -> int:
         # Draft steps read only from the tail below the target tokens.
         return max(num_tokens_main_model - self.tail_tokens, 0) // self.block_size
@@ -1654,7 +1676,6 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         """
         assert isinstance(manager_config.params, DFlashSlidingWindowManager.Params)
         assert dcp_world_size == 1 and pcp_world_size == 1
-        assert alignment_tokens % block_size == 0
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -1664,9 +1685,24 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         )
         if num_request_tokens is None:
             num_request_tokens = max_length
-        max_num_blocks = max_length // block_size
         num_retained_tokens = cls.sliding_window_reach(manager_config)
-        first_block = max(num_request_tokens - num_retained_tokens, 0) // block_size
+        first_read_token = max(num_request_tokens - num_retained_tokens, 0)
+        if alignment_tokens < block_size and block_size % alignment_tokens == 0:
+            # resolve_block_hashes kept the raw hash-granularity list.
+            assert isinstance(block_hashes, Sequence)
+            return cls._find_fine_grained_cache_hit(
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                block_size,
+                manager_config.params.sliding_window,
+                alignment_tokens,
+                first_read_token=first_read_token,
+            )
+        assert alignment_tokens % block_size == 0
+        max_num_blocks = max_length // block_size
+        first_block = first_read_token // block_size
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * max_num_blocks for _ in kv_cache_group_ids
         )

@@ -29,6 +29,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
+    DFlashSlidingWindowManager,
     MambaManager,
     SlidingWindowManager,
 )
@@ -2459,6 +2460,87 @@ def test_hybrid_sliding_window_partial_hit_needs_whole_window():
     manager.evict_blocks({interior_block.block_id})
     # The tail entry on block 3 survives, but tokens 21-23 are gone.
     assert manager.get_num_cached_tokens(req1) == 0
+
+
+def _full_mamba_window_manager(
+    block_size, hash_block_size, window_manager_config, retention_interval
+):
+    """Full attention, prefix-caching Mamba, and a window group (group 2)."""
+    spec = AttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size, shapes=(1, 1), dtypes=(torch.float32,)
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["full"], spec),
+            new_kv_cache_group(
+                ["mamba"], mamba_spec, MambaManager.config(enable_prefix_caching=True)
+            ),
+            new_kv_cache_group(["window"], spec, window_manager_config),
+        ],
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=retention_interval,
+    )
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+@pytest.mark.parametrize("num_new_tokens", [3, 10])
+def test_hybrid_dflash_drafter_group_gets_partial_hash_hits(
+    retention_interval, num_new_tokens
+):
+    """A DFlash drafter group takes fine-grained hits too. It needs drafter KV
+    only from the first token the request's next draft reads: a partial last
+    block in that range is copied, one below it stays null."""
+    hash_block_size = 2
+    block_size = 4 * hash_block_size
+    manager = _full_mamba_window_manager(
+        block_size,
+        hash_block_size,
+        DFlashSlidingWindowManager.config(sliding_window=6, num_speculative_tokens=2),
+        retention_interval,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+
+    tokens = list(range(27))
+    checkpoint = 26
+    req0 = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, checkpoint, 0, computed_blocks) is not None
+    req0.num_computed_tokens = checkpoint
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, len(tokens) - checkpoint) is not None
+    req0.num_computed_tokens = len(tokens)
+    draft_blocks = list(manager.get_blocks("0").blocks[2])
+    manager.free(req0)
+    manager.new_step_starts()
+
+    new_tokens = [100 + i for i in range(num_new_tokens)]
+    req1 = make_request("1", tokens + new_tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == checkpoint
+    # The first draft reads drafter KV from `num_tokens - sliding_window + 1` on.
+    first_read_block = (req1.num_tokens - 6 + 1) // block_size
+    draft_hit = computed_blocks.blocks[2]
+    assert len(draft_hit) == -(-checkpoint // block_size)
+    assert all(block.is_null for block in draft_hit[:first_read_block])
+    assert draft_hit[first_read_block:] == draft_blocks[first_read_block:4]
+
+    new_blocks = manager.allocate_slots(
+        req1, req1.num_tokens - num_computed, num_computed, computed_blocks
+    )
+    assert new_blocks is not None
+    copies, _ = manager.take_kv_cache_block_copies()
+    draft_cow = any(copy.src_block_id == draft_blocks[3].block_id for copy in copies)
+    assert draft_cow == (first_read_block <= 3)
 
 
 @pytest.mark.parametrize("prefix_match_unit", [2, None])

@@ -508,6 +508,46 @@ def test_dflash_window_hit_needs_only_the_window_before_request_end(
 
 
 @pytest.mark.parametrize(
+    ("cached", "max_length", "hit_length", "window"),
+    [
+        ({17, 18}, 40, 38, [17, 18]),  # full block 8 and a partial entry in 9
+        ({16}, 40, 34, [16]),  # another request's partial entry in block 8
+        ({18}, 40, 32, []),  # block 8 is missing: no drafter KV
+        (set(), 30, 30, []),  # the hit ends below the window: no drafter KV needed
+    ],
+)
+def test_dflash_window_fine_grained_hit_needs_only_the_window_before_request_end(
+    cached, max_length, hit_length, window
+):
+    """A finer prefix-match unit lets the hit end inside a block, still
+    needing cached drafter KV only from the request's first read on."""
+    hash_block_size = 2
+    block_pool = BlockPool(
+        num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(20)]
+    for i in cached:
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[i], 0), block_pool.blocks[i + 10]
+        )
+
+    # The first draft of a 41-token request reads tokens 34..40 (block 8 on).
+    (blocks,), num_hit_tokens = DFlashSlidingWindowManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=max_length,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        block_size=4,
+        manager_config=new_dflash_window_layer().manager_config,
+        alignment_tokens=hash_block_size,
+        num_request_tokens=41,
+    )
+
+    assert num_hit_tokens == hit_length
+    assert [b.block_id for b in blocks] == [0] * 8 + [i + 10 for i in window]
+
+
+@pytest.mark.parametrize(
     ("retention_interval", "cached"), [(None, [2, 3, 4, 7, 8, 9]), (0, [8])]
 )
 def test_dflash_window_sparse_retention_caches_only_what_a_replay_reads(
