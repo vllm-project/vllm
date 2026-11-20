@@ -245,6 +245,8 @@ class SchedulerConfig:
     an online fit of measured step times, outweighs the TTFT added. A request
     is held only while it can still meet the target given the releases it
     needs; one that has missed it is held at most this long at a time.
+    Every request weighs the same: with the "priority" `policy`, a
+    high-priority request is held as long as any other.
     Requires data parallelism on a MoE model, and cannot be combined with
     `prefill_schedule_interval`. Has no effect on the prefill-only and
     decode-only instances of disaggregated serving."""
