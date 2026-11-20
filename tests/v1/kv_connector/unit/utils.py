@@ -149,11 +149,7 @@ def create_vllm_config(
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype=dtype,
-        seed=42,
-        hf_overrides=hf_overrides or {},
+        model=model, dtype=dtype, seed=42, hf_overrides=hf_overrides or {}
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -197,19 +193,13 @@ def create_vllm_config(
     )
 
 
-def set_mtp_config(
-    config: VllmConfig,
-    num_lookahead: int = 1,
-    *,
-    disable_lookahead_block_hashes: bool = False,
-) -> None:
+def set_mtp_config(config: VllmConfig, num_lookahead: int = 1) -> None:
     """Configure test MTP without loading a separate draft model."""
     assert config.model_config is not None
     config.model_config.hf_config.n_predict = num_lookahead
     spec = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=num_lookahead,
-        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
     )
     spec.method = "mtp"
     spec.draft_model_config = config.model_config
@@ -636,6 +626,7 @@ def make_nixl_scheduler(
     sched.kv_cache_config.hash_block_size = 16
     sched.vllm_config = SimpleNamespace(
         num_prefill_lookahead_tokens=0,
+        num_reprefillable_tokens=0,
         num_hash_lookahead_tokens=0,
         cache_config=CacheConfig(block_size=16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -646,6 +637,7 @@ def make_nixl_scheduler(
         sched._heartbeat_by_engine = {}
         sched._heartbeat_req_engine = {}
         sched._last_heartbeat_time = 0.0
+        sched._new_heartbeat_reqs = set()
         sched._kv_lease_duration = kv_lease_duration
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
@@ -716,6 +708,7 @@ def make_nixl_push_scheduler(
     vllm_config.parallel_config.decode_context_parallel_size = 1
     vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_reprefillable_tokens = 0
     vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
@@ -735,6 +728,7 @@ def make_nixl_push_scheduler(
     sched._heartbeat_by_engine = {}
     sched._heartbeat_req_engine = {}
     sched._last_heartbeat_time = 0.0
+    sched._new_heartbeat_reqs = set()
     sched.blocks_per_sw = []
 
     return sched

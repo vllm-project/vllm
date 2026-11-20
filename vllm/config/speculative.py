@@ -112,6 +112,7 @@ EagleModelTypes = Literal[
 SpeculativeMethod = Literal[
     "ngram",
     "draft_model",
+    "dfly",
     "suffix",
     EagleModelTypes,
     NgramGPUTypes,
@@ -569,17 +570,6 @@ class SpeculativeConfig:
     If `None`, use the value from the draft model's Hugging Face config."""
 
     # Advanced control
-    disable_eagle_block_drop: bool = False
-    """Disable dropping the trailing prefix-cache block for EAGLE-like
-    speculative methods. This is an experimental option for measuring the
-    acceptance-rate impact of reusing that block. It does not disable the
-    speculative drafter itself."""
-    disable_lookahead_block_hashes: bool = False
-    """Disable lookahead block hashes for EAGLE-like speculative methods and
-    fall back to dropping the trailing prefix-cache block. Lookahead hashes
-    also cover the tokens the drafter reads after each block, so engines
-    sharing a KV store and external consumers of KV cache events must use the
-    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
     and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
@@ -784,8 +774,6 @@ class SpeculativeConfig:
             "revision",
             "code_revision",
             "index_share_for_mtp_iteration",
-            "disable_eagle_block_drop",
-            "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
@@ -1252,7 +1240,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
-        if hf_config.model_type == "hy_v4":
+        if hf_config.model_type in ("hy_v4", "hy_v4_vl"):
             hf_config.model_type = "hy_v4_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
@@ -1277,6 +1265,11 @@ class SpeculativeConfig:
                     "architectures": ["InklingMTPModel"],
                 }
             )
+
+        if hf_config.model_type == "inkling2":
+            from vllm.models.inkling2.configs import Inkling2DSparkConfig
+
+            hf_config = Inkling2DSparkConfig.from_target(hf_config)
 
         if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
             hf_config.model_type = "gemma4_mtp"
@@ -1499,10 +1492,12 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         config_cls = get_method_config_class(self)
-        # DSpark drafts carry their own width (block size), so the default
-        # draft is resolved even without num_speculative_tokens.
+        # These drafts carry their own width, so resolve their default model
+        # even without num_speculative_tokens.
         if self.model is None and (
-            self.num_speculative_tokens is not None or self.use_dspark()
+            self.num_speculative_tokens is not None
+            or self.use_dspark()
+            or self.method == "dfly"
         ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
@@ -2125,19 +2120,6 @@ class SpeculativeConfig:
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
-
-    def needs_eagle_block_drop(self) -> bool:
-        """Whether draft KV at a position depends on the next token.
-
-        EAGLE-style drafters build a position's draft KV from its hidden state
-        and the next token. DFlash/DSpark build it from the target hidden state
-        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
-        """
-        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
-
-    def use_eagle_block_drop(self) -> bool:
-        """Whether the volatile trailing prefix-cache block should be dropped."""
-        return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

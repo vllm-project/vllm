@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
+    VLLM_MAX_TOKENIZE_TOKENS: int | None = None
     VLLM_MAX_NUM_BAD_WORDS: int = 128
     VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
@@ -169,6 +170,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -333,7 +335,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
-    VLLM_RELOAD_MODE: Literal["layerwise", "direct"] = "layerwise"
+    VLLM_RELOAD_MODE: Literal["auto", "layerwise", "direct"] = "auto"
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -347,7 +349,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-    VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
+    VLLM_XPU_SUPPORT_FP8_QUERY: bool | None = None
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -1229,6 +1231,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Maximum number of stop strings allowed in a single request.
     "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of tokens allowed for /tokenize, /detokenize, and
+    # /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
+    # set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
+    "VLLM_MAX_TOKENIZE_TOKENS": lambda: (
+        int(val)
+        if (val := os.environ.get("VLLM_MAX_TOKENIZE_TOKENS", "").strip())
+        else None
+    ),
     # Maximum number of bad-word token sequences generated per request.
     "VLLM_MAX_NUM_BAD_WORDS": lambda: int(
         os.environ.get("VLLM_MAX_NUM_BAD_WORDS", "128")
@@ -1288,10 +1298,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # How a PP stage sends its intermediate tensors to the next stage.
     # "copy_engine" uses copy engines instead of NCCL kernels: CUDA copy engines
-    # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs TP=1 and
-    # fully connected PP GPUs on one node, and fails startup without.
-    # "auto" uses copy engines when every PP rank can, and NCCL otherwise; on
-    # ROCm it keeps NCCL.
+    # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs each PP
+    # chain's GPUs directly connected: on one node, or with CUDA across nodes in
+    # one multi-node NVLink domain with an IMEX channel. It fails startup
+    # without. "auto" uses copy engines when every rank can, and NCCL otherwise;
+    # on ROCm it keeps NCCL.
     "VLLM_PP_TRANSPORT": env_with_choices(
         "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
     ),
@@ -1516,6 +1527,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # Share DP-shared Engram host tables (EngramConfig.dp_shared_memory) as
+    # HIP VMM host memory instead of /dev/shm. Disabled by default: on some
+    # amdgpu drivers (e.g. 6.16.6) a peer's access to the imported memory
+    # keeps it allocated after every process exits (ROCm/rocm-systems#13573).
+    "VLLM_ROCM_ENGRAM_HIP_VMM": lambda: (
+        os.getenv("VLLM_ROCM_ENGRAM_HIP_VMM", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
@@ -2347,9 +2365,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # How weight updates reload the model: "layerwise" rebuilds each layer
     # from the checkpoint tensors; "direct" writes them into the live
-    # tensors and reruns post-load processing in place.
+    # tensors and reruns post-load processing in place; "auto" reloads
+    # directly with runtime weight updates where supported, else layerwise.
     "VLLM_RELOAD_MODE": env_with_choices(
-        "VLLM_RELOAD_MODE", "layerwise", ["layerwise", "direct"]
+        "VLLM_RELOAD_MODE", "auto", ["auto", "layerwise", "direct"]
     ),
     # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
     # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
@@ -2403,11 +2422,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
     ),
-    # Force N-contiguous weight layout for all XPU unquantized linears.
-    "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
-        int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
-    ),
     # whether use xpu specific sample kernel
+    # Whether XPU attention takes an FP8 query. If unset, enabled on Xe3p
+    # (native FP8) and disabled otherwise.
+    "VLLM_XPU_SUPPORT_FP8_QUERY": lambda: (
+        bool(int(os.environ["VLLM_XPU_SUPPORT_FP8_QUERY"]))
+        if "VLLM_XPU_SUPPORT_FP8_QUERY" in os.environ
+        else None
+    ),
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
     ),
@@ -2592,6 +2614,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+        "VLLM_MAX_TOKENIZE_TOKENS",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
@@ -2634,6 +2657,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
+        # Where Engram host tables live; the GPU views and graphs are the same.
+        "VLLM_ROCM_ENGRAM_HIP_VMM",
     }
 
     from vllm.config.utils import normalize_value
