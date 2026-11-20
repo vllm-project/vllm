@@ -3,7 +3,7 @@
 
 import inspect
 import os
-from collections.abc import Callable, Hashable, Iterator
+from collections.abc import Callable, Generator, Hashable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from itertools import accumulate
@@ -39,7 +39,7 @@ _workspace_lane: ContextVar[int] = ContextVar("vllm_workspace_lane", default=0)
 
 
 @contextmanager
-def use_workspace_lane(lane: int) -> Iterator[None]:
+def use_workspace_lane(lane: int) -> Generator[None]:
     """Select an independent workspace owner for this execution context."""
     if lane < 0:
         raise ValueError(f"Workspace lane must be non-negative, got {lane}.")
@@ -136,7 +136,10 @@ class WorkspaceManager:
                 f"Workspace lane {lane} is not configured; manager has "
                 f"{self._num_lanes} lane(s)."
             )
-        return dbo_current_ubatch_id() * self._num_lanes + lane
+        # One set of workspaces shared by every microbatch (TP-only DBO) or one
+        # per microbatch.
+        ubatch = dbo_current_ubatch_id() if self._num_ubatches > 1 else 0
+        return ubatch * self._num_lanes + lane
 
     def get_persistent_resource(self, key: Hashable, factory: Callable[[], T]) -> T:
         """Return the resource cached for `key` in the current ubatch and lane.

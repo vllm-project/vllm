@@ -24,7 +24,7 @@ from model_constraints import load_head_constraints, suggest_tensor_parallel_siz
 from vllm.config.scheduler import SchedulerConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorkloadHints:
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -45,7 +45,7 @@ class WorkloadHints:
                 raise ValueError(f"{name} must be greater than zero")
 
 
-@dataclass
+@dataclass(slots=True)
 class TuningResult:
     """Runtime overrides and benchmark-only seeds produced by tuning policies."""
 
