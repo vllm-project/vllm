@@ -231,6 +231,10 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(
+            response.error.param.as_deref(),
+            Some("thinking_token_budget")
+        );
         assert!(response.error.message.contains("thinking_token_budget"));
     }
 
@@ -246,6 +250,7 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param, None);
         assert!(response.error.message.contains("min_tokens=5"));
         assert!(response.error.message.contains("max_tokens=4"));
     }
@@ -263,6 +268,7 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param.as_deref(), Some("top_p"));
         assert!(response.error.message.contains("top_p"));
     }
 
@@ -318,8 +324,10 @@ mod tests {
             vllm_chat::Error::UntrustedRequestChatTemplate,
         );
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.param.as_deref(), Some("chat_template"));
         assert_eq!(
-            api_error.to_error_response().error.message,
+            response.error.message,
             "Chat template is passed with request, but --trust-request-chat-template is not set. \
              Refused request with untrusted chat template."
         );
@@ -354,6 +362,7 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param.as_deref(), Some("logprobs"));
         assert!(response.error.message.contains("logprobs"));
     }
 
@@ -368,6 +377,10 @@ mod tests {
         ));
         let api_error = chat_submit_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.param.as_deref(),
+            Some("prompt_logprobs")
+        );
     }
 
     #[test]
@@ -379,6 +392,10 @@ mod tests {
         });
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.param.as_deref(),
+            Some("logprob_token_ids")
+        );
     }
 
     #[test]
@@ -388,6 +405,7 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param.as_deref(), Some("allowed_token_ids"));
         assert!(response.error.message.contains("allowed_token_ids"));
     }
 
@@ -401,6 +419,10 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(
+            response.error.param.as_deref(),
+            Some("truncate_prompt_tokens")
+        );
         assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
         assert!(response.error.message.contains("max_model_len = 4000"));
     }
@@ -412,6 +434,10 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(
+            response.error.param.as_deref(),
+            Some("truncate_prompt_tokens")
+        );
         assert!(response.error.message.contains("-2"));
         assert!(response.error.message.contains("must be >= -1"));
     }

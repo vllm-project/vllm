@@ -77,7 +77,8 @@ pub(super) fn prepare_chat_request(
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
     let n = resolve_n(request.n)?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
@@ -156,6 +157,9 @@ pub(super) fn prepare_chat_request(
     )
     .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
 
+    #[expect(deprecated)]
+    let max_tokens = request.max_completion_tokens.or(request.max_tokens);
+
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
         messages,
@@ -165,7 +169,7 @@ pub(super) fn prepare_chat_request(
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
-            max_tokens: request.max_completion_tokens,
+            max_tokens,
             min_tokens: request.min_tokens,
             thinking_token_budget: request.thinking_token_budget,
             logprobs,
@@ -259,6 +263,7 @@ pub(crate) fn normalize_generation_prompt_mode(
         }
         (_, true, _) => {
             bail_invalid_request!(
+                param = "continue_final_message",
                 "Cannot set `continue_final_message` to True when the last message is not from the assistant."
             );
         }
@@ -422,13 +427,16 @@ fn convert_assistant_tool_calls(
         .collect()
 }
 
-pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
+fn convert_tools_with_param(
+    tools: Option<Vec<Tool>>,
+    param: &'static str,
+) -> Result<Vec<ChatTool>, ApiError> {
     tools
         .unwrap_or_default()
         .into_iter()
         .map(|tool| {
             if tool.tool_type != "function" {
-                bail_invalid_request!("Only function tools are supported.");
+                bail_invalid_request!(param = param, "Only function tools are supported.");
             }
             let mut function = tool.function;
             function.defer_loading = function.defer_loading.or(tool.defer_loading);
@@ -437,8 +445,12 @@ pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, A
         .collect()
 }
 
+pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
+    convert_tools_with_param(tools, "tools")
+}
+
 fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
-    let tools = convert_tools(tools)?;
+    let tools = convert_tools_with_param(tools, "messages[].tools")?;
     Ok((!tools.is_empty()).then_some(tools))
 }
 
@@ -454,10 +466,15 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
             name: function.name.clone(),
         }),
         ToolChoice::AllowedTools { tools, .. } => bail_invalid_request!(
+            param = "tool_choice",
             "allowed_tools tool_choice is not supported yet: {}.",
             tools.iter().map(ToolReference::identifier).join(", ")
         ),
-        _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
+        _ => bail_invalid_request!(
+            param = "tool_choice",
+            "tool_choice={:?} is not supported yet.",
+            tool_choice
+        ),
     }
 }
 
@@ -472,7 +489,6 @@ mod tests {
     use llm_multimodal::ImageDetail;
     use serde_json::json;
     use thiserror_ext::AsReport as _;
-    use validator::Validate;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
@@ -655,7 +671,6 @@ mod tests {
             "min_tokens": 0,
         }))
         .expect("parse zero min_tokens");
-        request.validate().expect("validate zero min_tokens");
 
         let prepared = prepare_chat_request(
             request,
@@ -824,15 +839,69 @@ mod tests {
     }
 
     #[test]
-    fn chat_http_request_rejects_empty_cache_salt() {
+    fn prepare_chat_request_falls_back_to_deprecated_max_tokens() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "messages": [{"role": "user", "content": "hello"}],
-            "cache_salt": "",
+            "max_tokens": 32,
         }))
-        .expect("parse cache_salt");
+        .expect("parse deprecated max_tokens");
 
-        assert!(request.validate().is_err());
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare deprecated max_tokens");
+        assert_eq!(prepared.chat_request.sampling_params.max_tokens, Some(32));
+
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 32,
+            "max_completion_tokens": 64,
+        }))
+        .expect("parse both max_tokens and max_completion_tokens");
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("max_completion_tokens wins");
+        assert_eq!(prepared.chat_request.sampling_params.max_tokens, Some(64));
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_non_function_developer_tools() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("policy".to_string()),
+                tools: Some(vec![Tool {
+                    tool_type: "mcp".to_string(),
+                    function: Function {
+                        name: "tool".to_string(),
+                        description: None,
+                        parameters: json!({}),
+                        strict: None,
+                        defer_loading: None,
+                    },
+                    defer_loading: None,
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_error_response().error.param.as_deref(),
+            Some("messages[].tools")
+        );
     }
 
     #[test]
@@ -1788,7 +1857,9 @@ mod tests {
         expect![[r#"
             InvalidRequest {
                 message: "tool_choice function `f` was not found in the available tools",
-                param: None,
+                param: Some(
+                    "tool_choice",
+                ),
             }
         "#]]
         .assert_debug_eq(&error);
