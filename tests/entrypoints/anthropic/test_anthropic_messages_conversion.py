@@ -2072,6 +2072,46 @@ class TestToolDefinitions:
         assert insert_field in props
         assert ("insert_text" in props) == (insert_field == "insert_text")
 
+    @pytest.mark.parametrize(
+        ("tool_input", "valid"),
+        [
+            (
+                {
+                    "command": "rename",
+                    "old_path": "/memories/a",
+                    "new_path": "/memories/b",
+                },
+                True,
+            ),
+            ({"command": "rename"}, False),
+            ({"command": "rename", "old_path": "/memories/a"}, False),
+            ({"command": "view", "path": "/memories"}, True),
+            ({"command": "view"}, False),
+            ({"command": "create", "path": "/memories/a"}, False),
+            ({"command": "str_replace", "path": "/memories/a", "old_str": "x"}, False),
+            (
+                {
+                    "command": "insert",
+                    "path": "/memories/a",
+                    "insert_line": 0,
+                    "insert_text": "x",
+                },
+                True,
+            ),
+            ({"command": "insert", "path": "/memories/a", "insert_line": 0}, False),
+            ({"command": "delete", "path": "/memories/a"}, True),
+        ],
+    )
+    def test_memory_tool_schema_requires_command_fields(self, tool_input, valid):
+        jsonschema = pytest.importorskip("jsonschema")
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"type": "memory_20250818", "name": "memory"}],
+        )
+        schema = _convert(request).tools[0].function.parameters
+        validator = jsonschema.Draft202012Validator(schema)
+        assert validator.is_valid(tool_input) == valid
+
     def test_client_tool_tool_level_options_are_accepted(self):
         request = _make_request(
             [{"role": "user", "content": "Hi"}],

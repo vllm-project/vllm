@@ -101,6 +101,16 @@ def _text_editor(name: str, legacy: bool) -> ClientToolSpec:
     )
 
 
+# Fields each memory command needs, as in Anthropic's BetaMemoryTool20250818*Command.
+_MEMORY_REQUIRED = {
+    "view": ["path"],
+    "create": ["path", "file_text"],
+    "str_replace": ["path", "old_str", "new_str"],
+    "insert": ["path", "insert_line", "insert_text"],
+    "delete": ["path"],
+    "rename": ["old_path", "new_path"],
+}
+
 _MEMORY = ClientToolSpec(
     name="memory",
     description=(
@@ -109,17 +119,7 @@ _MEMORY = ClientToolSpec(
     ),
     input_schema=_object(
         {
-            "command": {
-                "type": "string",
-                "enum": [
-                    "view",
-                    "create",
-                    "str_replace",
-                    "insert",
-                    "delete",
-                    "rename",
-                ],
-            },
+            "command": {"type": "string", "enum": list(_MEMORY_REQUIRED)},
             "path": _PATH,
             "view_range": _VIEW_RANGE,
             "file_text": _FILE_TEXT,
@@ -131,7 +131,16 @@ _MEMORY = ClientToolSpec(
             "new_path": {"type": "string", "description": "New path."},
         },
         ["command"],
-    ),
+    )
+    | {
+        "allOf": [
+            {
+                "if": {"properties": {"command": {"const": command}}},
+                "then": {"required": required},
+            }
+            for command, required in _MEMORY_REQUIRED.items()
+        ]
+    },
 )
 
 CLIENT_TOOL_SPECS: dict[str, ClientToolSpec] = {
