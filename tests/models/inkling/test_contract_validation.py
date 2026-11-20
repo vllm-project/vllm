@@ -3,15 +3,11 @@
 
 import numpy as np
 import pytest
+from transformers import InklingTextConfig
 
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.inkling.common.mm_preprocess import InklingMultiModalDataParser
 from vllm.models.inkling.common.towers import plan_out_scales
-from vllm.models.inkling.configs import (
-    InklingAudioConfig,
-    InklingModelConfig,
-    InklingVisionConfig,
-)
 from vllm.models.inkling.nvidia.sconv_swa_attn import (
     InklingSconvMetadataBuilder,
 )
@@ -34,20 +30,6 @@ def test_vision_scale_plan_breaks_assignment_ties_in_order():
     assert reductions == sorted(set(reductions))
 
 
-@pytest.mark.parametrize(
-    ("config_cls", "kwargs", "missing"),
-    [
-        pytest.param(InklingAudioConfig, {"decoder_dmodel": 16}, "n_mel_bins"),
-        pytest.param(
-            InklingVisionConfig, {"decoder_dmodel": 16}, "vision_encoder_type"
-        ),
-    ],
-)
-def test_enabled_tower_requires_architecture_fields(config_cls, kwargs, missing):
-    with pytest.raises(ValueError, match=missing):
-        config_cls(**kwargs)
-
-
 def test_inkling_raw_2d_audio_is_rejected_as_ambiguous():
     parser = InklingMultiModalDataParser(target_sr=16_000, target_channels=1)
     with pytest.raises(ValueError, match="ambiguous channel layout"):
@@ -55,7 +37,7 @@ def test_inkling_raw_2d_audio_is_rejected_as_ambiguous():
 
 
 def test_inkling_mtp_chain_norm_is_disabled_by_default():
-    assert InklingModelConfig().chain_hidden_post_norm is False
+    assert InklingTextConfig().chain_hidden_post_norm is False
 
 
 def test_inkling_supports_piecewise_cudagraphs():
