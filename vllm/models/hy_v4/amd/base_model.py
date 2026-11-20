@@ -68,7 +68,6 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.hy_v4.amd.hc import HYV4HCHeadLayer, HYV4HCLayer
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -77,6 +76,7 @@ from .attention import (
     is_skip_topk_indexer_weight,
     sparse_layer_ids,
 )
+from .hc import HYV4HCHeadLayer, HYV4HCLayer
 from .moe import HYV4FeedForward, HYV4MoEFused
 from .mrope import set_token_rope
 

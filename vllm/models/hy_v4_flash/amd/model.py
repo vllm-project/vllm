@@ -14,6 +14,11 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.models.hy_v4.amd.base_model import (
+    HYV4DecoderLayer,
+    HYV4ForCausalLM,
+    HYV4Model,
+)
 from vllm.models.hy_v4.amd.hc import HYV4HCHeadLayer, HYV4HCLayer, HYV4HCPreLayer
 from vllm.models.hy_v4.amd.triton_ihc import (
     triton_ihc_post_pre_rms_norm,
@@ -23,11 +28,6 @@ from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .hy_v4.model import (
-    HYV4DecoderLayer,
-    HYV4ForCausalLM,
-    HYV4Model,
-)
 from .moe import HYV4FlashFeedForward, HYV4FlashMoE
 
 _EXPERT_WEIGHT = re.compile(

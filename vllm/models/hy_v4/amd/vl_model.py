@@ -32,12 +32,12 @@ from vllm.transformers_utils.processors.hy_v4 import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .base_model import HYV4ForCausalLM
 from .mm_preprocess import (
     HYV4VLDummyInputsBuilder,
     HYV4VLMultiModalProcessor,
     HYV4VLProcessingInfo,
 )
-from .model import HYV4ForCausalLM
 from .vision import HYV4VisionTransformer
 from .vl_cudagraph import HYV4VLEncoderCudaGraphMixin
 

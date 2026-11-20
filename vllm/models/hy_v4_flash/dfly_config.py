@@ -13,7 +13,7 @@ from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 class HYV4FlashDFlySpeculatorConfig(HYV4DFlySpeculatorConfig):
     target_model_type = "hy_v4_flash"
     speculator_class = (
-        "vllm.models.hy_v4_flash.amd.hy_v4.dfly_speculator.HYV4DFlySpeculator"
+        "vllm.models.hy_v4.amd.dfly_speculator.HYV4DFlySpeculator"
         if current_platform.is_rocm()
         else HYV4DFlySpeculatorConfig.speculator_class
     )
