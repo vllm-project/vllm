@@ -34,7 +34,6 @@ from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeAudioEncoderConfig,
-    Qwen3OmniMoeConfig,
     Qwen3OmniMoeThinkerConfig,
 )
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
@@ -1164,7 +1163,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(Qwen2_5OmniThinkerProcessingInfo):
     processor_kwargs_cls = Qwen3OmniMoeProcessorKwargs
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3OmniMoeConfig).thinker_config
+        return self.ctx.get_hf_config(Qwen3OmniMoeThinkerConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3OmniMoeProcessor:
         processor = self.ctx.get_hf_processor(
@@ -1661,11 +1660,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config  # needed for torch compile forward context
-        thinker_config: Qwen3OmniMoeThinkerConfig = (
-            vllm_config.model_config.hf_config.thinker_config
-        )
-        # MoE LoRA uses the architecture to determine its weight layout.
-        thinker_config.architectures = vllm_config.model_config.hf_config.architectures
+        thinker_config: Qwen3OmniMoeThinkerConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config

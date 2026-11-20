@@ -405,22 +405,24 @@ def _is_tensor_type(annotation: object) -> bool:
     )
 
 
-def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
+def infer_dynamic_arg_dims(cls: type[nn.Module], dim: int = 0) -> "DynamicArgDims":
     """Infer `dynamic_arg_dims` from the signature of `cls.forward`.
 
-    The 0-th dimension is dynamic for every argument which is either unannotated
-    or annotated with a tensor type, optionally in a union with other types.
-    String annotations are not resolved.
+    `dim` is dynamic for every argument which is either unannotated or annotated
+    with a tensor type, optionally in a union with other types, and which has no
+    default other than `None`. String annotations are not resolved.
     """
     dims: DynamicArgDims = {}
     for name, param in inspect.signature(cls.forward).parameters.items():
         if name == "self" or param.kind in {param.VAR_POSITIONAL, param.VAR_KEYWORD}:
             continue
+        if param.default not in (None, param.empty):
+            continue
         annotation = param.annotation
         is_union = get_origin(annotation) in {Union, UnionType}
         members = get_args(annotation) if is_union else (annotation,)
         if annotation is param.empty or any(map(_is_tensor_type, members)):
-            dims[name] = 0
+            dims[name] = dim
     return dims
 
 
@@ -464,6 +466,43 @@ def maybe_disable_dynamic_rope_update(
                     getattr(module, f"{prefix}inv_freq").copy_(inv_freq)
                 rope_types[layer_type] = "default"
         module.rope_type = rope_types if per_layer else rope_types[None]
+
+
+class _PreambleDone(Exception):
+    """Stops a decoder forward before its first layer."""
+
+
+@torch.no_grad()
+def decoder_mutates_inputs_embeds(
+    model: nn.Module, first_layer: nn.Module, hidden_size: int, uses_mrope: bool
+) -> bool:
+    """Whether `model`'s pre-layer code modifies `inputs_embeds` in place.
+
+    Runs `model` on one token and stops it at `first_layer`. If the probe fails,
+    assumes it does, so callers fall back to copying the input."""
+
+    def stop(module, args):
+        raise _PreambleDone
+
+    inputs_embeds = torch.zeros(1, 1, hidden_size)
+    position_ids = torch.zeros(1, 1, dtype=torch.long)
+    if uses_mrope:
+        position_ids = position_ids.expand(3, 1, 1)
+    handle = first_layer.register_forward_pre_hook(stop)
+    try:
+        model(
+            inputs_embeds=inputs_embeds,
+            use_cache=False,
+            position_ids=position_ids,
+            return_dict=False,
+        )
+    except _PreambleDone:
+        return inputs_embeds._version > 0
+    except Exception:
+        logger.debug("Decoder input mutation probe failed", exc_info=True)
+    finally:
+        handle.remove()
+    return True
 
 
 def has_bidirectional_attention(model: nn.Module) -> bool:

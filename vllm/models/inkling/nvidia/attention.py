@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 from torch import nn
+from transformers import InklingTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -32,7 +33,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
-from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
     _INKLING_FA4_REL_ATTENTION_KERNEL,
@@ -68,7 +68,7 @@ class RelLogitsProj(nn.Module):
 class InklingAttention(nn.Module, AttentionLayerBase):
     def __init__(
         self,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         *,
         num_heads: int,
         num_kv_heads: int,
