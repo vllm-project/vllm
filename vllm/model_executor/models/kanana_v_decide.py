@@ -16,9 +16,9 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.offloader import get_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -104,38 +104,33 @@ class KananaVDecideVisionAttention(Qwen2_5_VisionAttention):
         return output
 
 
-class KananaVDecideVisionTransformer(Qwen3_VisionTransformer):
-    """The Qwen3-VL vision tower with the gated attention in every block."""
-
-    def __init__(
-        self,
-        vision_config,
-        norm_eps: float = 1e-6,
-        quant_config: QuantizationConfig | None = None,
-        input_norm: torch.nn.Module | None = None,
-        prefix: str = "",
-    ) -> None:
-        if not vision_config.gated_attention:
-            raise ValueError("Kanana-2-v-decide checkpoints use gated vision attention")
-        super().__init__(
-            vision_config,
-            norm_eps=norm_eps,
-            quant_config=quant_config,
-            input_norm=input_norm,
-            prefix=prefix,
+def gate_vision_attention(
+    visual: Qwen3_VisionTransformer,
+    vision_config,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> None:
+    """Swap the gated attention into every block of a Qwen3-VL vision tower."""
+    if not vision_config.gated_attention:
+        raise ValueError("Kanana-2-v-decide checkpoints use gated vision attention")
+    if visual.attn_backend == AttentionBackendEnum.FLASHINFER:
+        # FlashInfer reads q, k and v as views of a three-part qkv; the
+        # gated qkv has four parts.
+        raise ValueError(
+            "Kanana-2-v-decide does not support the FLASHINFER vision attention"
         )
-        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
-            # FlashInfer reads q, k and v as views of a three-part qkv; the
-            # gated qkv has four parts.
-            raise ValueError(
-                "Kanana-2-v-decide does not support the FLASHINFER vision attention"
-            )
-        for i, block in enumerate(self.blocks):
-            block.attn = KananaVDecideVisionAttention(
-                embed_dim=vision_config.hidden_size,
-                num_heads=vision_config.num_heads,
-                quant_config=quant_config,
-                prefix=f"{prefix}.blocks.{i}.attn",
+    offloader = get_offloader()
+    for i, block in enumerate(visual.blocks):
+        block.attn = KananaVDecideVisionAttention(
+            embed_dim=vision_config.hidden_size,
+            num_heads=vision_config.num_heads,
+            quant_config=quant_config,
+            prefix=f"{prefix}.blocks.{i}.attn",
+        )
+        if offloader.supports_tower_offload:
+            # The tower went through the offloader when Qwen3-VL built it.
+            offloader.wrap_modules(
+                (m for m in [block.attn]), prefix=f"{prefix}.blocks.{i}.attn"
             )
 
 
@@ -219,13 +214,9 @@ class KananaVDecideModel(_KananaVDecideBase):
                 f"got {config.embedding_dimension}"
             )
         if isinstance(self.visual, Qwen3_VisionTransformer):
-            # Qwen3-VL builds the plain tower; rebuild it with the gated
-            # attention under the same tower marking.
-            with self._mark_tower_model(vllm_config, {"image", "video"}):
-                self.visual = KananaVDecideVisionTransformer(
-                    config.vision_config,
-                    norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                    quant_config=vllm_config.quant_config,
-                    input_norm=build_mm_input_norm(self.model_config),
-                    prefix=maybe_prefix(prefix, "visual"),
-                )
+            gate_vision_attention(
+                self.visual,
+                config.vision_config,
+                vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
