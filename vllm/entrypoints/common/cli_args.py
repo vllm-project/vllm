@@ -307,7 +307,8 @@ class FrontendArgs(BaseFrontendArgs):
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
     `--port`. Binds on `--host`, or 127.0.0.1 with `--uds`. Cannot be combined
-    with the Python gRPC server's `--grpc` flag."""
+    with the Python gRPC server's `--grpc` flag. With `vllm launch render`, serves
+    the `vllm.Render` gRPC service next to the HTTP render routes."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
@@ -500,8 +501,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
 
 
 def validate_grpc_port_arg(args: argparse.Namespace) -> None:
-    """Validate the Rust frontend's optional gRPC listener."""
+    """Validate the optional gRPC listener of the Rust frontend or of
+    `vllm launch render`."""
     if getattr(args, "grpc_port", None) is None:
+        return
+
+    # `vllm launch render` serves the Python `vllm.Render` gRPC service itself.
+    if getattr(args, "launch_component", None) == "render":
+        _validate_grpc_port_number(args)
         return
 
     if args.grpc:
@@ -525,6 +532,10 @@ def validate_grpc_port_arg(args: argparse.Namespace) -> None:
             "--data-parallel-multi-port-external-lb: "
             "its frontends would share the same gRPC port"
         )
+    _validate_grpc_port_number(args)
+
+
+def _validate_grpc_port_number(args: argparse.Namespace) -> None:
     if not 0 <= args.grpc_port <= 65535:
         raise ValueError("--grpc-port must be between 0 and 65535")
     if args.grpc_port != 0 and args.grpc_port == args.port and not args.uds:
