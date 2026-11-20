@@ -289,6 +289,27 @@ def _aiter_ep_sort(
     return routing_data, gather_idx, scatter_idx, gate_valid
 
 
+def shuffle_w4a4_moe_weights(layer: torch.nn.Module) -> None:
+    """Shuffle the oracle's weights into the WMMA 16x16 tile order.
+
+    The oracle leaves w13 gate/up-interleaved and both weights as
+    [E, K/2, N] views of [E, N, K/2] storage, with the scales already
+    swizzled for gfx1250; the preshuffled layout only reorders the weight
+    bytes, so the scales are untouched. Expert biases are per output column,
+    so the byte shuffle leaves them as they are.
+    """
+    from aiter.ops.shuffle import shuffle_weight
+    from aiter.ops.triton.utils.shuffle import moe_weight_decode_view
+
+    from vllm.model_executor.utils import replace_parameter
+
+    for name in ("w13_weight", "w2_weight"):
+        w = getattr(layer, name).data.transpose(1, 2).contiguous()  # [E, N, K/2]
+        replace_parameter(
+            layer, name, moe_weight_decode_view(shuffle_weight(w, layout=(16, 16)))
+        )
+
+
 class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     """Monolithic MXFP4 W4A4 expert using AITER Triton/Gluon kernels (gfx1250).
 
@@ -320,28 +341,8 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         self.preshuffle_weights = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Shuffle the oracle's weights into the WMMA 16x16 tile order.
-
-        The oracle leaves w13 gate/up-interleaved and both weights as
-        [E, K/2, N] views of [E, N, K/2] storage, with the scales already
-        swizzled for gfx1250; the preshuffled layout only reorders the weight
-        bytes, so the scales are untouched.
-        """
-        if not self.preshuffle_weights:
-            return
-        # Expert biases are per output column, so the byte shuffle leaves them
-        # as they are.
-
-        from aiter.ops.shuffle import shuffle_weight
-        from aiter.ops.triton.utils.shuffle import moe_weight_decode_view
-
-        from vllm.model_executor.utils import replace_parameter
-
-        for name in ("w13_weight", "w2_weight"):
-            w = getattr(layer, name).data.transpose(1, 2).contiguous()  # [E, N, K/2]
-            replace_parameter(
-                layer, name, moe_weight_decode_view(shuffle_weight(w, layout=(16, 16)))
-            )
+        if self.preshuffle_weights:
+            shuffle_w4a4_moe_weights(layer)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

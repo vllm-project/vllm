@@ -28,8 +28,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a4_moe import (
-    AiterW4A4ExpertsMonolithic,
     aiter_triton_kernel_w4a4_moe_forward,
+    shuffle_w4a4_moe_weights,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
@@ -659,7 +659,7 @@ class MuseSparkAiterW4A4Experts(MuseSparkAiterExperts):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Same WMMA 16x16 preshuffle as AiterW4A4ExpertsMonolithic
         self.preshuffle_weights = True
-        AiterW4A4ExpertsMonolithic.process_weights_after_loading(self, layer)
+        shuffle_w4a4_moe_weights(layer)
 
     @staticmethod
     def _supports_current_device() -> bool:
