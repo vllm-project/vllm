@@ -23,7 +23,7 @@ from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.scale_out.render.grpc import (
+from vllm.entrypoints.scale_out.render.grpc import (  # type: ignore[attr-defined]
     inference_pb2,
     render_pb2,
     render_pb2_grpc,
