@@ -187,6 +187,23 @@ def tekken_convert_tokens_to_string(
     return "".join(cast(Sequence[str], tokens))
 
 
+def _filter_from_openai_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only kwargs that mistral-common's ChatCompletionRequest.from_openai
+    accepts (plus the OpenAI 'seed' alias for 'random_seed').
+
+    Renderer-level defaults (e.g. 'cohere_format') and template-only kwargs
+    (e.g. 'enable_thinking') are not request fields; forwarding them makes
+    strict validation reject the whole request.
+    """
+    allowed = MistralChatCompletionRequest.model_fields.keys() | {"seed"}
+    filtered = {k: v for k, v in kwargs.items() if k in allowed}
+    if dropped := set(kwargs) - set(filtered):
+        logger.debug(
+            "Dropping chat template kwargs not accepted by mistral-common: %s",
+            sorted(dropped),
+        )
+    return filtered
+
 class MistralTokenizer(TokenizerLike):
     IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
 
@@ -387,7 +404,10 @@ class MistralTokenizer(TokenizerLike):
         )
 
         # Remaining kwargs (e.g. reasoning_effort, response_format) reach
-        # ChatCompletionRequest.from_openai, which drops unknown fields.
+        # ChatCompletionRequest.from_openai; drop the ones it does not accept
+        # (renderer defaults like cohere_format, template-only kwargs like
+        # enable_thinking) so strict validation doesn't reject the request.
+        kwargs = _filter_from_openai_kwargs(kwargs)
         return self.transformers_tokenizer.apply_chat_template(
             conversation=messages,
             tools=tools,
