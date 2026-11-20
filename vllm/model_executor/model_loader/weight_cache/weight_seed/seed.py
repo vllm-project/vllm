@@ -4,7 +4,6 @@
 
 import contextlib
 import threading
-import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
@@ -46,8 +45,13 @@ class WeightShardSeed(Seedable):
         self._daemon = daemon
         self._movers: dict[SeedBackend, WeightMover] = {}
         self._active_copies = 0
-        self._lease_condition = threading.Condition(daemon._state_lock)
+        self._lease_lock = threading.Lock()
         self._release_pending = False
+
+    @property
+    def active_copies(self) -> int:
+        with self._lease_lock:
+            return self._active_copies
 
     def _mover(self, backend: SeedBackend) -> WeightMover:
         mover = self._movers.get(backend)
@@ -56,10 +60,8 @@ class WeightShardSeed(Seedable):
             self._movers[backend] = mover
         return mover
 
-    def release(self) -> None:
-        """Wait for copies, then drop source state without blocking their acks."""
-        deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
-        with self._lease_condition:
+    def start_release(self) -> None:
+        with self._lease_lock:
             self._release_pending = True
             if self._active_copies:
                 logger.info(
@@ -69,26 +71,25 @@ class WeightShardSeed(Seedable):
                     self._daemon.global_rank,
                     self._active_copies,
                 )
-            while self._active_copies:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"Timed out waiting for {self._active_copies} "
-                        "weight-cache copy acknowledgement(s); cached "
-                        "weights and NIC registrations were retained"
-                    )
-                self._lease_condition.wait(remaining)
+
+    def finish_release(self) -> None:
+        with self._lease_lock:
+            if self._active_copies:
+                raise TimeoutError(
+                    f"Timed out waiting for {self._active_copies} "
+                    "weight-cache copy acknowledgement(s); cached "
+                    "weights and NIC registrations were retained"
+                )
             # A failed release stays pending: some regions may have been
             # unregistered, so publishing the old bookkeeping is unsafe.
             for mover in self._movers.values():
                 mover.release()
 
     def _acknowledge(self) -> dict[str, bool]:
-        with self._lease_condition:
+        with self._lease_lock:
             if not self._active_copies:
                 raise ValueError("Unexpected weight-cache acknowledgement")
             self._active_copies -= 1
-            self._lease_condition.notify_all()
         return {"acknowledged": True}
 
     def validate_remote(self, request: dict[str, Any]) -> None:
@@ -108,15 +109,14 @@ class WeightShardSeed(Seedable):
             return self._acknowledge()
         daemon = self._daemon
         backend = parse_seed_backend(request.get("seed_backend", PEER_IPC_BACKEND))
-        with daemon._state_lock:
-            if not daemon.has_weights or self._release_pending:
-                raise ValueError("Weights were released")
+        with self._lease_lock:
+            if self._release_pending:
+                raise ValueError("Weights are being released")
             mover = self._mover(backend)
             tensors, kinds, aliases, attrs = daemon._seed_state()
             manifest, storages = build_manifest(tensors, kinds)
             seed = mover.prepare_seed(storages)
-            with self._lease_condition:
-                self._active_copies += 1
+            self._active_copies += 1
             return {
                 "cache_config": asdict(daemon.cache_key),
                 # Matched instead of the checkpoint fingerprint by a mirror
