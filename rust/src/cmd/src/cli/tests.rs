@@ -3646,6 +3646,8 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
             "13345",
             "--data-parallel-size",
             "4",
+            "--mm-processor-cache-gb",
+            "0",
             "--headless-client-handshake-address",
             "ipc:///tmp/vllm-rs-h",
             "--reasoning-parser",

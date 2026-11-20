@@ -188,18 +188,23 @@ void cutlass_scaled_mm_sm89(torch::stable::Tensor& out,
                   torch::headeronly::ScalarType::Float);
   STD_TORCH_CHECK(b_scales.scalar_type() ==
                   torch::headeronly::ScalarType::Float);
+  // Only fp8 needs the fixed-config kernel, as on SM90+. int8 accumulates
+  // exactly in int32, so its regular dispatch is already batch invariant.
+  const bool fp8_batch_invariant =
+      vllm_is_batch_invariant() &&
+      a.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn;
   if (bias) {
     STD_TORCH_CHECK(bias->scalar_type() == out.scalar_type(),
                     "currently bias dtype must match output dtype ",
                     out.scalar_type());
-    if (vllm_is_batch_invariant()) {
+    if (fp8_batch_invariant) {
       return cutlass_scaled_mm_sm89_fp8_batch_invariant_epilogue<
           c2x::ScaledEpilogueBias>(out, a, b, a_scales, b_scales, *bias);
     }
     return cutlass_scaled_mm_sm89_epilogue<c2x::ScaledEpilogueBias>(
         out, a, b, a_scales, b_scales, *bias);
   } else {
-    if (vllm_is_batch_invariant()) {
+    if (fp8_batch_invariant) {
       return cutlass_scaled_mm_sm89_fp8_batch_invariant_epilogue<
           c2x::ScaledEpilogue>(out, a, b, a_scales, b_scales);
     }
