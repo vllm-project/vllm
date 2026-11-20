@@ -152,6 +152,11 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine accepts placeholder metadata without embedding tensors.
     #[serde(default)]
     pub allow_missing_mm_embeddings: bool,
+    /// Encoder cache tokens a request's distinct multimodal items may need in
+    /// total. Set without chunked prefill, when they are all encoded in one
+    /// step, so a request needing more could never be scheduled.
+    #[serde(default)]
+    pub max_mm_embeds_per_request: Option<u64>,
 }
 
 fn supports_prompt_logprobs_default() -> bool {
