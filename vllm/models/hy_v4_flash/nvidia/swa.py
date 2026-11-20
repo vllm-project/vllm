@@ -24,8 +24,7 @@ class FlashSparseMetadataBuilder(FlashMLASparseMetadataBuilder):
         self.topk_tokens = layer.topk_buffer_width
         self.topk_tokens_tensor.fill_(self.topk_tokens)
         # The direct paged kernel never gathers evicted SWA history.
-        if not self.use_hisparse or layer.sliding_window is not None:
-            self.fp8_use_mixed_batch = True
+        self.fp8_use_mixed_batch = True
 
 
 class FlashSparseBackend(HYV4FlashMLASparseBackend):
