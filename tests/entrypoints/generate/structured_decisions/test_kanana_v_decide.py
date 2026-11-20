@@ -31,6 +31,7 @@ from vllm.transformers_utils.configs.kanana_v_decide import KananaVDecideConfig
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 MODEL = "kakaocorp/kanana-2-v-decide-3b-2611"
+REVISION = "12820d654ed9789a0f7f48daeee1703c3483c464"
 TEMPERATURE = 0.05
 QUERY_HEAD = (
     "<|begin_of_text|><|im_start|>system\nRepresent the state for the specified "
@@ -49,7 +50,7 @@ EXECUTOR = ThreadPoolExecutor(1)
 def tokenizer():
     from vllm.tokenizers import get_tokenizer
 
-    return get_tokenizer(MODEL)
+    return get_tokenizer(MODEL, revision=REVISION)
 
 
 def question(type_name: str, instructions: Any, criteria: Any):
