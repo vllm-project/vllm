@@ -60,6 +60,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     resolve_tool_strictness,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from vllm.tool_parsers.utils import warn_custom_tool_grammar_fallback
 
 logger = init_logger(__name__)
 
@@ -508,6 +509,7 @@ class DelegatingParser(Parser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         tool_parser = self._tool_parser
         if tool_parser is None or not request.tools:
+            warn_custom_tool_grammar_fallback(request.tools)
             return request
 
         need_tool_calling = (
@@ -559,6 +561,7 @@ class DelegatingParser(Parser):
                     "constraint applies.",
                     scope="local",
                 )
+                warn_custom_tool_grammar_fallback(request.tools)
                 return request
             output_format = structured_outputs_to_format(structured_outputs)
 
@@ -577,8 +580,13 @@ class DelegatingParser(Parser):
             )
         else:
             tools_structural_tag = None
+        if tools_structural_tag is not None and getattr(
+            tools_structural_tag, "_custom_tool_grammar_enforced", False
+        ):
+            request._custom_tool_grammar_enforced = True
 
         if tools_structural_tag is None:
+            warn_custom_tool_grammar_fallback(request.tools)
             if is_auto and structured_outputs is not None:
                 logger.warning_once(
                     "Tool calls are not constrained for tool_choice=auto with "

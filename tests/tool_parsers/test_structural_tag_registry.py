@@ -2,18 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from openai.types.responses import CustomTool, ToolChoiceFunction
+from openai.types.responses import CustomTool, ToolChoiceCustom, ToolChoiceFunction
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from xgrammar import Grammar, StructuralTag
 from xgrammar import get_model_structural_tag as get_xgrammar_builtin_structural_tag
 from xgrammar.testing import _is_grammar_accept_string
 
 import vllm.envs as envs
+import vllm.logger as vllm_logger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
@@ -103,6 +105,47 @@ def sample_tools_strict() -> list[ChatCompletionToolsParam]:
     ]
 
 
+@pytest.fixture()
+def reset_warning_once(monkeypatch):
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    vllm_logger._print_warning_once.cache_clear()
+    yield
+    vllm_logger._print_warning_once.cache_clear()
+
+
+@pytest.mark.parametrize("model", ["qwen_3_coder"])
+def test_custom_tool_grammar_fallback_is_explicit(
+    model, caplog, reset_warning_once
+) -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": 'start: "apply_patch"',
+                    },
+                }
+            ],
+        }
+    )
+
+    tag = get_model_structural_tag(
+        model,
+        request.tools,
+        request.tool_choice,
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert "best-effort" in caplog.text
+    assert "not enforced" in caplog.text
+
+
 def test_supported_structural_tag_models_include_vllm_builtins():
     assert SUPPORTED_STRUCTURAL_TAG_MODELS == (
         XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
@@ -173,6 +216,52 @@ def test_deepseek_v41_constrains_parameters_after_reasoning(
         grammar, "reason</think>" + begin + parameter + end
     )
     assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
+
+
+@pytest.mark.parametrize(
+    ("model", "call_start", "param_start", "param_end", "tool_end"),
+    [
+        (
+            "deepseek_v4",
+            '\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name="apply_patch">\n',
+            '<｜DSML｜parameter name="input" string="true">',
+            "</｜DSML｜parameter>\n</｜DSML｜invoke>\n",
+            "</｜DSML｜tool_calls>",
+        ),
+        (
+            "deepseek_v4_1",
+            '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="apply_patch">\n',
+            '<｜DSML｜ parameter name="input" string="true">',
+            "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n",
+            "</｜DSML｜ calls>",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "required", ToolChoiceCustom(type="custom", name="apply_patch")],
+)
+def test_deepseek_custom_tool_grammar_constrains_raw_input(
+    model, call_start, param_start, param_end, tool_end, tool_choice
+):
+    tool = CustomTool(
+        type="custom",
+        name="apply_patch",
+        format={
+            "type": "grammar",
+            "syntax": "lark",
+            "definition": 'start: "hello"',
+        },
+    )
+    tag = get_model_structural_tag(model, [tool], tool_choice, reasoning=False)
+    assert isinstance(tag, StructuralTag)
+    grammar = Grammar.from_structural_tag(tag)
+
+    valid = call_start + param_start + "hello" + param_end + tool_end
+    invalid = call_start + param_start + "goodbye" + param_end + tool_end
+
+    assert _is_grammar_accept_string(grammar, valid)
+    assert not _is_grammar_accept_string(grammar, invalid)
 
 
 def test_deepseek_v41_non_strict_parallel_calls_keep_typed_dsml(sample_tools):
