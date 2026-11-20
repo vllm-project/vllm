@@ -32,7 +32,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, Targets, Traced, trace_loads
-from .direct import direct_reload_active, direct_reload_enabled, mark_loaded
+from .direct import direct_reload_active, mark_loaded, reloads_directly
 from .geometry import (
     Box,
     Fallback,
@@ -222,8 +222,11 @@ def check_plannable(model: torch.nn.Module) -> None:
         RuntimeError: the configuration cannot be planned.
 
     """
-    if not direct_reload_enabled():
-        raise RuntimeError("load plan: requires VLLM_RELOAD_MODE=direct")
+    if not reloads_directly(model):
+        raise RuntimeError(
+            "load plan: requires direct reload; this rank reloads layerwise "
+            "(see its startup log)"
+        )
     for name, module in model.named_modules():
         moe_config = getattr(module, "moe_config", None)
         parallel = getattr(moe_config, "moe_parallel_config", None)
