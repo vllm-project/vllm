@@ -724,7 +724,7 @@ def test_pp_sizes_lookup_hits_only_with_every_layer_range():
             "dense", KVCacheLayout.LBHNC, 2, rank, store, num_blocks=8
         )
         send_thread = KVCacheStoreSendingThread(
-            store=store,
+            store_service=MooncakeStoreService(store),
             token_databases=writer.token_dbs,
             block_size=writer.block_size,
             coord=writer.coord,
