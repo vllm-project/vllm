@@ -133,8 +133,11 @@ def question_block(question: Question) -> str:
     the default head; an empty value renders empty. Foreign question types
     (the OpenAI decisions API builds its own) letter their options the same
     way."""
-    if question.raw_instructions is not None:
-        head = render_value(question.raw_instructions)
+    # build_question always sets raw, so the absent case is a None element
+    # rather than a None tuple, and rendering it would print the string.
+    raw_instructions = question.raw[0] if question.raw is not None else None
+    if raw_instructions is not None:
+        head = render_value(raw_instructions)
     elif question.instructions:
         head = question.instructions
     else:
@@ -175,7 +178,7 @@ class KnowLineChoice(QuestionType):
                 f"question {qid!r}: choice needs 2..{MAX_LABELS} criteria"
             )
         return [
-            Option(str(k), None if v is None else render_value(v), raw=v)
+            Option(str(k), None if v is None else render_value(v))
             for k, v in criteria.items()
         ]
 
@@ -226,7 +229,7 @@ class KnowLineScore(QuestionType):
             raise StructuredDecisionError(
                 f"question {qid!r}: score needs 2..{MAX_LABELS} levels"
             )
-        return [Option(str(i), render_value(v), raw=v) for i, v in enumerate(criteria)]
+        return [Option(str(i), render_value(v)) for i, v in enumerate(criteria)]
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float
@@ -235,7 +238,13 @@ class KnowLineScore(QuestionType):
             "type": self.name,
             "score": math.fsum(i * p for i, p in enumerate(probs)),
             "probabilities": {str(i): p for i, p in enumerate(probs)},
-            "legend": {str(i): o.raw for i, o in enumerate(question.options)},
+            # The legend echoes the criteria as they came in, not flattened.
+            "legend": {
+                str(i): v
+                for i, v in enumerate(
+                    question.raw[1] if question.raw is not None else []
+                )
+            },
             "confidence": _confidence(probs),
         }
 
