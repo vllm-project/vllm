@@ -83,6 +83,11 @@ variants:
     extra_args:
       - "--quantization"
       - "awq"
+    hardware_overrides:
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
 
   redhat_fp8:
     model_id: "RedHatAI/Qwen3-32B-FP8-dynamic"
