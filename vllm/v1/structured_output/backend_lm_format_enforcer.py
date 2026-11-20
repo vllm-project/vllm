@@ -18,24 +18,40 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.utils import compile_regex_with_timeout
 
+# lmformatenforcer.integrations.vllm imports private vLLM modules and breaks when
+# they move. Its transformers builder takes vLLM's tokenizers unchanged.
 if TYPE_CHECKING:
     import lmformatenforcer
-    import lmformatenforcer.integrations.vllm as lmfe_vllm
 else:
     lmformatenforcer = LazyLoader("lmformatenforcer", globals(), "lmformatenforcer")
-    lmfe_vllm = LazyLoader(
-        "lmformatenforcer.integrations.vllm",
-        globals(),
-        "lmformatenforcer.integrations.vllm",
-    )
 
 
 @lru_cache
-def _cached_build_vllm_token_enforcer_tokenizer_data(
+def _cached_build_token_enforcer_tokenizer_data(
     tokenizer: PreTrainedTokenizerBase, vocab_size: int
-) -> "lmfe_vllm.TokenEnforcerTokenizerData":
-    return lmfe_vllm.build_vllm_token_enforcer_tokenizer_data(
-        tokenizer, use_bitmask=True, vocab_size=vocab_size
+) -> "lmformatenforcer.TokenEnforcerTokenizerData":
+    # Built here: lm-format-enforcer's vllm and transformers integrations import
+    # modules that vLLM and transformers 5 lack.
+    token_0 = tokenizer.encode("0")[-1]
+    special_ids = set(tokenizer.all_special_ids)
+    regular_tokens = []
+    for token_id in range(vocab_size):
+        if token_id in special_ids:
+            continue
+        # Decoding after "0" keeps the leading space of a word-start token.
+        after_0 = tokenizer.decode([token_0, token_id])[1:]
+        is_word_start = len(after_0) > len(tokenizer.decode([token_id]))
+        regular_tokens.append((token_id, after_0, is_word_start))
+
+    def decode(tokens: list[int]) -> str:
+        return tokenizer.decode(tokens).rstrip("�")
+
+    return lmformatenforcer.TokenEnforcerTokenizerData(
+        regular_tokens,
+        decode,
+        tokenizer.eos_token_id,
+        use_bitmask=True,
+        vocab_size=vocab_size,
     )
 
 
@@ -93,7 +109,7 @@ class LMFormatEnforcerGrammar(StructuredOutputGrammar):
 @dataclass
 class LMFormatEnforcerBackend(StructuredOutputBackend):
     def __post_init__(self):
-        self.tokenizer_data = _cached_build_vllm_token_enforcer_tokenizer_data(
+        self.tokenizer_data = _cached_build_token_enforcer_tokenizer_data(
             self.tokenizer, self.vocab_size
         )
 
