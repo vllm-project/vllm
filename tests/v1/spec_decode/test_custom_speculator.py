@@ -109,7 +109,6 @@ def test_custom_speculator_inherits_builtin_config(register):
     # Set up and behaves as the built-in speculator, but builds the custom one.
     assert spec_config.custom_method == "my_ngram"
     assert spec_config.method == "ngram_gpu"
-    assert spec_config.use_ngram_gpu()
     assert spec_config.prompt_lookup_min == spec_config.prompt_lookup_max == 5
     assert spec_config.speculator_config.prefer_dense_token_history
     assert type(spec_config.speculator_config) is DummyNgramGPUSpeculatorConfig
@@ -246,7 +245,6 @@ def _checkpoint_spec(
             speculator_config_class=declared,
             hf_config=SimpleNamespace(model_type=model_type),
         ),
-        use_gemma4_mtp=lambda: False,
         use_multi_module_mtp=lambda: False,
     )
 
