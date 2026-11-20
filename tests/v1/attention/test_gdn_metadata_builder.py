@@ -237,13 +237,13 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
         assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
 @pytest.mark.parametrize("full_cuda_graph", [False, True])
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
 def test_update_block_table_matches_build(
-    test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
+    test_case: GDNBuildTestCase, full_cuda_graph: bool, enable_prefix_caching: bool
 ):
     """update_block_table() on another group's metadata matches build()."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
@@ -252,16 +252,16 @@ def test_update_block_table_matches_build(
         for _ in range(3)
     )
     for builder in (src, dst, ref):
-        builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+        builder.vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     common = _common_attn_metadata(ref, batch)
-    if mamba_cache_mode == "align":
+    if enable_prefix_caching:
         # MRV2 precomputes these for every Mamba group each step.
         dst.mamba_aligned_state_indices = ref.mamba_aligned_state_indices = (
             mamba_get_block_table_tensor(
                 common.block_table_tensor,
                 common.seq_lens,
                 ref.kv_cache_spec,
-                "align",
+                True,
                 ref.num_speculative_blocks,
             )
         )
@@ -481,7 +481,7 @@ def _create_checkpoint_builder_and_batch(
             method="ngram",
             num_speculative_tokens=num_spec,
         )
-    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.enable_prefix_caching = True
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     mamba_spec = MambaSpec(
         block_size=64,
@@ -542,7 +542,7 @@ def test_checkpoint_metadata_preserves_non_spec_order(
 
 
 def _create_replayssm_gdn_builder(
-    mamba_cache_mode: str = "none",
+    enable_prefix_caching: bool = False,
     full_cuda_graph: bool = False,
     block_size: int = BLOCK_SIZE,
 ) -> GDNAttentionMetadataBuilder:
@@ -557,7 +557,7 @@ def _create_replayssm_gdn_builder(
     # only) does not run; the builder reads the flags in __init__.
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = 16
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     mamba_spec = MambaSpec(
         block_size=block_size,
         shapes=((16, 64),),
@@ -618,17 +618,19 @@ def test_replayssm_first_token_prefill_stays_prefill():
     assert meta.write_pos_d is None
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-def test_replayssm_decode_plan_inputs(mamba_cache_mode: str):
-    """Align mode hands the planner each row's sequence length and the block
+@pytest.mark.parametrize(
+    "enable_prefix_caching", [False, True], ids=["no_prefix_caching", "prefix_caching"]
+)
+def test_replayssm_decode_plan_inputs(enable_prefix_caching: bool):
+    """Prefix caching hands the planner each row's sequence length and the block
     size, so it restarts the ring per block and flushes on block completion."""
-    builder = _create_replayssm_gdn_builder(mamba_cache_mode, block_size=64)
+    builder = _create_replayssm_gdn_builder(enable_prefix_caching, block_size=64)
     seq_lens = [151, 192, 201]
     meta = _build_replayssm(builder, seq_lens, [1, 1, 1], [False, False, False])
 
     assert meta.num_decodes == 3
     _assert_plans_into_persistent_buffers(builder, meta, 3)
-    if mamba_cache_mode == "align":
+    if enable_prefix_caching:
         assert meta.replayssm_seq_lens_d is not None
         assert meta.replayssm_seq_lens_d.tolist() == seq_lens
         assert meta.replayssm_align_block_size == 64
@@ -651,7 +653,7 @@ def test_update_block_table_regathers_checkpoint(num_spec):
         other_table,
         other.seq_lens,
         dst.kv_cache_spec,
-        "align",
+        True,
         dst.num_speculative_blocks,
     )
 

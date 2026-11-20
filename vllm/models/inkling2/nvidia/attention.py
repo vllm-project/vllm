@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 from ..configs import Inkling2ModelConfig
 from .lora import add_linear_lora
+from .ops import use_sm100_kernels
 from .ops.attention import (
     _INKLING2_FA4_REL_ATTENTION_KERNEL,
     gate_sink,
@@ -53,6 +54,7 @@ from .ops.attention import (
     plan_decode_attention,
     rel_decode_attention,
 )
+from .ops.attention_sm90 import MODE_OUT_LSE, rel_attention
 from .ops.linear import linear
 from .ops.sconv import attention_prologue, shift_rel_proj
 from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
@@ -216,7 +218,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         if prefix in forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         forward_context[prefix] = self
-        if vllm_config.kernel_config.enable_jit_warmup:
+        if vllm_config.kernel_config.enable_jit_warmup and use_sm100_kernels():
             _INKLING2_FA4_REL_ATTENTION_KERNEL.register_warmup()
 
     def process_weights_after_loading(self) -> None:
@@ -505,6 +507,26 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         if num_decodes:
             cu_seqlens_q = cu_seqlens_q - num_decode_tokens
         key_cache, value_cache = self._split_kv_cache()
+        if not use_sm100_kernels():
+            rel_attention(
+                q[:nt],
+                key_cache,
+                value_cache,
+                out,
+                lse,
+                rel_logits,
+                block_table=md.block_table[num_decodes:],
+                cache_seqlens=md.seq_lens[num_decodes:],
+                cu_seqlens_q=cu_seqlens_q,
+                max_query_len=md.max_query_len,
+                softmax_scale=self.scaling,
+                window=self.sliding_window if self.is_local else 0,
+                num_splits=1,
+                mode=MODE_OUT_LSE,
+            )
+            out[nt:].zero_()
+            lse[:, nt:].zero_()
+            return
         _INKLING2_FA4_REL_ATTENTION_KERNEL(
             q[:nt],
             key_cache,

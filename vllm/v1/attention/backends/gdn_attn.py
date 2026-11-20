@@ -127,7 +127,7 @@ class GDNAttentionMetadata:
 
     # ReplaySSM standard decode: per-row ring cursor and flush flag. The first
     # layer of each cache group fills them on the GPU from per-slot ring
-    # counters (see plan_replayssm_decode); align mode also reads the rows'
+    # counters (see plan_replayssm_decode); prefix caching also reads the rows'
     # sequence lengths. None unless use_replayssm is enabled.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
@@ -387,7 +387,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 m.block_table_tensor,
                 m.seq_lens,
                 self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
+                self.vllm_config.cache_config.enable_prefix_caching,
                 self.num_speculative_blocks,
             )
 
@@ -681,7 +681,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # rows as no-ops.
             write_pos_d = self.decode_write_pos_d[: m.num_reqs]
             is_flush_d = self.decode_is_flush_d[: m.num_reqs]
-            if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            if self.vllm_config.cache_config.enable_prefix_caching:
                 replayssm_seq_lens_d = m.seq_lens[: m.num_reqs]
                 replayssm_align_block_size = self.kv_cache_spec.block_size
 
@@ -826,7 +826,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if m.checkpoint is not None
             else None
         )
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+        if self.vllm_config.cache_config.enable_prefix_caching:
             assert self.mamba_aligned_state_indices is not None
             blk_table = self.mamba_aligned_state_indices
         masks = m.spec_sequence_masks_cpu

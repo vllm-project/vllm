@@ -15,9 +15,9 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import bucket_max_seqlen_q
 from vllm.platforms import current_platform
 
 _cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
-requires_sm100 = pytest.mark.skipif(
-    _cap is None or _cap.major not in (10, 11),
-    reason="tml_fa4 sheared relative bias requires SM100/SM110",
+requires_sm90 = pytest.mark.skipif(
+    _cap is None or _cap.major not in (9, 10, 11),
+    reason="Inkling2 attention requires Hopper or Blackwell",
 )
 
 HEAD_DIM = 128
@@ -93,7 +93,7 @@ def _ref_attention(
     return out, lse
 
 
-@requires_sm100
+@requires_sm90
 @pytest.mark.parametrize(
     "num_heads,num_kv_heads,block_size,window_left,scenario",
     [
@@ -120,10 +120,18 @@ def test_inkling2_rel_attention(
     num_splits,
     use_scheduler,
 ):
+    from vllm.models.inkling2.nvidia.ops import use_sm100_kernels
     from vllm.models.inkling2.nvidia.ops.attention import (
         _INKLING2_FA4_REL_ATTENTION_KERNEL,
     )
+    from vllm.models.inkling2.nvidia.ops.attention_sm90 import (
+        MODE_OUT_LSE,
+        rel_attention,
+    )
 
+    sm100 = use_sm100_kernels()
+    if not sm100 and (num_splits, use_scheduler) != (1, True):
+        pytest.skip("the Hopper kernel does not split prefill")
     torch.manual_seed(0)
     device = "cuda"
     seqs = SCENARIOS[scenario]
@@ -159,22 +167,40 @@ def test_inkling2_rel_attention(
     out = torch.empty(q.shape, device=device)
     lse = torch.empty(q.shape[1::-1], device=device)
 
-    _INKLING2_FA4_REL_ATTENTION_KERNEL(
-        q,
-        key_cache,
-        value_cache,
-        block_table=block_table,
-        cache_seqlens=seqused_k,
-        cu_seqlens_q=cu_seqlens_q,
-        max_seqlen_q=bucket_max_seqlen_q(max(q_lens)),
-        softmax_scale=scale,
-        window_size=(-1, -1) if window_left is None else (window_left, 0),
-        sheared_bias=rel_in,
-        num_splits=num_splits,
-        use_scheduler=use_scheduler,
-        out=out,
-        lse=lse,
-    )
+    if sm100:
+        _INKLING2_FA4_REL_ATTENTION_KERNEL(
+            q,
+            key_cache,
+            value_cache,
+            block_table=block_table,
+            cache_seqlens=seqused_k,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=bucket_max_seqlen_q(max(q_lens)),
+            softmax_scale=scale,
+            window_size=(-1, -1) if window_left is None else (window_left, 0),
+            sheared_bias=rel_in,
+            num_splits=num_splits,
+            use_scheduler=use_scheduler,
+            out=out,
+            lse=lse,
+        )
+    else:
+        rel_attention(
+            q,
+            key_cache,
+            value_cache,
+            out,
+            lse,
+            rel_in,
+            block_table=block_table,
+            cache_seqlens=seqused_k,
+            cu_seqlens_q=cu_seqlens_q,
+            max_query_len=max(q_lens),
+            softmax_scale=scale,
+            window=0 if window_left is None else window_left + 1,
+            num_splits=1,
+            mode=MODE_OUT_LSE,
+        )
     lse = lse.t()
 
     ref_out, ref_lse = _ref_attention(
@@ -185,7 +211,7 @@ def test_inkling2_rel_attention(
     torch.testing.assert_close(lse, ref_lse, atol=1e-4, rtol=1e-5)
 
 
-@requires_sm100
+@requires_sm90
 @pytest.mark.parametrize(
     "num_heads,num_kv_heads,window_left",
     [(12, 2, None), (6, 1, REL_EXTENT - 1), (12, 2, REL_EXTENT - 1)],
@@ -273,7 +299,7 @@ def test_inkling2_rel_decode_attention(
     assert (out[num_tokens:] == 0).all()
 
 
-@requires_sm100
+@requires_sm90
 @pytest.mark.parametrize("is_local", [False, True])
 @pytest.mark.parametrize("num_splits", [1, 9])
 @torch.inference_mode()

@@ -1269,12 +1269,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         w2_data = w2_weight.data.view(torch.uint8)
         w13_scale_data = w13_weight_scale.data.view(torch.uint8)
 
-        # SILU applies the activation outside the GEMM and keeps the
-        # checkpoint's packed halves; the SWIGLUOAI epilogue needs them
-        # interleaved.
+        # The fused swiglu epilogue (SWIGLUOAI and SILU) reads gate/up
+        # interleaved along N.
         if getattr(layer, "activation", None) in (
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SILU,
         ):
             w13_data = _interleave_gate_up_rows(w13_data)
             w13_scale_data = _interleave_gate_up_rows(w13_scale_data)
@@ -2069,7 +2069,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             mxfp4_moe_ep_weights,
         )
 
-        # DeepGEMM consumes MXFP4 directly; CuTeDSL gets bf16 and requantizes.
+        # DeepGEMM and the Hopper/SM107 CuTeDSL kernels consume MXFP4 as
+        # stored; CuTeDSL on SM100/SM103 gets bf16 and requantizes.
         weights = mxfp4_moe_ep_weights(
             FLASHINFER_MOE_EP_CUTEDSL
             if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL

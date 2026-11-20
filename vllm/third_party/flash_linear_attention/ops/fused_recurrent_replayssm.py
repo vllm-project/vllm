@@ -73,7 +73,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
 
     # Per-row buffer cursor and flush flag; valid (committed) cache positions.
     # write_pos and is_flush are per decode row (i_n). is_flush is a builder
-    # input (not derived) so align mode can force a flush mid-buffer.
+    # input (not derived) so prefix caching can force a flush mid-buffer.
     b_write_pos = tl.load(write_pos + i_n).to(tl.int64)
     b_is_flush = tl.load(is_flush + i_n) != 0
     cache_valid = (o_c < b_write_pos) & (o_c < MAX_CACHE_LEN)

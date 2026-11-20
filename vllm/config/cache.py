@@ -174,7 +174,6 @@ def is_known_kv_cache_dtype(name: str) -> bool:
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
-MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -312,20 +311,11 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
-    mamba_cache_mode: MambaCacheMode = "none"
-    """The cache strategy for Mamba layers, derived from `enable_prefix_caching`:
-
-    - "none": prefix caching is disabled.
-    - "align": prefix caching is enabled. Only cache the mamba state of the last
-      token of each scheduler step and when the token is at position
-      i * block_size.
-    """
     enable_mamba_shared_prefix_checkpoint: bool = False
-    """Also register a Mamba "align" checkpoint at the shared-prefix junction --
-    where an EAGLE/MTP sibling was observed to resume -- instead of only at the
-    prompt tail. Off by default; only takes effect with prefix caching enabled,
-    EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
-    block size."""
+    """Also register a Mamba checkpoint at the shared-prefix junction --
+    where a sibling request was observed to resume -- instead of only at the
+    prompt tail. Off by default; only takes effect with prefix caching enabled
+    and a prefix match unit smaller than the Mamba block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B. Mamba2 Triton standard decode and
     Qwen3.5 Gated DeltaNet use B physical rows; FlashInfer and Triton
@@ -334,12 +324,11 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use the ReplaySSM decode kernels for Mamba2 and Qwen3.5 Gated DeltaNet:
     cache recent SSM inputs and skip the per-step full-state store, writing the
-    checkpoint back only on flush. Triton and FlashInfer support the 'none' and
-    'align' Mamba cache modes. Mamba2 speculative decoding supports both
-    backends; Gated DeltaNet supports Triton standard decode only. Pipeline
-    parallelism is not supported. Flushes are most efficient when
-    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
-    required."""
+    checkpoint back only on flush. Triton and FlashInfer support Mamba prefix
+    caching on and off. Mamba2 speculative decoding supports both backends;
+    Gated DeltaNet supports Triton standard decode only. Pipeline parallelism
+    is not supported. Flushes are most efficient when mamba_block_size is a
+    multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
