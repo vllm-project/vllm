@@ -42,9 +42,9 @@ def flashmla_core(impl, query, cache, topk, metadata):
 
 def flashmla_dcp_core(impl, query, pages, slots, valid, out, table, cache_lens):
     """DCP: FlashMLA sparse decode of every rank's BF16 query heads (the gathered q
-    mailbox) over this rank's compacted ``slots`` (natural-log LSE; a fresh
-    scheduler metadata per call follows the ``valid`` lengths) into ``out``, its
-    LSE and ``valid`` (DcpValue drops the rows this rank owns none of)."""
+    mailbox) over this rank's compacted `slots` (natural-log LSE; a fresh
+    scheduler metadata per call follows the `valid` lengths) into `out`, its
+    LSE and `valid` (DcpValue drops the rows this rank owns none of)."""
     from vllm.v1.attention.ops.flashmla import (
         flash_mla_with_kvcache,
         get_mla_metadata,

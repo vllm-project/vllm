@@ -32,11 +32,11 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
+    AttentionSpec,
+    KVCacheGroup,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -107,20 +107,16 @@ def _make_modular_routed_experts():
 
 
 def _full_attention_kv_group(
-    spec_type: type[FullAttentionSpec] = FullAttentionSpec,
-) -> KVCacheGroupSpec:
+    spec_type: type[AttentionSpec] = AttentionSpec,
+) -> KVCacheGroup:
     full_attention = spec_type(
         block_size=16,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
     )
-    return KVCacheGroupSpec(
-        ["layer"],
-        UniformTypeKVCacheSpecs(
-            block_size=16,
-            kv_cache_specs={"layer": full_attention},
-        ),
+    return KVCacheGroup.from_layers(
+        {"layer": FullAttentionManager.layer_config(full_attention)}
     )
 
 
@@ -809,6 +805,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
 
 
 def test_aux_output_worker_connector_default_capacity(monkeypatch):
+    import vllm.distributed.aux_output_connector.connector as aux_output_connector
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
@@ -821,9 +818,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     )
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", Mock())
     monkeypatch.setattr(
-        aux_output_worker,
-        "resolve_kv_cache_block_sizes",
-        lambda *_: (32, 16),
+        aux_output_connector, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
     )
     monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
     monkeypatch.setattr(
@@ -856,7 +851,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
 
 
-def test_v2_model_runner_accepts_routed_experts(monkeypatch):
+def test_model_runner_accepts_routed_experts(monkeypatch):
     monkeypatch.setattr("importlib.metadata.entry_points", lambda **_: ())
     config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -883,6 +878,6 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
         ec_transfer_config=None,
     )
 
-    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+    unsupported = VllmConfig._get_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported

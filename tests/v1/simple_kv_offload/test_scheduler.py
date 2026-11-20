@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from unittest.mock import Mock
 
 import pytest
 import torch
 
+from tests.v1.core.utils import uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.kv_connector.unit.utils import create_scheduler, set_mtp_config
-from tests.v1.spec_decode.utils import attach_speculator_config
 from vllm import SamplingParams
 from vllm.config import (
     CacheConfig,
@@ -20,7 +20,6 @@ from vllm.config import (
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
-    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.config.cache import MambaCacheMode
@@ -31,7 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     get_request_block_hasher,
@@ -45,19 +44,17 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
-    register_all_kvcache_specs,
+    ChunkedLocalAttentionManager,
+    CircularBufferManager,
+    MambaManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -66,10 +63,6 @@ from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
-)
-from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.config import (
-    MultiModuleMTPSpeculatorConfig,
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -102,33 +95,24 @@ def _make_kv_cache_config(
     """Build a KVCacheConfig with non-empty kv_cache_tensors."""
     groups = []
     tensors = []
-    register_all_kvcache_specs(
-        vllm_config=None
-    )  # Ensure specs are registered for tests
     total_size = _BYTES_PER_BLOCK * num_blocks * num_groups
     byte_offset = 0
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
-        spec = (
-            FullAttentionSpec(
-                block_size=BLOCK_SIZE,
-                num_kv_heads=NUM_KV_HEADS,
-                head_size=HEAD_SIZE,
-                dtype=DTYPE,
-            )
-            if g == 0
-            else SlidingWindowSpec(
-                block_size=BLOCK_SIZE,
-                num_kv_heads=NUM_KV_HEADS,
-                head_size=HEAD_SIZE,
-                dtype=DTYPE,
-                sliding_window=BLOCK_SIZE * 4,
-            )
+        spec = AttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
         )
         groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(layer_names, spec)
+            if g == 0
+            else make_kv_cache_group(
                 layer_names,
                 spec,
+                SlidingWindowManager,
+                SlidingWindowManager.config(sliding_window=BLOCK_SIZE * 4),
             )
         )
         tensors.append(
@@ -154,21 +138,23 @@ def _make_scratch_kv_cache_config(
     """FullAttention group plus a non-prefix-cacheable scratch group.
 
     Mirrors GLM-5.3-Flash, whose kpool-tail group holds one per-request
-    scratch block of ``index_kpool`` tokens: it is excluded from prefix
+    scratch block of `index_kpool` tokens: it is excluded from prefix
     caching, so its block size neither divides nor is divided by the
     hash block size in general.
     """
-    register_all_kvcache_specs(vllm_config=None)
     fa_config = _make_kv_cache_config(num_blocks, num_groups=1)
     scratch_layers = ["layer_scratch"]
-    scratch_spec = CircularBufferSpec(
+    scratch_spec = AttentionSpec(
         block_size=scratch_block_size,
         num_kv_heads=2,
         head_size=HEAD_SIZE,
         head_size_v=0,
         dtype=DTYPE,
     )
-    assert not scratch_spec.prefix_cacheable
+    scratch_group = make_kv_cache_group(
+        scratch_layers, scratch_spec, CircularBufferManager
+    )
+    assert not scratch_group.prefix_cacheable
     scratch_bytes = scratch_spec.page_size_bytes * num_blocks
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -181,19 +167,13 @@ def _make_scratch_kv_cache_config(
                 block_stride=scratch_spec.page_size_bytes,
             )
         ],
-        kv_cache_groups=fa_config.kv_cache_groups
-        + [KVCacheGroupSpec(scratch_layers, scratch_spec)],
+        kv_cache_groups=fa_config.kv_cache_groups + [scratch_group],
     )
 
 
 def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     """Minimal VllmConfig for scheduler tests (no GPU)."""
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
         max_num_batched_tokens=64,
@@ -219,7 +199,7 @@ def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerFixture:
     """Bundle returned by make_scheduler for convenient access."""
 
@@ -232,9 +212,9 @@ class SchedulerFixture:
 
 def _make_lookahead_config(num_lookahead: int) -> VllmConfig:
     config = _make_vllm_config()
-    set_mtp_config(
-        config, max(1, num_lookahead), disable_lookahead_block_hashes=num_lookahead == 0
-    )
+    if num_lookahead == 0:
+        return config
+    set_mtp_config(config, num_lookahead)
     return config
 
 
@@ -297,7 +277,7 @@ def test_lookahead_store_retries_block_when_hash_becomes_available(finish):
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "num_lookahead, prompt_len, boundary",
-    [(1, 44, 40), (5, 43, 36), (5, 44, 32)],
+    [(1, 44, 40), (5, 44, 36)],
 )
 def test_lookahead_mamba_partial_tail_survives_finish(
     num_lookahead, prompt_len, boundary
@@ -311,16 +291,18 @@ def test_lookahead_mamba_partial_tail_survives_finish(
     assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config = {"num_cpu_blocks": 32}
     kv_config = _make_kv_cache_config(32)
-    mamba = MambaSpec(
-        block_size=16,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="align",
-        num_speculative_blocks=1,
-        num_prefill_checkpoint_blocks=1,
+    mamba = MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,))
+    kv_config.kv_cache_groups.append(
+        make_kv_cache_group(
+            ["mamba"],
+            mamba,
+            manager_config=MambaManager.config(
+                mamba_cache_mode="align",
+                num_speculative_blocks=1,
+                num_prefill_checkpoint_blocks=1,
+            ),
+        )
     )
-    kv_config.kv_cache_groups[0].is_eagle_group = True
-    kv_config.kv_cache_groups.append(KVCacheGroupSpec(["mamba"], mamba))
     kv_config.kv_cache_tensors.append(
         KVCacheTensor(
             size=mamba.page_size_bytes * 32,
@@ -353,7 +335,6 @@ def test_lookahead_mamba_partial_tail_survives_finish(
             step,
             ModelRunnerOutput(
                 req_ids=[req.request_id],
-                req_id_to_index={req.request_id: 0},
                 sampled_token_ids=[[99] if is_final else []],
             ),
         )
@@ -428,7 +409,8 @@ def test_connector_explicit_cpu_blocks_align_uneven_stages(
     """The same configured pool size must fit lighter and heavier PP stages."""
     config = _make_kv_cache_config(num_blocks=16)
     names = [f"layer_{i}" for i in range(num_layers)]
-    config.kv_cache_groups[0].layer_names = names
+    group = config.kv_cache_groups[0]
+    group.kv_cache_specs = dict.fromkeys(names, uniform_spec(group))
     config.kv_cache_tensors[0].layers = names
     config.kv_cache_tensors[0].size *= num_layers
     vllm_config = _make_vllm_config()
@@ -553,10 +535,10 @@ def make_scheduler_output(
 
     Args:
         new_reqs: For first-time requests, maps req_id -> block_ids tuple.
-            These are placed into ``scheduled_new_reqs`` as ``NewRequestData``.
+            These are placed into `scheduled_new_reqs` as `NewRequestData`.
         cached_req_new_blocks: For returning (cached) requests, maps
             req_id -> new_block_ids (incremental) or None.
-            These are placed into ``scheduled_cached_reqs``.
+            These are placed into `scheduled_cached_reqs`.
 
     """
     scheduled_new_reqs: list[NewRequestData] = []
@@ -572,6 +554,7 @@ def make_scheduler_output(
                     block_ids=block_ids,
                     num_computed_tokens=0,
                     lora_request=None,
+                    prefill_token_ids=[],
                 )
             )
 
@@ -580,9 +563,7 @@ def make_scheduler_output(
         cached_new_block_ids = [cached_req_new_blocks[rid] for rid in cached_req_ids]
         cached_reqs = CachedRequestData(
             req_ids=cached_req_ids,
-            resumed_req_ids=set(),
             new_token_ids=[[] for _ in cached_req_ids],
-            all_token_ids={},
             new_block_ids=cached_new_block_ids,
             num_computed_tokens=[0] * len(cached_req_ids),
             num_output_tokens=[0] * len(cached_req_ids),
@@ -671,11 +652,11 @@ def _alloc_and_register(
     """Allocate GPU blocks and return KVCacheBlocks.
 
     Block IDs are no longer registered in a mock KVCacheManager; instead
-    tests pass them through ``make_scheduler_output`` so that
-    ``yield_req_data`` can pick them up.
+    tests pass them through `make_scheduler_output` so that
+    `yield_req_data` can pick them up.
 
-    If ``confirmed`` is True, advance ``request.num_computed_tokens`` to simulate
-    the scheduler's ``_update_after_schedule`` from a prior step.
+    If `confirmed` is True, advance `request.num_computed_tokens` to simulate
+    the scheduler's `_update_after_schedule` from a prior step.
     """
     gpu_blocks = _allocate_gpu_blocks(
         fix.gpu_block_pool, request, num_blocks, group_id=group_id
@@ -1024,8 +1005,8 @@ def test_reset_releases_unsubmitted_finished_stores() -> None:
 # ---------------------------------------------------------------------------
 def test_max_hit_len_cap_drops_last_full_block() -> None:
     """When num_tokens is an exact multiple of BLOCK_SIZE, the manager's
-    ``max_hit_len = num_tokens - 1`` cap forces ``find_longest_cache_hit`` to
-    drop the final block (since ``max_length // block_size`` rounds down).
+    `max_hit_len = num_tokens - 1` cap forces `find_longest_cache_hit` to
+    drop the final block (since `max_length // block_size` rounds down).
     """
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
@@ -1331,13 +1312,8 @@ def test_lazy_walk_covers_bounded_replay_swa_groups() -> None:
     """Lazy: the walk covers what every group, offloaded or not, takes per step."""
     config = _make_kv_cache_config(num_blocks=32, num_groups=3)
     for group in config.kv_cache_groups[1:]:
-        group.kv_cache_spec = SlidingWindowMLASpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=HEAD_SIZE,
-            dtype=DTYPE,
-            sliding_window=BLOCK_SIZE * 4,
-            bounded_replay=True,
+        group.manager_config = SlidingWindowManager.config(
+            sliding_window=BLOCK_SIZE * 4, bounded_replay=True
         )
     fix = make_scheduler(
         num_cpu_blocks=32, num_gpu_blocks=32, lazy=True, kv_cache_config=config
@@ -1969,12 +1945,8 @@ def test_chunked_prefill_reads_live_block_ids() -> None:
     assert len(meta2.store_gpu_blocks) == 2
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @pytest.mark.parametrize("same_output", [False, True])
-def test_eager_store_resets_block_cursor_after_preemption(
-    use_v2_model_runner: bool,
-    same_output: bool,
-) -> None:
+def test_eager_store_resets_block_cursor_after_preemption(same_output: bool) -> None:
     """A resumed request stores its confirmed tail after preemption."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=False)
     sched = fix.scheduler
@@ -1998,17 +1970,10 @@ def test_eager_store_resets_block_cursor_after_preemption(
 
     resumed_blocks = _alloc_and_register(fix, req, num_blocks=3)
     sched.update_state_after_alloc(req, resumed_blocks, num_external_tokens=0)
-    if use_v2_model_runner:
-        resumed_output = make_scheduler_output(
-            {req.request_id: 3 * BLOCK_SIZE},
-            new_reqs={req.request_id: resumed_blocks.get_block_ids()},
-        )
-    else:
-        resumed_output = make_scheduler_output(
-            {req.request_id: 3 * BLOCK_SIZE},
-            cached_req_new_blocks={req.request_id: resumed_blocks.get_block_ids()},
-        )
-        resumed_output.scheduled_cached_reqs.resumed_req_ids.add(req.request_id)
+    resumed_output = make_scheduler_output(
+        {req.request_id: 3 * BLOCK_SIZE},
+        new_reqs={req.request_id: resumed_blocks.get_block_ids()},
+    )
     if same_output:
         resumed_output.preempted_req_ids = {req.request_id}
 
@@ -2166,12 +2131,8 @@ def test_chunked_local_cpu_lookup_requires_chunk_aligned_prefix(
 ) -> None:
     """Recompute suffixes whose relative and absolute chunk boundaries differ."""
     config = _make_kv_cache_config(num_blocks=32, num_groups=2)
-    config.kv_cache_groups[1].kv_cache_spec = ChunkedLocalAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_SIZE,
-        dtype=DTYPE,
-        attention_chunk_size=64,
+    config.kv_cache_groups[1].manager_config = ChunkedLocalAttentionManager.config(
+        attention_chunk_size=64
     )
     fix = make_scheduler(num_cpu_blocks=32, kv_cache_config=config)
     scheduler = fix.scheduler
@@ -2197,14 +2158,14 @@ def test_chunked_local_cpu_lookup_requires_chunk_aligned_prefix(
 def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
     """Regression for vllm-project/vllm#39702.
 
-    When ``get_num_new_matched_tokens`` (Phase A) reports a CPU cache hit
-    of ``N`` tokens but ``update_state_after_alloc`` (Phase B) runs after
+    When `get_num_new_matched_tokens` (Phase A) reports a CPU cache hit
+    of `N` tokens but `update_state_after_alloc` (Phase B) runs after
     other requests have caused LRU eviction of those exact blocks, the
-    second ``find_longest_cache_hit`` call returns 0 while
-    ``num_external_tokens`` is still ``N``, triggering
-    ``AssertionError: Expected N hit tokens, got 0``.
+    second `find_longest_cache_hit` call returns 0 while
+    `num_external_tokens` is still `N`, triggering
+    `AssertionError: Expected N hit tokens, got 0`.
 
-    Setup: ``num_cpu_blocks=5`` (4 usable; null_block takes 1).
+    Setup: `num_cpu_blocks=5` (4 usable; null_block takes 1).
         1. Store req_a's 2 blocks to CPU. CPU: [a0, a1, _, _].
         2. Phase A on req_b (same prompt as req_a) reports a 2-block hit.
            Without the fix this does NOT pin a0/a1 — they remain at LRU front.
@@ -2215,8 +2176,8 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
            cached hashes, asserts.
 
     After the fix, Phase A pins the hit blocks so step 3 evicts req_c's
-    blocks instead, and Phase B reads the cached ``(cpu_hit_blocks,
-    hit_length)`` tuple without re-searching.
+    blocks instead, and Phase B reads the cached `(cpu_hit_blocks,
+    hit_length)` tuple without re-searching.
     """
     # 5 total = 4 usable (null_block takes 1)
     fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
@@ -2830,7 +2791,7 @@ def _make_hybrid_attention_mamba_scheduler(
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
-    attention_spec = FullAttentionSpec(
+    attention_spec = AttentionSpec(
         block_size=attention_block_size,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -2840,7 +2801,6 @@ def _make_hybrid_attention_mamba_scheduler(
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode=mamba_cache_mode,
     )
     return _make_two_group_scheduler(
         attention_spec,
@@ -2857,7 +2817,7 @@ def _make_hybrid_attention_mamba_scheduler(
 
 
 def _make_two_group_scheduler(
-    attention_spec: FullAttentionSpec,
+    attention_spec: AttentionSpec,
     second_group: tuple[str, KVCacheSpec],
     *,
     num_cpu_blocks: int,
@@ -2872,8 +2832,15 @@ def _make_two_group_scheduler(
     """Build a scheduler for one attention group plus one named second group."""
     second_name, second_spec = second_group
     groups = [
-        KVCacheGroupSpec(["attention"], attention_spec),
-        KVCacheGroupSpec([second_name], second_spec),
+        make_kv_cache_group(["attention"], attention_spec),
+        make_kv_cache_group(
+            [second_name],
+            second_spec,
+            MambaManager,
+            MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+        )
+        if isinstance(second_spec, MambaSpec)
+        else make_kv_cache_group([second_name], second_spec),
     ]
     tensors = [
         KVCacheTensor(
@@ -2923,9 +2890,9 @@ def _make_two_group_scheduler(
 def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     """Replicated groups must not be scaled by the DCP world size.
 
-    The spec's ``dcp_sharded`` flag controls its effective block size.
+    The spec's `dcp_sharded` flag controls its effective block size.
     Reconstructing a group's geometry as
-    ``spec.block_size * cp_world_size`` over-scales the replicated groups, so
+    `spec.block_size * cp_world_size` over-scales the replicated groups, so
     the eager store scan believes far fewer of their blocks are ready and
     silently offloads only a fraction of them.
     """
@@ -2933,7 +2900,7 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     replicated_block_size = 4 * BLOCK_SIZE
     dcp_world_size = 2
     fix = _make_two_group_scheduler(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=attention_block_size,
             num_kv_heads=NUM_KV_HEADS,
             head_size=HEAD_SIZE,
@@ -2941,7 +2908,7 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
         ),
         (
             "replicated_attention",
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=replicated_block_size,
                 num_kv_heads=NUM_KV_HEADS,
                 head_size=HEAD_SIZE,
@@ -3463,7 +3430,7 @@ def test_boundary_handoff_dropped_for_departing_request(gone_via: str) -> None:
 def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
     """Boundary stores must extend block_meta alongside the block ids.
 
-    ``_process_store_completion`` indexes ``block_meta`` by position, so a
+    `_process_store_completion` indexes `block_meta` by position, so a
     boundary handoff that appends only block ids shortens the list, trips its
     length assertion and shifts every following entry's metadata.
     """
@@ -3563,14 +3530,13 @@ QSA_RING_BLOCK_SIZE = 4
 
 
 def _make_qsa_hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
-    register_all_kvcache_specs(vllm_config=None)
-    full_spec = FullAttentionSpec(
+    full_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    ring_spec = CircularBufferSpec(
+    ring_spec = AttentionSpec(
         block_size=QSA_RING_BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -3578,15 +3544,15 @@ def _make_qsa_hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
         dtype=DTYPE,
     )
     groups = [
-        KVCacheGroupSpec(["layer_0"], full_spec),
-        KVCacheGroupSpec(["qsa_ring"], ring_spec),
+        make_kv_cache_group(["layer_0"], full_spec),
+        make_kv_cache_group(["qsa_ring"], ring_spec, CircularBufferManager),
     ]
     tensors = [
         KVCacheTensor(
-            size=group.kv_cache_spec.page_size_bytes * num_blocks,
+            size=group.page_size_bytes * num_blocks,
             layers=list(group.layer_names),
-            layer_stride=group.kv_cache_spec.page_size_bytes * num_blocks,
-            block_stride=group.kv_cache_spec.page_size_bytes,
+            layer_stride=group.page_size_bytes * num_blocks,
+            block_stride=group.page_size_bytes,
         )
         for group in groups
     ]
@@ -3676,190 +3642,3 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
         without_ring, max_batched
     )
     assert target_with == target_without
-
-
-@pytest.mark.parametrize("retention_interval", [None, 0])
-@pytest.mark.parametrize("chunk_size,prefill_lookahead", [(64, 1), (1024, 1), (1, 3)])
-@pytest.mark.parametrize(
-    "draft_sliding_window,draft_sharded",
-    [(True, False), (False, False), (False, True)],
-    ids=["swa", "replicated_full", "sharded_full"],
-)
-def test_eager_store_matches_gpu_cacheable_prefix(
-    retention_interval: int | None,
-    chunk_size: int,
-    prefill_lookahead: int,
-    draft_sliding_window: bool,
-    draft_sharded: bool,
-) -> None:
-    """Preserve GPU hits for replicated SWA and DCP-sharded full-attention drafts."""
-    block_size = 64
-    scheduler_block_size = 8 * block_size
-    draft_block_size = scheduler_block_size if draft_sharded else block_size
-    prompt_len = 16 * scheduler_block_size + draft_block_size + prefill_lookahead
-    kv_cache_config = _make_kv_cache_config(256, num_groups=2)
-    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        group.kv_cache_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=NUM_KV_HEADS,
-            head_size=HEAD_SIZE,
-            dtype=DTYPE,
-            dcp_sharded=group_id == 0 or draft_sharded,
-        )
-    for tensor in kv_cache_config.kv_cache_tensors:
-        tensor.size *= block_size // BLOCK_SIZE
-        tensor.layer_stride *= block_size // BLOCK_SIZE
-        tensor.block_stride *= block_size // BLOCK_SIZE
-    if draft_sliding_window:
-        kv_cache_config.kv_cache_groups[1].kv_cache_spec = SlidingWindowSpec(
-            block_size=block_size,
-            num_kv_heads=NUM_KV_HEADS,
-            head_size=HEAD_SIZE,
-            dtype=DTYPE,
-            sliding_window=scheduler_block_size,
-            extra_retained_tokens=prefill_lookahead - 1,
-            dcp_sharded=False,
-        )
-    kv_cache_config.kv_cache_groups[1].is_eagle_group = True
-    kv_cache_config.prefix_cache_retention_interval = retention_interval
-    vllm_config = _make_cp_vllm_config(dcp_world_size=8)
-    vllm_config.model_config.max_model_len = 16384
-    speculative_config = Mock(spec=SpeculativeConfig)
-    speculative_config.num_speculative_tokens = 3
-    speculative_config.use_eagle.return_value = True
-    speculative_config.use_eagle_block_drop.return_value = True
-    speculative_config.use_multi_module_mtp.return_value = prefill_lookahead > 1
-    attach_speculator_config(
-        speculative_config,
-        MultiModuleMTPSpeculatorConfig
-        if prefill_lookahead > 1
-        else MTPSpeculatorConfig,
-    )
-    vllm_config.speculative_config = speculative_config
-    scheduler = SimpleCPUOffloadScheduler(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        cpu_capacity_bytes=kv_cache_config.kv_cache_tensors[0].size,
-        scheduler_block_size=scheduler_block_size,
-        hash_block_size=block_size,
-    )
-    gpu_manager = KVCacheManager(
-        kv_cache_config,
-        max_model_len=16384,
-        max_in_flight_tokens=chunk_size,
-        scheduler_block_size=scheduler_block_size,
-        hash_block_size=block_size,
-        dcp_world_size=8,
-        use_eagle=True,
-        num_prefill_lookahead=prefill_lookahead,
-    )
-    scheduler.bind_gpu_block_pool(gpu_manager.block_pool)
-    request = Request(
-        request_id="dcp-draft-source",
-        prompt_token_ids=list(range(prompt_len)),
-        sampling_params=SamplingParams(max_tokens=2),
-        pooling_params=None,
-        mm_features=None,
-        block_hasher=get_request_block_hasher(block_size, sha256),
-    )
-    # Follow allocate -> connector metadata -> compute completion, including
-    # one decode step so the final prefill blocks can be offloaded.
-    while request.num_computed_tokens <= prompt_len:
-        if request.num_computed_tokens == prompt_len:
-            request.append_output_token_ids([prompt_len])
-        num_new_tokens = min(
-            chunk_size, request.num_tokens - request.num_computed_tokens
-        )
-        new_blocks = gpu_manager.allocate_slots(
-            request, num_new_tokens, num_lookahead_tokens=3
-        )
-        assert new_blocks is not None
-        if request.num_computed_tokens == 0:
-            scheduler.update_state_after_alloc(
-                request, gpu_manager.get_blocks(request.request_id), 0
-            )
-            output = make_scheduler_output(
-                {request.request_id: num_new_tokens},
-                new_reqs={request.request_id: new_blocks.get_block_ids()},
-            )
-        else:
-            output = make_scheduler_output(
-                {request.request_id: num_new_tokens},
-                cached_req_new_blocks={request.request_id: new_blocks.get_block_ids()},
-            )
-        store_meta = scheduler.build_connector_meta(output)
-        request.num_computed_tokens += num_new_tokens
-        if store_meta.store_event >= 0:
-            simulate_store_completion(scheduler, store_meta.store_event)
-
-    matching_request = Request(
-        request_id="dcp-draft-load",
-        prompt_token_ids=request.prompt_token_ids,
-        sampling_params=request.sampling_params,
-        pooling_params=None,
-        mm_features=None,
-        block_hasher=request._block_hasher,
-    )
-    expected_hit = (
-        15 if draft_sliding_window and retention_interval is not None else 16
-    ) * scheduler_block_size
-    assert gpu_manager.get_computed_blocks(matching_request)[1] == expected_hit
-    scheduler.request_finished(request, [])
-    gpu_manager.free(request)
-    assert gpu_manager.block_pool.reset_prefix_cache()
-
-    hit_tokens, is_async = scheduler.get_num_new_matched_tokens(
-        matching_request, num_computed_tokens=0
-    )
-    assert hit_tokens is not None
-    assert (hit_tokens, is_async) == (expected_hit, True)
-
-    assert (
-        gpu_manager.allocate_slots(
-            matching_request,
-            num_new_tokens=0,
-            num_external_computed_tokens=hit_tokens,
-            delay_cache_blocks=True,
-        )
-        is not None
-    )
-    load_blocks = gpu_manager.get_blocks(matching_request.request_id)
-    scheduler.update_state_after_alloc(matching_request, load_blocks, hit_tokens)
-    load_meta = scheduler.build_connector_meta(
-        make_scheduler_output(
-            {matching_request.request_id: 0},
-            new_reqs={matching_request.request_id: load_blocks.get_block_ids()},
-        )
-    )
-    # SWA loads only the eight-block tail after null padding; a sharded full
-    # draft must load every prefix block, with the same DCP geometry as the target.
-    num_draft_blocks = 8 if draft_sliding_window else hit_tokens // draft_block_size
-    assert load_meta.load_gpu_blocks == [
-        block.block_id
-        for block in (
-            *load_blocks.blocks[0],
-            *load_blocks.blocks[1][-num_draft_blocks:],
-        )
-    ]
-    assert (
-        len(load_meta.load_gpu_blocks)
-        == hit_tokens // scheduler_block_size + num_draft_blocks
-    )
-    target_hashes = [
-        make_block_hash_with_group_id(matching_request.block_hashes[(i + 1) * 8 - 1], 0)
-        for i in range(hit_tokens // scheduler_block_size)
-    ]
-    draft_hashes = [
-        make_block_hash_with_group_id(
-            matching_request.block_hashes[(i + 1) * draft_block_size // block_size - 1],
-            1,
-        )
-        for i in range(
-            hit_tokens // draft_block_size - num_draft_blocks,
-            hit_tokens // draft_block_size,
-        )
-    ]
-    assert [
-        scheduler.cpu_block_pool.blocks[bid].block_hash
-        for bid in load_meta.load_cpu_blocks
-    ] == target_hashes + draft_hashes

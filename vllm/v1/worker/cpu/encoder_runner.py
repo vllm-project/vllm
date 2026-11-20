@@ -21,6 +21,7 @@ from vllm.multimodal.utils import (
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    reserve_encoder_cache_residency,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -108,6 +109,11 @@ class EncoderRunner:
         )
         self.encoder_cache.encoder_outputs.update(
             (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
+        )
+        reserve_encoder_cache_residency(
+            self.encoder_cache.encoder_outputs,
+            dummy_encoder_outputs,
+            budget.encoder_cache_size,
         )
 
     @torch.inference_mode()
@@ -222,10 +228,13 @@ class EncoderRunner:
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                # Attach modality for Omni interleaved merge (collected on demand).
-                set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
-
-                req_start_pos = query_start_loc[i] + start_pos - cur_query_start
+                req_start_pos = int(query_start_loc[i]) + start_pos - cur_query_start
+                # Attach modality and placement for the Omni interleaved merge.
+                set_mm_embedding_modality(
+                    mm_embeds_item,
+                    mm_feature.modality,
+                    (req_start_pos + start_idx, req_start_pos + end_idx, is_embed),
+                )
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
                     True if is_embed is None else is_embed
                 )

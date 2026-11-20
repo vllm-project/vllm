@@ -146,9 +146,9 @@ class ServingDerender(BaseServing):
         """Postprocess a GenerateResponse into a ChatCompletionResponse.
 
         Non-streaming only: expects the complete GenerateResponse with all
-        token IDs present.  Uses ``parser.parse()`` for one-shot extraction.
+        token IDs present.  Uses `parser.parse()` for one-shot extraction.
 
-        When ``request.chat_request`` is provided, the parser splits the
+        When `request.chat_request` is provided, the parser splits the
         output into (reasoning, content, tool_calls).  Otherwise falls
         back to plain detokenization.
         """
@@ -172,7 +172,11 @@ class ServingDerender(BaseServing):
             )
 
         try:
-            choices, prompt_logprobs = await self.online_derenderer.derender_chat(
+            (
+                choices,
+                prompt_logprobs,
+                completion_tokens_details,
+            ) = await self.online_derenderer.derender_chat(
                 request.generate_response,
                 request.chat_request,
                 request.prompt_token_ids,
@@ -187,6 +191,12 @@ class ServingDerender(BaseServing):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
+            # Only the generate step knows the prefix cache hit, so its
+            # usage is the source for `prompt_tokens_details`.
+            prompt_tokens_details=(
+                gen.usage.prompt_tokens_details if gen.usage is not None else None
+            ),
+            completion_tokens_details=completion_tokens_details,
         )
 
         model_name = request.model or self.models.model_name()
@@ -293,9 +303,9 @@ class ServingDerender(BaseServing):
         self,
         request: DerenderChatStreamRequest,
     ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState] | ErrorResponse:
-        """Streaming counterpart to ``derender_chat_response``.
+        """Streaming counterpart to `derender_chat_response`.
 
-        Processes one ``GenerateStreamResponse`` chunk and returns the
+        Processes one `GenerateStreamResponse` chunk and returns the
         derendered chunk together with the updated client carried state.
         """
         error_check_ret = await self._check_model(request)
@@ -402,9 +412,9 @@ class ServingDerender(BaseServing):
         self,
         request: DerenderCompletionStreamRequest,
     ) -> tuple[CompletionStreamResponse, DerenderStreamState] | ErrorResponse:
-        """Streaming counterpart to ``derender_completion_response``.
+        """Streaming counterpart to `derender_completion_response`.
 
-        Processes one ``GenerateStreamResponse`` chunk (one output sequence's
+        Processes one `GenerateStreamResponse` chunk (one output sequence's
         delta) and returns the derendered chunk and updated state.
         """
         error_check_ret = await self._check_model(request)

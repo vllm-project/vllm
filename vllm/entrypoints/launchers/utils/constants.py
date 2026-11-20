@@ -5,3 +5,6 @@
 # These constants help mitigate header abuse attacks
 H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT = 4194304  # 4 MB
 H11_MAX_HEADER_COUNT_DEFAULT = 256
+
+# Tag for placeholder routes of disabled features
+DISABLED_ROUTE_TAG = "disabled"

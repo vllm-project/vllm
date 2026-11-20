@@ -44,6 +44,9 @@ class LoadConfig:
     - "ipc_cache" will map post-quantized weights from a local weight cache
       daemon via CUDA IPC for fast engine restarts. Launch the daemon with
       `vllm preload` first.
+    - "peer_cache" will build the model on meta and pull post-processed
+      weights from a source replica's weight cache daemon. Set internally
+      by `vllm preload --weight-cache-seed`; not for engine use.
     - "npcache" will load the weights in pytorch format and store a numpy cache
       to speed up the loading.
     - "dummy" will initialize the weights with random values, which is mainly
@@ -98,7 +101,7 @@ class LoadConfig:
         default=DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS, ge=1
     )
     """Maximum number of file-level prefetch workers used by the ordinary
-    ``prefetch`` strategy. Each worker sequentially reads one checkpoint
+    `prefetch` strategy. Each worker sequentially reads one checkpoint
     file."""
     safetensors_prefetch_block_size: int = Field(
         default=DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE, ge=1

@@ -35,6 +35,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FunAudioChatConfig": "vllm.transformers_utils.configs.funaudiochat",
     "FunAudioChatAudioEncoderConfig": "vllm.transformers_utils.configs.funaudiochat",
     "HYV4Config": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4FlashConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4FlashVLConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4VLConfig": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4VLVisionConfig": "vllm.transformers_utils.configs.hy_v4",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
@@ -42,15 +46,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "RWConfig": "vllm.transformers_utils.configs.falcon",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MingV3ASRConfig": "vllm.transformers_utils.configs.ming_v3_asr",
-    "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
-    "MiniMaxM3TextConfig": "vllm.transformers_utils.configs.minimax_m3",
     "Moondream3Config": "vllm.transformers_utils.configs.moondream3",
     "Moondream3TextConfig": "vllm.transformers_utils.configs.moondream3",
     "Moondream3VisionConfig": "vllm.transformers_utils.configs.moondream3",
-    "MossTranscribeDiarizeConfig": (
-        "vllm.transformers_utils.configs.moss_transcribe_diarize"
-    ),
     "Nemotron3_5TranscribeConfig": (
         "vllm.transformers_utils.configs.nemotron3_5_transcribe"
     ),
@@ -59,9 +58,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "Lfm3Config": "vllm.transformers_utils.configs.lfm3",
     "Lfm3AudioConfig": "vllm.transformers_utils.configs.lfm3_audio",
+    "Lfm3OmniConfig": "vllm.transformers_utils.configs.lfm3_omni",
     "Lfm3VlConfig": "vllm.transformers_utils.configs.lfm3_vl",
     "Lfm3VlVisionConfig": "vllm.transformers_utils.configs.lfm3_vl",
-    "MuseSpark1xTextConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkTextConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkVisionConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkAudioConfig": "vllm.transformers_utils.configs.muse_spark",
@@ -69,6 +68,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MuseSparkConfig": "vllm.transformers_utils.configs.muse_spark",
     "KimiK3Config": "vllm.transformers_utils.configs.kimi_k3",
     "KimiK3VisionConfig": "vllm.transformers_utils.configs.kimi_k3",
+    "NemotronLabsDiffusionConfig": (
+        "vllm.transformers_utils.configs.nemotron_labs_diffusion"
+    ),
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
@@ -88,10 +90,13 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "InklingAudioConfig": "vllm.models.inkling.configs",
     "InklingVisionConfig": "vllm.models.inkling.configs",
     "InklingMMConfig": "vllm.models.inkling.configs",
+    "Inkling2ModelConfig": "vllm.models.inkling2.configs",
+    "Inkling2MMConfig": "vllm.models.inkling2.configs",
     # Upstream Transformers classes registered in _CONFIG_REGISTRY
     "DeepseekV3Config": "transformers",
     "HyperCLOVAXConfig": "transformers",
     "Kimi_K25Config": "transformers",
+    "MiniMaxM3VLConfig": "transformers",
     "Step3p7TextConfig": "transformers",
 }
 
@@ -122,13 +127,12 @@ __all__ = [
     "RWConfig",
     "MiDashengLMConfig",
     "MingV3ASRConfig",
-    "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",
-    "MiniMaxM3TextConfig",
+    "MiniMaxM3VLConfig",
+    "NemotronLabsDiffusionConfig",
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
-    "MossTranscribeDiarizeConfig",
     "Nemotron3_5TranscribeConfig",
     "MoonViTConfig",
     "KimiLinearConfig",
@@ -136,9 +140,9 @@ __all__ = [
     "Kimi_K25Config",
     "Lfm3Config",
     "Lfm3AudioConfig",
+    "Lfm3OmniConfig",
     "Lfm3VlConfig",
     "Lfm3VlVisionConfig",
-    "MuseSpark1xTextConfig",
     "MuseSparkTextConfig",
     "MuseSparkVisionConfig",
     "MuseSparkAudioConfig",
@@ -166,6 +170,8 @@ __all__ = [
     "InklingAudioConfig",
     "InklingVisionConfig",
     "InklingMMConfig",
+    "Inkling2ModelConfig",
+    "Inkling2MMConfig",
 ]
 
 

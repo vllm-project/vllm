@@ -319,6 +319,65 @@ def test_tool_references_render_as_tool_names():
     )
 
 
+def function_tool(name, description, parameters, deferred):
+    function = {"name": name, "description": description, "parameters": parameters}
+    return {"type": "function", "function": function, "defer_loading": deferred}
+
+
+TOOL_SEARCH_TOOLS = [
+    function_tool(
+        "tool_search",
+        "Search tools",
+        {"type": "object", "properties": {"query": {"type": "string"}}},
+        False,
+    ),
+    function_tool(
+        "get_weather",
+        "Weather",
+        {"type": "object", "properties": {"city": {"type": "string"}}},
+        True,
+    ),
+    function_tool("get_time", "Time", {"type": "object"}, True),
+]
+
+
+def tool_search_messages(*references):
+    search = tool_call("tool_search")
+    search["function"]["arguments"] = '{"query": "weather"}'
+    return [
+        {"role": "user", "content": "weather in Paris?"},
+        {"role": "assistant", "tool_calls": [search]},
+        {
+            "role": "tool",
+            "tool_call_id": "tool_search",
+            "content": [{"type": "tool_reference", "name": n} for n in references],
+        },
+        {"role": "user", "content": "go on"},
+    ]
+
+
+def test_tool_references_list_deferred_tools_like_deepseek_recipe():
+    # deepseek-recipe (935817c) leaves deferred tools out of the tool prompt
+    # and lists referenced ones after the tool search result's user turn.
+    # Same fixture as the Rust renderer's test of the same name.
+    expected = (FIXTURES / "deepseek_v41" / "tool_search_references.txt").read_text()
+    messages = tool_search_messages("get_weather", "get_time")
+    assert render(messages, tools=TOOL_SEARCH_TOOLS, thinking=False) == expected
+
+
+@pytest.mark.parametrize(
+    ("messages", "tools", "match"),
+    [
+        (tool_search_messages(), TOOL_SEARCH_TOOLS[1:], "cannot be deferred"),
+        (tool_search_messages("nope"), TOOL_SEARCH_TOOLS, "'nope' not found"),
+    ],
+    ids=["all_deferred", "unknown_reference"],
+)
+def test_tool_search_request_errors(messages, tools, match):
+    with pytest.raises(ValueError, match=match):
+        render(messages, tools=tools)
+
+
 @pytest.fixture(params=[False, True], ids=["sync", "async"])
 def render_with_media(request, monkeypatch):
     # Keep real message parsing and image tracking; no model download is needed.
@@ -511,3 +570,15 @@ def test_open_final_message_gets_no_generation_prompt(thinking_mode, final):
 def test_continue_final_message_requires_assistant(messages):
     with pytest.raises(ValueError, match="final assistant"):
         render(messages, continue_final_message=True)
+
+
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v41_unknown_role_raises_value_error():
+    # Invalid roles are client errors: they must surface as ValueError
+    # (mapped to HTTP 400 by the OpenAI serving layer), not
+    # NotImplementedError (mapped to HTTP 501).
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        encode_messages(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            thinking_mode="chat",
+        )

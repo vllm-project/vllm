@@ -528,7 +528,7 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
     """Test that compiling gpt2 twice results in a cache hit.
 
     Counter values are read from the EngineCore subprocess via
-    ``LLM.collective_rpc`` so the test works under default V1
+    `LLM.collective_rpc` so the test works under default V1
     multiprocessing (no shared memory between test and engine).
     """
     from vllm import LLM
@@ -1024,8 +1024,10 @@ def graph_cache_probe(tmp_path):
             [
                 sys.executable,
                 "-c",
-                "from tests.compile.test_aot_compile import "
-                "_run_graph_cache_probe; _run_graph_cache_probe()",
+                (
+                    "from tests.compile.test_aot_compile import "
+                    "_run_graph_cache_probe; _run_graph_cache_probe()"
+                ),
             ],
             cwd=Path(__file__).resolve().parents[2],
             env=env,

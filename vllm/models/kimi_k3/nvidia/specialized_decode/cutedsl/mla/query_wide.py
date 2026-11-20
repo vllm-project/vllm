@@ -61,26 +61,21 @@ ABSORB_CTAS = 304
 
 
 def wide_query(heads: int) -> bool:
-    """Whether the MLA query of ``heads`` local heads runs split at every batch."""
+    """Whether the MLA query of `heads` local heads runs split at every batch."""
     return heads >= WIDE_HEADS
 
 
 def split_query(heads: int, batch: int, dcp: int = 0) -> bool:
-    """Whether the MLA query of ``batch`` rows at ``heads`` local heads runs split
+    """Whether the MLA query of `batch` rows at `heads` local heads runs split
     (QueryNorm, the Q_B projection, MlaAbsorb): always from WIDE_HEADS heads, else
     from SPLIT_FROM rows (under DCP MlaAbsorb publishes into the q mailbox)."""
     return wide_query(heads) or batch >= SPLIT_FROM
 
 
 def fi_heads(heads: int) -> int:
-    """The FlashInfer sparse MLA query heads of ``heads`` local heads: 64 < H < 128
-    zero-padded to 128 (trtllm-gen takes <= 64 or exactly 128 heads; prims_ts
-    before flashinfer-ai/flashinfer#7984 runs other counts as two M64 tiles that
-    load every KV row twice: at 96 heads 2.0-2.1x slower from 80 rows, GB300 128K,
-    101.9 / 149.3 / 244.7 us at 80 / 160 / 320 rows against 50.7 / 72.4 / 112.6
-    padded). The stock decode pads only on such builds
-    (``FlashInferMLASparseImpl._prims_ts_query_heads``); the pad heads are zero, so
-    both head counts compute the same rows."""
+    """The FlashInfer sparse MLA query heads of `heads` local heads: 64 < H < 128
+    zero-padded to 128, as trtllm-gen takes <= 64 or exactly 128 heads. The pad
+    heads are zero, so prims_ts computes the same rows either way."""
     return 128 if 64 < heads < 128 else heads
 
 
@@ -101,7 +96,7 @@ class MlaAbsorb(MlaQuery):
     """W_UK absorption, rope columns and MLA KV insert from the Q_B rows. One
     128-thread CTA per (128 latent columns, head): 384 CTAs at 96 heads, one wave
     at three per SM. It stages its 32 KB W_UK slice once, then walks the batch in
-    tiles of ``absorb_tokens`` tokens (the next tile's rows load while the current
+    tiles of `absorb_tokens` tokens (the next tile's rows load while the current
     one's output stores); warp w owns latent columns 32w..32w+31 of the part for
     every 16-token MMA tile (BF16 MMA, FP32 accumulation, K = 128). The four parts
     of a head share its rope columns, every CTA one KV insert per 4H tokens.
@@ -111,10 +106,10 @@ class MlaAbsorb(MlaQuery):
     us of W_UK bytes.
 
     Small head counts (TP8 / DCP8: 12) split each (part, head)'s token tiles over
-    ``absorb_splits`` CTAs (grid z), each staging the W_UK slice.
+    `absorb_splits` CTAs (grid z), each staging the W_UK slice.
 
-    ``dcp`` (with ``q_heads``): each CTA also multicasts the query bytes it stores
-    (latent columns, rope columns) into head block ``rank`` of every rank's q
+    `dcp` (with `q_heads`): each CTA also multicasts the query bytes it stores
+    (latent columns, rope columns) into head block `rank` of every rank's q
     mailbox, as MlaQuery.publish; QueryWait polls it (no poll here).
 
     Arguments as MlaQuery's with the Q_B rows [B, H * 192] (BF16) in place of the
@@ -158,7 +153,7 @@ class MlaAbsorb(MlaQuery):
 
     @cute.jit
     def stage_rows(self, q_rows, qn, tok0, head, tid):
-        """cp.async the nope columns of tokens tok0 .. tok0 + T into ``qn``."""
+        """cp.async the nope columns of tokens tok0 .. tok0 + T into `qn`."""
         T: cutlass.Constexpr = self.tokens
         for c in range(tid, T * 16, 128):
             t, j = c // 16, c % 16
@@ -169,8 +164,8 @@ class MlaAbsorb(MlaQuery):
 
     @cute.jit
     def publish_words(self, args, token, head, col, words):
-        """DCP: ``words`` (the query bytes of ``token``'s head ``head`` from column
-        ``col``) into head block ``rank`` of every rank's q mailbox."""
+        """DCP: `words` (the query bytes of `token`'s head `head` from column
+        `col`) into head block `rank` of every rank's q mailbox."""
         if cutlass.const_expr(self.dcp > 0):
             box_mc, rank = args[self.box_arg + 1 : self.box_arg + 3]
             E: cutlass.Constexpr = self.q_bytes
@@ -320,7 +315,7 @@ QUANT_HEADS = 64
 
 
 def absorb_bmm(heads: int, batch: int) -> bool:
-    """Whether ``batch`` rows of ``heads`` local heads absorb by the W_UK bmm."""
+    """Whether `batch` rows of `heads` local heads absorb by the W_UK bmm."""
     return heads >= QUANT_HEADS and batch >= QUANT_FROM
 
 

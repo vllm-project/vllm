@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import cast
+
+import torch
 
 from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
@@ -25,6 +27,7 @@ from vllm.inputs import (
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
+    PlaceholderRange,
 )
 
 
@@ -45,7 +48,7 @@ def _encode_metadata_items(
     *,
     declared: Collection[str],
 ) -> list[str | None]:
-    """Serialize placeholder-metadata and ``keep_on_cpu`` fields per item."""
+    """Serialize placeholder-metadata and `keep_on_cpu` fields per item."""
     metadata_items: list[str | None] = []
     for item in items:
         if item is None:
@@ -65,37 +68,32 @@ def _encode_metadata_items(
     return metadata_items
 
 
-def _encode_mm_kwargs_with_metadata(
+def _encode_mm_metadata(
     raw_mm_kwargs: MultiModalKwargsOptionalItems,
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
-) -> tuple[dict[str, list[str | None]], dict[str, list[str | None]] | None]:
-    """Serialize full kwargs and their metadata-only subsets per modality."""
-    kwargs_data: dict[str, list[str | None]] = {}
+) -> dict[str, list[str | None]] | None:
+    """Serialize metadata-only subsets, or `None` if a modality has none."""
     metadata_by_modality: dict[str, list[str | None]] = {}
 
     for modality, items in raw_mm_kwargs.items():
-        kwargs_data[modality] = [
-            encode_mm_kwargs_item(item) if item is not None else None for item in items
-        ]
-
         declared = (
             set(metadata_fields_for(modality))
             if metadata_fields_for is not None
             else set()
         )
         metadata_items = _encode_metadata_items(items, declared=declared)
-        if any(item is not None for item in metadata_items):
-            metadata_by_modality[modality] = metadata_items
+        if not any(item is not None for item in metadata_items):
+            return None
+        metadata_by_modality[modality] = metadata_items
 
-    mm_metadata = metadata_by_modality or None
-    return kwargs_data, mm_metadata
+    return metadata_by_modality
 
 
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:
-    """Deserialize ``features`` into per-modality kwargs for ``mm_input``."""
+    """Deserialize `features` into per-modality kwargs for `mm_input`."""
     mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
     kwargs_data = features.kwargs_data or {}
     mm_metadata = features.mm_metadata or {}
@@ -118,10 +116,29 @@ def mm_kwargs_from_features(
     return mm_kwargs
 
 
+def rebuild_mm_placeholders(
+    mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
+) -> dict[str, list[PlaceholderRange]]:
+    """Inverse of `placeholder_ranges_from_engine_input`."""
+    return {
+        modality: [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None
+                if p.is_embed is None
+                else torch.tensor(p.is_embed, dtype=torch.bool),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in mm_placeholders.items()
+    }
+
+
 def placeholder_ranges_from_engine_input(
     engine_input: EngineInput,
 ) -> dict[str, list[PlaceholderRangeInfo]] | None:
-    """Return per-modality placeholder ranges, or ``None`` for text-only prompts."""
+    """Return per-modality placeholder ranges, or `None` for text-only prompts."""
     if engine_input.get("type") != "multimodal":
         return None
 
@@ -130,10 +147,26 @@ def placeholder_ranges_from_engine_input(
     ]
     return {
         modality: [
-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
+            )
+            for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }
+
+
+def mm_hashes_from_engine_input(
+    engine_input: EngineInput,
+) -> dict[str, list[str]] | None:
+    """Return per-modality processor cache keys, or `None` for text-only prompts."""
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    mm_hashes: MultiModalHashes = cast(MultiModalInput, engine_input)["mm_hashes"]
+    return {modality: list(hashes) for modality, hashes in mm_hashes.items()}
 
 
 def extract_mm_features(
@@ -144,11 +177,12 @@ def extract_mm_features(
 ) -> MultiModalFeatures | None:
     """Extract multimodal features from a rendered engine prompt.
 
-    Returns ``None`` for text-only prompts. ``mm_metadata`` keeps the
+    Returns `None` for text-only prompts. `mm_metadata` keeps the
     intersection of processed kwargs that prefill needs after EC transfer:
     fields declared as embedding metadata, plus fields marked
-    ``keep_on_cpu`` (for example M-RoPE grid dims). With
-    ``mm_payload="none"`` neither is serialized.
+    `keep_on_cpu` (for example M-RoPE grid dims). It is `None` if any
+    modality has no such fields. `mm_payload="metadata"` omits `kwargs_data`
+    and `mm_payload="none"` omits both.
     """
     if engine_input.get("type") != "multimodal":
         return None
@@ -160,13 +194,25 @@ def extract_mm_features(
 
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
-    if mm_payload == "tensors":
-        raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
-        if raw_mm_kwargs:
-            kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
-                raw_mm_kwargs,
-                metadata_fields_for=metadata_fields_for,
+    raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
+    if raw_mm_kwargs and mm_payload != "none":
+        mm_metadata = _encode_mm_metadata(
+            raw_mm_kwargs,
+            metadata_fields_for=metadata_fields_for,
+        )
+        if mm_payload == "metadata" and mm_metadata is None:
+            raise ValueError(
+                "mm_payload='metadata' requires metadata for every modality "
+                "in the request. Render with mm_payload='tensors' instead."
             )
+        if mm_payload == "tensors":
+            kwargs_data = {
+                modality: [
+                    encode_mm_kwargs_item(item) if item is not None else None
+                    for item in items
+                ]
+                for modality, items in raw_mm_kwargs.items()
+            }
 
     return MultiModalFeatures(
         mm_hashes=mm_hashes,

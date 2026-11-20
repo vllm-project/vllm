@@ -273,8 +273,10 @@ FORMATS = {
     "indexed": (
         " ",
         "{id}",
-        "Reply on one line with each question's id immediately followed by its "
-        "label, separated by single spaces.",
+        (
+            "Reply on one line with each question's id immediately followed by its "
+            "label, separated by single spaces."
+        ),
     ),
 }
 
@@ -330,9 +332,9 @@ def init_tokenizer(tok):
 def resolve_template(qs, head, lead, fmt):
     """Tokenize the answer template and find each question's slot. Every label
     must change exactly one token, at the same position for all of a question's
-    labels, or this raises SchemaError. ``head`` is the token run the canvas
+    labels, or this raises SchemaError. `head` is the token run the canvas
     starts with: the empty thought block for a plain read, and empty when the
-    prompt already ends the thought channel. ``lead`` is the text before the
+    prompt already ends the thought channel. `lead` is the text before the
     first answer: the join when earlier answers are in the prompt, so the
     tokens match one joint template."""
     base_labels = [0] * len(qs)
@@ -451,7 +453,7 @@ def upstream_completions(body, timeout=600):
 
 def chat_prompt_ids(sys_text, state_text, thinking=False):
     """The prompt the chat endpoint would build, as token ids, ending after
-    the model turn marker. Text states only. ``thinking`` turns the chat
+    the model turn marker. Text states only. `thinking` turns the chat
     template's thinking marker on."""
     messages = [
         {"role": "system", "content": sys_text},
@@ -468,7 +470,7 @@ def chat_prompt_ids(sys_text, state_text, thinking=False):
 
 def think(sys_text, state_text, budget):
     """A read prefix that ends with a thought the model wrote: the chat prompt
-    with thinking on, the open tag, up to ``budget`` generated tokens, the
+    with thinking on, the open tag, up to `budget` generated tokens, the
     close tag. Returns the prefix and a diagnostics dict for the thought."""
     prompt = chat_prompt_ids(sys_text, state_text, thinking=True) + THOUGHT_OPEN
     started = time.time()
@@ -497,7 +499,7 @@ def think(sys_text, state_text, budget):
 
 def think_chat(sys_text, state_content, budget):
     """A thought written with the image in view: the chat endpoint with
-    thinking on, capped at ``budget`` tokens and cut at the close tag.
+    thinking on, capped at `budget` tokens and cut at the close tag.
     Returns the thought's token ids and a diagnostics dict."""
     body = {
         "model": ARGS.model,
@@ -565,7 +567,7 @@ def one_read(
     d = upstream_chat(body)
     content = d["choices"][0]["logprobs"]["content"]
     out = []
-    for q, s in zip(schema["questions"], slots):
+    for _, s in zip(schema["questions"], slots):
         top = {
             int(t["token"].split(":")[1]): t["logprob"]
             for t in content[s["pos"]]["top_logprobs"]
@@ -615,7 +617,7 @@ def one_read_continuation(schema, template, slots, prompt_ids, seed):
     d = upstream_completions(body)
     rows = d["choices"][0]["logprobs"]["top_logprobs"]
     out = []
-    for q, sl in zip(schema["questions"], slots):
+    for _, sl in zip(schema["questions"], slots):
         top = {int(k.split(":")[1]): v for k, v in rows[sl["pos"]].items()}
         out.append(slot_distribution(top, sl["label_ids"]))
     return out, d.get("usage", {})
@@ -686,8 +688,8 @@ def schedule(qs):
 
 
 def chunk_groups(schema, qs):
-    """``qs`` split, in order, into the fewest groups whose answer templates
-    fit ``chunk_rows`` (the canvas by default). A question marked alone gets
+    """`qs` split, in order, into the fewest groups whose answer templates
+    fit `chunk_rows` (the canvas by default). A question marked alone gets
     its own group."""
     limit = schema.get("chunk_rows") or CANVAS_LEN
     groups, group = [], []
