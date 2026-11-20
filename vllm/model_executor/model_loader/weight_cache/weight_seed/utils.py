@@ -11,12 +11,16 @@ import torch
 from pydantic import TypeAdapter
 
 from vllm.config import replace
-from vllm.model_executor.model_loader.weight_cache.protocol import (
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     TensorKind,
-    WeightCacheKey,
-    parse_seed_address,
+)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     recv_msg,
     send_msg,
+)
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    WeightCacheKey,
+    parse_seed_address,
     verify_socket_owner,
 )
 from vllm.platforms import current_platform
@@ -110,8 +114,9 @@ def rebuild_tensors(
         dtype = manifest_dtype(view["dtype"])
         if _view_extent(view, dtype.itemsize) > buffer.nbytes:
             raise RuntimeError(f"Seed manifest entry {name!r} overruns its storage")
+        offset = view["offset"] + buffer.storage_offset() // dtype.itemsize
         tensors[name] = torch.empty(0, dtype=dtype, device=buffer.device).set_(
-            buffer.untyped_storage(), view["offset"], view["shape"], view["stride"]
+            buffer.untyped_storage(), offset, view["shape"], view["stride"]
         )
     return tensors
 
@@ -120,11 +125,6 @@ def allocate_storage(storage: Mapping[str, Any], device: torch.device) -> torch.
     """A fresh byte buffer for one manifest storage, on the source's device type."""
     target = torch.device("cpu") if storage["device"] == "cpu" else device
     return torch.empty(storage["nbytes"], dtype=torch.uint8, device=target)
-
-
-def storage_bytes(storage: torch.UntypedStorage) -> torch.Tensor:
-    """A flat byte tensor covering the whole storage."""
-    return torch.empty(0, dtype=torch.uint8, device=storage.device).set_(storage)
 
 
 def seed_mismatches(

@@ -98,20 +98,25 @@ def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
     Set on decoder requests to name the remote prefiller they pull from;
     carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_prefiller")
+    val = kv_params.get("remote_prefiller")
+    return val if isinstance(val, dict) else None
 
 
 def _remote_decoder_params(kv_params: dict | None) -> dict | None:
-    """Return the `remote_decoder` sub-dict, or None if absent.
+    """Return the `remote_decoder` sub-dict, or None if absent or null.
 
     Set on prefiller requests to name the remote decoder they serve;
-    carries kv_request_id.
+    carries kv_request_id. A present but non-dict value is treated as an
+    empty dict so submit_store fails closed instead of storing locally.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_decoder")
+    val = kv_params.get("remote_decoder")
+    if val is None:
+        return None
+    return val if isinstance(val, dict) else {}
 
 
 def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
@@ -120,9 +125,10 @@ def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
     Set on symmetric-P2P consumer requests to name the remote source they
     pull from; carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_kv_source")
+    val = kv_params.get("remote_kv_source")
+    return val if isinstance(val, dict) else None
 
 
 def _peer_id_from_params(role_params: dict) -> str | None:
@@ -132,6 +138,11 @@ def _peer_id_from_params(role_params: dict) -> str | None:
     if host and port:
         return f"{host}:{port}"
     return None
+
+
+def _request_id_from_params(role_params: dict) -> str | None:
+    request_id = role_params.get("kv_request_id")
+    return request_id if isinstance(request_id, str) and request_id else None
 
 
 @dataclass(slots=True)
@@ -168,8 +179,8 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
     if not role:
         return None
     peer_id = _peer_id_from_params(role)
-    kv_request_id = role.get("kv_request_id")
-    if peer_id is None or not kv_request_id:
+    kv_request_id = _request_id_from_params(role)
+    if peer_id is None or kv_request_id is None:
         return None
     return P2PSourceInfo(
         kv_request_id=kv_request_id,
@@ -184,7 +195,7 @@ def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
     role = _remote_decoder_params(kv_params)
     if role is None:
         return None
-    return P2PDestInfo(kv_request_id=role.get("kv_request_id") or None)
+    return P2PDestInfo(kv_request_id=_request_id_from_params(role))
 
 
 def _annotate_req_context(req_context: ReqContext) -> None:
