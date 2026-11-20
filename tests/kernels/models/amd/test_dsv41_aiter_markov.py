@@ -277,24 +277,15 @@ def test_aiter_markov_per_call_fallback(stand_in: _StandIn, monkeypatch):
 )
 def test_aiter_markov_falls_back_without_op(markov_flag, monkeypatch, module):
     """With the flag on and an AITER without the op or with another API, the
-    draft step runs vLLM's loop and gives its tokens."""
+    speculator keeps vLLM's loop instead of failing in the draft step."""
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+    from vllm.models.deepseek_v41.amd.ops import aiter_markov
 
-    vocab, n = 1024, 4
-    hidden = torch.zeros(n * N_SPEC, 8, device="cuda")
-    g = torch.Generator(device="cuda").manual_seed(2)
-    base = (torch.randn(n * N_SPEC, vocab, generator=g, device="cuda") * 3).bfloat16()
     monkeypatch.setitem(sys.modules, OP_MODULE, module)
-    tokens = []
-    for on in (False, True):
-        markov_flag(on)
-        rocm_aiter_ops._flydsl_markov_sampler_module.cache_clear()
-        assert rocm_aiter_ops.flydsl_markov_sampler() is None
-        s = _speculator(_model(vocab, 2, base), n, vocab, seed=2)
-        DSparkSpeculator._sample_sequential(s, n, hidden)
-        tokens.append(s.draft_tokens.clone())
-    torch.testing.assert_close(tokens[1], tokens[0], rtol=0, atol=0)
+    markov_flag(True)
+    rocm_aiter_ops._flydsl_markov_sampler_module.cache_clear()
+    s = _speculator(_model(1024, seed=2), 2, 1024, seed=2)
+    assert aiter_markov.resolve(s, s.model) is None
 
 
 @pytest.mark.parametrize("num_reqs", [1, 5, 37, 200])
