@@ -218,6 +218,89 @@ def test_minicpmv4_6_video_budget_covers_largest_frames():
 
 
 @pytest.mark.parametrize(
+    ("modality", "mm_processor_kwargs"),
+    [
+        ("image", {"images_kwargs": {"downsample_mode": "4x"}}),
+        ("video", {"videos_kwargs": {"downsample_mode": "4x"}}),
+        ("video", {"videos_kwargs": {"max_slice_nums": 1}}),
+    ],
+)
+def test_minicpmv4_6_budget_follows_configured_kwargs(
+    modality: str,
+    mm_processor_kwargs: dict[str, object],
+):
+    ctx = build_model_context(
+        "openbmb/MiniCPM-V-4_6",
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+    seq_len = ctx.model_config.max_model_len
+    max_tokens = info.get_mm_max_tokens_per_item(
+        seq_len=seq_len, mm_counts={modality: 1}
+    )
+    assert max_tokens is not None
+    budget = max_tokens[modality]
+    dummy = processor.get_dummy_mm_inputs({modality: 1})
+    if modality == "image":
+        processed = processor(
+            info.image_pattern,
+            mm_items=info.parse_mm_data({"image": [Image.new("RGB", (1265, 1112))]}),
+            hf_processor_mm_kwargs={},
+        )
+        num_embeds = processed["mm_placeholders"]["image"][0].get_num_embeds()
+    else:
+        num_frames = info.get_num_frames_with_most_features(seq_len, 1)
+        num_embeds = _num_video_embeds(processor, _video_item(num_frames, 1265, 1112))
+
+    dummy_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"][modality])
+
+    assert dummy_embeds == budget
+    assert budget >= num_embeds
+
+
+@pytest.mark.parametrize("kwargs_on_init", [True, False])
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [{"max_slice_nums": 1}, {"videos_kwargs": {"max_slice_nums": 1}}],
+)
+def test_minicpmv4_6_video_slice_limit_matches_hf(
+    mm_processor_kwargs: dict[str, object],
+    kwargs_on_init: bool,
+):
+    ctx = build_model_context(
+        "openbmb/MiniCPM-V-4_6",
+        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+    video = _video_item(2, 1265, 1112)
+    processed = processor(
+        info.video_pattern,
+        mm_items=info.parse_mm_data({"video": [video]}),
+        hf_processor_mm_kwargs={} if kwargs_on_init else mm_processor_kwargs,
+    )
+    video_token = "<|video_pad|>"
+    reference = info.get_hf_processor()(
+        text=[video_token],
+        videos=[video[0]],
+        videos_kwargs={"do_sample_frames": False, "max_slice_nums": 1},
+        return_tensors="pt",
+    )
+    video_token_id = info.get_tokenizer().convert_tokens_to_ids(video_token)
+    num_embeds = sum(p.get_num_embeds() for p in processed["mm_placeholders"]["video"])
+    tgt_sizes = processed["mm_kwargs"].get_data()["video_tgt_sizes"]
+    assert isinstance(tgt_sizes, torch.Tensor)
+
+    assert num_embeds == int((reference["input_ids"] == video_token_id).sum())
+    assert tgt_sizes.shape[1] == reference["target_sizes_videos"].shape[0]
+
+
+@pytest.mark.parametrize(
     ("modality", "hint", "input_size"),
     [
         ("image", {"width": 1000, "height": 2000}, (1000, 2000)),

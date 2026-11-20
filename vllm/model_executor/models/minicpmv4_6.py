@@ -287,6 +287,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         num_frames: int,
         downsample_mode: str | None = None,
         video_idx: int = 0,
+        max_slice_nums: int | None = None,
     ) -> str:
         # Match transformers v5.7+ MiniCPMV4_6Processor video formatting:
         #   <image_id>{video_idx}</image_id>(<image>VIDEO*src</image>
@@ -298,9 +299,11 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # garbage descriptions.
         info = self.info
         assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        if max_slice_nums is None:
+            max_slice_nums = info.get_video_max_slice_num()
         grids, source_tokens, patch_tokens = info._compute_visual_tokens(
             image_size,
-            max_slice_nums=info.get_video_max_slice_num(),
+            max_slice_nums=max_slice_nums,
             downsample_mode=downsample_mode,
         )
         tokenizer = info.get_tokenizer()
@@ -414,7 +417,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # a single 4D tensor (sum_slices, C, P, L_max_video).
         image_processor = self.info.get_image_processor()
         patch_size = image_processor.patch_size
-        video_max_slice = self.info.get_video_max_slice_num()
+        video_max_slice = self._resolve_max_slice_nums(mm_kwargs, modality="video")
+        if video_max_slice is None:
+            video_max_slice = self.info.get_video_max_slice_num()
         video_ds_mode = self._resolve_downsample_mode(mm_kwargs, modality="video")
         video_mm_kwargs = {
             **_flat_processor_kwargs(mm_kwargs, video_ds_mode),
@@ -512,6 +517,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             hf_processor_mm_kwargs, modality="video"
         )
         image_max_slice = self._resolve_max_slice_nums(hf_processor_mm_kwargs)
+        video_max_slice = self._resolve_max_slice_nums(
+            hf_processor_mm_kwargs, modality="video"
+        )
 
         placeholders = [
             ("image", self.info.image_pattern),
@@ -579,6 +587,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                                 num_frames,
                                 downsample_mode=video_ds_mode,
                                 video_idx=item_idx,
+                                max_slice_nums=video_max_slice,
                             ),
                             add_special_tokens=False,
                         ),
@@ -599,6 +608,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         num_frames,
                         downsample_mode=video_ds_mode,
                         video_idx=item_idx,
+                        max_slice_nums=video_max_slice,
                     ),
                     add_special_tokens=False,
                 ),
@@ -703,6 +713,22 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             return getattr(config.slice_config, "max_slice_nums", 9)
         return getattr(config, "max_slice_nums", 9)
 
+    def get_max_image_tokens(self) -> int:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs("image")
+        return self.get_num_image_tokens(
+            self.get_image_size_with_most_features(),
+            max_slice_nums=max_slice_nums,
+            downsample_mode=downsample_mode,
+        )
+
+    def get_max_video_frame_tokens(self) -> int:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs("video")
+        return self.get_num_image_tokens(
+            self.get_video_frame_size_with_most_features(),
+            max_slice_nums=max_slice_nums,
+            downsample_mode=downsample_mode,
+        )
+
     def get_image_size_with_most_features(self) -> ImageSize:
         if self._has_size_hint("image"):
             return super().get_image_size_with_most_features()
@@ -740,9 +766,9 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         size, num_frames = self._get_video_size_and_frames(
             seq_len, mm_counts, _MAX_FRAMES_PER_VIDEO
         )
-        max_slice_nums = self.get_video_max_slice_num()
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs("video")
         return num_frames * self.get_num_image_tokens(
-            size, max_slice_nums=max_slice_nums
+            size, max_slice_nums=max_slice_nums, downsample_mode=downsample_mode
         )
 
     def _get_video_size_and_frames(
@@ -764,21 +790,34 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         options = self.ctx.get_mm_config().limit_per_prompt.get(modality)
         return bool(getattr(options, "width", None) or getattr(options, "height", None))
 
+    def _get_slicing_kwargs(self, modality: str) -> tuple[int, str]:
+        merged = self._merge_and_resolve_mm_processor_kwargs({})
+        max_slice_nums = _scoped_mm_kwarg(merged, modality, "max_slice_nums")
+        if max_slice_nums is None:
+            max_slice_nums = (
+                self.get_image_processor().max_slice_nums
+                if modality == "image"
+                else self.get_video_max_slice_num()
+            )
+        downsample_mode = _scoped_mm_kwarg(merged, modality, "downsample_mode")
+        return int(max_slice_nums), self._get_downsample_mode(
+            None if downsample_mode is None else str(downsample_mode)
+        )
+
     @cached_property
     def _image_sizes_by_tokens(self) -> dict[int, ImageSize]:
-        max_slice_nums = self.get_image_processor().max_slice_nums
-        return self._get_sizes_by_tokens(max_slice_nums)
+        return self._get_sizes_by_tokens("image")
 
     @cached_property
     def _video_sizes_by_tokens(self) -> dict[int, ImageSize]:
         return self._get_sizes_by_tokens(
-            self.get_video_max_slice_num(),
-            super().get_video_frame_size_with_most_features(),
+            "video", super().get_video_frame_size_with_most_features()
         )
 
     def _get_sizes_by_tokens(
-        self, max_slice_nums: int, *extra_sizes: ImageSize
+        self, modality: str, *extra_sizes: ImageSize
     ) -> dict[int, ImageSize]:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
         scale_resolution = self.get_image_processor().scale_resolution
         area = scale_resolution * scale_resolution
         heights = range(
@@ -795,7 +834,11 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         sizes_by_tokens: dict[int, ImageSize] = {}
         for size in [*sizes, *extra_sizes]:
             if max(size) <= _MAX_ASPECT_RATIO * min(size):
-                tokens = self.get_num_image_tokens(size, max_slice_nums=max_slice_nums)
+                tokens = self.get_num_image_tokens(
+                    size,
+                    max_slice_nums=max_slice_nums,
+                    downsample_mode=downsample_mode,
+                )
                 sizes_by_tokens.setdefault(tokens, size)
         return sizes_by_tokens
 
