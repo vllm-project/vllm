@@ -44,6 +44,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
     WatermarkConfig,
+    replace,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -65,8 +66,23 @@ from vllm.transformers_utils.config import (
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroup
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import (
+    Eagle3SpeculatorConfig,
+    EagleSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.config import (
+    MultiModuleMTPSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -2270,7 +2286,8 @@ _PEER_GROUP = {
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "requires cpu_offload=False"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
         (_PEER_GROUP, {"data_parallel_size": 8}, "cannot hold an engine of 8"),
@@ -2294,7 +2311,7 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
         ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
     ],
 )
-def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supported):
+def test_engram_peer_group_requires_pool_support(architecture, layer_field, supported):
     """Qwen4Exp's tables ignore peer groups, so they would not be split."""
     model = cast(
         ModelConfig,
@@ -2304,7 +2321,8 @@ def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supp
         ),
     )
     config = EngramConfig(**_PEER_GROUP)
-    with nullcontext() if supported else pytest.raises(ValueError, match="V4.1"):
+    rejects = pytest.raises(ValueError, match="pool support")
+    with nullcontext() if supported else rejects:
         config.verify_model_config(model)
 
 
@@ -4327,6 +4345,29 @@ def test_is_prefix_caching_supported(
     assert reason in caplog_vllm.text
 
 
+def test_replace_keeps_compile_factors_with_blocked_fp8_weights(tmp_path):
+    """Caches keyed by the compile factors (the FlashInfer autotune cache,
+    compiled graphs) must resolve to the same entry before and after replace()."""
+    from transformers import LlamaConfig
+
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(str(tmp_path)),
+        quant_config=Fp8Config(weight_block_size=[128, 128]),
+    )
+    assert config.compilation_config.custom_ops.count("+quant_fp8") == 1
+    before = config.compile_factors()
+
+    copied = replace(config, cache_config=replace(config.cache_config))
+
+    assert copied.compilation_config.custom_ops.count("+quant_fp8") == 1
+    assert copied.compile_factors() == before
+    # replace() shares the compilation config with the original.
+    assert config.compile_factors() == before
+
+
 @pytest.mark.parametrize(
     ("backend", "custom_ops", "expected"),
     [
@@ -4344,6 +4385,23 @@ def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: boo
         compilation_config=CompilationConfig(backend=backend, custom_ops=custom_ops)
     )
     assert config.compilation_config.is_custom_op_enabled("fused_layernorm") is expected
+
+
+@pytest.mark.parametrize(
+    ("custom_ops", "expected"),
+    [
+        ([], ["+quant_fp8"]),
+        (["+quant_fp8"], ["+quant_fp8"]),
+        (["-quant_fp8"], ["-quant_fp8"]),
+    ],
+)
+def test_enable_custom_op_by_default_is_idempotent(
+    custom_ops: list[str], expected: list[str]
+):
+    config = CompilationConfig(custom_ops=custom_ops)
+    config.enable_custom_op_by_default("quant_fp8")
+    config.enable_custom_op_by_default("quant_fp8")
+    assert config.custom_ops == expected
 
 
 def test_vllm_config_defaults_are_none():
@@ -4906,46 +4964,57 @@ def test_draft_sample_method_probabilistic_is_accepted():
 
 
 @pytest.mark.parametrize(
-    ("method", "drops_block"),
-    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+    ("speculator_config_cls", "num_hash_lookahead_tokens"),
+    [
+        (EagleSpeculatorConfig, 1),
+        (Eagle3SpeculatorConfig, 1),
+        (MTPSpeculatorConfig, 1),
+        (MultiModuleMTPSpeculatorConfig, 3),
+        (Gemma4MTPSpeculatorConfig, 0),
+        (DFlashSpeculatorConfig, 0),
+        (DSparkSpeculatorConfig, 0),
+        (DFlash2SpeculatorConfig, 0),
+        (DSpineSpeculatorConfig, 0),
+        (XPressSpeculatorConfig, 0),
+        (LiLiCorrSpeculatorConfig, 0),
+        (DFlySpeculatorConfig, 0),
+        (NgramSpeculatorConfig, 0),
+    ],
 )
-@pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
-def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
-    method: str,
-    drops_block: bool,
-    disable_eagle_block_drop: bool,
+def test_draft_kv_lookahead_dependency(
+    speculator_config_cls: type, num_hash_lookahead_tokens: int
 ):
-    # Start from an ngram config to avoid loading model metadata: these predicates
-    # depend only on the speculative method and the new switch.
-    speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=3,
-        disable_eagle_block_drop=disable_eagle_block_drop,
-    )
-    speculative_config.method = method
-
-    assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is (
-        drops_block and not disable_eagle_block_drop
+    """Hashes look ahead as far as the drafter's own KV reads."""
+    spec = SimpleNamespace(num_speculative_tokens=3)
+    assert (
+        speculator_config_cls(spec).num_hash_lookahead_tokens
+        == num_hash_lookahead_tokens
     )
 
 
 @pytest.mark.parametrize("model_type", ["gemma4_assistant", "gemma4_unified_assistant"])
-def test_gemma4_assistant_needs_no_eagle_block_drop(model_type):
+def test_gemma4_assistant_needs_no_hash_lookahead(model_type):
     # The Gemma-4 MTP drafter reads the target's KV and writes none of its own.
     from transformers import PreTrainedConfig
 
     hf_config = PreTrainedConfig(architectures=["Gemma4AssistantForCausalLM"])
     hf_config.model_type = model_type
     hf_config = SpeculativeConfig.hf_config_override(hf_config)
+    assert hf_config.architectures == ["Gemma4MTPModel"]
     speculative_config = SpeculativeConfig(method="ngram", num_speculative_tokens=3)
     speculative_config.method = "mtp"
-    speculative_config.draft_model_config = SimpleNamespace(hf_config=hf_config)
+    # Gemma4MTPModel declares Gemma4MTPSpeculatorConfig.
+    speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=hf_config,
+        speculator_config_class=(
+            f"{Gemma4MTPSpeculatorConfig.__module__}."
+            f"{Gemma4MTPSpeculatorConfig.__qualname__}"
+        ),
+    )
 
     assert speculative_config.use_gemma4_mtp()
     assert speculative_config.use_eagle()
-    assert not speculative_config.needs_eagle_block_drop()
-    assert not speculative_config.use_eagle_block_drop()
+    assert speculative_config.speculator_config.num_hash_lookahead_tokens == 0
 
 
 def test_draft_sample_method_gumbel_is_rejected():
