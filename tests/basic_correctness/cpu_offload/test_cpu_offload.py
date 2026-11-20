@@ -115,7 +115,7 @@ def _is_offloaded(p: nn.Parameter) -> bool:
 
 
 @pytest.mark.parametrize(
-    ("model", "model_impl", "segment"),
+    ("model", "model_impl", "tower_name"),
     [
         ("Qwen/Qwen3.5-0.8B", "auto", "visual"),
         # Transformers backend builds towers on the meta device
@@ -124,7 +124,7 @@ def _is_offloaded(p: nn.Parameter) -> bool:
 )
 @pytest.mark.parametrize("disable_uva", [False, True])
 def test_tower_weight_offloading(
-    vllm_runner, monkeypatch, model, model_impl, segment, disable_uva
+    vllm_runner, monkeypatch, model, model_impl, tower_name, disable_uva
 ):
     """`cpu_offload_params` segments must reach towers built outside make_layers.
 
@@ -149,7 +149,7 @@ def test_tower_weight_offloading(
             max_num_seqs=1,
             enable_prefix_caching=False,
             cpu_offload_gb=1,
-            cpu_offload_params={segment},
+            cpu_offload_params={tower_name},
         ) as vllm_model:
             engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
