@@ -7,3 +7,4 @@ class DFlash2SpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator"
     )
+    supports_watermarking = True
