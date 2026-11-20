@@ -13,7 +13,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ...utils import large_gpu_mark
 
 QWEN_MODEL = "Qwen/Qwen3.5-4B"
-# Short-conv (Mamba "align") + full-attention + sliding-window layers.
+# Short-conv (Mamba) + full-attention + sliding-window layers.
 LFM3_MODEL = "LiquidAI/LFM3-1.7B"
 QWEN_KV_CACHE_BYTES = 12 << 30
 HYBRID_MTP_MODELS = [
@@ -90,7 +90,6 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         kv_cache_memory_bytes=QWEN_KV_CACHE_BYTES if model_name == QWEN_MODEL else None,
         enforce_eager=True,
         tensor_parallel_size=1,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
     ) as llm:
@@ -206,7 +205,9 @@ def test_qwen_mtp_mamba_prefix_cache_hit_is_bounded(vllm_runner, monkeypatch):
         cold_outputs = llm.generate(wave2_prompts, cold_params)
 
     cached_tokens = [output.num_cached_tokens for output in warm_outputs]
-    assert max(cached_tokens) == block_size
+    # Wave 1 decodes past 2 * block_size, and the Mamba state at the last
+    # boundary crossed in decode is cached, so wave 2 resumes there.
+    assert max(cached_tokens) == 2 * block_size
 
     for arm, outputs in (("warm", warm_outputs), ("cold", cold_outputs)):
         missed = [

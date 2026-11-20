@@ -20,9 +20,7 @@ With prefix caching enabled, Mamba state is stored only on the Mamba block grid,
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled
-- EAGLE/MTP speculative decoding on the Mamba group
 - `--prefix-match-unit` smaller than the Mamba block size
-- the model does not use multi-module MTP
 
 ```bash
 vllm serve <hybrid-model> \
@@ -31,7 +29,7 @@ vllm serve <hybrid-model> \
 ```
 
 `--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. For hybrid Mamba models that is the block size itself, so no sub-block boundary exists and the flag has no effect.
-With `--prefix-match-unit` set explicitly, sliding-window groups, such as those of a DFlash drafter, also hit at this granularity as long as the blocks their window reads below the hit are still cached; not yet with speculative methods that drop the last cached block (EAGLE, EAGLE3, MTP). Finer hits keep more blocks cached per request, so with little free KV cache they can lose hits that block-aligned lookups keep.
+With `--prefix-match-unit` set explicitly, sliding-window groups also hit at this granularity as long as the blocks their window reads below the hit are still cached; not yet with DFlash or DSpark drafters. Finer hits keep more blocks cached per request, so with little free KV cache they can lose hits that block-aligned lookups keep.
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
@@ -56,11 +54,11 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-`--enable-prefix-caching` selects Mamba cache mode `align`. To use ReplaySSM without prefix caching, replace this flag with `--no-enable-prefix-caching`. This selects mode `none`. To disable speculative decoding, remove `--speculative-config`.
+`--enable-prefix-caching` also caches Mamba states at block boundaries. To use ReplaySSM without prefix caching, replace this flag with `--no-enable-prefix-caching`. To disable speculative decoding, remove `--speculative-config`.
 
 FlashInfer ReplaySSM has these limits:
 
-- `align` requires BF16 model inputs for its replay rings. The SSM state dtype is independent. The example uses FP16 state with stochastic rounding.
+- Prefix caching requires BF16 model inputs for its replay rings. The SSM state dtype is independent. The example uses FP16 state with stochastic rounding.
 - The logical replay buffer cannot exceed 16 tokens. For speculative decoding, it must contain at least `1 + num_speculative_tokens` tokens.
 - Pipeline parallelism, microbatching, and KV connectors are not supported.
 
