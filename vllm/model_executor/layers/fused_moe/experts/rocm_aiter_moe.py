@@ -771,11 +771,13 @@ class AiterMxfp4Experts(AiterExperts):
     def is_supported_config(
         cls, moe_config, weight_key, activation_key, activation_format
     ):
-        if moe_config.activation == MoEActivation.RELU2_NO_MUL:
+        if (
+            moe_config.activation == MoEActivation.RELU2_NO_MUL
+            and activation_key == kMxfp4Dynamic
+        ):
             return False, (
                 "kernel does not support fp4-activation relu2 (no AITER "
-                "GEMM kernel backs relu2 under this backend for either "
-                "mxfp4 or bf16-fallback activations; use AITER_MXFP4_BF16 "
+                "GEMM kernel backs this combination; use AITER_MXFP4_BF16 "
                 "instead)"
             )
         return super().is_supported_config(
