@@ -798,6 +798,8 @@ class AttentionImplBase(ABC, Generic[T]):
     # FULL CUDA graphs capture them as host values, "always" if it caches them.
     # A weight update that changes them is then refused.
     frozen_kv_scales: Literal["full_graph", "always"] | None = None
+    # Which of "q", "k", "v" are frozen; None for all of them.
+    frozen_kv_scale_names: frozenset[str] | None = None
 
     # Required attributes that all impls should have
     num_heads: int

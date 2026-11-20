@@ -245,6 +245,10 @@ def create_composite_attention_backend(
             for impl in self.get_impl_variants():
                 impl.process_weights_after_loading(act_dtype)
 
+        def process_kv_scales_after_loading(self, layer) -> None:
+            for impl in self.get_impl_variants():
+                impl.process_kv_scales_after_loading(layer)
+
         def fused_output_quant_supported(self, quant_key):
             return all(
                 impl.fused_output_quant_supported(quant_key)

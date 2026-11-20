@@ -1263,7 +1263,11 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
     def _descale(
-        self, scale: torch.Tensor, scale_float: float, shape: tuple[int, int]
+        self,
+        scale: torch.Tensor,
+        scale_float: float,
+        shape: tuple[int, int],
+        name: str = "qkv",
     ) -> torch.Tensor | None:
         # FA4 reads a missing descale as 1.0, and it copies every expanded view
         # into a contiguous tensor: three copy kernels per layer and step. The
@@ -1277,6 +1281,9 @@ class FlashAttentionImpl(AttentionImpl):
         ):
             # FULL CUDA graphs then keep the implicit 1.0.
             self.frozen_kv_scales = "full_graph"
+            self.frozen_kv_scale_names = (
+                self.frozen_kv_scale_names or frozenset()
+            ) | set(name)
             return None
         # A (1, 1) expanded view (one sequence, one KV head per rank) counts
         # as contiguous, so FA4 skips its copy and its CuTe layout check then
@@ -1391,12 +1398,16 @@ class FlashAttentionImpl(AttentionImpl):
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
         q_descale = (
-            self._descale(layer._q_scale, layer._q_scale_float, descale_shape)
+            self._descale(layer._q_scale, layer._q_scale_float, descale_shape, "q")
             if self.supports_quant_query_input
             else None
         )
-        k_descale = self._descale(layer._k_scale, layer._k_scale_float, descale_shape)
-        v_descale = self._descale(layer._v_scale, layer._v_scale_float, descale_shape)
+        k_descale = self._descale(
+            layer._k_scale, layer._k_scale_float, descale_shape, "k"
+        )
+        v_descale = self._descale(
+            layer._v_scale, layer._v_scale_float, descale_shape, "v"
+        )
 
         if self.dcp_world_size > 1:
             self._forward_with_dcp(

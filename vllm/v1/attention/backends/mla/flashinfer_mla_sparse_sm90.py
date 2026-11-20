@@ -560,6 +560,9 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
 
 class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
+    # The decode kernel takes host k scales.
+    frozen_kv_scales = "full_graph"
+
     def __init__(
         self,
         num_heads: int,
