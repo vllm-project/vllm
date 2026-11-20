@@ -62,5 +62,5 @@ Direct reload raises an error for the following; use
   multiples of 128.
 - The NCCL weight transfer load plan (`use_load_plan`) with online
   quantization.
-- `torchao` quantization, Humming kernels, LoRA, weight offloading,
+- `torchao` quantization, Humming kernels, weight offloading,
   `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.
