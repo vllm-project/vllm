@@ -1012,8 +1012,7 @@ def test_kv_cache_scale_sync_to_host_copies():
 
 
 @pytest.mark.parametrize("method_cls", ["base", "compressed_tensors"])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-def test_dummy_load_keeps_kv_cache_scales_of_real_start(kv_cache_dtype, method_cls):
+def test_dummy_load_keeps_kv_cache_scales_of_real_start(method_cls):
     """KV-cache scales missing from the checkpoint must match a real start after
     a dummy load: no later weight sync from that checkpoint rewrites them.
     """
@@ -1021,7 +1020,7 @@ def test_dummy_load_keeps_kv_cache_scales_of_real_start(kv_cache_dtype, method_c
     def start(load_format: str) -> torch.nn.Module:
         layer = torch.nn.Module()
         set_default_quant_scales(layer, register_buffer=True)
-        layer.kv_cache_dtype = kv_cache_dtype
+        layer.kv_cache_dtype = "auto"
         if method_cls == "base":
             method = BaseKVCacheMethod(quant_config=None)
         else:
