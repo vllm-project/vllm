@@ -461,19 +461,17 @@ class MoEMixin(MixtureOfExperts, Base):
                     fuser = MoEBlockFuser.match(
                         moe_block, experts_name, divides_shared_output
                     )
-                    shared_experts = None
-                    fused_shared_kwargs = None
-                    if fuser is not None:
-                        fused_shared_kwargs = self._fused_shared_expert_kwargs(
-                            fuser, moe_block, prefix, kwargs["intermediate_size"]
-                        )
-                    if fused_shared_kwargs:
-                        kwargs |= fused_shared_kwargs
-                    elif fuser is not None:
-                        shared_experts = fuser.shared_experts(moe_block, prefix)
                     if fuser is not None:
                         # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in MoERunner.
+                        shared_experts = None
+                        fse_kwargs = self._fused_shared_expert_kwargs(
+                            fuser, moe_block, prefix, kwargs["intermediate_size"]
+                        )
+                        if fse_kwargs is not None:
+                            kwargs |= fse_kwargs
+                        else:
+                            shared_experts = fuser.shared_experts(moe_block, prefix)
                         # Store shared experts for later down projection adjustment
                         if shared_experts is not None:
                             hf_shared = shared_experts.shared_experts
