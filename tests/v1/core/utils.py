@@ -98,6 +98,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    encoder_cache_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -140,6 +141,7 @@ def create_scheduler(
         long_prefill_token_threshold=long_prefill_token_threshold,
         long_prefill_token_threshold_adaptive=(long_prefill_token_threshold_adaptive),
         disable_chunked_mm_input=disable_chunked_mm_input,
+        encoder_cache_size=encoder_cache_size,
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
@@ -155,11 +157,6 @@ def create_scheduler(
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
-        mamba_cache_mode=(
-            mamba_layer_config.manager_config.params.mamba_cache_mode
-            if mamba_layer_config
-            else "none"
-        ),
     )
     kv_transfer_config = None
     if isinstance(use_kv_connector, MockKVConfig):
@@ -410,11 +407,14 @@ def chunked_local_layer(
 
 
 def mamba_layer(
-    spec: MambaSpec, mamba_cache_mode="none", num_speculative_blocks=2, **config_kwargs
+    spec: MambaSpec,
+    enable_prefix_caching=False,
+    num_speculative_blocks=2,
+    **config_kwargs,
 ) -> KVCacheLayerConfig:
     return MambaManager.layer_config(
         spec,
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
         **config_kwargs,
     )
@@ -435,11 +435,11 @@ def new_sliding_window_layer(sliding_window=1, **spec_kwargs):
 
 
 def new_mamba_layer(
-    mamba_cache_mode="none", num_speculative_blocks=2, **spec_kwargs
+    enable_prefix_caching=False, num_speculative_blocks=2, **spec_kwargs
 ) -> KVCacheLayerConfig:
     return mamba_layer(
         new_mamba_spec(**spec_kwargs),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
     )
 

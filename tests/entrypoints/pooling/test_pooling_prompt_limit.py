@@ -126,7 +126,8 @@ class TestPoolingPromptLimit:
 
 
 def test_prompt_limit_preserves_plugin_defined_payload(monkeypatch):
-    monkeypatch.setattr(envs, "VLLM_MAX_COMPLETION_PROMPTS", 5)
+    monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+    _clear_envs_cache()
     payload = ["x"] * 10
 
     request = IOProcessorRequest[list[str]](model="m", data=payload)
