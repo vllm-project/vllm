@@ -1455,8 +1455,8 @@ def _project_kv_cache_groups_to_worker(
 
 
 def get_pipeline_stages(
+    vllm_config: VllmConfig,
     kv_cache_configs: list[KVCacheConfig],
-    pipeline_parallel_size: int,
 ) -> tuple[KVCacheStage, ...]:
     """The KV cache of every pipeline stage.
 
@@ -1465,17 +1465,20 @@ def get_pipeline_stages(
     describes it.
 
     Args:
+        vllm_config: The global VllmConfig.
         kv_cache_configs: The KV cache config of each worker.
-        pipeline_parallel_size: The number of pipeline stages.
 
     Returns:
-        One `KVCacheStage` per PP rank, or an empty tuple when the workers do
-        not split evenly into the stages.
+        One `KVCacheStage` per PP rank, or an empty tuple when the configs do
+        not cover every stage, as under the external launcher, where each
+        engine core plans only its own worker.
 
     """
+    pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
     num_workers = len(kv_cache_configs)
     if num_workers == 0 or num_workers % pipeline_parallel_size:
         return ()
+    builder = get_kv_cache_config_builder(vllm_config)
     workers_per_stage = num_workers // pipeline_parallel_size
     stages: list[KVCacheStage] = []
     for first in range(0, num_workers, workers_per_stage):
@@ -1485,19 +1488,11 @@ def get_pipeline_stages(
             == [g.layer_names for g in config.kv_cache_groups]
             for worker in range(first, first + workers_per_stage)
         ), "Workers of one pipeline stage must hold the same KV cache layers."
-        # Every device tensor spans the one device allocation.
-        device_bytes = next(
-            (t.size for t in config.kv_cache_tensors if not t.host_resident), 0
-        )
         stages.append(
             KVCacheStage(
-                # Copies, as a model runner adds KV-sharing layers to the groups
-                # of its own config in place.
-                kv_cache_groups=tuple(
-                    replace(group, kv_cache_specs=dict(group.kv_cache_specs))
-                    for group in config.kv_cache_groups
-                ),
-                bytes_per_block=device_bytes // config.num_blocks,
+                bytes_per_block=_pool_bytes_per_block_from_builder(
+                    builder, vllm_config, config.kv_cache_groups
+                )
             )
         )
     return tuple(stages)

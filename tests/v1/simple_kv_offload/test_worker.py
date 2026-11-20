@@ -25,6 +25,7 @@ from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
 from tests.v1.core.utils import (
     get_kv_cache_configs,
     new_kv_cache_layer,
+    new_mamba_layer,
     new_sliding_window_layer,
 )
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
@@ -559,15 +560,22 @@ def test_register_separate_kv_head_groups(monkeypatch):
 
 
 @pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
-def test_cpu_blocks_follow_the_planned_pipeline_stages(monkeypatch, layout):
+@pytest.mark.parametrize(
+    "other_layer",
+    [new_sliding_window_layer(sliding_window=32), new_mamba_layer()],
+    ids=["sliding_window", "mamba"],
+)
+def test_cpu_blocks_follow_the_planned_pipeline_stages(
+    monkeypatch, layout, other_layer
+):
     """Each stage's worker registers blocks of the bytes the planner reports
     for its stage, overlaid cache groups included, and every worker sizes the
     pool by the stage with the largest blocks."""
-    swa = new_sliding_window_layer(sliding_window=32)
     full = new_kv_cache_layer()
-    # Two sliding-window layers per full attention layer, split 2 / 4. The
-    # groups overlay, so stage 0's two layers share one page per block.
-    layers = {f"layer{i}": full if i % 3 == 2 else swa for i in range(6)}
+    # Two sliding-window or Mamba layers per full attention layer, all with the
+    # same page size, split 2 / 4. The groups overlay, so stage 0's two layers
+    # share one page per block.
+    layers = {f"layer{i}": full if i % 3 == 2 else other_layer for i in range(6)}
     names = list(layers)
     layer_configs = [
         {name: layers[name] for name in names[:2]},
@@ -575,8 +583,9 @@ def test_cpu_blocks_follow_the_planned_pipeline_stages(monkeypatch, layout):
     ]
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     vllm_config.cache_config.kv_cache_layout = layout.name
+    vllm_config.parallel_config.pipeline_parallel_size = 2
     kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**22] * 2)
-    stages = get_pipeline_stages(kv_cache_configs, 2)
+    stages = get_pipeline_stages(vllm_config, kv_cache_configs)
     page = full.spec.page_size_bytes
     assert [stage.bytes_per_block for stage in stages] == [page, 2 * page]
 

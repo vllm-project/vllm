@@ -829,10 +829,6 @@ def prefix_lookup_groups(
 class KVCacheStage:
     """The KV cache of one pipeline stage."""
 
-    kv_cache_groups: tuple[KVCacheGroup, ...]
-    """The global KV cache groups projected onto the stage, by group ID, each
-    holding the stage's layers of the group in model order. A group holding
-    no layer of the stage is kept with no layers."""
     bytes_per_block: int
     """Bytes one block takes in the device KV cache of each worker of the
     stage."""
@@ -877,7 +873,8 @@ class KVCacheConfig:
     pipeline_stages: tuple[KVCacheStage, ...] = ()
     """The KV cache of every pipeline stage, by PP rank, resolved by the engine
     core so that both halves of a KV connector see every stage. Empty when the
-    stages are unknown."""
+    engine core plans only its own worker, as under the external launcher with
+    pipeline parallelism."""
 
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.

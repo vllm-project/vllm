@@ -795,8 +795,8 @@ def test_project_kv_cache_groups_to_worker():
 
 
 def test_pipeline_stages_describe_every_stage():
-    """Every worker learns each PP stage's group projections and block size in
-    bytes; the groups stay fixed when a worker later edits its own."""
+    """Every worker learns each PP stage's block size in bytes, draft layers on
+    the last stage included."""
     layer = new_kv_cache_layer()
     stage0 = {"layer0": layer, "layer1": layer}
     stage1 = {
@@ -808,21 +808,15 @@ def test_pipeline_stages_describe_every_stage():
     layer_configs = [stage0, stage0, stage1, stage1]
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = 2
     kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**30] * 4)
 
-    stages = get_pipeline_stages(kv_cache_configs, 2)
+    stages = get_pipeline_stages(vllm_config, kv_cache_configs)
 
-    assert [[g.layer_names for g in stage.kv_cache_groups] for stage in stages] == [
-        [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
-        for worker in (0, 2)
-    ]
     page = kv_cache_planning._get_layer_block_stride(layer.spec)
     assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
-    draft_stage_layers = ["layer2", "layer3", "draft.layer0"]
-    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
-    kv_cache_configs[2].kv_cache_groups[0].kv_cache_specs["shared"] = layer.spec
-    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
-    assert get_pipeline_stages(kv_cache_configs[:3], 2) == ()
+    # An engine core that plans only its own worker cannot describe the stages.
+    assert get_pipeline_stages(vllm_config, kv_cache_configs[:1]) == ()
 
 
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])

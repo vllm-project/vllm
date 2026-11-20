@@ -388,9 +388,7 @@ class EngineCore:
             scheduler_block_size,
             hash_block_size,
         )
-        pipeline_stages = get_pipeline_stages(
-            kv_cache_configs, vllm_config.parallel_config.pipeline_parallel_size
-        )
+        pipeline_stages = get_pipeline_stages(vllm_config, kv_cache_configs)
         # The scheduler's config is a deep copy taken before these are resolved,
         # so set them there too: the KV connector's scheduler side reads the same
         # fields as its workers.

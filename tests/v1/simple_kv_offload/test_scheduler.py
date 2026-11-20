@@ -2768,8 +2768,8 @@ def test_scheduler_sizes_by_the_largest_pipeline_stage() -> None:
     cpu_capacity = 4 * _BYTES_PER_BLOCK
     light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
     light.pipeline_stages = (
-        KVCacheStage(tuple(light.kv_cache_groups), _BYTES_PER_BLOCK),
-        KVCacheStage(tuple(light.kv_cache_groups), 3 * _BYTES_PER_BLOCK),
+        KVCacheStage(_BYTES_PER_BLOCK),
+        KVCacheStage(3 * _BYTES_PER_BLOCK),
     )
 
     sched = SimpleCPUOffloadScheduler(
