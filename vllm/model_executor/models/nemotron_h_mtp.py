@@ -29,13 +29,20 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import (
     WeightsMapper,
+    _merge_multimodal_embeddings,
     get_draft_quant_config,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP, SupportsQuant
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModalEmbeddings,
+    SupportsPP,
+    SupportsQuant,
+    _require_is_multimodal,
+)
 from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
@@ -327,8 +334,14 @@ class NemotronHMultiTokenPredictor(nn.Module):
         return hidden_states
 
 
-class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
-    """NemotronH MTP model."""
+class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbeddings):
+    """NemotronH MTP model.
+
+    The draft block is trained on the target decoder's input stream. On a
+    multimodal checkpoint the placeholder positions therefore carry the
+    target's image or audio embeddings, not the text embedding of the
+    placeholder token.
+    """
 
     has_own_embed_tokens = False
     has_own_lm_head = False
@@ -385,6 +398,22 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            multimodal_embeddings,
+            _require_is_multimodal(is_multimodal),
+        )
 
     def forward(
         self,

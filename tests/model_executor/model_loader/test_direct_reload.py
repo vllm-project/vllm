@@ -31,11 +31,14 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.online.loading import quantize_on_load
-from vllm.model_executor.model_loader.reload import finish_reload, start_reload
+from vllm.model_executor.model_loader.reload import direct, finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
+    direct_reload_enabled,
     finish_direct_reload,
     record_checkpoint_layout,
+    reloads_directly,
+    track_loaded_params,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -76,6 +79,17 @@ def test_output_padding_reload_keeps_unpadded_parameters_and_addresses(dist_init
     assert addresses == {
         name: param.data_ptr() for name, param in model.named_parameters()
     }
+
+
+@pytest.mark.parametrize("bias", [True, False])
+def test_output_padding_flagged_for_reload_fill(dist_init, bias):
+    padded = MergedColumnParallelLinear(4, [4, 4], bias=bias, padding_size=3)
+    plain = MergedColumnParallelLinear(4, [4, 4], bias=bias)
+    flagged = {
+        n for n, p in padded.named_parameters() if getattr(p, "fill_on_reload", 0)
+    }
+    assert flagged == ({"weight", "bias"} if bias else {"weight"})
+    assert not any(hasattr(p, "fill_on_reload") for p in plain.parameters())
 
 
 class _Method(QuantizeMethodBase):
@@ -206,6 +220,7 @@ def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
     """As `BaseModelLoader.load_model` does."""
     with _DEVICE:
         model = _ToyModel()
+    track_loaded_params(model)
     model.load_weights(weights.items())
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     return model
@@ -318,16 +333,46 @@ class TestReloadEqualsColdStart:
 
 
 class TestUnsent:
+    def test_missing_parameter_raises_before_post_processing(self):
+        model = _cold_start(_checkpoint())
+        before = _state(model)
+        begin_direct_reload(model)
+        for name, weight in _checkpoint(1.01).items():  # one bucket per tensor
+            if name != "engram.weight":
+                model.load_weights([(name, weight)])
+        with pytest.raises(RuntimeError, match=r"did not load 1 .*engram\.weight"):
+            finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+        assert set(_runs(model).values()) == {1}  # post-load processing not rerun
+        _reload(model, _checkpoint())  # a new full update repairs it
+        _assert_same(_state(model), before)
+
+    def test_first_update_after_dummy_start_sets_what_is_required(self):
+        with _DEVICE:
+            model = _ToyModel()
+        track_loaded_params(model)  # a dummy cold start loads nothing
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        _reload(model, _checkpoint())  # the first update sets the record
+        _assert_same(_state(model), _state(_cold_start(_checkpoint())))
+        begin_direct_reload(model)
+        model.load_weights(list(_checkpoint().items())[1:])
+        with pytest.raises(RuntimeError, match="attn.kv_b.weight"):
+            finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+
     def test_tensor_without_post_processing_keeps_its_bytes(self):
         # a frozen table the trainer does not send (Engram, an n-gram
-        # embedding): its module has no post-load processing, so a reload
-        # keeps its cold-start bytes; derived tensors read them as cold start
+        # embedding), kept by level 2 sleep: its module has no post-load
+        # processing, so a reload keeps its cold-start bytes
         model = _cold_start(_checkpoint())
         old = _checkpoint()
         new = _checkpoint(1.01)
         sent = {n: t for n, t in new.items() if n != "attn.kv_b.weight"}
         before = _state(model)
-        _reload(model, sent)
+        config = SimpleNamespace(
+            **vars(_MODEL_CONFIG), sleep_preserve_parameter_names=["attn.kv_b.*"]
+        )
+        begin_direct_reload(model)
+        model.load_weights(sent.items())
+        finish_direct_reload(model, config, _DEVICE)
         after = _state(model)
         _assert_same(after, before, names=["attn.kv_b.weight"], addresses=True)
         expected = dict(new, **{"attn.kv_b.weight": old["attn.kv_b.weight"]})
@@ -346,10 +391,19 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_online_quantization_refused(self, monkeypatch):
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_online_quantization_refused(self, monkeypatch, wrapped):
         # finish clears the guard that keeps online quantization from
         # quantizing its converted bytes again
+        from vllm.model_executor.layers.quantization.input_hadamard import (
+            InputHadamardLinearMethod,
+        )
+
         online = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        if wrapped:
+            wrapper = object.__new__(InputHadamardLinearMethod)
+            wrapper.quant_method = online
+            online = wrapper
         init = _ToyModel.__init__
 
         def with_online_layer(self):
@@ -543,6 +597,73 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     assert model.proj.weight._ckpt == ckpt
 
 
+def test_replace_parameter_keeps_only_the_target_reload_fill_flag():
+    model = _cold_start(_checkpoint())
+    model.mimo.weight.fill_on_reload = True
+    replace_parameter(model.proj, "weight", model.mimo.weight)
+    assert not hasattr(model.proj.weight, "fill_on_reload")
+    weight = model.mimo.weight
+    replace_parameter(model.mimo, "weight", weight.data.t().contiguous())  # kept
+    assert model.mimo.weight is weight and weight.fill_on_reload
+
+
+def _with_padded_rows(monkeypatch, fn=_pack, flag=True):
+    """Adds `rows.weight`: (6, 4), zero at construction; its loader writes
+    rows [:4] only."""
+    monkeypatch.setitem(_SHAPES, "rows.weight", ((4, 4), torch.float32))
+    monkeypatch.setitem(_PWAL, "rows", fn)
+    init = _ToyModel.__init__
+
+    def with_rows(self):
+        init(self)
+        weight = torch.nn.Parameter(torch.zeros(6, 4), requires_grad=False)
+        weight.weight_loader = lambda param, w: param.data[:4].copy_(w)
+        if flag:
+            weight.fill_on_reload = True
+        self.rows.weight = weight
+
+    monkeypatch.setattr(_ToyModel, "__init__", with_rows)
+
+
+@pytest.mark.parametrize("dummy", [False, True], ids=["real", "dummy"])
+def test_flagged_padding_zeroed_at_begin(monkeypatch, dummy):
+    # (e) at runtime: viewed back, the padding rows hold transposed bytes,
+    # which the loader skips
+    _with_padded_rows(monkeypatch)
+    if dummy:  # `load_format=dummy`: no loader runs
+        with _DEVICE:
+            model = _ToyModel()
+        for param in model.parameters():
+            param.data.fill_(7)
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    else:
+        model = _cold_start(_checkpoint())
+    assert model.rows.weight.fill_on_reload  # survives `replace_parameter`
+    ptrs = _ptrs(_state(model))
+    _reload(model, _checkpoint(1.01))
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+    assert _ptrs(_state(model)) == ptrs
+
+
+def test_unflagged_padding_keeps_stale_bytes(monkeypatch):
+    _with_padded_rows(monkeypatch, flag=False)
+    model = _cold_start(_checkpoint())
+    _reload(model, _checkpoint(1.01))
+    expected = _state(_cold_start(_checkpoint(1.01)))
+    assert not torch.equal(_state(model)["rows.weight"][1], expected["rows.weight"][1])
+
+
+def test_flagged_tensor_shared_from_another_model_not_zeroed(monkeypatch):
+    # a draft sharing a target layer: the target owns its flagged weight
+    _with_padded_rows(monkeypatch, fn=None)
+    target = _cold_start(_checkpoint())
+    draft = _cold_start(_checkpoint())
+    draft.rows = target.rows
+    before = _state(target)
+    begin_direct_reload(draft)
+    _assert_same(_state(target), before, addresses=True)
+
+
 def _config(**overrides) -> SimpleNamespace:
     offload = SimpleNamespace(
         offload_backend="auto",
@@ -564,7 +685,7 @@ def _config(**overrides) -> SimpleNamespace:
     "mode,overrides,match",
     [
         ("direct", {}, None),
-        ("layerwise", {"lora_config": object()}, None),
+        ("direct", {"lora_config": object()}, None),
         (
             "direct",
             {
@@ -603,7 +724,6 @@ def _config(**overrides) -> SimpleNamespace:
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"lora_config": object()}, "LoRA"),
         (
             "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
@@ -617,12 +737,11 @@ def _config(**overrides) -> SimpleNamespace:
     ],
     ids=[
         "defaults",
-        "layerwise-lora",
+        "lora",
         "offload-backend",
         "offload-prefetch",
         "offload-uva",
         "torchao",
-        "lora",
         "draft-lm-head-quant",
         "sharded-rdt",
     ],
@@ -635,3 +754,44 @@ def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
     else:
         with pytest.raises(ValueError, match=match):
             VllmConfig._verify_direct_reload_compat(config)
+
+
+_IPC = SimpleNamespace(backend="ipc")
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({"weight_transfer_config": _IPC}, True),
+        ({}, False),
+        ({"weight_transfer_config": _IPC, "lora_config": object()}, False),
+    ],
+    ids=["updates", "no-updates", "lora"],
+)
+def test_direct_reload_enabled(monkeypatch, overrides, expected):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
+    config = _config(**overrides)
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+    assert direct_reload_enabled() is expected
+
+
+def test_auto_refused_model_reloads_layerwise(monkeypatch):
+    from vllm.model_executor.model_loader.reload import lifecycle
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
+    config = _config(weight_transfer_config=_IPC)
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+    target = _ToyModel()
+    target.proj.shared_expert_online_loader = object()  # refused in direct mode
+    record_checkpoint_layout(target)
+    calls = []
+    monkeypatch.setattr(
+        lifecycle, "initialize_layerwise_reload", lambda m: calls.append("init")
+    )
+    monkeypatch.setattr(
+        lifecycle, "finalize_layerwise_reload", lambda m, c: calls.append("finalize")
+    )
+    start_reload(target)
+    finish_reload(target, _MODEL_CONFIG, _DEVICE)
+    assert calls == ["init", "finalize"]
+    assert reloads_directly(_cold_start(_checkpoint()))

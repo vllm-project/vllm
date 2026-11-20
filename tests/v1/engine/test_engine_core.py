@@ -442,6 +442,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     core = MagicMock()
     core.batch_queue = deque()
     core.batch_queue_size = 2
+    core.deferred_step = None
     core.is_mm_encoder_only = encoder_only
     core.is_pooling_model = False
     core.scheduler.has_requests.side_effect = [True, False, False]
@@ -475,6 +476,7 @@ def test_prefill_interval_counts_only_executed_steps(step_fn):
     core = MagicMock()
     core.batch_queue = deque()
     core.batch_queue_size = 2
+    core.deferred_step = None
     core.is_mm_encoder_only = False
     core.is_pooling_model = False
     core.prefill_schedule_interval = 3
@@ -593,7 +595,6 @@ def test_encoder_instance_zero_kv_cache(
     model_config = ModelConfig(
         model="llava-hf/llava-1.5-7b-hf",  # Multimodal model
         enforce_eager=True,
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
         max_model_len=512,
