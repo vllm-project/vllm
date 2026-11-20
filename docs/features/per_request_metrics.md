@@ -56,8 +56,8 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 | `mean_itl_ms` | Mean inter-token latency (average time between successive output tokens) during the decode phase. `null` for single-token responses. |
 | `tokens_per_second` | Overall output token throughput: all generated tokens over the inference interval (scheduling to last output token). Unlike `generation_time_ms`, this includes the prefill phase, so it reflects end-to-end generation speed rather than pure decode speed. |
 
-Unavailable timing fields are `null` in full responses and Responses stream
-events. Chat Completions and Completions omit them from streaming usage chunks.
+All fields are `null` if the underlying timing data is not available for that
+request.
 
 ### Reasoning Models
 
