@@ -47,7 +47,7 @@ attention backend.
 On ROCm, DFly is validated with HY4 Flash FP8 on eight MI355X GPUs:
 
 ```bash
-VLLM_ROCM_USE_AITER=1 \
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 \
 vllm serve tencent/Hy4-flash-FP8 \
     --tensor-parallel-size 8 \
     --dtype bfloat16 \
