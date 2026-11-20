@@ -68,7 +68,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_mamba_prefill_checkpoint_position,
+    get_reusable_prefix_length,
     is_mamba_prefill_checkpoint_valid,
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -306,13 +306,22 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = manager_cls_obj.create_manager(
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
+        # Without chunked prefill, all of a prompt's multimodal items are
+        # encoded in the step that prefills it, so must fit the cache together.
+        # Reported to frontends, which reject requests exceeding it.
+        self.max_mm_embeds_per_request = (
+            encoder_cache_size
+            if mm_budget
+            and not self.scheduler_config.enable_chunked_prefill
+            and not self.is_encoder_decoder
+            and not self.is_mm_encoder_only
+            else None
+        )
         if self.ec_connector is not None:
             self.ec_connector.bind_encoder_cache_query(
                 self.encoder_cache_manager.get_cached_num_encoder_embeds
             )
         speculative_config = vllm_config.speculative_config
-        self.use_eagle = False
-        self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_scheduled_spec_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
@@ -337,29 +346,17 @@ class Scheduler(SchedulerInterface):
         # lookahead slots.
         self.can_skip_drafts = self.num_lookahead_tokens > 0
         self.dynamic_sd_lookup: list[int] | None = None
-        if speculative_config is not None:
-            if speculative_config.num_speculative_tokens_per_batch_size:
-                self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
-                    speculative_config.num_speculative_tokens_per_batch_size,
-                    vllm_max_batch_size=self.scheduler_config.max_num_seqs,
-                    vllm_num_speculative_tokens=self.num_spec_tokens,
-                )
-            self.use_eagle = speculative_config.uses_target_hidden_states
-            self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
-            if (
-                speculative_config.needs_eagle_block_drop()
-                and speculative_config.disable_eagle_block_drop
-            ):
-                logger.warning(
-                    "EAGLE trailing prefix-cache block dropping is disabled. "
-                    "This is experimental and may affect speculative-token "
-                    "acceptance rates."
-                )
+        if (
+            speculative_config is not None
+            and speculative_config.num_speculative_tokens_per_batch_size
+        ):
+            self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
+                speculative_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=self.scheduler_config.max_num_seqs,
+                vllm_num_speculative_tokens=self.num_spec_tokens,
+            )
 
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
-        if self.num_hash_lookahead_tokens:
-            # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
-            self.use_eagle_block_drop = False
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -370,9 +367,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
-            use_eagle=self.use_eagle_block_drop,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
-            num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
@@ -451,10 +446,7 @@ class Scheduler(SchedulerInterface):
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
-        # Opt-in: also stop at the junction, where an eagle sibling resumes. The
-        # manager decides whether it can check-point there (per-group eagle bit,
-        # no MTP re-prefill tail); splitting for a stop it would refuse costs a
-        # forward pass and displaces the block-boundary stop.
+        # Only split at shared-prefix junctions the manager can publish.
         self.mamba_shared_prefix_checkpoint = (
             self.mamba_partial_cache_hit
             and self.kv_cache_manager.mamba_shared_prefix_checkpoint
@@ -583,25 +575,20 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching block, so back off one
-        # block to avoid a Mamba cache miss.
         ckpt_block_size = (
             self.hash_block_size if self.mamba_partial_cache_hit else self.block_size
         )
-        last_cache_position = get_mamba_prefill_checkpoint_position(
+        last_cache_position = get_reusable_prefix_length(
             request.num_tokens,
-            block_size,
-            self.use_eagle_block_drop,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            alignment_tokens=block_size,
         )
 
         end = start + num_new_tokens
-        checkpoint_position = get_mamba_prefill_checkpoint_position(
+        checkpoint_position = get_reusable_prefix_length(
             prefill_end,
-            ckpt_block_size,
-            drop_eagle_block=self.use_eagle_block_drop,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            alignment_tokens=ckpt_block_size,
         )
         use_internal_checkpoint = (
             self.mamba_has_prefill_checkpoint_blocks
@@ -633,18 +620,19 @@ class Scheduler(SchedulerInterface):
 
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (
-            get_mamba_prefill_checkpoint_position(
+            get_reusable_prefix_length(
                 request.num_prompt_tokens,
-                self.hash_block_size,
-                self.use_eagle_block_drop,
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+                alignment_tokens=self.hash_block_size,
             )
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
         )
         junction = request.shared_prefix_boundary
-        # Block-floored: a sub-block junction's state is not separately cacheable.
-        block_floored = start + (junction - start) // block_size * block_size
+        # Floored to the block grid: a sub-block junction's state is not
+        # separately cacheable, and a chunk starting mid-block must still stop
+        # at the block boundary.
+        block_floored = junction // block_size * block_size
         # Past the prompt the manager writes nothing, so fall back to the
         # block-floored stop rather than dropping it: a resumed request replaying
         # output tokens can still observe a junction there.
@@ -1057,26 +1045,6 @@ class Scheduler(SchedulerInterface):
             step_skipped_async_kv: deque[Request] = deque()
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
-            # Without chunked prefill, a request cut for encoder limits is
-            # deferred whole. While earlier batches are in flight, later
-            # requests could keep taking the encoder space it needs.
-            hold_after_encoder_deferral = (
-                not self.scheduler_config.enable_chunked_prefill
-                and not self.is_mm_encoder_only
-                and not self.is_encoder_decoder
-                and self.vllm_config.max_concurrent_batches > 1
-            )
-            # A deferred request holds later ones only if all its multimodal
-            # items fit the configured encoder cache at once. Otherwise it may
-            # never be scheduled, and the hold would never end. The check errs
-            # toward not holding: it counts repeated items and items inside the
-            # prefix hit, and the built-in manager may have more room than
-            # configured. A custom manager with less room is not covered.
-            configured_encoder_cache_size = (
-                self.scheduler_config.encoder_cache_size
-                or self.scheduler_config.max_num_batched_tokens
-            )
-            encoder_deferred = False
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -1443,21 +1411,6 @@ class Scheduler(SchedulerInterface):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
-                        if encoder_deferred and self._has_encoder_embeds_in_window(
-                            request,
-                            num_computed_tokens,
-                            num_computed_tokens
-                            + num_new_tokens
-                            + self.num_prefill_lookahead,
-                        ):
-                            # Leave the encoder cache and budget to the
-                            # earlier request deferred in this step. A request
-                            # needing no embeddings goes on, and as on main it
-                            # can still take a reference to a cached image,
-                            # which keeps the deferred request from evicting it.
-                            skip_request(request_queue)
-                            continue
-                        num_tokens_before_encoder = num_new_tokens
                         (
                             encoder_inputs_to_schedule,
                             num_new_tokens,
@@ -1470,16 +1423,6 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens,
                             encoder_compute_budget,
                             shift_computed_tokens=self.num_prefill_lookahead,
-                        )
-                        encoder_deferred |= (
-                            hold_after_encoder_deferral
-                            and num_new_tokens < num_tokens_before_encoder
-                            and request_id not in self.encoder_cache_mismatch_reqs
-                            and sum(
-                                feature.mm_position.get_num_embeds()
-                                for feature in request.mm_features
-                            )
-                            <= configured_encoder_cache_size
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
@@ -1958,6 +1901,11 @@ class Scheduler(SchedulerInterface):
             # Drop from the in-flight-prefill set once it's no longer prefilling.
             if not request.is_prefill_chunk:
                 self._inflight_prefills.discard(request)
+            # Safe before the step runs: a freed entry stays in the worker's
+            # cache until a later step evicts it, and the worker runs steps
+            # in order.
+            if request.has_encoder_inputs:
+                self._free_encoder_inputs(request)
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -2124,21 +2072,6 @@ class Scheduler(SchedulerInterface):
 
         for input_id in duplicate_input_ids:
             self.encoder_cache_manager.check_and_update_cache(request, input_id)
-
-    @staticmethod
-    def _has_encoder_embeds_in_window(request: Request, start: int, end: int) -> bool:
-        """Whether a multimodal item of the request has embeddings at token
-        positions in [start, end), counted as in `_try_schedule_encoder_inputs`."""
-        lo, hi = get_mm_features_in_window(request.mm_features, start=start, end=end)
-        for mm_feature in request.mm_features[lo:hi]:
-            mm_position = mm_feature.mm_position
-            embeds_start, embeds_end = mm_position.get_embeds_indices_in_range(
-                max(0, start - mm_position.offset),
-                min(mm_position.length, end - mm_position.offset),
-            )
-            if embeds_end > embeds_start:
-                return True
-        return False
 
     def _try_schedule_encoder_inputs(
         self,
@@ -2505,7 +2438,7 @@ class Scheduler(SchedulerInterface):
                         num_verified_tokens=num_verified,
                     )
 
-            # Free encoder inputs only after the step has actually executed.
+            # Frees inputs held back by pending output placeholders.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
 
