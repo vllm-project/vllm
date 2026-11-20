@@ -1279,11 +1279,12 @@ class FlashAttentionImpl(AttentionImpl):
             and scale.numel() == 1
             and scale_float == 1.0
         ):
-            # FULL CUDA graphs then keep the implicit 1.0.
-            self.frozen_kv_scales = "full_graph"
-            self.frozen_kv_scale_names = (
-                self.frozen_kv_scale_names or frozenset()
-            ) | set(name)
+            if torch.cuda.is_current_stream_capturing():
+                # The captured graph keeps the implicit 1.0.
+                self.frozen_kv_scales = "full_graph"
+                self.frozen_kv_scale_names = (
+                    self.frozen_kv_scale_names or frozenset()
+                ) | set(name)
             return None
         # A (1, 1) expanded view (one sequence, one KV head per rank) counts
         # as contiguous, so FA4 skips its copy and its CuTe layout check then
