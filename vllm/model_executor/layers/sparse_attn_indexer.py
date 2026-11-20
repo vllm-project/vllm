@@ -40,6 +40,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.layers import indexer_overlap
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -450,6 +451,13 @@ def _decode_chunk_ranges(
     return ranges
 
 
+def _decode_candidate_score_dtype(topk_backend: str) -> torch.dtype | None:
+    """The candidate selection's score dtype on decode rows."""
+    return (
+        torch.float32 if topk_backend in ("auto", "cooperative", "persistent") else None
+    )
+
+
 def _varlen_decode_rows(
     q: torch.Tensor,
     q_scale: torch.Tensor | None,
@@ -504,9 +512,7 @@ def _varlen_decode_rows(
                 candidate_block_size,
                 candidates,
                 1,
-                score_dtype=(
-                    torch.float32 if topk_backend in ("auto", "persistent") else None
-                ),
+                score_dtype=_decode_candidate_score_dtype(topk_backend),
             )
         else:
             _apply_candidate_mask(
@@ -1207,8 +1213,54 @@ def sparse_attn_indexer(
                 weights[:num_padded_tokens],
                 logits_dtype,
             )
+            q = (padded_q_quant_cast, padded_q_scale)
+            # One query row per request over the whole context on this rank:
+            # what the deferred path takes.
+            whole_rows = (
+                dcp_world_size == 1
+                and decode_metadata.global_seq_lens is None
+                and not needs_padded_path
+                and next_n == 1
+            )
+            if (
+                whole_rows
+                and candidate_blocks is None
+                and indexer_overlap.consume_deferred_topk_request()
+            ):
+                # The stock scan and top-k below, on the stock indexer's
+                # stream, without joining (VLLM_INDEXER_OVERLAP).
+                def stock_scan_topk() -> None:
+                    scores = fp8_fp4_paged_mqa_logits(
+                        q,
+                        kv_cache,
+                        decode_weights,
+                        seq_lens,
+                        decode_metadata.block_table,
+                        decode_metadata.schedule_metadata,
+                        max_model_len=max_model_len,
+                        logits_dtype=logits_dtype,
+                        indices=decode_metadata.indices,
+                    )
+                    if not get_indexer_topk(topk_backend).takes_bf16_logits(
+                        scores, topk_tokens, scores.shape[0]
+                    ):
+                        scores = as_fp32_logits(scores, seq_lens.view(-1))
+                    get_indexer_topk(topk_backend)(
+                        scores,
+                        seq_lens,
+                        next_n,
+                        topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                        topk_tokens,
+                        attn_metadata_narrowed.max_seq_len,
+                    )
+
+                indexer_overlap.defer_stock_topk(
+                    stock_scan_topk,
+                    (padded_q_quant_cast, padded_q_scale, decode_weights),
+                )
+                return topk_indices_buffer
             logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
+                q,
                 kv_cache,
                 decode_weights,
                 seq_lens,
@@ -1234,7 +1286,34 @@ def sparse_attn_indexer(
             row_repeat = next_n if vis.numel() != num_rows else 1
             vis = vis[:num_rows]
             decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write:
+            if (
+                candidate_write
+                and next_n == 1
+                and indexer_overlap.candidate_defer_allowed(attn_metadata_narrowed)
+            ):
+                # The candidate selection, and its expansion into the sparse
+                # block ids the first consumer would build first, on the
+                # candidate stream; this layer's top-k and the next layers do
+                # not wait for them (VLLM_INDEXER_OVERLAP).
+                def deferred_candidates(
+                    logits=logits, vis=vis, decode_candidates=decode_candidates
+                ) -> None:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                        row_repeat,
+                        score_dtype=_decode_candidate_score_dtype(topk_backend),
+                    )
+                    indexer_overlap.expand_sparse_decode_rows(
+                        attn_metadata_narrowed, candidate_blocks, candidate_block_size
+                    )
+
+                indexer_overlap.defer_candidates(deferred_candidates, (logits, vis))
+            elif candidate_write:
                 _select_candidate_blocks(
                     logits,
                     None,
@@ -1243,13 +1322,10 @@ def sparse_attn_indexer(
                     candidate_block_size,
                     decode_candidates,
                     row_repeat,
-                    score_dtype=(
-                        torch.float32
-                        if topk_backend in ("auto", "cooperative", "persistent")
-                        else None
-                    ),
+                    score_dtype=_decode_candidate_score_dtype(topk_backend),
                 )
             else:
+                indexer_overlap.join_candidates()
                 _apply_candidate_mask(
                     logits,
                     None,
@@ -1404,6 +1480,11 @@ class SparseAttnIndexer(CustomOp):
         # than threading them through per-step metadata.
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
+        if candidate_write:
+            indexer_overlap.init_candidate_stream(
+                not parallel_config.use_ubatching
+                and vllm_config.speculative_config is None
+            )
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         get_indexer_topk(self.topk_backend)
         self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
