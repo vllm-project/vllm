@@ -6,6 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+from torch import nn
+
+from vllm.model_executor.models.minicpm5_moe import MiniCPM5Gate
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.minicpm5_moe import MiniCPM5MoEConfig
 
@@ -78,6 +82,33 @@ class TestMiniCPM5MoEConfig(unittest.TestCase):
         self.assertIsNone(config.num_experts_per_tok)
         self.assertFalse(config.use_cache)
         self.assertEqual(config.custom_field, 7)
+
+
+class TestMiniCPM5Gate(unittest.TestCase):
+    def test_bf16_parameters_produce_fp32_logits_without_early_rounding(self):
+        weight = nn.Parameter(torch.ones(1, 2, dtype=torch.bfloat16))
+        correction_bias = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        gate = MiniCPM5Gate(weight, correction_bias)
+        hidden = torch.tensor([[1.0, 1.0 / 256]], dtype=torch.bfloat16)
+
+        logits, bias = gate(hidden)
+
+        self.assertEqual(logits.dtype, torch.float32)
+        self.assertIsNone(bias)
+        self.assertEqual(logits.item(), 1.0 + 1.0 / 256)
+        self.assertNotEqual(logits.item(), logits.to(torch.bfloat16).float().item())
+        self.assertIs(gate.weight, weight)
+        self.assertIs(gate.e_score_correction_bias, correction_bias)
+
+    def test_weight_reload_updates_fp32_routing(self):
+        weight = nn.Parameter(torch.ones(1, 2, dtype=torch.bfloat16))
+        correction_bias = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        gate = MiniCPM5Gate(weight, correction_bias)
+        with torch.no_grad():
+            weight.copy_(torch.tensor([[2.0, 3.0]], dtype=torch.bfloat16))
+        logits, _ = gate(torch.tensor([[1.0, 0.5]], dtype=torch.bfloat16))
+        self.assertEqual(logits.dtype, torch.float32)
+        self.assertEqual(logits.item(), 3.5)
 
 
 if __name__ == "__main__":

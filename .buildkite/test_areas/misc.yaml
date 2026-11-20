@@ -907,11 +907,13 @@ steps:
   - tests/transformers_utils
   - tests/config
   - tests/device_allocator
+  - tests/models/test_minicpm5_moe.py
+  - vllm/model_executor/models/minicpm5_moe.py
   device: cpu-small
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
-  - pytest -v -s transformers_utils/test_minicpm5_moe_config.py
+  - pytest -v -s models/test_minicpm5_moe.py
   - pytest -v -s tools/test_check_test_tethering.py
   - pytest -v -s tools/test_check_agent_files.py
   - pytest -v -s tools/test_check_trust_remote_code.py

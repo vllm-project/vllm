@@ -4,7 +4,7 @@
 
 Reuses upstream vLLM attention, fused MoE, and quantized Linear kernels.
 The checkpoint uses GQA with head-interleaved query/output gates, no QK
-normalization, full RoPE, and sigmoid/noaux_tc routing in the model dtype,
+normalization, full RoPE, and FP32 sigmoid/noaux_tc routing,
 matching the team SGLang implementation.
 """
 
@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
@@ -127,6 +128,16 @@ class MiniCPM5Attention(nn.Module):
         return self.o_proj(out)[0]
 
 
+class MiniCPM5Gate(nn.Module):
+    def __init__(self, weight: nn.Parameter, correction_bias: nn.Parameter):
+        super().__init__()
+        self.weight = weight
+        self.e_score_correction_bias = correction_bias
+
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return F.linear(hidden_states.float(), self.weight.float()), None
+
+
 class MiniCPM5DecoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str):
         super().__init__()
@@ -147,13 +158,16 @@ class MiniCPM5DecoderLayer(nn.Module):
             moe_config = copy.copy(c)
             moe_config.topk_method = "noaux_tc"
             moe_config.scoring_func = "sigmoid"
-            moe_config.moe_router_dtype = None
+            moe_config.moe_router_dtype = "float32"
             self.mlp = DeepseekV2MoE(
                 moe_config,
                 vllm_config.parallel_config,
                 quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            gate = self.mlp.gate
+            self.mlp.gate = MiniCPM5Gate(gate.weight, gate.e_score_correction_bias)
+            self.mlp.experts.gate = self.mlp.gate
         self.input_layernorm = RMSNorm(c.hidden_size, eps=c.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(c.hidden_size, eps=c.rms_norm_eps)
 
