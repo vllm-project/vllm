@@ -227,8 +227,8 @@ pub(super) const TEST_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAA
 
 #[cfg(test)]
 pub(super) fn test_shm_cache() -> Arc<MmProcessorShmCache> {
-    let cache = MmProcessorShmCache::create(vllm_mm_cache::MmShmCacheConfig {
-        shm_name: vllm_mm_cache::MmShmCacheConfig::unique_shm_name(),
+    let cache = MmProcessorShmCache::create(vllm_mm_cache::MmCacheConfig {
+        shm_name: vllm_mm_cache::MmCacheConfig::unique_shm_name(),
         data_buffer_size: 16 * 1024 * 1024,
         max_object_size: 4 * 1024 * 1024,
     })

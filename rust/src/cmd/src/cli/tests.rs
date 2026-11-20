@@ -3269,24 +3269,26 @@ fn serve_args_accept_mm_processor_cache_shm() {
     assert_eq!(args.runtime.mm_shm_cache_max_object_size_mb, 64);
     args.check_mm_shm_cache_support().unwrap();
 
-    let shm_config = args.runtime.mm_shm_cache_config().expect("shm cache should be enabled");
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let shm_config = args.runtime.mm_shm_cache_config(5555).expect("shm cache should be enabled");
     assert_eq!(shm_config.data_buffer_size, 8 << 30);
     assert_eq!(shm_config.max_object_size, 64 << 20);
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
-    expect![[r#"
-        [
-            "--reasoning-parser",
-            "qwen3",
-            "--mm-processor-cache-type",
-            "shm",
-            "--mm-processor-cache-gb",
-            "8",
-            "--mm-shm-cache-max-object-size-mb",
-            "64",
+    assert_eq!(
+        config.python_args,
+        vec![
+            "--reasoning-parser".to_string(),
+            "qwen3".to_string(),
+            "--mm-processor-cache-type".to_string(),
+            "shm".to_string(),
+            "--mm-processor-cache-gb".to_string(),
+            "8".to_string(),
+            "--mm-shm-cache-max-object-size-mb".to_string(),
+            "64".to_string(),
+            "--mm-shm-cache-buffer-name".to_string(),
+            shm_config.shm_name.clone(),
         ]
-    "#]]
-    .assert_debug_eq(&config.python_args);
+    );
 }
 
 #[test]
@@ -3299,7 +3301,7 @@ fn serve_args_mm_processor_cache_numeric_defaults_match_python() {
     assert_eq!(args.runtime.mm_processor_cache_type, None);
     assert_eq!(args.runtime.mm_processor_cache_gb, 4.0);
     assert_eq!(args.runtime.mm_shm_cache_max_object_size_mb, 128);
-    assert!(args.runtime.mm_shm_cache_config().is_none());
+    assert!(args.runtime.mm_shm_cache_config(5555).is_none());
 }
 
 #[test]
@@ -3320,8 +3322,10 @@ fn serve_args_mm_processor_cache_gb_zero_disables_cache() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert!(args.runtime.mm_shm_cache_config().is_none());
+    assert!(args.runtime.mm_shm_cache_config(5555).is_none());
     args.check_mm_shm_cache_support().unwrap();
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(!config.python_args.iter().any(|arg| arg == "--mm-shm-cache-buffer-name"));
 }
 
 #[test]

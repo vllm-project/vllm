@@ -55,7 +55,7 @@ use vllm_engine_core_client::{
 };
 use vllm_llm::EngineCoreLlm;
 use vllm_metrics::METRICS;
-use vllm_mm_cache::{MmProcessorShmCache, MmShmCacheConfig};
+use vllm_mm_cache::{MmCacheConfig, MmProcessorShmCache};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
 use vllm_tokenizer::test_utils::TestTokenizer;
@@ -10883,8 +10883,8 @@ async fn reset_mm_cache_route_sends_expected_utility_call() {
 #[serial]
 async fn reset_mm_cache_route_clears_shm_processor_cache() {
     let cache = Arc::new(
-        MmProcessorShmCache::create(MmShmCacheConfig {
-            shm_name: MmShmCacheConfig::unique_shm_name(),
+        MmProcessorShmCache::create(MmCacheConfig {
+            shm_name: MmCacheConfig::unique_shm_name(),
             data_buffer_size: 1 << 20,
             max_object_size: 1 << 17,
         })

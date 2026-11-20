@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
 use vllm_mm_cache::MmProcessorShmCache;
+use vllm_server::Config;
 use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
@@ -149,29 +150,26 @@ async fn async_main(cli: Cli) -> Result<()> {
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
 
-            // Create the shm multi-modal processor cache (the P0 writer) before
-            // spawning the managed Python engine, so its workers can open the
-            // segment named by `VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME`.
-            let mm_cache = args
-                .runtime
-                .mm_shm_cache_config()
-                .map(|config| MmProcessorShmCache::create(config).map(Arc::new))
-                .transpose()
-                .context("failed to create the shm multi-modal processor cache")?;
-
             // The frontend owning rank 0 hosts the deployment's handshake. In hybrid or
             // external DP LB, another node's frontend serves only its engines' second
             // handshake, on a local IPC endpoint.
             let client_handshake_address = (!args.headless
                 && topology.frontend_engine_start_index() != 0)
                 .then(frontend_ipc_handshake_address);
-            let mut engine_config = args.to_managed_engine_config(
+            let engine_config = args.to_managed_engine_config(
                 handshake_port,
                 &topology,
                 client_handshake_address.clone(),
             );
-            engine_config.mm_shm_cache_name =
-                mm_cache.as_ref().map(|cache| cache.shm_name().to_string());
+            // Create the shm multi-modal processor cache (the P0 writer) before
+            // spawning the managed Python engine, so its workers can open the
+            // segment named by `--mm-shm-cache-buffer-name`.
+            let mm_cache = args
+                .runtime
+                .mm_shm_cache_config(handshake_port)
+                .map(|config| MmProcessorShmCache::create(config).map(Arc::new))
+                .transpose()
+                .context("failed to create the shm multi-modal processor cache")?;
             let handshake_address =
                 client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
 
@@ -189,8 +187,10 @@ async fn async_main(cli: Cli) -> Result<()> {
                     Ok(())
                 })
             } else {
-                let mut config = args.to_frontend_config(handshake_address, &topology);
-                config.mm_processor_cache = mm_cache.clone();
+                let config = Config {
+                    mm_processor_cache: mm_cache.clone(),
+                    ..args.to_frontend_config(handshake_address, &topology)
+                };
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     let result = vllm_server::serve(config, shutdown).await;

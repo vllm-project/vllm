@@ -36,7 +36,7 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBacke
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
-use vllm_mm_cache::MmShmCacheConfig;
+use vllm_mm_cache::MmCacheConfig;
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
@@ -1070,11 +1070,11 @@ impl SharedRuntimeArgs {
             && self.mm_processor_cache_gb > 0.0
     }
 
-    /// Build the shm cache configuration with a fresh unique segment name, or
-    /// `None` when the shm cache is disabled.
-    pub fn mm_shm_cache_config(&self) -> Option<MmShmCacheConfig> {
-        self.mm_shm_cache_enabled().then(|| MmShmCacheConfig {
-            shm_name: MmShmCacheConfig::unique_shm_name(),
+    /// Build the shm cache configuration for this process and handshake port,
+    /// or `None` when the shm cache is disabled.
+    pub fn mm_shm_cache_config(&self, handshake_port: u16) -> Option<MmCacheConfig> {
+        self.mm_shm_cache_enabled().then(|| MmCacheConfig {
+            shm_name: format!("vllm-mm-shm-{}-{handshake_port}", std::process::id()),
             data_buffer_size: gib_to_bytes(self.mm_processor_cache_gb),
             max_object_size: (self.mm_shm_cache_max_object_size_mb as usize) << 20,
         })
@@ -1809,6 +1809,7 @@ impl ServeArgs {
             topology,
             client_handshake_address,
         );
+        let cache_config = self.runtime.mm_shm_cache_config(handshake_port);
         if self.runtime.mm_processor_cache_type == Some(MmProcessorCacheType::Shm) {
             config.python_args.extend([
                 "--mm-processor-cache-type".to_string(),
@@ -1817,6 +1818,12 @@ impl ServeArgs {
                 self.runtime.mm_processor_cache_gb.to_string(),
                 "--mm-shm-cache-max-object-size-mb".to_string(),
                 self.runtime.mm_shm_cache_max_object_size_mb.to_string(),
+            ]);
+        }
+        if let Some(cache_config) = cache_config {
+            config.python_args.extend([
+                "--mm-shm-cache-buffer-name".to_string(),
+                cache_config.shm_name,
             ]);
         }
         config

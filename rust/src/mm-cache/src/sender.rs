@@ -25,9 +25,9 @@ use vllm_shm_object_storage::{
 
 /// Configuration for the writer-side multimodal processor shm cache.
 #[derive(Debug)]
-pub struct MmShmCacheConfig {
+pub struct MmCacheConfig {
     /// POSIX shm object name (no leading slash), matching the
-    /// VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME env given to the Python engine.
+    /// `--mm-shm-cache-buffer-name` argument given to the Python engine.
     pub shm_name: String,
     /// Ring buffer size in bytes (`mm_processor_cache_gb * GiB`).
     pub data_buffer_size: usize,
@@ -35,7 +35,7 @@ pub struct MmShmCacheConfig {
     pub max_object_size: usize,
 }
 
-impl MmShmCacheConfig {
+impl MmCacheConfig {
     /// Unique per-process name, e.g. "vllm-mm-shm-{uuid}".
     pub fn unique_shm_name() -> String {
         format!("vllm-mm-shm-{}", uuid::Uuid::new_v4())
@@ -62,7 +62,7 @@ pub struct MmProcessorShmCache {
 
 impl MmProcessorShmCache {
     /// Create the shm segment (fails if the name already exists).
-    pub fn create(config: MmShmCacheConfig) -> Result<Self> {
+    pub fn create(config: MmCacheConfig) -> Result<Self> {
         let ring_buffer =
             SingleWriterShmRingBuffer::create(config.data_buffer_size, &config.shm_name)?;
         Ok(Self {
@@ -228,8 +228,8 @@ mod tests {
     use vllm_engine_core_client::protocol::tensor::WireTensor;
 
     fn create_cache(data_buffer_size: usize, max_object_size: usize) -> MmProcessorShmCache {
-        MmProcessorShmCache::create(MmShmCacheConfig {
-            shm_name: MmShmCacheConfig::unique_shm_name(),
+        MmProcessorShmCache::create(MmCacheConfig {
+            shm_name: MmCacheConfig::unique_shm_name(),
             data_buffer_size,
             max_object_size,
         })

@@ -55,8 +55,6 @@ pub struct ManagedEngineConfig {
     pub client_handshake_address: Option<String>,
     /// Extra CLI arguments forwarded verbatim to Python vLLM.
     pub python_args: Vec<String>,
-    /// Name of the shared-memory multimodal processor cache segment.
-    pub mm_shm_cache_name: Option<String>,
 }
 
 impl ManagedEngineConfig {
@@ -97,9 +95,6 @@ impl ManagedEngineConfig {
         }
         command.args(&self.python_args);
         command.envs(Self::rust_frontend_envs());
-        if let Some(name) = &self.mm_shm_cache_name {
-            command.env("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", name);
-        }
         command
     }
 }
@@ -304,7 +299,6 @@ mod tests {
                 "--max-model-len".to_string(),
                 "512".to_string(),
             ],
-            mm_shm_cache_name: Some("vllm-mm-shm-test".to_string()),
         };
         let command = config.to_command();
         let args = command.get_args().collect::<Vec<_>>();
@@ -340,12 +334,6 @@ mod tests {
         expect![[r#"
             [
                 (
-                    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-                    Some(
-                        "vllm-mm-shm-test",
-                    ),
-                ),
-                (
                     "VLLM_USE_RUST_FRONTEND",
                     Some(
                         "1",
@@ -375,7 +363,6 @@ mod tests {
             ]
             .map(str::to_string)
             .to_vec(),
-            mm_shm_cache_name: None,
         };
         let command = config.to_command();
         assert!(format!("{command:?}").contains("hf_secret"));
