@@ -165,7 +165,7 @@ class SparseCacheRole(StrEnum):
     INDEXER = "indexer"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ManagerConfig:
     """Allocation policy of a layer: the `SingleTypeKVCacheManager` that
     enforces it and that manager's `Params`. Layers whose configs compare
@@ -332,12 +332,14 @@ def compute_layout_strides(
     order = layout.stride_order
     padded_page_size = getattr(spec, "page_size_padded", None)
     if padded_page_size is not None:
-        assert kernel_block_size is None or kernel_block_size == spec.block_size, (
-            "Padded KV pages do not support kernel block splitting."
+        blocks_per_page = shape[_DIM_B] // num_blocks
+        assert padded_page_size % blocks_per_page == 0, (
+            "Padded page size must divide into equal kernel pages."
         )
+        padded_page_size //= blocks_per_page
         page_grid_end = max(order.index(_DIM_L), order.index(_DIM_B)) + 1
         page_grid_shape = tuple(shape[dim] for dim in order[:page_grid_end])
-        assert prod(page_grid_shape) == num_layers * num_blocks, (
+        assert prod(page_grid_shape) == num_layers * shape[_DIM_B], (
             "Page padding requires dimensions outside the page tail to be L, B, "
             f"or singleton; got {layout.name} with shape {shape}."
         )
@@ -374,15 +376,16 @@ def create_kv_cache_views(
     )
     ratio = shape_bytes[0] // num_blocks
     if ratio > 1:
-        # Kernel blocks subdivide a manager block into `ratio` equal pieces, so
-        # they sit a constant stride apart only if a block is one dense page: no
-        # padding at its end, and no other layer's page before the next block.
-        dense_page_size = prod(compute_layer_kv_cache_shape_bytes(spec, 1)[1:])
-        if block_stride != dense_page_size:
+        # Distribute page padding evenly among the kernel blocks. Other
+        # layers must not sit between consecutive pages of this layer.
+        page_size = getattr(spec, "page_size_padded", None) or prod(
+            compute_layer_kv_cache_shape_bytes(spec, 1)[1:]
+        )
+        if block_stride != page_size:
             raise ValueError(
                 f"The resolved KV cache layout ({layout.name}) does not store "
-                "blocks as dense, unpadded pages (block stride "
-                f"{block_stride} != page {dense_page_size}), so a manager "
+                "blocks as contiguous pages (block stride "
+                f"{block_stride} != page {page_size}), so a manager "
                 f"block cannot be split into {ratio} kernel blocks of "
                 f"{kernel_block_size} tokens. Reduce --block-size to "
                 f"{kernel_block_size} or set VLLM_KV_CACHE_LAYOUT to a "
@@ -475,6 +478,11 @@ class AttentionSpec(KVCacheSpec):
     """Tokens covered by one stored state. Ints > 1 compress multiple tokens
     into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
     token (Whisper block pooling: `Fraction(1, block_pool_size)`)."""
+    cache_role: SparseCacheRole | None = None
+    """Role in a sparse-attention index group; None for dense attention."""
+    topk_buffer_width: int | None = None
+    """Width of the model's sparse top-k indices buffer, including padding."""
+    is_index_group_leader: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -517,13 +525,9 @@ class AttentionSpec(KVCacheSpec):
 class MLAAttentionSpec(AttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
-    topk_buffer_width: int | None = None
-    """Width of the model's sparse top-k indices buffer, including padding."""
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
-    cache_role: SparseCacheRole = SparseCacheRole.SPARSE
-    is_index_group_leader: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 
@@ -583,24 +587,17 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
 
-def get_mamba_prefill_checkpoint_position(
+def get_reusable_prefix_length(
     num_tokens: int,
-    hash_block_size: int,
-    drop_eagle_block: bool,
-    num_hash_lookahead_tokens: int = 0,
+    num_hash_lookahead_tokens: int,
+    alignment_tokens: int = 1,
 ) -> int:
-    """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Leave tokens for logits recomputation and the checkpoint's hash.
-    # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = (
-        num_tokens
-        if drop_eagle_block
-        else num_tokens - max(1, num_hash_lookahead_tokens)
-    )
-    checkpoint_position = proof_limit // hash_block_size * hash_block_size
-    if drop_eagle_block:
-        checkpoint_position -= hash_block_size
-    return max(checkpoint_position, 0)
+    """Bound prefix reuse by known tokens, reserving logits and hash lookahead.
+
+    This does not establish that the corresponding KV has been computed or cached.
+    """
+    token_limit = max(0, num_tokens - max(1, num_hash_lookahead_tokens))
+    return token_limit // alignment_tokens * alignment_tokens
 
 
 def is_mamba_prefill_checkpoint_valid(
@@ -616,18 +613,18 @@ def is_mamba_prefill_checkpoint_valid(
         return False
     assert checkpoint_alignment > 0
 
-    initial_state_col = (query_start - 1) // mamba_block_size
     checkpoint_col = cdiv(query_end, mamba_block_size) - 2
     return (
         query_start % hash_block_size == 0
-        and checkpoint_col > initial_state_col
+        # A mid-block query may export into its first column (private copy).
+        and checkpoint_col >= query_start // mamba_block_size
         and query_start + hash_block_size <= checkpoint_position
         and query_start < checkpoint_position < query_end
         and (checkpoint_position - query_start) % checkpoint_alignment == 0
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheTensor:
     """A class for specifying how the workers should initialize the KV cache.
 
@@ -656,7 +653,7 @@ class KVCacheGroupRole(StrEnum):
     HISPARSE_INDEXER = "hisparse_indexer"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KVCacheLayerConfig:
     """What one layer needs from the KV cache: the manager that allocates its
     blocks, that manager's policy, and the layer's tensor layout."""
@@ -681,7 +678,7 @@ class KVCacheLayerConfig:
         return blocks * self.spec.page_size_bytes
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheGroup:
     """Represents a group of model layers that share the same KV cache block table.
     These layers are regarded as one layer in the KV cache manager.
@@ -695,8 +692,6 @@ class KVCacheGroup:
     block_size: int
     # Whether DCP shards the group's token positions across ranks
     dcp_sharded: bool = False
-    # Whether this group holds draft layers and takes the EAGLE last-block drop.
-    is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
     # Whether this group is part of the externally transferable KV state.
@@ -808,9 +803,6 @@ class PrefixLookupGroup(NamedTuple):
     manager_config: ManagerConfig
     block_size: int
     group_ids: list[int]
-    use_eagle: bool = False
-    """Whether the lookup takes the EAGLE last-block drop, which applies to
-    every member since they are looked up jointly. Set by the coordinator."""
 
     @property
     def manager_cls(self) -> type[SingleTypeKVCacheManager]:
@@ -825,10 +817,7 @@ def prefix_lookup_groups(
     for i, g in enumerate(groups):
         if not g.prefix_cacheable:
             continue
-        # A lookup takes the EAGLE last-block drop if any member does, so only
-        # groups with equal layouts share one. TODO: drop with the EAGLE drop.
-        layout = g.distinct_specs[0] if len(g.distinct_specs) == 1 else i
-        key = (g.manager_config, g.block_size, g.dcp_sharded, layout)
+        key = (g.manager_config, g.block_size, g.dcp_sharded)
         lookup = lookups.setdefault(
             key, PrefixLookupGroup(g.manager_config, g.block_size, [])
         )

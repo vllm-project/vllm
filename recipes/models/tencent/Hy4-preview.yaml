@@ -4,7 +4,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent Hunyuan Hy4-preview — scaled-up MoE language model (770B total / 49B active) with a 10B MTP layer for speculative decoding, 1M context, and hy_v4 tool/reasoning parsers"
   date_added: 2026-08-28
-  date_updated: 2026-09-28
+  date_updated: 2026-11-17
   tasks:
     - text
   performance_headline: "Hunyuan Hy4-preview MoE — 770B/49B on 16xB200, 8xB300, 8xMI355X with MTP"
@@ -25,12 +25,11 @@ model:
   docker_image:
     nvidia: "vllm/vllm-openai:hy4-preview"
     amd: "vllm/vllm-openai-rocm:nightly"
-  nightly_required: true
   install:
     docker:
-      note: "NVIDIA: dedicated hy4-preview image until changes land in vllm:latest. AMD: vllm/vllm-openai-rocm:nightly from 2026-09-22 or later."
+      note: "NVIDIA: dedicated hy4-preview image. AMD: vllm/vllm-openai-rocm v0.31.0 or newer (any build from 2026-09-22 on)."
     pip:
-      note: "Hy4-preview's latest optimizations aren't in a stable release yet — use nightly wheels or build from source."
+      note: "Use vLLM 0.31.0 or newer for the optimizations this recipe was tuned on."
   architecture: moe
   parameter_count: "770B"
   active_parameters: "49B"

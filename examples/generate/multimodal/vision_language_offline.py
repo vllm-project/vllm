@@ -20,6 +20,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -31,6 +32,7 @@ class ModelRequestData(NamedTuple):
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
     sampling_params: SamplingParams | list[SamplingParams] | None = None
+    use_llm_chat: bool = False
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -102,7 +104,6 @@ def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
@@ -1226,18 +1227,20 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
     # NOTE: Need L40 (or equivalent) to avoid OOM
     engine_args = EngineArgs(
         model=model_name,
+        tokenizer_mode="mistral",
+        config_format="mistral",
+        load_format="mistral",
+        ignore_patterns=["model*.safetensors"],
         max_model_len=8192,
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={modality: 1},
-        ignore_patterns=["consolidated.safetensors"],
     )
-
-    prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
-        prompts=prompts,
+        prompts=questions,
+        use_llm_chat=True,
     )
 
 
@@ -1398,43 +1401,6 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# OpenPangu
-def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "FreedomIntelligence/openPangu-VL-7B"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=4,
-        trust_remote_code=True,
-        enforce_eager=True,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "[unused19]"
-    video_placeholder = "[unused32]"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<s>[unused9]系统：[unused10][unused9]用户：[unused18]{placeholder}[unused20]{question}[unused10][unused9]助手："
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # OpenVLA
 def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1443,7 +1409,7 @@ def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     chat_template = get_chat_template_fallback_path("openvla", model_name)
     assert chat_template is not None
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{"role": "user", "content": "pick up the red block"}]
     prompt = tokenizer.apply_chat_template(
         messages,
@@ -1453,7 +1419,6 @@ def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     prompts = [prompt for _ in questions]
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=512,
         limit_mm_per_prompt={modality: 1},
     )
@@ -1475,12 +1440,11 @@ def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=4096,
         max_num_seqs=2,
-        trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={modality: 1},
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [
         [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
     ]
@@ -1540,7 +1504,6 @@ def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
-        trust_remote_code=True,
     )
 
     placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
@@ -2020,6 +1983,7 @@ def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
+        trust_remote_code=True,
         max_model_len=16384,
         limit_mm_per_prompt={modality: 1},
     )
@@ -2188,7 +2152,6 @@ model_example_map = {
     "nemotron_parse_35": run_nemotron_parse_35,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
-    "openpangu_vl": run_openpangu_vl,
     "openvla": run_openvla,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
@@ -2598,6 +2561,44 @@ def main(args):
     lora_request = (
         req_data.lora_requests * args.num_prompts if req_data.lora_requests else None
     )
+
+    if req_data.use_llm_chat:
+        if args.verify_mm_cache_hit_with_uuids:
+            raise ValueError(
+                "verify-mm-cache-hit-with-uuids is not supported when "
+                "use_llm_chat is True."
+            )
+
+        images = (
+            [inputs["multi_modal_data"][modality]]
+            if args.num_prompts == 1
+            else [inp["multi_modal_data"][modality] for inp in inputs]
+        )
+        messages = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompts[i % len(prompts)]},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encode_image_url(images[i])},
+                        },
+                    ],
+                }
+            ]
+            for i in range(args.num_prompts)
+        ]
+
+        with time_counter(args.time_generate):
+            outputs = llm.chat(messages, sampling_params=sampling_params)
+
+        print("-" * 50)
+        for o in outputs:
+            generated_text = o.outputs[0].text
+            print(generated_text)
+            print("-" * 50)
+        return
 
     with time_counter(args.time_generate):
         outputs = llm.generate(

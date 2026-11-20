@@ -8,7 +8,6 @@ num_fewshot: 5
 startup_max_wait_seconds: 1800
 server_args: >-
   --tokenizer-mode deepseek_v4
-  --trust-remote-code
   --max-model-len 8192
   --tensor-parallel-size 4
   --enable-expert-parallel

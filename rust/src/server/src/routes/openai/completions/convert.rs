@@ -7,7 +7,7 @@ use thiserror_ext::AsReport as _;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequestProcessor};
 
 use super::types::CompletionRequest;
-use crate::error::{ApiError, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
@@ -21,16 +21,26 @@ use crate::utils::{
 /// every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PreparedRequest {
-    /// Stable OpenAI-style request ID, reused as the external text request ID.
+    /// Stable OpenAI-style request ID, reused as the external text request ID
+    /// of a single prompt.
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
-    /// Number of choices to generate.
+    /// Number of choices to generate for each prompt.
     pub n: NonZeroU32,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
+    /// The request's prompts, in choice order; never empty.
+    pub prompts: Vec<PreparedPrompt>,
+}
+
+/// One prompt of a completion request.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct PreparedPrompt {
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
+    /// Prompt text that should be echoed back northbound when `echo=true`.
+    pub echo: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -41,8 +51,6 @@ pub(super) struct ResponseOptions {
     pub include_continuous_usage: bool,
     /// Whether the caller requested prompt-only echo via `max_tokens=0`.
     pub prompt_only: bool,
-    /// Prompt text that should be echoed back northbound when `echo=true`.
-    pub echo: Option<String>,
     /// Whether the caller requested output logprobs on completion choices.
     pub requested_logprobs: Option<i32>,
     /// Whether the caller requested choice-level prompt logprobs.
@@ -68,6 +76,14 @@ pub(super) fn prepare_completion_request(
     processor: &TextRequestProcessor,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    // Python's message; `prompt_embeds` itself is rejected above. An empty text
+    // prompt is left to tokenization, which may still yield a BOS token.
+    let Some(prompt) = request.prompt else {
+        bail_invalid_request!(
+            param = "prompt",
+            "Either prompt or prompt_embeds must be provided and non-empty."
+        );
+    };
     let n = resolve_n(request.n)?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
@@ -114,9 +130,11 @@ pub(super) fn prepare_completion_request(
 
     let echo = request.echo;
     let return_token_ids = request.return_token_ids.unwrap_or(false);
-    let mut text_request = TextRequest {
+    let prompts = prompt.into_prompts();
+    let text_request = TextRequest {
         request_id: request_id.clone(),
-        prompt: request.prompt,
+        // Set per prompt below.
+        prompt: Prompt::default(),
         mm_features: None,
         sampling_params: SamplingParams {
             temperature: request.temperature,
@@ -172,7 +190,24 @@ pub(super) fn prepare_completion_request(
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
     };
-    let echo = completion_echo_text(&mut text_request, echo, return_token_ids, processor)?;
+    // Like Python, each prompt of a batch is its own engine request, with the
+    // prompt index appended to the request ID.
+    let batched = prompts.len() > 1;
+    let prompts = itertools::repeat_n(text_request, prompts.len())
+        .zip(prompts)
+        .enumerate()
+        .map(|(index, (text_request, prompt))| {
+            let mut text_request = TextRequest {
+                prompt,
+                ..text_request
+            };
+            if batched {
+                text_request.request_id = format!("{request_id}-{index}");
+            }
+            let echo = completion_echo_text(&mut text_request, echo, return_token_ids, processor)?;
+            Ok(PreparedPrompt { text_request, echo })
+        })
+        .collect::<Result<_, ApiError>>()?;
 
     Ok(PreparedRequest {
         request_id,
@@ -182,14 +217,13 @@ pub(super) fn prepare_completion_request(
             include_usage,
             include_continuous_usage,
             prompt_only,
-            echo,
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
             return_token_ids,
             return_tokens_as_token_ids: request.return_tokens_as_token_ids,
             return_weight_versions: request.return_weight_versions.unwrap_or(false),
         },
-        text_request,
+        prompts,
     })
 }
 
@@ -235,20 +269,39 @@ mod tests {
     use validator::Validate;
     use vllm_text::tokenizer::DynTokenizer;
     use vllm_text::{
-        Prompt, PromptTruncation, PromptTruncationLimit, TextBackend, TextRequestProcessor,
-        TruncationSide,
+        Prompt, PromptTruncation, PromptTruncationLimit, TextBackend, TextRequest,
+        TextRequestProcessor, TruncationSide,
     };
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
-    use crate::routes::openai::completions::types::CompletionRequest;
+    use crate::routes::openai::completions::types::{CompletionPrompt, CompletionRequest};
     use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
+    impl super::PreparedRequest {
+        /// The lowered text request of a single-prompt request.
+        fn text_request(&self) -> &TextRequest {
+            &self.single_prompt().text_request
+        }
+
+        /// The echoed text of a single-prompt request.
+        fn echo(&self) -> Option<String> {
+            self.single_prompt().echo.clone()
+        }
+
+        fn single_prompt(&self) -> &super::PreparedPrompt {
+            let [prompt] = self.prompts.as_slice() else {
+                panic!("expected a single prompt, got {}", self.prompts.len());
+            };
+            prompt
+        }
+    }
+
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id)
+        resolve_request_context(headers, request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {
@@ -288,7 +341,10 @@ mod tests {
         let request: CompletionRequest =
             serde_json::from_value(base_request_json()).expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::Text("hello".to_string()));
+        assert_eq!(
+            request.prompt,
+            Some(CompletionPrompt::Single(Prompt::Text("hello".to_string())))
+        );
         assert_eq!(request.model.as_deref(), Some("Qwen/Qwen1.5-0.5B-Chat"));
     }
 
@@ -331,7 +387,10 @@ mod tests {
         }))
         .expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::TokenIds(vec![11, 22, 33]));
+        assert_eq!(
+            request.prompt,
+            Some(CompletionPrompt::Single(Prompt::TokenIds(vec![11, 22, 33])))
+        );
         assert_eq!(request.max_tokens, Some(7));
         assert!(request.ignore_eos);
     }
@@ -370,7 +429,7 @@ mod tests {
             )
             .expect("prepare top_k");
 
-            assert_eq!(prepared.text_request.sampling_params.top_k, expected);
+            assert_eq!(prepared.text_request().sampling_params.top_k, expected);
         }
     }
 
@@ -391,7 +450,7 @@ mod tests {
         .expect("prepare truncation");
 
         assert_eq!(
-            prepared.text_request.prompt_truncation,
+            prepared.text_request().prompt_truncation,
             Some(PromptTruncation {
                 limit: PromptTruncationLimit::InputBudget,
                 side: TruncationSide::Left,
@@ -453,34 +512,37 @@ mod tests {
 
         assert!(prepared.options.include_usage);
         assert_eq!(
-            prepared.text_request.prompt,
+            prepared.text_request().prompt,
             Prompt::TokenIds(vec![11, 22, 33])
         );
-        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(2));
-        assert_eq!(prepared.text_request.sampling_params.top_p, Some(0.9));
-        assert_eq!(prepared.text_request.sampling_params.top_k, Some(42));
-        assert_eq!(prepared.text_request.sampling_params.min_p, Some(0.1));
+        assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(7));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(2));
+        assert_eq!(prepared.text_request().sampling_params.top_p, Some(0.9));
+        assert_eq!(prepared.text_request().sampling_params.top_k, Some(42));
+        assert_eq!(prepared.text_request().sampling_params.min_p, Some(0.1));
         assert_eq!(
-            prepared.text_request.sampling_params.frequency_penalty,
+            prepared.text_request().sampling_params.frequency_penalty,
             Some(0.2)
         );
         assert_eq!(
-            prepared.text_request.sampling_params.presence_penalty,
+            prepared.text_request().sampling_params.presence_penalty,
             Some(0.3)
         );
         assert_eq!(
-            prepared.text_request.sampling_params.repetition_penalty,
+            prepared.text_request().sampling_params.repetition_penalty,
             Some(1.1)
         );
         assert_eq!(
-            prepared.text_request.sampling_params.bad_words,
+            prepared.text_request().sampling_params.bad_words,
             Some(vec!["hello".to_string()])
         );
-        assert!(prepared.text_request.sampling_params.ignore_eos);
-        assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert!(prepared.text_request().sampling_params.ignore_eos);
         assert_eq!(
-            prepared.text_request.sampling_params.stream_interval,
+            prepared.text_request().decode_options.skip_special_tokens,
+            Some(false)
+        );
+        assert_eq!(
+            prepared.text_request().sampling_params.stream_interval,
             NonZeroU32::new(4)
         );
     }
@@ -501,7 +563,7 @@ mod tests {
                 &test_processor(),
             )
             .expect("prepare")
-            .text_request
+            .text_request()
             .sampling_params
             .thinking_token_budget
         };
@@ -584,8 +646,8 @@ mod tests {
         )
         .expect("prepare");
 
-        assert_eq!(prepared.options.echo, Some("hello".to_string()));
-        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+        assert_eq!(prepared.echo(), Some("hello".to_string()));
+        assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(7));
         assert!(!prepared.options.prompt_only);
     }
 
@@ -609,8 +671,8 @@ mod tests {
         .expect("prepare");
 
         assert!(prepared.options.prompt_only);
-        assert_eq!(prepared.options.echo, Some("hello".to_string()));
-        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(1));
+        assert_eq!(prepared.echo(), Some("hello".to_string()));
+        assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(1));
     }
 
     #[test]
@@ -634,9 +696,9 @@ mod tests {
         .expect("prepare");
 
         assert!(prepared.options.prompt_only);
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(3));
         assert_eq!(
-            prepared.text_request.sampling_params.prompt_logprobs,
+            prepared.text_request().sampling_params.prompt_logprobs,
             Some(3)
         );
     }
@@ -660,9 +722,9 @@ mod tests {
         )
         .expect("prepare");
 
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(3));
         assert_eq!(
-            prepared.text_request.sampling_params.prompt_logprobs,
+            prepared.text_request().sampling_params.prompt_logprobs,
             Some(3)
         );
     }
@@ -685,9 +747,9 @@ mod tests {
         )
         .expect("prepare");
 
-        assert_eq!(prepared.options.echo, Some("hello".to_string()));
+        assert_eq!(prepared.echo(), Some("hello".to_string()));
         assert_eq!(
-            prepared.text_request.prompt,
+            prepared.text_request().prompt,
             Prompt::TokenIds(vec![104, 101, 108, 108, 111])
         );
     }
@@ -706,7 +768,7 @@ mod tests {
                 &test_processor(),
             )
             .unwrap();
-            let params = prepared.text_request.sampling_params;
+            let params = &prepared.text_request().sampling_params;
             let selected = !ids.is_empty();
             assert_eq!(params.logprob_token_ids, selected.then_some(ids));
             assert_eq!(params.logprobs, (!selected).then_some(0));
@@ -732,9 +794,9 @@ mod tests {
             &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(1));
         assert_eq!(
-            prepared.text_request.sampling_params.prompt_logprobs,
+            prepared.text_request().sampling_params.prompt_logprobs,
             Some(2)
         );
     }
@@ -757,7 +819,7 @@ mod tests {
         )
         .expect("prepare full-vocabulary logprobs");
 
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(-1));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(-1));
         assert_eq!(prepared.options.requested_logprobs, Some(-1));
     }
 
@@ -779,7 +841,7 @@ mod tests {
             &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.data_parallel_rank, Some(3));
+        assert_eq!(prepared.text_request().data_parallel_rank, Some(3));
     }
 
     #[test]
@@ -803,7 +865,7 @@ mod tests {
         )
         .expect("prepare");
         assert_eq!(
-            prepared.text_request.session_id.as_deref(),
+            prepared.text_request().session_id.as_deref(),
             Some("body-session")
         );
     }
@@ -826,7 +888,7 @@ mod tests {
             &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.priority, -5);
+        assert_eq!(prepared.text_request().priority, -5);
     }
 
     #[test]
@@ -847,7 +909,7 @@ mod tests {
         )
         .expect("prepare");
         assert_eq!(
-            prepared.text_request.session_id.as_deref(),
+            prepared.text_request().session_id.as_deref(),
             Some("xargs-session")
         );
     }
@@ -870,7 +932,7 @@ mod tests {
             &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.session_id, None);
+        assert_eq!(prepared.text_request().session_id, None);
     }
 
     #[test]
@@ -889,6 +951,6 @@ mod tests {
             &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.data_parallel_rank, None);
+        assert_eq!(prepared.text_request().data_parallel_rank, None);
     }
 }

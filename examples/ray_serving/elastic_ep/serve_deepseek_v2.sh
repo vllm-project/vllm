@@ -66,6 +66,5 @@ vllm serve "$MODEL_NAME" \
     --enable-eplb \
     --all2all-backend allgather_reducescatter \
     --num-redundant-experts "$REDUNDANT_EXPERTS" \
-    --trust-remote-code \
     --host "$HOST" \
     --port "$PORT"

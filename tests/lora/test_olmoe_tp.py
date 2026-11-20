@@ -117,7 +117,6 @@ def test_olmoe_lora_mixed(olmoe_lora_files):
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         hf_overrides={"head_dtype": "float32"},
         enable_chunked_prefill=True,
     )
@@ -143,7 +142,6 @@ def test_olmoe_lora_mixed_random(
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
     )
 
@@ -171,7 +169,6 @@ def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
         fully_sharded_loras=fully_sharded_loras,
@@ -218,7 +215,6 @@ async def _run_dp2_ep(lora_path: str) -> None:
             enable_lora=True,
             max_loras=4,
             enforce_eager=True,
-            trust_remote_code=True,
             hf_overrides={"head_dtype": "float32"},
             data_parallel_size=2,
             enable_expert_parallel=True,
