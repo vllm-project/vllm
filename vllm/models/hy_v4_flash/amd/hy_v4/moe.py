@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dense FFN and MoE blocks for HY V4 (NVIDIA)."""
+"""Dense FFN and MoE blocks for HY V4 (ROCm)."""
 
 import torch
 from torch import nn

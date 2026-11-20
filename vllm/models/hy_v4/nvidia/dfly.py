@@ -335,8 +335,8 @@ class HYV4DFlyForCausalLM(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        if not current_platform.is_cuda_alike():
-            raise NotImplementedError("HYV4 DFly requires CUDA or ROCm")
+        if not current_platform.is_cuda():
+            raise NotImplementedError("HYV4 DFly currently requires NVIDIA CUDA")
         self.model = HYV4DFlyModel(vllm_config, maybe_prefix(prefix, "model"))
         self.config = self.model.config
         self.has_own_embed_tokens = False

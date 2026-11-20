@@ -5,12 +5,6 @@
 from functools import cached_property
 
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.models.hy_v4.nvidia.mm_preprocess import (
-    HYV4VLDummyInputsBuilder,
-    HYV4VLMultiModalProcessor,
-    HYV4VLProcessingInfo,
-)
-from vllm.models.hy_v4.nvidia.vl_model import HYV4VLForConditionalGeneration
 from vllm.models.hy_v4_flash.configs import HYV4FlashVLConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.processor import get_processor_kwargs_keys
@@ -19,6 +13,12 @@ from vllm.transformers_utils.processors.hy_v4 import (
     HYV4VLProcessorKwargs,
 )
 
+from .hy_v4.mm_preprocess import (
+    HYV4VLDummyInputsBuilder,
+    HYV4VLMultiModalProcessor,
+    HYV4VLProcessingInfo,
+)
+from .hy_v4.vl_model import HYV4VLForConditionalGeneration
 from .model import HYV4FlashForCausalLM, validate_runtime
 
 
