@@ -343,9 +343,7 @@ def test_ngram_embedding_loads_shards_and_ignores_legacy_token_lookup() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "case", ["complete", "missing", "duplicate", "missing_scale", "peer_missing_scale"]
-)
+@pytest.mark.parametrize("case", ["complete", "missing", "duplicate", "missing_scale"])
 def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
     module = _make_ngram_embedding_for_load_test()
     embedding = Qwen4ExpPLEPoolEmbedding.__new__(Qwen4ExpPLEPoolEmbedding)
@@ -358,17 +356,7 @@ def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
     embedding.weight_scale = nn.Parameter(torch.tensor([scale]))
     embedding.table = SimpleNamespace(row_start=2, shard=embedding.weight)
     ready = []
-    embedding.pool = SimpleNamespace(
-        group=SimpleNamespace(
-            all_gather=lambda status: [
-                status,
-                b"FP8 PLE checkpoint is missing its global scale"
-                if case == "peer_missing_scale"
-                else b"",
-            ]
-        ),
-        ready=lambda table: ready.append(table),
-    )
+    embedding.pool = SimpleNamespace(ready=lambda table: ready.append(table))
     module.ngram_embedding = embedding
     shards = [
         ("ngram_embedding.shard_0.weight", torch.zeros(4, 2)),
@@ -379,6 +367,12 @@ def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
     elif case == "duplicate":
         shards.append(shards[0])
     module.load_weights(shards)
+    if case == "missing_scale":
+        with pytest.raises(ValueError, match="missing its global scale"):
+            Qwen4ExpPLEFp8EmbeddingMethod().process_weights_after_loading(embedding)
+        assert not ready
+        return
+
     Qwen4ExpPLEFp8EmbeddingMethod().process_weights_after_loading(embedding)
     if case == "complete":
         embedding.process_weights_after_loading()
@@ -387,9 +381,7 @@ def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
         torch.testing.assert_close(embedding.weight[2:], torch.ones(2, 2))
     else:
         error = (
-            "missing its global scale"
-            if case.endswith("scale")
-            else "checkpoint validation failed"
+            "PLE rows covered through" if case == "missing" else "overlapping PLE rows"
         )
         with pytest.raises(RuntimeError, match=error):
             embedding.process_weights_after_loading()

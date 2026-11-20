@@ -266,7 +266,6 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
 class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding):
     """Serve FP8 PLE rows from shards split over an NVLink or RDMA peer group."""
 
-    validate_fp8_scale_collectively = True
     weight_reload_error = (
         "Qwen4Exp Engram pool tables cannot reload weights; restart the group"
     )
@@ -310,24 +309,13 @@ class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding):
             raise RuntimeError("Qwen4Exp PLE weight must alias its Engram pool shard")
         start = self.table.row_start
         end = start + self.table.shard.shape[0]
-        cursor, error = start, ""
+        cursor = start
         for first, last in sorted(self._loaded_ranges):
             if first != cursor:
-                error = f"missing or overlapping PLE rows at {cursor}"
-                break
+                raise RuntimeError(f"Missing or overlapping PLE rows at {cursor}")
             cursor = last
-        if not error and cursor != end:
-            error = f"PLE rows covered through {cursor}, expected {end}"
-        if not error:
-            try:
-                Qwen4ExpPLEFp8EmbeddingMethod.validate_global_scale(self)
-            except ValueError as exc:
-                error = str(exc)
-        errors = self.pool.group.all_gather(error.encode())
-        if any(errors):
-            raise RuntimeError(
-                f"Engram pool PLE checkpoint validation failed: {errors}"
-            )
+        if cursor != end:
+            raise RuntimeError(f"PLE rows covered through {cursor}, expected {end}")
         self.pool.ready(self.table)
 
     def record_checkpoint_rows(self, start: int, end: int) -> None:
@@ -823,9 +811,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 for name, _ in regular_weights:
                     if name == "ngram_embedding.weight":
                         embedding.record_checkpoint_rows(0, embedding.org_vocab_size)
-        if isinstance(embedding, Qwen4ExpPLEPoolEmbedding):
-            # Coverage is checked collectively in the pool's post-load hook.
-            loaded.add("ngram_embedding.weight")
         return loaded
 
 

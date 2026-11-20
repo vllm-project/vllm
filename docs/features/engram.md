@@ -162,7 +162,7 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
 Qwen4Exp PLE tables use ETP sharding by default. On NVIDIA they can also use
-the cross-engine NVLink pool described below.
+the cross-engine Engram pool described below.
 
 ## Sharing host tables across DP replicas
 
