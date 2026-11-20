@@ -41,6 +41,8 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
         # Queue every request before the first step, so both boots schedule
         # the same batches -- see tests/v1/e2e/general/test_sharded_sampling.py.
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        # The warm-up boot below works only through the on-disk autotune cache.
+        m.setenv("TRITON_CACHE_AUTOTUNING", "1")
 
         def run(disable_sharding: bool):
             llm = LLM(
@@ -77,6 +79,11 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
                 torch.accelerator.empty_cache()
                 cleanup_dist_env_and_memory()
                 wait_for_memory_to_settle()
+
+        # On a cold cache each TP rank autotunes the GDN Triton kernels on its
+        # own and may pick a config that sums in a different order; later boots
+        # all load one cached config. Warm the cache so the compared boots match.
+        run(disable_sharding=True)
 
         ref_greedy, ref_seeded = run(disable_sharding=True)
         shard_greedy, shard_seeded = run(disable_sharding=False)
