@@ -13,6 +13,7 @@ meta:
   related_recipes:
     - thinkingmachines/Inkling
     - thinkingmachines/Inkling-Small
+    - thinkingmachines/Inkling-2-Small-MXFP8
   hardware:
     gb200: verified
     h200: verified
@@ -63,18 +64,6 @@ variants:
       - arch:sm100
       - arch:sm103
     description: "Routed experts in NVFP4 (layers 0-39) and MXFP8 (layers 40-47); attention, routers, attention-residual queries and the LM head in BF16/FP32. ~393 GB on disk including the 3.2 GB DSpark draft. Blackwell quantizes expert activations to the same format; Hopper keeps them in BF16 (W4A16/W8A16)."
-  mxfp8:
-    model_id: "thinkingmachines/Inkling-2-Small-MXFP8"
-    precision: mxfp8
-    precision_hardware:
-      brand: NVIDIA
-    vram_minimum_gb: 747
-    supported_hardware:
-      - h200
-      - b200
-      - b300
-    tp: 8
-    description: "All routed experts in MXFP8. ~623 GB on disk including the DSpark draft. TP8 on H200, B200 and B300. Thinking Machines recommends the NVFP4 checkpoint, the native training precision; MXFP8 scores 1-2 points higher on evals."
 
 compatible_strategies:
   - single_node_tp
@@ -168,8 +157,8 @@ guide: |
   block-scaled tensor cores, so the experts run as W4A16 (NVFP4) and W8A16 (MXFP8) GEMMs
   with BF16 activations. GSM8K is 0.976 at TP4, the same as the reference.
 
-  The MXFP8 checkpoint (`thinkingmachines/Inkling-2-Small-MXFP8`) needs about 750 GB. Run it at TP8 on H200, B200
-  or B300. On H200 at TP8 it scores 0.974-0.976 on GSM8K.
+  An MXFP8 checkpoint is also available; see the
+  [Inkling 2 Small MXFP8 recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Small-MXFP8).
 
   LoRA adapters are supported on the attention projections and the routed experts. Expert
   adapters need BF16 expert weights; with the NVFP4/MXFP8 experts of this checkpoint, use
