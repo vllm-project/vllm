@@ -843,13 +843,12 @@ def _pipeline_layer_specs(partition: list[int]) -> list[list[str]]:
     ]
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = len(partition)
     kv_cache_configs = get_kv_cache_configs(
         vllm_config, layer_configs, [2**30] * len(layer_configs)
     )
     kv_cache_config = kv_cache_configs[-1]
-    kv_cache_config.pipeline_stages = get_pipeline_stages(
-        kv_cache_configs, len(partition)
-    )
+    kv_cache_config.pipeline_stages = get_pipeline_stages(vllm_config, kv_cache_configs)
     return [
         list(kv_cache_config.pipeline_layer_specs(group_id))
         for group_id in range(len(kv_cache_config.kv_cache_groups))
