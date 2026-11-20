@@ -425,7 +425,10 @@ class KernelConfig:
     - "cutlass": Use CUTLASS-based kernels
     - "flashinfer": Use FlashInfer with `backend="auto"`, letting its autotuner
       choose among the backends that share one weight layout: BF16 (SM10x),
-      FP8 per-tensor and NVFP4
+      FP8 per-tensor and NVFP4. Unquantized BF16 layers use the FlashInfer tuning
+      file shipped for the model, its TP size and the GPU architecture (see
+      `vllm/model_executor/layers/gemmbf16_configs`); without such a file, and
+      for GEMM shapes it does not contain, they use torch
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels
       (BF16, NVFP4, MXFP8, W4A16_NVFP4)

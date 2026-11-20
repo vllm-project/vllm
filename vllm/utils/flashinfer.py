@@ -47,6 +47,15 @@ _BF16_TUNING_DIR = (
     / "gemmbf16_configs"
 )
 _bf16_tuning_files_loaded = False
+# (N, K) of every GEMM the loaded tuning file has tactics for.
+_bf16_tuning_shapes: frozenset[tuple[int, int]] = frozenset()
+
+# <model>-tp<tensor parallel size>-<architecture>.json
+_BF16_TUNING_FILE_NAME = re.compile(
+    r"^(?P<model>.+)-tp(?P<tp>\d+)-(?P<arch>[a-z0-9]+)\.json$"
+)
+# The shape of a GEMM in a tuning file key: ((M, K), (K, N), ...)
+_BF16_TUNING_KEY_SHAPE = re.compile(r"\(\((\d+), (\d+)\), \((\d+), (\d+)\)")
 
 _DATACENTER_BLACKWELL_CAPABILITIES = ((10, 0), (10, 3))
 _DATACENTER_BLACKWELL_GPU_NAME = re.compile(r"NVIDIA (GB200|B200|GB300|B300)\b")
@@ -54,6 +63,11 @@ _DATACENTER_BLACKWELL_GPU_NAME = re.compile(r"NVIDIA (GB200|B200|GB300|B300)\b")
 
 def is_flashinfer_bf16_tuning_loaded() -> bool:
     return _bf16_tuning_files_loaded
+
+
+def is_flashinfer_bf16_shape_tuned(n: int, k: int) -> bool:
+    """Whether the loaded tuning file has tactics for an N x K GEMM."""
+    return (n, k) in _bf16_tuning_shapes
 
 
 def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
@@ -97,33 +111,122 @@ def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
     return path
 
 
+def _bf16_tuning_arch_matches(arch: str) -> bool:
+    """Whether a tuning file of this architecture suits the current GPU."""
+    if arch == "blackwell":
+        return (
+            current_platform.is_cuda()
+            and tuple(torch.cuda.get_device_capability())
+            in _DATACENTER_BLACKWELL_CAPABILITIES
+        )
+    return False
+
+
+def _bf16_tuning_model_matches(file_model: str, name: str) -> bool:
+    """Whether a model name is the one a tuning file was made for.
+
+    A tuning file is named after the last component of the hub id. Checkpoints
+    derived from that model (-FP8, -NVFP4, -Instruct, ...) share its BF16 GEMM
+    shapes, so a name that continues the file's model after "-", "_" or "." also
+    matches. The name may be a hub id, a local path or a served model name.
+    """
+    name = name.rstrip("/").rsplit("/", 1)[-1].lower()
+    model = file_model.lower()
+    return name == model or (name.startswith(model) and name[len(model)] in "-_.")
+
+
+def find_flashinfer_bf16_tuning_file(
+    model_names: tuple[str, ...], tp_size: int
+) -> Path | None:
+    """Return the tuning file for a model, TP size and the current GPU, if any.
+
+    Files are named <model>-tp<tp size>-<architecture>.json. When several files
+    match, the one for the longest model name wins.
+    """
+    best: Path | None = None
+    best_length = -1
+    for file in sorted(_BF16_TUNING_DIR.glob("*.json")):
+        parsed = _BF16_TUNING_FILE_NAME.match(file.name)
+        if (
+            parsed is None
+            or int(parsed["tp"]) != tp_size
+            or not _bf16_tuning_arch_matches(parsed["arch"])
+        ):
+            continue
+        model = parsed["model"]
+        if len(model) > best_length and any(
+            _bf16_tuning_model_matches(model, name) for name in model_names
+        ):
+            best, best_length = file, len(model)
+    return best
+
+
 @functools.cache
-def load_flashinfer_bf16_tuning_dir() -> None:
-    """Load every FlashInfer autotune JSON shipped in gemmbf16_configs."""
-    directory = _BF16_TUNING_DIR
-    files = sorted(directory.glob("*.json"))
-    if not files:
-        return
+def load_flashinfer_bf16_tuning(model_names: tuple[str, ...], tp_size: int) -> bool:
+    """Load the FlashInfer tuning file for a model, TP size and the current GPU.
+
+    Returns whether a file was loaded. Without one, FlashInfer has no tactics for
+    this model and the BF16 GEMMs should stay on torch.
+    """
+    file = find_flashinfer_bf16_tuning_file(model_names, tp_size)
+    if file is None:
+        logger.info(
+            "No FlashInfer BF16 tuning file for model %s with TP%d on this GPU in %s",
+            model_names[0] if model_names else "?",
+            tp_size,
+            _BF16_TUNING_DIR,
+        )
+        return False
     from flashinfer.autotuner import AutoTuner
 
-    tuner = AutoTuner.get()
-    loaded = []
-    with tempfile.TemporaryDirectory() as workdir:
-        for file in files:
-            try:
-                path = _bf16_tuning_path_for_this_gpu(file, Path(workdir))
-                if tuner.load_configs(str(path)):
-                    loaded.append(file.name)
-            except Exception as e:
-                logger.warning("Cannot load FlashInfer tuning file %s: %s", file, e)
-    global _bf16_tuning_files_loaded
-    _bf16_tuning_files_loaded = bool(loaded)
+    try:
+        with open(file) as f:
+            shapes = frozenset(
+                (int(m.group(4)), int(m.group(2)))
+                for key in json.load(f)
+                if (m := _BF16_TUNING_KEY_SHAPE.search(key))
+                and m.group(2) == m.group(3)
+            )
+        with tempfile.TemporaryDirectory() as workdir:
+            path = _bf16_tuning_path_for_this_gpu(file, Path(workdir))
+            loaded = bool(AutoTuner.get().load_configs(str(path)))
+    except Exception as e:
+        logger.warning("Cannot load FlashInfer tuning file %s: %s", file, e)
+        return False
+    if not loaded:
+        logger.warning("FlashInfer rejected the tuning file %s", file)
+        return False
+    global _bf16_tuning_files_loaded, _bf16_tuning_shapes
+    _bf16_tuning_files_loaded = True
+    _bf16_tuning_shapes = shapes
     logger.info(
-        "Loaded %d of %d FlashInfer tuning files from %s: %s",
-        len(loaded),
-        len(files),
-        directory,
-        ", ".join(loaded),
+        "Loaded FlashInfer BF16 tuning file %s with %d GEMM shapes",
+        file.name,
+        len(shapes),
+    )
+    return True
+
+
+def load_flashinfer_bf16_tuning_for_current_model() -> bool:
+    """load_flashinfer_bf16_tuning() for the model and TP size of the vLLM config."""
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.model_config is None:
+        return False
+    model_config = vllm_config.model_config
+    names = [model_config.model]
+    served = getattr(model_config, "served_model_name", None)
+    if isinstance(served, str):
+        names.append(served)
+    elif served:
+        names.extend(served)
+    name_or_path = getattr(model_config.hf_config, "_name_or_path", None)
+    if name_or_path:
+        names.append(str(name_or_path))
+    return load_flashinfer_bf16_tuning(
+        tuple(dict.fromkeys(name for name in names if name)),
+        vllm_config.parallel_config.tensor_parallel_size,
     )
 
 
@@ -1658,8 +1761,11 @@ __all__ = [
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",
-    "load_flashinfer_bf16_tuning_dir",
+    "find_flashinfer_bf16_tuning_file",
+    "load_flashinfer_bf16_tuning",
+    "load_flashinfer_bf16_tuning_for_current_model",
     "is_flashinfer_bf16_tuning_loaded",
+    "is_flashinfer_bf16_shape_tuned",
     "init_flashinfer_bf16_tuning_buckets",
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
