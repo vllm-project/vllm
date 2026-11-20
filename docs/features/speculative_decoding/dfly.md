@@ -55,8 +55,6 @@ vllm serve tencent/Hy4-flash-FP8 \
     --speculative_config '{"num_speculative_tokens":5,"method":"dfly"}'
 ```
 
-DFly with HY4 (non-Flash) targets is not supported on ROCm.
-
 Measure acceptance and latency on your own workload using the
 [acceptance metrics](acceptance_metrics.md) and
 [benchmark CLI](../../benchmarking/cli.md). This implementation does not
