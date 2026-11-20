@@ -4807,6 +4807,23 @@ def test_transfer_mode_changes_compatibility_hash():
 
 
 @pytest.mark.skip_global_cleanup
+def test_kv_cache_dtype_recipe_changes_compatibility_hash():
+    # `nvfp4_swa_fp8` and `nvfp4` share `cache_dtype="nvfp4"` but store
+    # sliding-window layers in different dtypes.
+    recipe_config = create_vllm_config(cache_dtype="nvfp4_swa_fp8")
+    nvfp4_config = create_vllm_config(cache_dtype="nvfp4")
+    assert recipe_config.cache_config.cache_dtype == "nvfp4"
+
+    recipe_hash = compute_nixl_compatibility_hash(recipe_config, "FLASHINFER")
+    nvfp4_hash = compute_nixl_compatibility_hash(nvfp4_config, "FLASHINFER")
+
+    assert recipe_hash != nvfp4_hash
+    assert recipe_hash == compute_nixl_compatibility_hash(
+        create_vllm_config(cache_dtype="nvfp4_swa_fp8"), "FLASHINFER"
+    )
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("mode", ["pull", "push"])
 @pytest.mark.parametrize(
     "tp_size,pcp_size,dcp_size,transfer_tp_size",
