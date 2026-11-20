@@ -180,7 +180,7 @@ def get_attn_backend(
             and vllm_config.model_config.rswa_window is not None
         ),
         use_hisparse=(
-            use_sparse and vllm_config.attention_config.hisparse_config is not None
+            use_sparse and vllm_config.attention_config.use_hisparse_decode_cache
         ),
     )
 

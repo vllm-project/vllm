@@ -2577,7 +2577,23 @@ def recv_worker():
     return worker
 
 
-def test_mixed_memory_read_notifies_after_both_transfers_finish(recv_worker):
+@pytest.mark.parametrize("mixed_producer", [False, True])
+def test_mixed_memory_read_notifies_after_both_transfers_finish(
+    recv_worker, mixed_producer
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RemoteDramDescriptors,
+    )
+
+    remote = (
+        _RemoteDramDescriptors(
+            31,
+            np.array([False] * 4 + [True] * 3 + [False]),
+            np.array([0, 1, 2, 3, 0, 1, 2, 4]),
+        )
+        if mixed_producer
+        else None
+    )
     worker = recv_worker
     worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
     worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
@@ -2593,19 +2609,20 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish(recv_worker):
         remote_xfer_side_handle=30,
         local_block_descs_ids=np.array([0, 2]),
         remote_block_descs_ids=np.array([5, 7]),
+        remote_dram=remote,
         notif_agent="prefill",
         notif_id=b"request:1",
     )
 
     dram_read, device_read = worker.nixl_wrapper.make_prepped_xfer.call_args_list
     assert dram_read.args[:2] == ("READ", 10)
-    assert dram_read.args[3] == 30
+    assert dram_read.args[3] == (31 if mixed_producer else 30)
     np.testing.assert_array_equal(dram_read.args[2], [0])
-    np.testing.assert_array_equal(dram_read.args[4], [5])
+    np.testing.assert_array_equal(dram_read.args[4], [1 if mixed_producer else 5])
     assert device_read.args[:2] == ("READ", 20)
     assert device_read.args[3] == 30
     np.testing.assert_array_equal(device_read.args[2], [0])
-    np.testing.assert_array_equal(device_read.args[4], [7])
+    np.testing.assert_array_equal(device_read.args[4], [4 if mixed_producer else 7])
     worker.nixl_wrapper.send_notif.assert_not_called()
 
     assert worker.get_finished() == (set(), {"request"})

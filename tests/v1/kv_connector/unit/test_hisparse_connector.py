@@ -4,6 +4,7 @@ import ctypes
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -39,6 +40,27 @@ from vllm.v1.hisparse.types import (
 )
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16])
+def test_layerwise_dma_roundtrip_respects_padded_pages_and_dirty_rows(dtype):
+    from vllm.v1.hisparse.layerwise import copy_descriptors
+
+    host = torch.arange(6 * 7 * 8).to(dtype).view(6, 7, 8)[:, :4]
+    gpu = torch.full((8, 5, 8), 3, dtype=dtype)[:, :2]
+    expected = host.clone()
+
+    def transfer(spans, to_gpu):
+        src, dst, sizes = copy_descriptors(host, gpu, np.array(spans), to_gpu)
+        for s, d, n in zip(src.tolist(), dst.tolist(), sizes.tolist(), strict=True):
+            ctypes.memmove(d, s, n)
+
+    transfer([(4, 6, 6)], True)
+    assert torch.equal(gpu[3:6].reshape(6, 8), host[1:3].reshape(8, 8)[:6])
+    gpu[5, 1].fill_(21)
+    transfer([(9, 11, 1)], False)
+    expected[2, 1].fill_(21)
+    assert torch.equal(host, expected)
 
 
 @pytest.mark.parametrize("nested", [False, True])

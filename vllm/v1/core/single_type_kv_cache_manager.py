@@ -2978,6 +2978,11 @@ class HiSparseSourceManager(FullAttentionManager):
         return super().pop_blocks_for_free(request_id)
 
 
+class HiSparsePrefillSourceManager(HiSparseSourceManager):
+    # Replaying beyond the common indexer/host hit writes fresh Main KV.
+    retains_longer_hit = False
+
+
 class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
     """Base for ephemeral groups whose host source owns prefix caching."""
 

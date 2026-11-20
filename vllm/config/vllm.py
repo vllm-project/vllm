@@ -1955,6 +1955,24 @@ class VllmConfig:
             self.attention_config.hisparse_config = HiSparseConfig()
 
         if self.attention_config.hisparse_config is not None:
+            if (
+                self.attention_config.hisparse_config.prefill_layerwise_num_buffers
+                and not (
+                    current_platform.is_cuda()
+                    and self.model_config is not None
+                    and self.model_config.enforce_eager
+                    and self.kv_transfer_config
+                    and self.kv_transfer_config.kv_role == "kv_producer"
+                    and self.parallel_config.prefill_context_parallel_size == 1
+                    and self.speculative_config is None
+                    and not self.parallel_config.use_ubatching
+                )
+            ):
+                raise ValueError(
+                    "Layerwise HiSparse requires an eager CUDA kv_producer, "
+                    "prefill context parallel size 1, and disabled ubatching "
+                    "and speculation."
+                )
             if current_platform.get_hisparse_backend_cls() is None:
                 raise ValueError("The current platform does not support HiSparse.")
             if self.parallel_config.pipeline_parallel_size > 1:
@@ -3379,6 +3397,11 @@ class VllmConfig:
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
                 "cache size, so no measurement would size the cache"
             )
+        elif (
+            self.attention_config.hisparse_config is not None
+            and self.attention_config.hisparse_config.prefill_layerwise_num_buffers
+        ):
+            unsupported = "layerwise HiSparse allocates separate fixed-size GPU buffers"
         elif KVCacheAccess.LEGACY_IPC in kv_cache_access:
             unsupported = (
                 "a KV connector (e.g. LMCacheMPConnector) shares the KV cache "

@@ -551,7 +551,7 @@ def _prims_ts_unsupported_reason(
     dims = (text_config.kv_lora_rank, text_config.qk_rope_head_dim)
     if dims != (512, 64):
         return f"(kv_lora_rank, qk_rope_head_dim) {dims} (needs (512, 64))"
-    if vllm_config.attention_config.hisparse_config is not None:
+    if vllm_config.attention_config.use_hisparse_decode_cache:
         return "HiSparse"
     if vllm_config.parallel_config.use_ubatching:
         # The shared plans and workspace serve one stream at a time.

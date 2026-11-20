@@ -885,6 +885,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_caches_by_layer = kv_caches_dict
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
+            if self.kv_cache_config.hisparse_prefill_indexer_group is not None:
+                from vllm.v1.hisparse.layerwise import attach_layerwise_hooks
+
+                attach_layerwise_hooks(self.model, self.kv_cache_config)
+
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
                 if self.aux_output_connector is None:

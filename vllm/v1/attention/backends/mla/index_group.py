@@ -348,7 +348,7 @@ class SparseMLAIndexGroupBuilder:
             group_cls = (
                 HiSparseMLAIndexGroup
                 if vllm_config is not None
-                and vllm_config.attention_config.hisparse_config is not None
+                and vllm_config.attention_config.use_hisparse_decode_cache
                 else SparseMLAIndexGroup
             )
             workspace_rows = self.max_decode_rows
