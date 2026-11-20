@@ -321,7 +321,9 @@ class ModelArchConfigConvertorBase:
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
             "hy_v4",
+            "hy_v4_flash",
             "hy_v4_mtp",
+            "hy_v4_dfly",
         ):
             # check is deepseek_v4 model
             if get_compress_ratios(self.hf_text_config):
@@ -363,6 +365,7 @@ class ModelArchConfigConvertorBase:
             "molmo2",
             "moondream3",
             "paligemma",
+            "shieldgemma2",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
@@ -873,8 +876,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
-    "RefinedWeb": FalconModelArchConfigConvertor,
-    "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
