@@ -8,7 +8,6 @@ import functools
 import json
 import os
 import sys
-import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -458,12 +457,6 @@ _IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
 )
 
 
-_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
-    "--disable-cascade-attn is deprecated and has no effect since cascade "
-    "attention has been removed. It will be removed in v0.33.0."
-)
-
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -583,7 +576,6 @@ class EngineArgs:
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
-    disable_cascade_attn: bool | None = None
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -652,6 +644,9 @@ class EngineArgs:
     )
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
+    )
+    mm_shm_cache_buffer_name: str = get_field(
+        MultiModalConfig, "mm_shm_cache_buffer_name"
     )
     mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
@@ -1006,12 +1001,6 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
-        )
-        model_group.add_argument(
-            "--disable-cascade-attn",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help=_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE,
         )
         model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
@@ -1522,6 +1511,10 @@ class EngineArgs:
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
         )
         multimodal_group.add_argument(
+            "--mm-shm-cache-buffer-name",
+            **multimodal_kwargs["mm_shm_cache_buffer_name"],
+        )
+        multimodal_group.add_argument(
             "--mm-encoder-only", **multimodal_kwargs["mm_encoder_only"]
         )
         multimodal_group.add_argument(
@@ -2000,8 +1993,6 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
-        if self.disable_cascade_attn is not None:
-            warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
         return ModelConfig(
             model=self.model,
@@ -2047,6 +2038,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_shm_cache_buffer_name=self.mm_shm_cache_buffer_name,
             mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
