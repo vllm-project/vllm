@@ -1133,39 +1133,30 @@ Options:
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    (
-        "child_support",
-        "num_lookahead",
-        "prefix_caching",
-        "disabled",
-        "expected",
-        "nested",
-        "role",
-    ),
+    ("child_support", "num_lookahead", "prefix_caching", "nested", "role"),
     [
-        ([], 1, True, False, 0, False, "SCHEDULER"),
-        ([True, True], 1, True, False, 1, False, "SCHEDULER"),
-        ([True, False], 1, True, False, 0, False, "SCHEDULER"),
-        ([True, True], 1, False, False, 1, False, "SCHEDULER"),
-        ([True, True], 2, True, False, 2, False, "SCHEDULER"),
-        ([True, True], 1, True, True, 0, False, "SCHEDULER"),
-        ([True, True], 1, True, False, 1, False, "WORKER"),
-        ([True, False], 1, True, False, 0, False, "WORKER"),
-        ([True, True], 1, True, False, 1, True, "SCHEDULER"),
-        ([True, False], 1, True, False, 0, True, "SCHEDULER"),
-        ([True, True], 1, True, False, 1, True, "WORKER"),
-        ([True, False], 1, True, False, 0, True, "WORKER"),
+        ([True, True], 1, True, False, "SCHEDULER"),
+        ([True, False], 1, True, False, "SCHEDULER"),
+        ([True, True], 1, False, False, "SCHEDULER"),
+        ([True, True], 2, True, False, "SCHEDULER"),
+        ([True, True], 1, True, False, "WORKER"),
+        ([True, False], 1, True, False, "WORKER"),
+        ([True, True], 1, True, True, "SCHEDULER"),
+        ([True, False], 1, True, True, "SCHEDULER"),
+        ([True, True], 1, True, True, "WORKER"),
+        ([True, False], 1, True, True, "WORKER"),
     ],
 )
 def test_multi_connector_children_use_configured_lookahead_hashes(
     child_support: list[bool],
     num_lookahead: int,
     prefix_caching: bool,
-    disabled: bool,
-    expected: int,
     nested: bool,
     role: str,
+    caplog_vllm,
 ):
+    """An unsupported child only warns, once on the scheduler side; every
+    connector keeps the lookahead."""
     children = [_lookahead_connector_config(supported) for supported in child_support]
     if nested:
         children = [
@@ -1182,8 +1173,12 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
         disable_hybrid_kv_cache_manager=True,
     )
     vllm_config.cache_config.enable_prefix_caching = prefix_caching
-    set_mtp_config(vllm_config, num_lookahead, disable_lookahead_block_hashes=disabled)
+    set_mtp_config(vllm_config, num_lookahead)
 
+    assert MultiConnector.supports_lookahead_block_hashes(
+        vllm_config.kv_transfer_config
+    ) == all(child_support)
+    expected = num_lookahead
     assert vllm_config.num_hash_lookahead_tokens == expected
 
     connector = KVConnectorFactory.create_connector(
@@ -1192,6 +1187,8 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
     )
 
+    warned = "does not support hash lookahead" in caplog_vllm.text
+    assert warned == (role == "SCHEDULER" and not all(child_support))
     assert isinstance(connector, MultiConnector)
     assert connector._vllm_config.num_hash_lookahead_tokens == expected
     for child in connector.sub_connectors:
