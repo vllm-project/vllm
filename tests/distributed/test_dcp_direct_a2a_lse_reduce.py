@@ -1052,8 +1052,7 @@ def _a2a_reference(
     [
         (1, torch.float32, False, False, False, torch.bfloat16),
         (13, torch.bfloat16, True, True, True, torch.float16),
-        # The whole workspace.
-        (_A2A_MAX_NUM_TOKENS, torch.float32, True, False, True, torch.bfloat16),
+        (16, torch.float16, False, True, False, torch.bfloat16),
     ],
 )
 def test_cutedsl_a2a_bit_exact_vs_cuda_op(
@@ -1093,6 +1092,25 @@ def test_cutedsl_a2a_bit_exact_vs_cuda_op(
             ranks_cute.received_signal[rank], ranks_cuda.received_signal[rank]
         )
         assert not ranks_cute.counters[rank].any()
+
+
+@_requires_cutedsl_a2a
+def test_cutedsl_a2a_full_workspace_matches_reference():
+    # CuTe DSL only: the CUDA op cannot run 8 ranks of a full workspace on one
+    # GPU, as their spinning combines need more resident blocks than it has.
+    world_size, heads_per_rank, num_tokens = 8, 12, _A2A_MAX_NUM_TOKENS
+    ranks = _SimulatedA2ARanks(world_size, heads_per_rank)
+    partial_outputs, partial_lses = _a2a_inputs(
+        world_size, heads_per_rank, num_tokens, torch.float32, True, True, seed=7
+    )
+    actual = ranks.outputs(num_tokens)
+    ranks.cutedsl(actual, partial_outputs, partial_lses, base_e=True)
+    torch.accelerator.synchronize()
+    for rank in range(world_size):
+        expected = _a2a_reference(
+            partial_outputs, partial_lses, rank, heads_per_rank, True
+        )
+        torch.testing.assert_close(actual[rank].float(), expected, rtol=2e-2, atol=2e-2)
 
 
 @_requires_cutedsl_a2a
