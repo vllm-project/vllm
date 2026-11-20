@@ -217,7 +217,7 @@ def can_initialize(
 
     from vllm.platforms import current_platform
 
-    # Flash is CUDA-only; unsupported platforms must reject initialization.
+    # Flash runs on CUDA and ROCm; other platforms must reject initialization.
     initialization_result = (
         pytest.raises(NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA")
         if model_arch
@@ -226,7 +226,7 @@ def can_initialize(
             "HYV4FlashVLForConditionalGeneration",
             "HYV4DFlyModel",
         )
-        and not current_platform.is_cuda()
+        and not current_platform.is_cuda_alike()
         else nullcontext()
     )
     with (
