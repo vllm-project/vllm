@@ -9,8 +9,12 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import VllmConfig, set_current_vllm_config
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
+from vllm.config import CUDAGraphMode, ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -163,3 +167,102 @@ def test_shard_q_round_trip(use_sm, q_dtype, num_decode_tokens):
         args=(world, get_open_port(), use_sm, q_dtype, num_decode_tokens),
         nprocs=world,
     )
+
+
+def _check_builder_shardq_route(rank, world, port):
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+    from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    torch.accelerator.set_device_index(rank)
+    device = torch.device("cuda", rank)
+    config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V3.2",
+        tensor_parallel_size=world,
+        max_model_len=4096,
+        max_num_batched_tokens=2112,
+        max_num_seqs=2,
+        num_gpu_blocks=128,
+        block_size=64,
+        dtype="bfloat16",
+    )
+    config.cache_config.cache_dtype = "fp8_ds_mla"
+    config.model_config = ModelConfig(
+        model="deepseek-ai/DeepSeek-V3.2",
+        hf_overrides={"num_attention_heads": 32},
+        dtype="bfloat16",
+        max_model_len=4096,
+    )
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    with set_current_vllm_config(config):
+        init_distributed_environment(
+            world_size=world,
+            rank=rank,
+            distributed_init_method=f"tcp://127.0.0.1:{port}",
+            local_rank=rank,
+            backend=current_platform.dist_backend,
+        )
+        ensure_model_parallel_initialized(world, 1)
+        init_workspace_manager(device)
+        try:
+            # The indexer shards the long 64-query request, while MLA classifies
+            # it as decode. MLA's remaining prefill fits within the top-k.
+            common = create_common_attn_metadata(
+                BatchSpec(seq_lens=[4096, 2048], query_lens=[64, 2048]),
+                64,
+                device,
+                arange_block_indices=True,
+            )
+            for enabled in (False, True):
+                prefix = f"layer_{enabled}"
+                with torch.device(device):
+                    layer = MLAAttention(
+                        num_heads=32 // world,
+                        scale=192**-0.5,
+                        qk_nope_head_dim=128,
+                        qk_rope_head_dim=64,
+                        v_head_dim=128,
+                        q_lora_rank=1536,
+                        kv_lora_rank=512,
+                        kv_b_proj=ColumnParallelLinear(512, 32 * 256, bias=False),
+                        cache_config=config.cache_config,
+                        prefix=prefix,
+                        attn_backend=FlashMLASparseBackend,
+                        use_sparse=True,
+                        topk_indices_buffer=torch.empty(
+                            (2112, 2048), dtype=torch.int32
+                        ),
+                        shardq_eligible=enabled,
+                    )
+                builder = FlashMLASparseBackend.get_builder_cls()(
+                    layer.get_kv_cache_config(config).spec, [prefix], config, device
+                )
+                assert layer.use_shardq == enabled
+                metadata = builder.build(0, common)
+                assert (metadata.shardq is not None) == enabled
+                assert metadata.prefill is not None
+                expected = (
+                    SparseMLAPrefillRoute.SPARSE_MQA
+                    if enabled
+                    else SparseMLAPrefillRoute.DENSE_MHA
+                )
+                assert metadata.prefill.route is expected, metadata.prefill.route
+        finally:
+            reset_workspace_manager()
+            destroy_model_parallel()
+            destroy_distributed_environment()
+
+
+def test_builder_selects_mqa_after_shardq_split():
+    """The real builder must select the route after computing the ShardQ split."""
+    world = 2
+    if not current_platform.is_cuda() or torch.accelerator.device_count() < world:
+        pytest.skip("requires two CUDA GPUs for FlashMLA ShardQ")
+    from vllm.v1.attention.ops import flashmla
+
+    supported, reason = flashmla.is_flashmla_sparse_supported()
+    if not supported:
+        pytest.skip(reason)
+    mp.spawn(_check_builder_shardq_route, args=(world, get_open_port()), nprocs=world)

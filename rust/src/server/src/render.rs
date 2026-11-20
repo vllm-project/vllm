@@ -19,10 +19,11 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
-use crate::lora::check_lora_module;
+use crate::lora::{LoraModelResolution, check_lora_module};
 use crate::model_names::ServedModelNames;
+use crate::state::AppState;
 use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
     HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
@@ -41,12 +42,13 @@ pub struct RenderConfig {
     pub hf_config: Option<ModelSource>,
     /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
     pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    pub hf_token: Option<HfToken>,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
-    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
-    pub max_n_sequences: i64,
     pub host: String,
     pub port: u16,
     /// Port for the gRPC Render service on `host`; `None` disables gRPC.
@@ -73,6 +75,8 @@ pub struct RenderConfig {
     pub dtype: Option<ModelDtype>,
     /// Maximum multimodal items per prompt for each modality.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     pub tls: Option<TlsConfig>,
 }
 
@@ -107,8 +111,6 @@ pub(crate) struct RenderState {
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
-    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
-    pub(crate) max_n_sequences: i64,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
     pub(crate) lora_modules: Vec<LoraModulePath>,
@@ -119,6 +121,51 @@ impl RenderState {
     pub(crate) fn model_names(&self) -> ServedModelNames {
         (self.served_model_names.clone())
             .with_names(self.lora_modules.iter().map(|module| module.name.clone()))
+    }
+}
+
+/// Chat and text processors shared by the engine-backed and render-only servers.
+pub(crate) trait RenderContext: Send + Sync + 'static {
+    fn chat_processor(&self) -> &ChatRequestProcessor;
+    fn text_processor(&self) -> &TextRequestProcessor;
+    /// Resolve the requested model against the served models and LoRA adapters.
+    fn resolve_model(
+        &self,
+        model: Option<&str>,
+    ) -> impl Future<Output = LoraModelResolution> + Send;
+}
+
+impl RenderContext for AppState {
+    fn chat_processor(&self) -> &ChatRequestProcessor {
+        self.chat.request_processor()
+    }
+
+    fn text_processor(&self) -> &TextRequestProcessor {
+        self.chat.text().request_processor()
+    }
+
+    async fn resolve_model(&self, model: Option<&str>) -> LoraModelResolution {
+        self.resolve_model_with_loras(model).await
+    }
+}
+
+impl RenderContext for RenderState {
+    fn chat_processor(&self) -> &ChatRequestProcessor {
+        &self.chat
+    }
+
+    fn text_processor(&self) -> &TextRequestProcessor {
+        &self.text
+    }
+
+    /// Accept LoRA adapter names as the model, like Python. Rendering does not
+    /// use the adapter, so no LoRA request is resolved; the adapter name is
+    /// passed through as the generate request's model.
+    async fn resolve_model(&self, _model: Option<&str>) -> LoraModelResolution {
+        LoraModelResolution {
+            model_names: self.model_names(),
+            lora_request: None,
+        }
     }
 }
 
@@ -147,8 +194,10 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
             skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
+            override_generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
@@ -156,6 +205,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )
     .await
@@ -197,7 +247,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         model: config.model.clone(),
         served_model_names,
         max_model_len: config.max_model_len,
-        max_n_sequences: config.max_n_sequences,
         text,
         chat,
         lora_modules: config.lora_modules.clone(),
@@ -365,10 +414,10 @@ mod tests {
                 tokenizer: None,
                 hf_config: None,
                 skip_tokenizer_init: false,
+                hf_token: None,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 skip_model_name_validation: false,
-                max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
                 host: "127.0.0.1".to_string(),
                 port: 8000,
                 grpc_port: None,
@@ -387,6 +436,7 @@ mod tests {
                 language_model_only: false,
                 dtype: None,
                 limit_mm_per_prompt: Default::default(),
+                mm_processor_kwargs: Default::default(),
                 tls: None,
             },
             shutdown,

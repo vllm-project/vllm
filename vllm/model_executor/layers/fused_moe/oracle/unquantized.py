@@ -283,7 +283,7 @@ def select_unquantized_moe_backend(
             oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
             kernel_cls, _ = oracle.try_backend(backend)
             if kernel_cls is not None:
-                logger.info_once(oracle.make_log_backend(backend, is_lora=True))
+                logger.debug_once(oracle.make_log_backend(backend, is_lora=True))
                 return backend, kernel_cls
 
         return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
@@ -306,10 +306,11 @@ def select_unquantized_moe_backend(
         return oracle.return_or_raise(UnquantizedMoeBackend.MOONEP, AVAILABLE_BACKENDS)
 
     runner_backend = moe_config.moe_backend
-    # 'humming' and 'marlin' are quantization-only; an unquantized layer (e.g.
-    # excluded via modules_to_not_convert, or an unquantized MTP draft of a
-    # quantized model) falls through to auto instead of erroring.
-    if runner_backend not in ["auto", "humming", "marlin"]:
+    # 'humming', 'marlin' and the RDNA3 int4 backends are quantization-only; an
+    # unquantized layer (e.g. excluded via modules_to_not_convert, or an
+    # unquantized MTP draft of a quantized model) falls through to auto instead
+    # of erroring.
+    if runner_backend not in ["auto", "humming", "marlin", "rdna3", "rdna3_int4_int8"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             moe_config.activation_format.is_batched
@@ -333,7 +334,7 @@ def select_unquantized_moe_backend(
             backend = UnquantizedMoeBackend.AITER
             kernel_cls, rejected = oracle.try_backend(backend)
             if kernel_cls is not None:
-                logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+                logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
                 return backend, kernel_cls
             # AITER was explicitly requested but does not support this
             # deployment configuration (e.g. a non-gated MoE activation,
@@ -360,7 +361,7 @@ def select_unquantized_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
 
     raise NotImplementedError(
