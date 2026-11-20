@@ -6,6 +6,8 @@ import json
 import openai  # use the official client for correctness check
 import pytest
 
+import vllm.envs as envs
+
 MODEL_NAME = "Qwen/Qwen3-1.7B"
 NAMESPACE = "mcp__computer_use"
 TOOL_NAME = "get_app_state"
@@ -112,3 +114,29 @@ async def test_namespace_tool_separator_streaming(
 
     assert done_call is not None
     _assert_namespace_tool_call(done_call)
+
+
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="additional_tools input items are not supported by the Rust frontend yet",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_namespace_tool_from_additional_tools_item(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    """Codex declares its tools through an `additional_tools` input item."""
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            {"type": "additional_tools", "role": "developer", "tools": tools},
+            *prompt,
+        ],
+        temperature=0.0,
+    )
+
+    tool_call = next(
+        (out for out in response.output if out.type == "function_call"), None
+    )
+    assert tool_call is not None
+    _assert_namespace_tool_call(tool_call)
