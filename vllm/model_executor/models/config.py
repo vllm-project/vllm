@@ -481,6 +481,12 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
 
         # Generic JIT warmup submits text-only requests, which DASH cannot use.
         vllm_config.kernel_config.enable_jit_warmup = False
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            logger.warning(
+                "Unlimited-OCR-2 does not support the extensible KV cache; "
+                "turning it off."
+            )
+        vllm_config.cache_config.enable_extensible_kv_cache = False
         compilation = vllm_config.compilation_config
         breakable = is_breakable_cudagraph_enabled()
         if not vllm_config.model_config.enforce_eager:
@@ -1102,7 +1108,8 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
 
-        assert config.__class__.__name__ == "NewConfig"
+        # `NewConfig` is the remote-code config, `GteConfig` the native one.
+        assert config.__class__.__name__ in ("NewConfig", "GteConfig")
         assert config.hidden_act == "gelu"
 
         config.hidden_act = "geglu"
@@ -1889,6 +1896,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
+    "GteForSequenceClassification": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
