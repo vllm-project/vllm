@@ -23,6 +23,7 @@ use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
 use crate::lora::{LoraModelResolution, check_lora_module};
 use crate::model_names::ServedModelNames;
+use crate::render_fingerprint;
 use crate::state::AppState;
 use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
@@ -108,6 +109,7 @@ fn auto_model_dtype(config_dtype: Option<ModelDtype>) -> ModelDtype {
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: ServedModelNames,
+    pub(crate) render_fingerprint: String,
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
@@ -128,6 +130,7 @@ impl RenderState {
 pub(crate) trait RenderContext: Send + Sync + 'static {
     fn chat_processor(&self) -> &ChatRequestProcessor;
     fn text_processor(&self) -> &TextRequestProcessor;
+    fn render_fingerprint(&self) -> Option<&str>;
     /// Resolve the requested model against the served models and LoRA adapters.
     fn resolve_model(
         &self,
@@ -144,6 +147,10 @@ impl RenderContext for AppState {
         self.chat.text().request_processor()
     }
 
+    fn render_fingerprint(&self) -> Option<&str> {
+        self.render_fingerprint.as_deref()
+    }
+
     async fn resolve_model(&self, model: Option<&str>) -> LoraModelResolution {
         self.resolve_model_with_loras(model).await
     }
@@ -156,6 +163,10 @@ impl RenderContext for RenderState {
 
     fn text_processor(&self) -> &TextRequestProcessor {
         &self.text
+    }
+
+    fn render_fingerprint(&self) -> Option<&str> {
+        Some(&self.render_fingerprint)
     }
 
     /// Accept LoRA adapter names as the model, like Python. Rendering does not
@@ -241,9 +252,12 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
                 .collect(),
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
+    let render_fingerprint =
+        render_fingerprint::for_render_server(config, model_dtype, &loaded.resolved_model_files)?;
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
+        render_fingerprint,
         max_model_len: config.max_model_len,
         text,
         chat,

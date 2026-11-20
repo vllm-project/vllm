@@ -13,6 +13,7 @@ mod middleware;
 mod mm_wire;
 mod model_names;
 mod render;
+mod render_fingerprint;
 mod routes;
 mod runtime;
 #[cfg(test)]

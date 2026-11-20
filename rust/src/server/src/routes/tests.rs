@@ -859,6 +859,7 @@ fn test_render_state(max_model_len: Option<u32>) -> RenderState {
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
+        render_fingerprint: "vllm-render-v1-test".to_string(),
     }
 }
 
@@ -3159,6 +3160,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             chat: ChatRequestProcessor::new(backend.clone(), None, None)
                 .with_exclude_tools_when_tool_choice_none(exclude),
             lora_modules: Vec::new(),
+            render_fingerprint: "vllm-render-v1-test".to_string(),
         }));
         let (status, json) = post_json(
             &mut app,

@@ -246,6 +246,7 @@ pub(super) async fn load_model_backends(
         options.generation_config,
         &options.override_generation_config,
     )?;
+    let resolved_model_files = files.clone();
     let tokenizer = text_backend.tokenizer();
     // Rendering and parsing a chat need a tokenizer.
     let chat_backend: DynChatBackend = if text_backend.has_tokenizer() {
@@ -263,6 +264,7 @@ pub(super) async fn load_model_backends(
     Ok(LoadedModelBackends {
         text_backend,
         chat_backend,
+        resolved_model_files,
     })
 }
 

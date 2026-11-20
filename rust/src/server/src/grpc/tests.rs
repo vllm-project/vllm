@@ -3148,6 +3148,7 @@ fn render_state_with(backend: FakeRenderBackend) -> RenderState {
     RenderState {
         model: "Qwen/Qwen3-0.6B".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        render_fingerprint: "vllm-render-v1-test".to_string(),
         max_model_len: Some(1024),
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::new(backend, None, None),
@@ -3241,6 +3242,7 @@ async fn render_chat_returns_rendered_prompt_and_reasoning_gate() {
         render_token_ids("user: Weather in Paris?\nassistant:")
     );
     assert_eq!(rendered.structured_output, None);
+    assert_eq!(rendered.render_fingerprint, "vllm-render-v1-test");
     // The engine's reasoning parser sees the same thinking mode as the template.
     let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
     assert_eq!(
