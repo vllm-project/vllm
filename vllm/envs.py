@@ -1396,14 +1396,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
         os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
     ),
-    # Run the AITER MXFP4 MoE calls that AITER's FlyDSL a8w4 experts op
-    # (`aiter.ops.flydsl.moe_a8w4_experts`) supports on it instead of
-    # `aiter.fused_moe`: hidden 5120, intermediate 2304, top-3 or top-6, at
-    # most 63 local experts, 1-1024 tokens (under expert parallelism at most
-    # 192 for top-6 and 48 for top-3), SwiGLU limit 10: DeepSeek-V4.1-Flash
-    # routed experts with the default a8w4 activations. Other calls, and AITER
-    # builds without the op, stay on `aiter.fused_moe`. gfx950 only. Disabled
-    # by default.
+    # Run the `--moe-backend aiter` MXFP4 MoE calls that AITER's FlyDSL a8w4
+    # experts op (`aiter.ops.flydsl.moe_a8w4_experts`) supports on it instead
+    # of `aiter.fused_moe`: hidden 5120, intermediate 2304, top-3 or top-6, at
+    # most 63 local experts, 1-1024 tokens (under expert parallelism only EP8,
+    # at most 160 tokens for top-6 and 96 for top-3), SwiGLU limit 10:
+    # DeepSeek-V4.1-Flash routed experts with the default a8w4 activations.
+    # Other calls, and AITER builds without the op, stay on `aiter.fused_moe`.
+    # gfx950 only. Disabled by default.
     "VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4", "False").lower()
         in ("true", "1")
