@@ -34,6 +34,30 @@ This configuration requires PP=DP=DCP=1 and does not support microbatching,
 speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
 monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
 
+
+### Experimental SM90 candidate-only PCP prefill
+
+In this prototype, DeepSeek-V4.1 can reuse the SM90 candidate-only indexer
+with replicated-cache PCP (DCP=1). It stays disabled by default. Source builds
+can opt in with `--attention-config '{"indexer_sparse_logits":true}'` and
+`--additional-config '{"candidate_pcp_prototype":true}'`.
+Use synchronous eager execution (`--no-async-scheduling --enforce-eager`),
+PP=DP=1, an FP8 indexer cache and the supported 32-head, 128-dimension geometry.
+Microbatching, speculative decoding and ShardQ are excluded.
+
+The adapter uses device absolute query positions and the PCP manager's local
+segment block tables, including duplicate segments of one request. Padding
+has zero candidate length. Short prefills, mixed/decode batches and missing
+position metadata retain dense scoring. Long-context prefill keeps the
+existing candidate-width threshold and score/top-k/address mapping kernels.
+Bounded replay reruns the candidate publisher (layer 20) on the kept query
+rows before consumer layers, so candidate rows are republished in that order.
+
+This is a metadata prototype with CPU contract tests; distributed scoring,
+model output and performance still require validation. It does not enable
+PCP with KV transfer: the model's existing PCP/P-D gate remains in force.
+An installed wheel does not load this source prototype automatically.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

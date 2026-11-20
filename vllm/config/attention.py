@@ -122,7 +122,9 @@ class AttentionConfig:
     indexer_sparse_logits: bool | None = None
     """Score only candidate blocks in the DeepSeek V4.1 two-level indexer.
     None (default) enables it on SM90 and supported SM100 configurations;
-    True forces it; False uses dense scoring. Requires no context parallelism.
+    True forces it; False uses dense scoring. DCP is unsupported.
+    SM90 PCP prefill additionally requires the experimental explicit
+    `additional_config.candidate_pcp_prototype` opt-in; auto stays off for PCP.
     SM90 uses CuTe DSL with FP8 cache and dense fallback for short prefills.
     Unsupported cache, model geometry or microbatching raises at initialization,
     including with the default None.
