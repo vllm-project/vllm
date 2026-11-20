@@ -44,7 +44,11 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.parakeet import ParakeetExtractor, ProjectedParakeet
-from vllm.model_executor.models.radio import RadioModel, calc_seq_lens
+from vllm.model_executor.models.radio import (
+    RadioModel,
+    calc_seq_lens,
+    radio_config_from_args,
+)
 from vllm.model_executor.models.utils import (
     WeightsMapper,
     init_vllm_registered_model,
@@ -88,7 +92,6 @@ from vllm.multimodal.video_prune.evs import (
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.processors.internvl import get_internvl_target_ratios
 from vllm.transformers_utils.processors.nano_nemotron_vl import (
     AUDIO_CONTEXT,
@@ -1775,32 +1778,30 @@ class NemotronH_Nano_VL_V2(
 
     def get_vit_model_from_radio_config(self, hf_config):
         hf_config_vision = hf_config.vision_config
-        model_name = hf_config_vision.args.get("model")
-        if model_name is None:
-            raise ValueError(f"Unsupported vit model type: {model_name}")
-
         preferred_resolution = getattr(hf_config_vision, "preferred_resolution", None)
         image_size = preferred_resolution[0] if preferred_resolution else 224
         patch_size = getattr(hf_config_vision, "patch_size", 16)
 
         # video_temporal_patch_size and separate_video_embedder are
         # top-level vision_config attributes, not inside args.
-        video_temporal_patch_size = getattr(
-            hf_config_vision, "video_temporal_patch_size", 1
+        video_temporal_patch_size = (
+            getattr(hf_config_vision, "video_temporal_patch_size", None) or 1
         )
-        separate_video_embedder = getattr(
+        if video_temporal_patch_size > 1 and not getattr(
             hf_config_vision, "separate_video_embedder", True
-        )
+        ):
+            raise NotImplementedError(
+                "Only separate_video_embedder=True is supported for"
+                " temporal compression (video_temporal_patch_size > 1)"
+            )
 
-        radio_config = RadioConfig(
-            model_name=model_name,
+        radio_config = radio_config_from_args(
+            hf_config_vision.args,
             image_size=image_size,
             patch_size=patch_size,
             norm_mean=hf_config.norm_mean,
             norm_std=hf_config.norm_std,
             video_temporal_patch_size=video_temporal_patch_size,
-            separate_video_embedder=separate_video_embedder,
-            **hf_config_vision.args,
         )
 
         return RadioModel(config=radio_config)

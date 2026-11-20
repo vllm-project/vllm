@@ -38,6 +38,7 @@ from vllm.entrypoints.openai.chat_completion.stream_processor import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     PromptTokenUsageInfo,
     UsageInfo,
@@ -51,7 +52,7 @@ from vllm.exceptions import (
 )
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -65,7 +66,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
+from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
 from .mm_features import (
+    mm_hashes_from_engine_input,
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
     rebuild_mm_placeholders,
@@ -91,6 +94,7 @@ from .protocol import (
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
     OutputMode,
+    RenderedGenerateResponse,
 )
 
 logger = init_logger(__name__)
@@ -164,6 +168,7 @@ class ServingTokens(GenerateBaseServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -173,8 +178,10 @@ class ServingTokens(GenerateBaseServing):
         )
         self.online_renderer = online_renderer
         self.online_derenderer = online_derenderer
+        self.render_lock = asyncio.Lock()
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
+        self.enable_force_include_usage = enable_force_include_usage
         self.force_no_detokenize = force_no_detokenize
         self.has_tokenizer = (
             not force_no_detokenize and self.renderer.tokenizer is not None
@@ -218,7 +225,12 @@ class ServingTokens(GenerateBaseServing):
         self,
         request: GenerateRequest,
         raw_request: Request | None = None,
-    ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
+    ) -> (
+        GenerateResponse
+        | RenderedGenerateResponse
+        | ErrorResponse
+        | AsyncGenerator[str, None]
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -399,10 +411,16 @@ class ServingTokens(GenerateBaseServing):
 
         # Offsets are relative to the decoder prompt, so they are not
         # meaningful for encoder-decoder models.
+        return_mm_info = (
+            request.return_token_ids and not self.model_config.is_encoder_decoder
+        )
         request._response_mm_placeholders = (
             placeholder_ranges_from_engine_input(engine_input)
-            if request.return_token_ids and not self.model_config.is_encoder_decoder
+            if return_mm_info
             else None
+        )
+        request._response_mm_hashes = (
+            mm_hashes_from_engine_input(engine_input) if return_mm_info else None
         )
 
         # Schedule the request and get the result generator.
@@ -422,7 +440,10 @@ class ServingTokens(GenerateBaseServing):
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
         # defaults ``max_tokens`` to 16, which would otherwise silently cap
         # every generation that omits the field.
-        if not request.is_sampling_param_provided("max_tokens"):
+        if (
+            not request.is_sampling_param_provided("max_tokens")
+            or sampling_params.max_tokens is None
+        ):
             sampling_params.max_tokens = get_max_tokens(
                 max_model_len=self.model_config.max_model_len,
                 max_tokens=None,
@@ -430,12 +451,30 @@ class ServingTokens(GenerateBaseServing):
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
+            if sampling_params.min_tokens > sampling_params.max_tokens:
+                return self.create_error_response(
+                    f"min_tokens must be less than or equal to "
+                    f"max_tokens={sampling_params.max_tokens}, got "
+                    f"{sampling_params.min_tokens}.",
+                    param="min_tokens",
+                )
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
         )
+        if (
+            not request.stream
+            and request.output_mode == "tokens"
+            and sampling_params.logprobs is not None
+            and sampling_params.logprobs >= 0
+            and sampling_params.prompt_logprobs is None
+        ):
+            # Keep sample logprobs as rows without decoded tokens, to render
+            # them without a Python object per entry (see logprobs_render).
+            sampling_params.flat_logprobs = True
+            sampling_params._detokenize_logprobs = False
 
         self._log_inputs(
             request_id,
@@ -500,7 +539,7 @@ class ServingTokens(GenerateBaseServing):
         model_name: str,
         request_metadata: RequestResponseMetadata,
         derender_request: ChatCompletionRequest | None = None,
-    ) -> ErrorResponse | GenerateResponse:
+    ) -> ErrorResponse | GenerateResponse | RenderedGenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
@@ -517,6 +556,7 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
+        fragments: dict[int, list[bytes]] = {}  # choice -> rendered logprobs
         tokens_choices: list[GenerateTokensChoice] = []
         text_choices: list[GenerateTextChoice] = []
         derender_choice_fields: list[dict[str, Any]] = []
@@ -538,10 +578,18 @@ class ServingTokens(GenerateBaseServing):
                         tokenizer=tokenizer,
                         top_limit=top_limit,
                     )
+                elif isinstance(out_logprobs, FlatLogprobs) and (
+                    rendered := await render_tokens_logprobs(
+                        token_ids, out_logprobs, self.render_lock
+                    )
+                ):
+                    fragments[len(tokens_choices)] = rendered
+                    logprobs = None
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
-                        top_logprobs=out_logprobs,
+                        # One pass, rather than indexing a FlatLogprobs.
+                        top_logprobs=list(out_logprobs),
                     )
             else:
                 logprobs = None
@@ -577,6 +625,7 @@ class ServingTokens(GenerateBaseServing):
             num_generated_tokens += len(output.token_ids)
 
         derender_choices: list[GenerateDerenderChoice] = []
+        completion_tokens_details: CompletionTokenUsageInfo | None = None
         if derender_mode:
             history_tool_call_cnt = (
                 request.parse_context.history_tool_call_cnt
@@ -584,7 +633,10 @@ class ServingTokens(GenerateBaseServing):
                 else 0
             )
             try:
-                parsed = await self.online_derenderer.derender_text_choices(
+                (
+                    parsed,
+                    completion_tokens_details,
+                ) = await self.online_derenderer.derender_text_choices(
                     final_res.outputs,
                     derender_request,
                     history_tool_call_cnt,
@@ -617,6 +669,7 @@ class ServingTokens(GenerateBaseServing):
             created_time,
             num_generated_tokens,
             request_metadata,
+            completion_tokens_details,
         )
         response: (
             GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse
@@ -649,6 +702,10 @@ class ServingTokens(GenerateBaseServing):
                         delta=False,
                     )
 
+        if fragments:
+            return RenderedGenerateResponse(
+                render_json_with_fragments(response.model_dump(), "logprobs", fragments)
+            )
         return response
 
     def _build_response_fields(
@@ -660,6 +717,7 @@ class ServingTokens(GenerateBaseServing):
         created_time: int,
         num_generated_tokens: int,
         request_metadata: RequestResponseMetadata,
+        completion_tokens_details: CompletionTokenUsageInfo | None = None,
     ) -> dict[str, Any]:
         """Build the fields shared by every non-streaming response level."""
         assert final_res.prompt_token_ids is not None
@@ -671,6 +729,7 @@ class ServingTokens(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            completion_tokens_details=completion_tokens_details,
         )
         if (
             self.enable_prompt_tokens_details
@@ -703,6 +762,7 @@ class ServingTokens(GenerateBaseServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             mm_placeholders=request._response_mm_placeholders,
+            mm_hashes=request._response_mm_hashes,
             metrics=per_request_metrics,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
@@ -724,6 +784,12 @@ class ServingTokens(GenerateBaseServing):
         sampling_params: SamplingParams = request.sampling_params
         # With n > 1, the first output may not include every choice yet.
         num_generated_tokens = [0] * sampling_params.n
+        output_token_ids: list[list[int]] | None = (
+            [[] for _ in range(sampling_params.n)]
+            if processors is not None
+            and self.online_derenderer.include_reasoning_tokens_details
+            else None
+        )
         last_res: RequestOutput | None = None
         derender_mode = request.output_mode == "derender"
         assert derender_mode == (processors is not None)
@@ -735,7 +801,7 @@ class ServingTokens(GenerateBaseServing):
         finish_reason_sent = [False] * sampling_params.n
 
         include_usage, include_continuous_usage = should_include_usage(
-            request.stream_options, False
+            request.stream_options, self.enable_force_include_usage
         )
 
         try:
@@ -779,6 +845,8 @@ class ServingTokens(GenerateBaseServing):
                         if finish_reason_sent[i]:
                             continue
                         processor = processors[i]
+                        if output_token_ids is not None:
+                            output_token_ids[i].extend(delta_token_ids)
                         delta, finish_reason = processor.step(
                             output.text,
                             as_list(delta_token_ids),
@@ -859,6 +927,7 @@ class ServingTokens(GenerateBaseServing):
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
                         chunk.mm_placeholders = request._response_mm_placeholders
+                        chunk.mm_hashes = request._response_mm_hashes
                         prompt_token_ids = None
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
@@ -870,7 +939,12 @@ class ServingTokens(GenerateBaseServing):
                     # Omit fields that are absent from token-bearing chunks.
                     exclude = {
                         name
-                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+                        for name in (
+                            "prompt_token_ids",
+                            "mm_placeholders",
+                            "mm_hashes",
+                            "metrics",
+                        )
                         if getattr(chunk, name) is None
                     }
                     yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
@@ -880,6 +954,13 @@ class ServingTokens(GenerateBaseServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=num_prompt_tokens + total_completion_tokens,
+                completion_tokens_details=(
+                    self.online_derenderer.stream_completion_tokens_details(
+                        processors, output_token_ids
+                    )
+                    if processors is not None and output_token_ids is not None
+                    else None
+                ),
             )
 
             if self.enable_prompt_tokens_details and num_cached_tokens is not None:
