@@ -93,10 +93,14 @@ class _InlineExecutor:
 
 
 class _PendingExecutor:
-    """A probe that has not answered yet."""
+    """Probes that answer only when a test sets their result."""
+
+    def __init__(self):
+        self.probes: list[Future] = []
 
     def submit(self, fn, *args):
-        return Future()
+        self.probes.append(Future())
+        return self.probes[-1]
 
     def shutdown(self, wait=True, cancel_futures=False):
         pass
@@ -360,6 +364,27 @@ def test_probe_is_dropped_when_its_last_request_finishes(engine):
     engine.step()
     assert request.status == RequestStatus.RUNNING
     assert not connector._write_recv_probes
+
+
+def test_probe_is_dropped_when_the_request_that_started_it_stops_waiting(engine):
+    """A probe answers for the deadline it was started at. A later deadline on
+    the same prefill probes again instead of taking an answer that may be
+    minutes old."""
+    connector = engine.scheduler.connector.connector_scheduler
+    prober = connector._write_recv_prober = _PendingExecutor()
+    first = engine.add_waiting_request()
+    engine.clock.now += TIMEOUT_S / 2
+    second = engine.add_waiting_request()
+    engine.clock.now += TIMEOUT_S / 2 + 1
+    engine.step()
+    assert len(prober.probes) == 1
+
+    engine.step(write_done=frozenset({first.request_id}))
+    prober.probes[0].set_result(True)
+    engine.clock.now += TIMEOUT_S / 2
+    engine.step()
+    assert len(prober.probes) == 2
+    assert second.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
 def test_peer_listening_tells_a_listening_socket_from_a_closed_port():
