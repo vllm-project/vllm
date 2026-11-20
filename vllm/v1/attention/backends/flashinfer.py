@@ -1309,18 +1309,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.qo_indptr_prefill = torch.zeros(
             max_num_reqs + 1, dtype=torch.int32, device=self.device
         )
-        # Fixed-address mixed-causal metadata for FULL CUDA graph replay.
+        # Fixed-address mixed-causal metadata for FULL CUDA graph replay. Only
+        # block-diffusion models send per-request causal flags.
+        mixed_causal = vllm_config.diffusion_config is not None
         self.variable_window_bounds_buf = {
             w: torch.zeros(
                 2, self.max_num_batched_tokens, dtype=torch.int32, device=self.device
             )
             for w in self.sliding_window_lefts
+            if mixed_causal
         }
         self.token_causal_buf = (
             torch.zeros(
                 self.max_num_batched_tokens, dtype=torch.bool, device=self.device
             )
-            if any(p.window_left < 0 for p in per_layer_parameters.values())
+            if mixed_causal
+            and any(p.window_left < 0 for p in per_layer_parameters.values())
             else None
         )
 
@@ -1790,6 +1794,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
         dynamic_causal = isinstance(causal, torch.Tensor)
+        assert not dynamic_causal or self.vllm_config.diffusion_config is not None
+        # Defensive: no mixed-causal model passes multimodal ranges yet.
         if (
             dynamic_causal
             and common_attn_metadata.mm_req_doc_ranges

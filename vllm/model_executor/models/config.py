@@ -743,12 +743,23 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             ):
                 raise ValueError(
                     "DiffusionGemma on FlashInfer requires the TRTLLM-Gen context "
-                    "kernel. Use --attention-backend TRITON_ATTN instead."
+                    "kernel. Use --attention-backend TRITON_ATTN (or FLASH_ATTN on "
+                    "Hopper) instead."
                 )
             if get_kv_quant_mode(vllm_config.cache_config.cache_dtype).is_nvfp4:
                 raise ValueError(
                     "DiffusionGemma on FlashInfer does not support an NVFP4 KV "
                     "cache yet."
+                )
+            if vllm_config.compilation_config.pass_config.fuse_attn_quant:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support quantized "
+                    "attention output (fuse_attn_quant) yet."
+                )
+            if vllm_config.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support decode context "
+                    "parallelism yet."
                 )
             attention_config.use_trtllm_attention = True
 
