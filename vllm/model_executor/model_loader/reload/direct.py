@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload (`VLLM_RELOAD_MODE=direct`).
+"""Direct weight reload (`VLLM_RELOAD_MODE=direct`, or `auto` where it applies).
 
 Cold start records each tensor's checkpoint layout before post-load processing
 (PWAL). `begin` views re-laid-out tensors back to that layout on their
@@ -28,7 +28,7 @@ from fnmatch import fnmatchcase
 import torch
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import (
@@ -42,10 +42,12 @@ __all__ = [
     "begin_direct_reload",
     "direct_reload_active",
     "direct_reload_enabled",
+    "direct_reload_refusal",
     "finish_direct_reload",
     "loadable_tensors",
     "mark_loaded",
     "record_checkpoint_layout",
+    "reloads_directly",
     "track_loaded_params",
 ]
 
@@ -66,9 +68,64 @@ _LOADER_ATTRS = (
 )
 
 
+def direct_reload_refusal(config: VllmConfig) -> str | None:
+    """Why direct weight reload cannot update `config`'s model, if it cannot."""
+    offload = config.offload_config
+    if (
+        offload.offload_backend != "auto"
+        or offload.prefetch.offload_group_size > 0
+        or offload.uva.cpu_offload_gb > 0
+    ):
+        # CPU/UVA offload gives parameters new storage on every post-load
+        # processing; prefetch offload shares one buffer between layers
+        return "weight offloading"
+    model_config = config.model_config
+    if model_config is not None and model_config.quantization == "torchao":
+        # post-load processing swaps the weight for a tensor subclass parameter
+        return "torchao quantization"
+    spec = config.speculative_config
+    if spec is not None and spec.draft_lm_head_quantization is not None:
+        # after `begin` the draft's quantized lm_head is a view of the target
+        # lm_head's storage: post-load processing would write it there
+        return "draft_lm_head_quantization"
+    transfer = config.weight_transfer_config
+    if transfer is not None and transfer.backend == "sharded_rdt":
+        # its replay plan is baked by a layerwise (meta) dry run
+        return "the sharded_rdt weight-transfer backend"
+    return None
+
+
 def direct_reload_enabled() -> bool:
-    """Whether weight updates reload in place (`VLLM_RELOAD_MODE=direct`)."""
-    return envs.VLLM_RELOAD_MODE == "direct"
+    """Whether a model loaded now records its checkpoint layout to reload directly."""
+    if envs.VLLM_RELOAD_MODE == "layerwise":
+        return False
+    if envs.VLLM_RELOAD_MODE == "auto":
+        config = get_current_vllm_config_or_none()
+        if config is None or config.weight_transfer_config is None:
+            return False
+        reason: str | None
+        if config.lora_config is not None:
+            # a LoRA model's lm_head is not loaded again by every update
+            reason = "LoRA"
+        else:
+            reason = direct_reload_refusal(config)
+        if reason:
+            _log_layerwise(reason)
+            return False
+    return True
+
+
+def _log_layerwise(reason: str) -> None:
+    logger.info_once(
+        "Direct reload does not support %s: weight updates reload layerwise.",
+        reason,
+        scope="process",
+    )
+
+
+def reloads_directly(model: torch.nn.Module) -> bool:
+    """Whether `model`'s updates reload directly: its cold start recorded a layout."""
+    return hasattr(model, "_ckpt_param_names")
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
@@ -157,8 +214,8 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         )
 
 
-def _check_supported_modules(model: torch.nn.Module) -> None:
-    # config-level refusals: VllmConfig._verify_direct_reload_compat
+def _module_refusal(model: torch.nn.Module) -> str | None:
+    """Why the model's modules cannot reload directly, if they cannot."""
     from vllm.model_executor.layers.quantization.humming import (
         HummingLinearMethod,
         HummingMoEMethod,
@@ -170,19 +227,22 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
 
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
+        # wrappers (input Hadamard) hold the real method as `quant_method`
+        while isinstance(
+            inner := getattr(method, "quant_method", None), QuantizeMethodBase
+        ):
+            method = inner
         # also without an online config (experts_int8); fused shared experts
         # quantize staging parameters that post-load processing deletes
         if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)) or (
             getattr(module, "shared_expert_online_loader", None) is not None
         ):
-            raise RuntimeError(
-                f"direct reload: online quantization is not supported "
-                f"({name}: {type(method).__name__})"
-            )
+            return f"online quantization ({name}: {type(method).__name__})"
         if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
             # the method, not the module): a reload would keep checkpoint bytes
-            raise RuntimeError(f"direct reload: humming is not supported ({name})")
+            return f"humming ({name})"
+    return None
 
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
@@ -191,9 +251,16 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     no other model recorded first), and which parameter names hold checkpoint
     tensors.
     Runs once; reloads reuse the cold-start record."""
-    if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
-        return  # pre-processed weights are already in runtime layout
-    _check_supported_modules(model)
+    if hasattr(model, "_ckpt_param_names"):
+        return
+    reason: str | None
+    if is_weights_pre_processed():
+        reason = "pre-processed weights"  # already in runtime layout
+    elif (reason := _module_refusal(model)) and envs.VLLM_RELOAD_MODE == "direct":
+        raise RuntimeError(f"direct reload: {reason} is not supported")
+    if reason:
+        _log_layerwise(reason)
+        return
     # what cold start loaded, every update must load again; after a dummy
     # start (nothing loaded) the first update sets it
     model._required_params = model.__dict__.pop("_loaded_params", None)

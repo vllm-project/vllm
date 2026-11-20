@@ -1,0 +1,146 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "Inkling 2 Small MXFP8"
+  slug: "inkling-2-small-mxfp8"
+  provider: "Thinking Machines Lab"
+  description: "MXFP8 checkpoint of Inkling 2 Small, the multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, and a bundled DSpark speculator."
+  date_added: 2026-11-20
+  date_updated: 2026-11-20
+  tasks:
+    - multimodal
+  related_recipes:
+    - thinkingmachines/Inkling-2-Small
+  hardware:
+    h200: verified
+
+model:
+  model_id: "thinkingmachines/Inkling-2-Small-MXFP8"
+  # Inkling2ForConditionalGeneration is not in v0.34.0; the next release at the earliest.
+  min_vllm_version: "0.35.0"
+  nightly_required: true
+  docker_image: "vllm/vllm-openai:nightly"
+  architecture: moe
+  parameter_count: "594B"
+  active_parameters: "17B"
+  context_length: 1048576
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Parse reasoning output with the Inkling reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "inkling"
+  tool_calling:
+    description: "Enable auto tool choice with the Inkling tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "inkling"
+  spec_decoding:
+    description: "DSpark speculative decoding with the draft bundled in the checkpoint: a 5-layer parallel block drafter plus a recurrent head, 7 draft tokens per step. Drafts are sampled from the draft distribution, as in the reference, which raises acceptance at temperature > 0."
+    args:
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+
+opt_in_features:
+  - tool_calling
+
+variants:
+  default:
+    precision: mxfp8
+    # Blackwell runs the experts as native MXFP8; Hopper as W8A16 (Humming GEMMs).
+    precision_hardware:
+      brand: NVIDIA
+    # 623 GB of safetensors x 1.2.
+    vram_minimum_gb: 747
+    supported_hardware:
+      - h200
+      - arch:sm100
+      - arch:sm103
+    description: "All routed experts in MXFP8; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~623 GB on disk including the DSpark draft. Blackwell quantizes expert activations to MXFP8; Hopper keeps them in BF16 (W8A16)."
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+# H200 has no cross-node NVLink for pure multi-node TP.
+strategy_hardware:
+  multi_node_tp:
+    hopper: unsupported
+
+# TP8: one 8-GPU node (H200, B200, B300) or two 4-GPU trays (GB200, GB300).
+strategy_min_gpus:
+  single_node_tp: 8
+  multi_node_tp: 8
+
+hardware_overrides: {}
+
+# Probabilistic DSpark drafting caches 7 x 201K-vocab bf16 logits per
+# sequence, so cap the batch at 256 sequences as in the NVFP4 recipe.
+strategy_overrides:
+  single_node_tp:
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--max-model-len"
+          - "1048576"
+          - "--max-num-seqs"
+          - "256"
+      # 8x H200: 62 GiB KV per GPU fits 1M (1.66M-token cache), but requests
+      # past ~800K tokens looped in tests (777K and below answered correctly).
+      hopper:
+        extra_args:
+          - "--max-model-len"
+          - "524288"
+          - "--max-num-seqs"
+          - "256"
+  # --no-numa-bind works around a headless-node startup crash with vLLM's
+  # default NUMA binding.
+  multi_node_tp:
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--max-model-len"
+          - "1048576"
+          - "--max-num-seqs"
+          - "256"
+          - "--no-numa-bind"
+
+troubleshooting:
+  - title: "AssertionError: Executable was changed during NUMA binding context"
+    when:
+      strategies: [multi_node_tp]
+    body: "On the headless node of a multi-node launch, vLLM's default NUMA binding swaps the global multiprocessing executable while workers start from concurrent threads. Launch every node with `--no-numa-bind`."
+
+guide: |
+  ## Overview
+
+  This is the MXFP8 checkpoint of [Inkling 2 Small](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Small):
+  the same model, with every routed expert in MXFP8 instead of NVFP4 (layers 0-39) and MXFP8
+  (layers 40-47). Inkling 2 Small was trained in NVFP4, and Thinking Machines recommends the
+  NVFP4 checkpoint for all use cases. MXFP8 scores 1-2 points higher on evals, at about 1.6x the
+  memory. See the NVFP4 recipe for the architecture, LoRA support, client usage and benchmarking.
+
+  ## Runtime
+
+  Inkling 2 Small is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
+  nightly wheel until it is in a vLLM release.
+
+  ## Configurations
+
+  The checkpoint needs about 750 GB, so it runs at TP8 (TP8 attention with EP8 experts): one
+  8-GPU H200, B200 or B300 node, or two GB200 or GB300 trays.
+
+  - **H200, TP8:** contexts up to 524,288 tokens. With the command above (DSpark and the
+    reasoning parser), GSM8K is 0.972-0.974 (0-shot, chat) with a DSpark acceptance length of 4.5.
+  - **Blackwell, TP8:** the full 1,048,576-token context.
+
+  On Hopper, the experts run as W8A16 GEMMs with BF16 activations.
+
+  ## References
+
+  - [Inkling 2 Small recipe (NVFP4)](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Small)
+  - [Inkling 2 Small MXFP8 on Hugging Face](https://huggingface.co/thinkingmachines/Inkling-2-Small-MXFP8)
+  - [Inkling 2 Small announcement](https://thinkingmachines.ai/news/inkling-2-small/)
