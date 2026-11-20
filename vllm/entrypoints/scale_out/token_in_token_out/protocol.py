@@ -310,6 +310,14 @@ class GenerateRequest(BaseModel):
         ),
     )
 
+    return_prompt_features: bool = Field(
+        default=False,
+        description=(
+            "For non-streaming raw multimodal requests, return the expanded "
+            "prompt token IDs and metadata-only features for an EC consumer."
+        ),
+    )
+
     output_mode: OutputMode = Field(
         default="tokens",
         description=(
@@ -379,6 +387,7 @@ class GenerateRequest(BaseModel):
         PrivateAttr(default=None)
     )
     _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
+    _response_prompt_features: MultiModalFeatures | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -664,6 +673,9 @@ class GenerateResponseBase(BaseModel):
     back with `mm_placeholders` as `features` to reuse the items without
     `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
+    features: MultiModalFeatures | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,

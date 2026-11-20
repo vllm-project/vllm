@@ -227,6 +227,33 @@ async def test_content_parts_generates_tokens(client, test_image):
     assert gen_data["prompt_token_ids"] == expanded
     assert gen_data["mm_placeholders"] == mm_placeholders
     assert gen_data["mm_hashes"] == render_data["features"]["mm_hashes"]
+    assert "features" not in gen_data
+
+
+@pytest.mark.asyncio
+async def test_content_parts_returns_forwardable_features(client, test_image):
+    """Return the rendered layout and metadata, without encoder inputs."""
+    urls = [
+        encode_image_url(test_image, format="PNG"),
+        encode_image_url(Image.new("RGB", (224, 336)), format="PNG"),
+    ]
+    rendered = await _render_image_prompt(client, *urls)
+    features = rendered["features"]
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": _collapse_placeholders(
+                rendered["token_ids"], features["mm_placeholders"]
+            ),
+            "content_parts": [{"type": "image_url", "url": url} for url in urls],
+            "sampling_params": {"max_tokens": 1, "temperature": 0.0},
+            "return_prompt_features": True,
+        },
+    )
+    response.raise_for_status()
+    result = response.json()
+    assert result["prompt_token_ids"] == rendered["token_ids"]
+    assert result["features"] == {**features, "kwargs_data": None}
 
 
 @pytest.mark.asyncio

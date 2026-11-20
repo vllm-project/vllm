@@ -68,6 +68,7 @@ from vllm.utils.serial_utils import numpy2base64
 
 from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
 from .mm_features import (
+    extract_mm_features,
     mm_hashes_from_engine_input,
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
@@ -236,6 +237,18 @@ class ServingTokens(GenerateBaseServing):
 
         self._preflight()
 
+        if request.return_prompt_features and (
+            request.stream
+            or not request.content_parts
+            or request.features is not None
+            or not self.model_config.is_multimodal_model
+            or self.model_config.is_encoder_decoder
+        ):
+            return self.create_error_response(
+                "return_prompt_features requires a non-streaming request with "
+                "raw content_parts only and a decoder-only multimodal model."
+            )
+
         lora_request = None
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
@@ -362,7 +375,7 @@ class ServingTokens(GenerateBaseServing):
                 prompt["multi_modal_uuids"] = mm_uuids
             try:
                 (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
-                    [prompt]
+                    [prompt], skip_mm_cache=request.return_prompt_features
                 )
             except PromptUpdateMismatchError as e:
                 if not features:
@@ -406,6 +419,23 @@ class ServingTokens(GenerateBaseServing):
                 prompt_embeds=None,
                 skip_mm_cache=True,
             )
+
+        if request.return_prompt_features:
+            parser = self.renderer.get_mm_processor().info.data_parser
+            try:
+                prompt_features = extract_mm_features(
+                    engine_input,
+                    metadata_fields_for=parser.placeholder_metadata_fields,
+                    mm_payload="metadata",
+                    include_empty_metadata=True,
+                )
+            except ValueError as exc:
+                return self.create_error_response(exc)
+            if prompt_features is None or prompt_features.mm_metadata is None:
+                return self.create_error_response(
+                    "No multimodal features were produced from content_parts."
+                )
+            request._response_prompt_features = prompt_features
 
         # Offsets are relative to the decoder prompt, so they are not
         # meaningful for encoder-decoder models.
@@ -757,8 +787,11 @@ class ServingTokens(GenerateBaseServing):
                 else None
             ),
             prompt_token_ids=(
-                final_res.prompt_token_ids if request.return_token_ids else None
+                final_res.prompt_token_ids
+                if request.return_token_ids or request.return_prompt_features
+                else None
             ),
+            features=request._response_prompt_features,
             mm_placeholders=request._response_mm_placeholders,
             mm_hashes=request._response_mm_hashes,
             metrics=per_request_metrics,

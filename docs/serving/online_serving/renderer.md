@@ -366,6 +366,23 @@ Single-process clients can keep passing the full render response to
 `/inference/v1/generate` unchanged; `mm_metadata` is optional and ignored
 when `kwargs_data` is present.
 
+### Return the handoff from the encoder
+
+If the coordinator can render and tokenize the conversation without processing
+media, it can send the token IDs with unexpanded media markers and the original
+media in `content_parts` directly to the encode worker's
+`/inference/v1/generate`. Set `return_prompt_features: true` on this
+non-streaming request. The encode worker processes the media and returns
+`prompt_token_ids` with expanded placeholders, plus `features` with the item
+hashes, placeholder ranges, and serialized metadata but no encoder inputs.
+
+Send those IDs as `token_ids`, the returned `features`, and the encode
+response's `ec_transfer_params` to the EC consumer's
+`/inference/v1/generate`. The consumer loads the embeddings through its EC
+connector and uses the supplied layout, so it does not render the chat or
+expand the placeholders again. The existing Chat Completions EPD path is
+unchanged.
+
 ### Payload shape
 
 #### Render response
