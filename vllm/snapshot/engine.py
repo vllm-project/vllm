@@ -21,7 +21,7 @@ class SnapshotSession:
     recovery, then releases them again for capture. The caller must not expose
     the engine to request producers until restore succeeds, and owns
     termination when a phase fails: a failed session cannot be resumed. The
-    engine must be an out-of-process ``EngineClient``; ``wait`` pause mode is
+    engine must be an out-of-process `EngineClient`; `wait` pause mode is
     not available to an in-process engine.
     """
 
