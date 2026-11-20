@@ -83,3 +83,5 @@ th:not(:first-child) {
 
 !!! note
     For information on feature support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+
+See [Pipeline activation send buffer](pipeline_send_buffer.md) for bounded PP output snapshots.
