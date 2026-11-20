@@ -123,6 +123,12 @@ miss or error, an invalid or incompatible bundle, or a D2D failure falls back
 to local compilation. A Store without a source cannot provide a compiled-cache
 cold start.
 
+The source scans compiled caches only when a shared Store is configured. If
+collecting or publishing the bundle fails, for example because the cache exceeds
+the 8 GiB limit, the source logs a warning and continues serving model weights.
+It advertises no compiled bundle, so targets use local compilation. Invalid
+Store configuration and Store initialization errors remain startup errors.
+
 For autotune tables, the exchange is keyed by the on-disk cache layout: a
 request names the cache by kind, configuration hash, DP rank and world rank,
 and the source resolves it to files under its cache root. Before installing,
@@ -451,6 +457,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   and engine. Engines reuse the processed weights and scales, including
   fused-projection scales and output padding. This does not enable ModelOpt
   block FP8, FP8 MoE, or other FP8 linear backends.
+  Serialized ModelOpt `INT8_PB_WO` linear layers can also reuse pre-processed
+  weights with the Marlin backend and FP16/BF16 activations. Humming and
+  ModelOpt INT8 MoE layers are not covered.
   Serialized `compressed-tensors` W8A8 FP8 linear layers with 128×128
   weight blocks and dynamic per-token group-128 activations support CUDA IPC
   when both processes select the CUTLASS block-FP8 backend on a supported GPU.
