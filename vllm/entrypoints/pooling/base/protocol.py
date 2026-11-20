@@ -83,7 +83,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     skip_mm_cache: bool = Field(
         default=False,
-        description=("If True, skip the multimodal processor cache for this request. "),
+        description=("If true, skip the multimodal processor cache for this request."),
     )
     # --8<-- [end:pooling-common-extra-params]
 

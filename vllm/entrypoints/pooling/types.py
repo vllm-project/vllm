@@ -146,20 +146,19 @@ class OfflineInputsContext:
     add_special_tokens: bool | None = None
     tokenization_kwargs: dict[str, Any] | None = None
 
-    # chat_template_kwargs:
-    # Tri-state: `None` means "not specified" and falls back to default
-    add_generation_prompt: bool | None = False
-    continue_final_message: bool | None = False
-    chat_template_kwargs: dict[str, Any] | None = None
-
+    # chat_params:
     chat_template: str | None = None
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    # Tri-state: `None` means "not specified" and falls back to default
+    add_generation_prompt: bool | None = None
+    continue_final_message: bool | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
 
     # mm_kwargs:
     skip_mm_cache: bool = False
     cache_salt: str | None = None
-    mm_processor_kwargs: dict[str, Any] | None = None
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
 
     def build_tok_params(
         self,

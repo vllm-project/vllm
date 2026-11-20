@@ -59,8 +59,6 @@ def _build_chat_params(
             params=params,
             default_template=default_template,
             default_template_content_format=default_format,
-            tokenizer=_make_tokenizer(),
-            model_config=_make_model_config(),
         )
         return chat_params_cls
 
