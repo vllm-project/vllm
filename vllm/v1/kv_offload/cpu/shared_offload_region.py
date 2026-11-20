@@ -62,7 +62,7 @@ def _libc_mmap() -> Callable[..., int | None]:
     return mmap_fn
 
 
-def _create_memfd(name: str, flags: int = 0) -> int | None:
+def _create_memfd(name: str, flags: int = getattr(os, "MFD_CLOEXEC", 1)) -> int | None:
     """Create an anonymous in-memory file descriptor.
 
     Falls back across Python's os.memfd_create, libc's memfd_create, and

@@ -828,6 +828,21 @@ def test_create_memfd_fallback_when_os_missing(monkeypatch):
             os.close(fd)
 
 
+@pytest.mark.parametrize("drop_os_memfd", [False, True])
+def test_create_memfd_is_not_inheritable(monkeypatch, drop_os_memfd):
+    """The reservation memfd keeps MFD_CLOEXEC like os.memfd_create's default,
+    on every fallback path."""
+    if drop_os_memfd:
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+    fd = region_module._create_memfd("test_vllm_memfd_cloexec")
+    if fd is None:
+        pytest.skip("memfd_create unavailable")
+    try:
+        assert not os.get_inheritable(fd)
+    finally:
+        os.close(fd)
+
+
 def test_segmented_region_initializes_without_os_memfd_create(iid, monkeypatch):
     """Segmented region initialization succeeds even when os.memfd_create is absent."""
     monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
