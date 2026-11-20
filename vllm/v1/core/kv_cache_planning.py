@@ -1608,7 +1608,7 @@ def resolve_mamba_block_size(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
 ) -> int | None:
-    """Mamba block size for every worker's align-mode Mamba specs, or None if
+    """Mamba block size for every worker's prefix-caching Mamba specs, or None if
     the workers already agree.
 
     Each worker sizes its Mamba blocks from the attention layers it holds, which
@@ -1616,7 +1616,7 @@ def resolve_mamba_block_size(
     size. The result is the largest size that every attention block size of the
     model is a multiple of.
     """
-    if vllm_config.cache_config.mamba_cache_mode != "align":
+    if not vllm_config.cache_config.enable_prefix_caching:
         return None
     configs = [lc for worker in layer_configs for lc in worker.values()]
     mamba_sizes = {
