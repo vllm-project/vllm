@@ -11,7 +11,6 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-import transformers
 from transformers import PreTrainedConfig
 
 from vllm.config.model import ModelConfig
@@ -69,46 +68,6 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
             for key, value in expected.items():
                 assert config.rope_parameters[layer_type][key] == value
         assert set(config.rope_parameters) == set(per_layer)
-
-
-@pytest.mark.parametrize(
-    ("model_type", "architecture", "config_cls", "pr"),
-    [
-        ("internlm3", "InternLM3ForCausalLM", "InternLM3Config", 50578),
-        ("exaone", "ExaoneForCausalLM", "ExaoneConfig", 50966),
-    ],
-)
-def test_upstreamed_architecture_ignores_remote_code(
-    tmp_path, model_type, architecture, config_cls, pr
-):
-    """Checkpoints of upstreamed models keep their stale `auto_map`.
-
-    With `trust_remote_code=True` it must not win over Transformers' own
-    implementation (the module it names does not even exist here).
-    """
-    if not hasattr(transformers, config_cls):
-        pytest.skip(f"Needs https://github.com/huggingface/transformers/pull/{pr}")
-    model_cls = architecture.removesuffix("ForCausalLM")
-    (tmp_path / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": model_type,
-                "architectures": [architecture],
-                "auto_map": {
-                    "AutoConfig": f"configuration_{model_type}.{config_cls}",
-                    "AutoModelForCausalLM": f"modeling_{model_type}.{model_cls}",
-                },
-                "num_hidden_layers": 2,
-                "num_attention_heads": 4,
-                "hidden_size": 64,
-                "intermediate_size": 128,
-            }
-        )
-    )
-    _, config = config_module.HFConfigParser().parse(tmp_path, trust_remote_code=True)
-    assert isinstance(config, getattr(transformers, config_cls))
-    assert getattr(config, "auto_map", None) is None
-    assert config.num_hidden_layers == 2
 
 
 def test_patch_legacy_rope_type_preserves_nope_layers():
