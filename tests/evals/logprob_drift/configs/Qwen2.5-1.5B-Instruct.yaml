@@ -1,0 +1,4 @@
+model_name: "Qwen/Qwen2.5-1.5B-Instruct"
+num_passages: 64
+top_k: 20
+server_args: "--max-model-len 4096"
