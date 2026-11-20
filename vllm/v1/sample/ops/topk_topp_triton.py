@@ -217,8 +217,8 @@ def run(launch: Launch, stream: int, per_call: tuple) -> None:
 
 LEVELS_OPTS = dict(num_warps=4)
 # ROCm puts a cooperative launch on a separate device queue, which slows every kernel
-# of the graph replays after it (about 10% per step), so it launches plainly. The grid
-# is sized by capacity() to fit the GPU at once, as cooperative launches check.
+# of the graph replays after it (about 10% per step), so it launches plainly. Its grid
+# of one program per CU (programs_per_sm_rocm) fits the GPU at once without that check.
 FILTER_OPTS = dict(
     num_warps=WARPS, launch_cooperative_grid=not current_platform.is_rocm()
 )
@@ -295,18 +295,31 @@ def capacity(key: tuple, args: dict) -> int:
     """Programs of the persistent kernel that fit on the GPU at once, so that the
     grid barriers cannot deadlock (the cooperative launch fails otherwise)."""
     if key not in _CAPACITY:
-        kernel = _filter_kernel.warmup(**args, **FILTER_OPTS, grid=(1,))
-        kernel._init_handles()
         props = torch.cuda.get_device_properties(key[0])
-        threads = getattr(props, "warp_size", 32) * WARPS
-        regs = getattr(props, "regs_per_multiprocessor", 65536)
-        smem = getattr(props, "shared_memory_per_multiprocessor", 228 * 1024)
-        by_regs = regs // (max(kernel.n_regs, 1) * threads)
-        by_smem = smem // (kernel.metadata.shared + 1024)
-        by_threads = props.max_threads_per_multi_processor // threads
-        fit = max(1, min(by_regs, by_smem, by_threads))
-        _CAPACITY[key] = fit * props.multi_processor_count
+        if current_platform.is_rocm():
+            progs_per_sm = programs_per_sm_rocm()
+        else:
+            progs_per_sm = programs_per_sm_cuda(props, args)
+        _CAPACITY[key] = progs_per_sm * props.multi_processor_count
     return _CAPACITY[key]
+
+
+def programs_per_sm_rocm() -> int:
+    """ROCm launches without the cooperative check and would hang on a grid that does
+    not fit, so it takes the one program that always fits a CU
+    (hipModuleOccupancyMaxActiveBlocksPerMultiprocessor could tell if more fit)."""
+    return 1
+
+
+def programs_per_sm_cuda(props, args: dict) -> int:
+    """An estimate: the cooperative launch fails if it is too high."""
+    kernel = _filter_kernel.warmup(**args, **FILTER_OPTS, grid=(1,))
+    kernel._init_handles()
+    threads = props.warp_size * WARPS
+    by_regs = props.regs_per_multiprocessor // (max(kernel.n_regs, 1) * threads)
+    by_smem = props.shared_memory_per_multiprocessor // (kernel.metadata.shared + 1024)
+    by_threads = props.max_threads_per_multi_processor // threads
+    return max(1, min(by_regs, by_smem, by_threads))
 
 
 _BUFFERS: dict[tuple[torch.device, int], dict[str, torch.Tensor]] = {}
