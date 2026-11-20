@@ -247,3 +247,47 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
         run_test(tmp_path, processor, llm, text, img, expected_len, info)
 
     print("All tests passed successfully!")
+
+
+def test_shared_storage_connector_caches_off_across_instances(tmp_path, vllm_runner):
+    """With prefix caching and the processor cache both off, a second engine
+    sharing the ExampleConnector store must not load the KV that the first
+    engine saved for a different image with the same text."""
+    images = [
+        ImageAsset("stop_sign").pil_image.resize((1280, 720)),
+        ImageAsset("cherry_blossom").pil_image.resize((1280, 720)),
+    ]
+    outputs = []
+    for image in images:
+        with vllm_runner(
+            MODEL_NAME,
+            max_model_len=8192,
+            max_num_seqs=1,
+            gpu_memory_utilization=0.4,
+            block_size=16,
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            mm_processor_cache_gb=0,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="ExampleConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+            ),
+            limit_mm_per_prompt={"image": 1},
+        ) as vllm_model:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encode_image_url(image)},
+                        },
+                        {"type": "text", "text": TEXT_PROMPTS[0]},
+                    ],
+                }
+            ]
+            outputs.append(vllm_model.llm.chat(messages, SAMPLING_PARAMS)[0])
+
+    assert outputs[1].num_cached_tokens == 0
+    assert _check_path_len(tmp_path) == 2
