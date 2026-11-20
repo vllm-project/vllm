@@ -127,12 +127,15 @@ struct SchedulerStatsHandles {
     mooncake_operation_failed_keys_total: MooncakeOperationCounterFamily,
 
     // Mooncake connector transfer telemetry, decoded from `kv_connector_stats`.
-    mooncake_xfer_time_seconds: HistogramMetric,
-    mooncake_bytes_transferred: HistogramMetric,
-    mooncake_num_descriptors: HistogramMetric,
-    mooncake_num_failed_transfers: U64Counter,
-    mooncake_num_failed_recvs: U64Counter,
-    mooncake_num_kv_expired_reqs: U64Counter,
+    // Kept as `Family`, like every connector's telemetry: a series appears once
+    // the connector first reports, rather than on every engine whether or not
+    // the connector is configured.
+    mooncake_xfer_time_seconds: Family<EngineLabels, HistogramMetric, fn() -> HistogramMetric>,
+    mooncake_bytes_transferred: Family<EngineLabels, HistogramMetric, fn() -> HistogramMetric>,
+    mooncake_num_descriptors: Family<EngineLabels, HistogramMetric, fn() -> HistogramMetric>,
+    mooncake_num_failed_transfers: Family<EngineLabels, U64Counter>,
+    mooncake_num_failed_recvs: Family<EngineLabels, U64Counter>,
+    mooncake_num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
 
     // UMBP store connector telemetry, decoded from `kv_connector_stats`.
     // Kept as `Family` like the Mooncake store telemetry: an operation's
@@ -151,15 +154,16 @@ struct SchedulerStatsHandles {
     simple_kv_offload_pending_store_blocks: Family<EngineLabels, U64Gauge>,
     simple_kv_offload_info: Family<SimpleCpuOffloadInfoLabels, U64Gauge>,
 
-    // NIXL connector telemetry, decoded from `kv_connector_stats`.
-    nixl_xfer_time_seconds: HistogramMetric,
-    nixl_post_time_seconds: HistogramMetric,
-    nixl_bytes_transferred: HistogramMetric,
-    nixl_num_descriptors: HistogramMetric,
-    nixl_num_failed_transfers: U64Counter,
-    nixl_num_failed_notifications: U64Counter,
-    nixl_num_kv_expired_reqs: U64Counter,
-    nixl_num_notifications_after_expiry: U64Counter,
+    // NIXL connector telemetry, decoded from `kv_connector_stats`. Kept as
+    // `Family` like the Mooncake transfer telemetry.
+    nixl_xfer_time_seconds: Family<EngineLabels, HistogramMetric, fn() -> HistogramMetric>,
+    nixl_post_time_seconds: Family<EngineLabels, HistogramMetric, fn() -> HistogramMetric>,
+    nixl_bytes_transferred: Family<EngineLabels, HistogramMetric, fn() -> HistogramMetric>,
+    nixl_num_descriptors: Family<EngineLabels, HistogramMetric, fn() -> HistogramMetric>,
+    nixl_num_failed_transfers: Family<EngineLabels, U64Counter>,
+    nixl_num_failed_notifications: Family<EngineLabels, U64Counter>,
+    nixl_num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
+    nixl_num_notifications_after_expiry: Family<EngineLabels, U64Counter>,
 
     // Non-Prometheus interval accumulator for periodic text-log helpers.
     log_stats: SchedulerLogStatsAccumulator,
@@ -319,16 +323,12 @@ fn resolve_scheduler_stats_handles(
         mooncake_operation_keys_total: metrics.mooncake_operation_keys_total.clone(),
         mooncake_operation_bytes_total: metrics.mooncake_operation_bytes_total.clone(),
         mooncake_operation_failed_keys_total: metrics.mooncake_operation_failed_keys_total.clone(),
-        mooncake_xfer_time_seconds: metrics.mooncake_xfer_time_seconds.get_or_create_owned(&labels),
-        mooncake_bytes_transferred: metrics.mooncake_bytes_transferred.get_or_create_owned(&labels),
-        mooncake_num_descriptors: metrics.mooncake_num_descriptors.get_or_create_owned(&labels),
-        mooncake_num_failed_transfers: metrics
-            .mooncake_num_failed_transfers
-            .get_or_create_owned(&labels),
-        mooncake_num_failed_recvs: metrics.mooncake_num_failed_recvs.get_or_create_owned(&labels),
-        mooncake_num_kv_expired_reqs: metrics
-            .mooncake_num_kv_expired_reqs
-            .get_or_create_owned(&labels),
+        mooncake_xfer_time_seconds: metrics.mooncake_xfer_time_seconds.clone(),
+        mooncake_bytes_transferred: metrics.mooncake_bytes_transferred.clone(),
+        mooncake_num_descriptors: metrics.mooncake_num_descriptors.clone(),
+        mooncake_num_failed_transfers: metrics.mooncake_num_failed_transfers.clone(),
+        mooncake_num_failed_recvs: metrics.mooncake_num_failed_recvs.clone(),
+        mooncake_num_kv_expired_reqs: metrics.mooncake_num_kv_expired_reqs.clone(),
         umbp_transfer_submitted_total: metrics.umbp_transfer_submitted_total.clone(),
         umbp_transfer_completed_total: metrics.umbp_transfer_completed_total.clone(),
         umbp_transfer_failed_total: metrics.umbp_transfer_failed_total.clone(),
@@ -342,18 +342,14 @@ fn resolve_scheduler_stats_handles(
             .simple_kv_offload_pending_store_blocks
             .clone(),
         simple_kv_offload_info: metrics.simple_kv_offload_info.clone(),
-        nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.get_or_create_owned(&labels),
-        nixl_post_time_seconds: metrics.nixl_post_time_seconds.get_or_create_owned(&labels),
-        nixl_bytes_transferred: metrics.nixl_bytes_transferred.get_or_create_owned(&labels),
-        nixl_num_descriptors: metrics.nixl_num_descriptors.get_or_create_owned(&labels),
-        nixl_num_failed_transfers: metrics.nixl_num_failed_transfers.get_or_create_owned(&labels),
-        nixl_num_failed_notifications: metrics
-            .nixl_num_failed_notifications
-            .get_or_create_owned(&labels),
-        nixl_num_kv_expired_reqs: metrics.nixl_num_kv_expired_reqs.get_or_create_owned(&labels),
-        nixl_num_notifications_after_expiry: metrics
-            .nixl_num_notifications_after_expiry
-            .get_or_create_owned(&labels),
+        nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.clone(),
+        nixl_post_time_seconds: metrics.nixl_post_time_seconds.clone(),
+        nixl_bytes_transferred: metrics.nixl_bytes_transferred.clone(),
+        nixl_num_descriptors: metrics.nixl_num_descriptors.clone(),
+        nixl_num_failed_transfers: metrics.nixl_num_failed_transfers.clone(),
+        nixl_num_failed_notifications: metrics.nixl_num_failed_notifications.clone(),
+        nixl_num_kv_expired_reqs: metrics.nixl_num_kv_expired_reqs.clone(),
+        nixl_num_notifications_after_expiry: metrics.nixl_num_notifications_after_expiry.clone(),
         labels,
     }
 }
@@ -508,21 +504,30 @@ fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiCo
 }
 
 fn record_mooncake_transfer_stats(handles: &SchedulerStatsHandles, stats: &MooncakeTransferStats) {
+    let labels = &handles.labels;
+    let xfer_time_seconds = handles.mooncake_xfer_time_seconds.get_or_create(labels);
     for value in &stats.transfer_duration {
-        handles.mooncake_xfer_time_seconds.observe(*value);
+        xfer_time_seconds.observe(*value);
     }
+    let bytes_transferred = handles.mooncake_bytes_transferred.get_or_create(labels);
     for value in &stats.bytes_transferred {
-        handles.mooncake_bytes_transferred.observe(*value as f64);
+        bytes_transferred.observe(*value as f64);
     }
+    let num_descriptors = handles.mooncake_num_descriptors.get_or_create(labels);
     for value in &stats.num_descriptors {
-        handles.mooncake_num_descriptors.observe(*value as f64);
+        num_descriptors.observe(*value as f64);
     }
     handles
         .mooncake_num_failed_transfers
+        .get_or_create(labels)
         .inc_by(stats.num_failed_transfers.iter().sum());
-    handles.mooncake_num_failed_recvs.inc_by(stats.num_failed_recvs.iter().sum());
+    handles
+        .mooncake_num_failed_recvs
+        .get_or_create(labels)
+        .inc_by(stats.num_failed_recvs.iter().sum());
     handles
         .mooncake_num_kv_expired_reqs
+        .get_or_create(labels)
         .inc_by(stats.num_kv_expired_reqs.iter().sum());
 }
 
@@ -616,19 +621,24 @@ fn record_simple_cpu_offload_stats(handles: &SchedulerStatsHandles, stats: &Simp
 }
 
 fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
+    let labels = &handles.labels;
+    let xfer_time_seconds = handles.nixl_xfer_time_seconds.get_or_create(labels);
     for value in &stats.transfer_duration {
-        handles.nixl_xfer_time_seconds.observe(*value);
+        xfer_time_seconds.observe(*value);
     }
+    let post_time_seconds = handles.nixl_post_time_seconds.get_or_create(labels);
     for value in &stats.post_duration {
-        handles.nixl_post_time_seconds.observe(*value);
+        post_time_seconds.observe(*value);
     }
+    let bytes_transferred = handles.nixl_bytes_transferred.get_or_create(labels);
     for value in &stats.bytes_transferred {
-        handles.nixl_bytes_transferred.observe(*value as f64);
+        bytes_transferred.observe(*value as f64);
     }
+    let num_descriptors = handles.nixl_num_descriptors.get_or_create(labels);
     for value in &stats.num_descriptors {
-        handles.nixl_num_descriptors.observe(*value as f64);
+        num_descriptors.observe(*value as f64);
     }
-    handles.nixl_num_failed_transfers.inc_by(
+    handles.nixl_num_failed_transfers.get_or_create(labels).inc_by(
         stats
             .num_failed_transfers
             .iter()
@@ -638,10 +648,15 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
     );
     handles
         .nixl_num_failed_notifications
+        .get_or_create(labels)
         .inc_by(stats.num_failed_notifications.iter().sum());
-    handles.nixl_num_kv_expired_reqs.inc_by(stats.num_kv_expired_reqs.iter().sum());
+    handles
+        .nixl_num_kv_expired_reqs
+        .get_or_create(labels)
+        .inc_by(stats.num_kv_expired_reqs.iter().sum());
     handles
         .nixl_num_notifications_after_expiry
+        .get_or_create(labels)
         .inc_by(stats.num_notifications_after_expiry.iter().sum());
 }
 
@@ -980,6 +995,51 @@ mod tests {
             vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="in_progress"} 1
             vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="waiting_to_start"} 3"#]]
         .assert_eq(&kv_fetch_series());
+    }
+
+    /// No NIXL or Mooncake series appear before the connector first reports,
+    /// and then only the reporting connector's. Python builds only the
+    /// configured connector's metrics, and creates its per-engine series at
+    /// startup.
+    #[test]
+    fn kv_connector_series_appear_on_first_report() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        let connector_series = || {
+            metrics
+                .render()
+                .unwrap()
+                .lines()
+                .filter(|line| {
+                    (line.starts_with("vllm:nixl_") || line.starts_with("vllm:mooncake_"))
+                        && !line.contains("_bucket{")
+                })
+                .sorted()
+                .join("\n")
+        };
+
+        expect![[""]].assert_eq(&connector_series());
+
+        let stats = SchedulerStats {
+            kv_connector_stats: Some(KvConnectorStats::Nixl(nixl_stats())),
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        expect![[r#"
+            vllm:nixl_bytes_transferred_count{model_name="model",engine="0"} 2
+            vllm:nixl_bytes_transferred_sum{model_name="model",engine="0"} 12288.0
+            vllm:nixl_num_descriptors_count{model_name="model",engine="0"} 2
+            vllm:nixl_num_descriptors_sum{model_name="model",engine="0"} 6.0
+            vllm:nixl_num_failed_notifications_total{model_name="model",engine="0"} 1
+            vllm:nixl_num_failed_transfers_total{model_name="model",engine="0"} 2
+            vllm:nixl_num_kv_expired_reqs_total{model_name="model",engine="0"} 1
+            vllm:nixl_num_notifications_after_expiry_total{model_name="model",engine="0"} 2
+            vllm:nixl_post_time_seconds_count{model_name="model",engine="0"} 2
+            vllm:nixl_post_time_seconds_sum{model_name="model",engine="0"} 0.003
+            vllm:nixl_xfer_time_seconds_count{model_name="model",engine="0"} 2
+            vllm:nixl_xfer_time_seconds_sum{model_name="model",engine="0"} 0.03"#]]
+        .assert_eq(&connector_series());
     }
 
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.
