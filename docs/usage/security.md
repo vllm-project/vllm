@@ -294,6 +294,10 @@ Certain API request parameters can have a large impact on resource consumption a
 
 To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
 
+On the Python frontend, `/v1/responses` and `/v1/responses/render` stop validating
+the `input` list at the first invalid item and return HTTP 400. The error may
+include several details for that item.
+
 ### Recommendations
 
 - **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
