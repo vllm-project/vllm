@@ -75,3 +75,48 @@ def test_systemone_answers_130_options_without_flags(server):
     answer = response.json()["answers"]["big"]
     assert answer["choice"] in criteria
     assert set(answer["probabilities"]) == set(criteria)
+
+
+def test_systemone_answers_the_mixed_130_and_5_request(server):
+    # The review's mixed request: 130 options next to 5 in one read, the
+    # case that 500'd on the removed V1 runner and still mixes
+    # LogprobTokenIdsState rows on V2.
+    criteria = {f"opt{i}": f"outcome {i}" for i in range(130)}
+    small = {
+        "yes": "a refund is owed",
+        "no": "nothing is owed",
+        "maybe": "unclear",
+        "other": "something else",
+    }
+    response = httpx.post(
+        server.url_for("v1", "systemone"),
+        json={
+            "model": MODEL,
+            "state": "The customer was billed twice for the same order.",
+            "questions": {
+                "big": {
+                    "type": "choice",
+                    "instructions": "Which outcome fits the ticket?",
+                    "criteria": criteria,
+                },
+                "small": {
+                    "type": "choice",
+                    "instructions": "Is a refund owed?",
+                    "criteria": small,
+                },
+            },
+        },
+        timeout=120,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    big = body["answers"]["big"]
+    assert set(big["probabilities"]) == set(criteria)
+    assert big["choice"] in criteria
+    assert set(body["answers"]["small"]["probabilities"]) == set(small)
+    # The probabilities are a softmax over the labels, so they sum to one
+    # by construction; the diagnostics carry the labels' share over the
+    # whole vocabulary, which is at most one.
+    assert sum(big["probabilities"].values()) == pytest.approx(1.0, abs=1e-3)
+    for qid in ("big", "small"):
+        assert 0.0 < body["diagnostics"][qid]["label_mass"] <= 1.0 + 1e-3
