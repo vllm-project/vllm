@@ -34,20 +34,25 @@ release them, and a finished request holds them under the KV lease
 (`kv_lease_duration`), which D's heartbeats extend.
 
 * While the request runs, each step's newly computed prompt blocks are written
-  to D once the step's event completes. D decodes once the normal
-  completion notification arrives, so it must follow all of the request's
-  data: it rides on the WRITE of the last prompt block, which is submitted only
-  after the request's earlier WRITEs have completed successfully.
-* When the request finishes, the existing whole-request path reports it once
-  its last chunk WRITE completed. If a chunk was not written (D not handshaked
-  yet, an incompatible peer or a failed WRITE), the whole request is written
-  instead; if D has not registered yet, the request waits for its registration
-  as a whole-request push does.
+  to D once the step's event completes, without a notification.
+* D decodes once the normal completion notification arrives, so it must follow
+  all of the request's data. The writer sends it with `send_notif` once the
+  last prompt block's WRITE has been submitted and every WRITE of the request
+  is `DONE`. A notification attached to a WRITE would be sent when the UCX
+  endpoint flush completes, which some UCX versions report before all of an
+  SGL WRITE's data is posted.
+* When the request finishes, the existing whole-request path reports it once D
+  has been notified. If a chunk was not written and D was not notified (D not
+  handshaked yet, an incompatible peer or a failed WRITE), the whole request
+  is written instead; if D has not registered yet, the request waits for its
+  registration as a whole-request push does. D is notified at most once: if
+  sending the notification fails, it may still have reached D, so the request
+  is left to the lease, as a failed whole-request push is.
 * When the request is preempted or aborted, `handle_preemptions` drops its
   queued chunk jobs and waits for its submitted WRITEs before the blocks can be
   reused. A preempted request is pushed again from the first block once
   recomputed, so D's blocks end up holding a single complete version before
-  the notification. If its last chunk already handed it off to D, which async
+  the notification. If D was already notified, which async
   scheduling allows before the request finishes, nothing is pushed again.
 
 D only reads its blocks after the completion notification, so the D-side

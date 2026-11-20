@@ -87,8 +87,10 @@ class _ChunkRequestState:
     pending_jobs: int = 0
     # A job was not written to D.
     failed: bool = False
-    # The WRITE of the last prompt block, which carries the completion
-    # notification, was submitted.
+    # The job of the last prompt block was submitted.
+    last_submitted: bool = False
+    # The completion notification was sent to D, which then decodes. It is
+    # sent once, after every WRITE of the request has completed.
     notified: bool = False
     # Set once the request's state is dropped; its remaining jobs are skipped.
     retired: bool = False
@@ -409,6 +411,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 if self._chunked_push:
                     self._process_chunk_jobs()
                     self._poll_chunk_transfers()
+                    self._notify_completed_chunk_requests()
                     self._process_chunk_handoffs()
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
@@ -538,15 +541,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # The request is pushed whole when it finishes.
             self._finish_chunk_job(task)
             return
-        # D decodes once the completion notification arrives, so it must
-        # follow all of the request's data. It rides on the WRITE of the
-        # last block, submitted once every earlier WRITE of the request
-        # has completed; if one failed, the request is pushed whole when it
-        # finishes.
-        last = job.end_block == job.total_blocks
-        if last and state.pending_jobs > 1:
-            self._chunk_deferred.append(task)
-            return
 
         if state.reg_data is None:
             state.reg_data = self._pop_matching_registration(job.request_id)
@@ -576,9 +570,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         handles: list[TransferHandle] = []
         failed = False
-        notify = last
         try:
-            handles = self._submit_chunk_job(job, reg_data, notify=notify)
+            handles = self._submit_chunk_job(job, reg_data)
         except Exception:
             logger.exception("NIXL chunk push submission failed for %s", job.request_id)
             failed = True
@@ -586,9 +579,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             if job.request_id in self._send_failures:
                 self._send_failures.discard(job.request_id)
                 failed = True
+        state.last_submitted |= job.end_block == job.total_blocks
         if handles:
             state.failed |= failed
-            state.notified = notify
             transfer_id = f"{job.request_id}:{self._next_chunk_transfer_id}"
             self._next_chunk_transfer_id += 1
             self._chunk_transfers[transfer_id] = handles
@@ -597,14 +590,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._finish_chunk_job(task, failed=failed)
 
     def _submit_chunk_job(
-        self,
-        job: NixlPushChunkJob,
-        reg_data: dict[str, Any],
-        *,
-        notify: bool,
+        self, job: NixlPushChunkJob, reg_data: dict[str, Any]
     ) -> list[TransferHandle]:
-        """WRITE the job's blocks that fall in D's uncached suffix, with the
-        request's completion notification if `notify`."""
+        """WRITE the job's blocks that fall in D's uncached suffix, without a
+        notification."""
         remote_groups = self._as_grouped_block_ids(reg_data["local_block_ids"])
         ranges = self._chunk_block_ranges(job, len(remote_groups[0]))
         if ranges is None:
@@ -615,7 +604,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             (job.block_ids[local_range],),
             (list(remote_groups[0][remote_range]),),
             reg_data,
-            notify=notify,
+            notify=False,
         )
 
     @staticmethod
@@ -636,6 +625,44 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _finish_chunk_job(self, task: _ChunkTask, failed: bool = False) -> None:
         task.state.pending_jobs -= 1
         task.state.failed |= failed
+
+    def _notify_completed_chunk_requests(self) -> None:
+        """Send D the completion notification of each request whose WRITEs
+        have all completed. D decodes once it arrives, so it must follow all
+        of the request's data: a WRITE that is DONE on P has landed on D,
+        whereas a notification attached to a WRITE is sent on the flush,
+        which some UCX versions complete before all of an SGL WRITE's data
+        is posted. The notification is sent once the last prompt block's job
+        has been submitted and no job is pending."""
+        for req_id, state in self._chunk_states.items():
+            if (
+                state.notified
+                or state.failed
+                or not state.last_submitted
+                or state.pending_jobs > 0
+            ):
+                continue
+            assert state.reg_data is not None
+            # Set first: a send that raises may still have reached D.
+            state.notified = True
+            try:
+                self._send_completion_notif(state.reg_data)
+            except Exception:
+                logger.exception(
+                    "NIXL chunk push completion notification failed for %s", req_id
+                )
+                state.failed = True
+
+    def _send_completion_notif(self, reg_data: dict[str, Any]) -> None:
+        """Notify each D rank written to that the request's KV cache is
+        complete, as the notification attached to a whole-request push
+        WRITE does."""
+        engine_id = reg_data["decode_engine_id"]
+        agents = self._remote_agents[engine_id]
+        pp_rank = self._single_remote_stage(engine_id).pp_rank
+        notif = f"{reg_data['request_id']}:{self.world_size}".encode()
+        for rank in self.tp_mappings[engine_id].all_source_ranks:
+            self.nixl_wrapper.send_notif(agents[(pp_rank, rank)], notif_msg=notif)
 
     def _set_chunk_finished(self, req_id: ReqId, block_ids: BlockIds) -> bool:
         """Record that a request with chunk jobs finished; its hand-off then
@@ -660,18 +687,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 continue
             self._drop_chunk_request(req_id)
             assert state.finished_blocks is not None
-            if state.notified and not state.failed:
-                # The last chunk's WRITE carried the completion notification:
-                # report the request like a whole-request push whose WRITEs
-                # completed.
-                with self._sending_transfers_lock:
-                    self._sending_transfers[req_id] = []
+            if state.notified:
+                # D was notified after all of the request's WRITEs completed.
+                # With no handle left in `_sending_transfers`,
+                # `get_transfer_results` reports the request as a
+                # whole-request push whose WRITEs completed. If sending the
+                # notification failed, it may still have reached D, so as for
+                # a failed whole-request push the request is left to the lease.
+                if not state.failed:
+                    with self._sending_transfers_lock:
+                        self._sending_transfers[req_id] = []
             elif state.reg_data is None:
                 # D has not registered yet: push the whole request on arrival.
                 self._push_finished_blocks[req_id] = state.finished_blocks
             else:
-                # A chunk was not written. A failed notifying WRITE sent no
-                # notification, so pushing the whole request is safe.
+                # A chunk was not written and D was not notified: push the
+                # whole request.
                 self._do_start_push_kv(req_id, state.finished_blocks, state.reg_data)
 
     # --- D-side registration send (writer thread) ---------------------- #
@@ -1179,11 +1210,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 for task in self._chunk_transfer_tasks.values()
             ):
                 continue
-            for req_id in retirement.preempted:
-                state = self._chunk_states.get(req_id)
-                # A notifying WRITE that failed did not hand the request off.
-                if state is not None and state.notified and state.failed:
-                    self._restart_chunk_request(req_id)
             self._chunk_retirements.remove(retirement)
             retirement.done.set()
 

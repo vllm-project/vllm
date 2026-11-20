@@ -275,9 +275,8 @@ class ReqMeta:
 @dataclass(frozen=True)
 class NixlPushChunkJob:
     """Prompt blocks `[start_block, end_block)` of a running request, with
-    their ids in its full-attention block table. The job that ends at
-    `total_blocks`, the prompt's block count, carries the request's
-    completion notification to D; the others carry none.
+    their ids in its full-attention block table. `total_blocks` is the
+    prompt's block count; the job that ends there is the request's last.
     """
 
     request_id: ReqId

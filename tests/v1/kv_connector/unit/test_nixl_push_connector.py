@@ -552,7 +552,8 @@ def _chunk_job(start_block: int, end_block: int) -> NixlPushChunkJob:
 def _chunk_worker() -> _StubWriterWorker:
     """A chunked-push worker for request "req-p", whose D side "req-d" has
     registered blocks 100 and 101 and is handshaked. WRITEs are recorded as
-    (local blocks, remote blocks, notify)."""
+    (local blocks, remote blocks, notify), and completion notifications as
+    D's request id."""
     w = _StubWriterWorker.fresh()
     w._chunked_push = True
     w._pending_d_registrations["req-p"] = _registration_data(
@@ -571,7 +572,17 @@ def _chunk_worker() -> _StubWriterWorker:
         return [len(w.writes)]
 
     w._xfer_blocks_for_req = xfer
+    w.notifs = []
+    w._send_completion_notif = lambda reg_data: w.notifs.append(reg_data["request_id"])
     return w
+
+
+def _run_writer_pass(w: _StubWriterWorker) -> None:
+    """The chunk steps of one writer pass."""
+    w._process_chunk_jobs()
+    w._poll_chunk_transfers()
+    w._notify_completed_chunk_requests()
+    w._process_chunk_handoffs()
 
 
 def _publish(w: _StubWriterWorker, *jobs: NixlPushChunkJob, ready: bool = True):
@@ -603,34 +614,66 @@ def _run_writer_until_idle(w: _StubWriterWorker) -> None:
         t.join(timeout=2)
 
 
-def test_last_chunk_waits_for_earlier_writes_and_carries_notification():
+def test_d_is_notified_once_every_write_is_done():
     w = _chunk_worker()
     w.nixl_wrapper.check_xfer_state.return_value = "PROC"
     _publish(w, _chunk_job(0, 1), _chunk_job(1, 2))
-    w._process_chunk_jobs()
-    assert w.writes == [(([1],), ([100],), False)]
+    _run_writer_pass(w)
+    # The last chunk does not wait for the earlier one, and no WRITE notifies.
+    assert w.writes == [(([1],), ([100],), False), (([2],), ([101],), False)]
     assert "decode-engine" in w._engine_last_active
+    assert w.notifs == []
 
     w.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    w._poll_chunk_transfers()
-    w._process_chunk_jobs()
-    assert w.writes[1:] == [(([2],), ([101],), True)]
+    _run_writer_pass(w)
+    _run_writer_pass(w)
+    assert w.notifs == ["req-d"]
 
 
-def test_handed_off_request_is_reported_once_it_finishes():
+def test_d_is_not_notified_before_the_last_chunk():
     w = _chunk_worker()
     w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    _publish(w, _chunk_job(0, 1))
+    _run_writer_pass(w)
+    # The first chunk is done, but the rest of the prompt is not computed yet.
+    assert w.notifs == []
+
+    _publish(w, _chunk_job(1, 2))
+    _run_writer_pass(w)
+    assert w.notifs == ["req-d"]
+
+
+def test_completion_notif_goes_to_each_d_rank_written():
+    w = _StubWriterWorker.fresh()
+    w.nixl_wrapper = MagicMock()
+    w.world_size = 2
+    w._remote_agents["decode-engine"] = {(0, 0): "agent-0", (0, 1): "agent-1"}
+    w.tp_mappings = {"decode-engine": MagicMock(all_source_ranks=[1])}
+    w._single_remote_stage = lambda engine_id: MagicMock(pp_rank=0)
+    w._send_completion_notif(_registration_data("req-d"))
+    w.nixl_wrapper.send_notif.assert_called_once_with("agent-1", notif_msg=b"req-d:2")
+
+
+@pytest.mark.parametrize("notification", ["sent", "failed"])
+def test_notified_request_is_not_pushed_again(notification):
+    # D is notified at most once. A request whose notification was sent is
+    # reported as a whole-request push whose WRITEs completed; one whose
+    # notification raised may have notified D anyway, so it is left to the
+    # lease, as a failed whole-request push is.
+    w = _chunk_worker()
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    if notification == "failed":
+        w._send_completion_notif = MagicMock(side_effect=RuntimeError("send"))
     _publish(w, _chunk_job(0, 2))
-    w._process_chunk_jobs()
-    w._poll_chunk_transfers()
+    _run_writer_pass(w)
     assert "req-p" not in w._sending_transfers
 
-    # Reported with no further WRITE, as a whole-request push whose WRITEs
-    # completed.
     w._set_chunk_finished("req-p", ([1, 2],))
     w._process_chunk_handoffs()
-    assert w._sending_transfers["req-p"] == []
-    assert len(w.writes) == 1
+    assert w.start_push_calls == []
+    assert "req-p" not in w._push_finished_blocks
+    assert "req-p" not in w._chunk_states
+    assert w._sending_transfers.get("req-p") == ([] if notification == "sent" else None)
 
 
 def test_job_that_raises_fails_only_its_request():
@@ -644,7 +687,7 @@ def test_job_that_raises_fails_only_its_request():
     _publish(w, _chunk_job(0, 2), other)
     w._process_chunk_jobs()
     assert w._chunk_states["req-p"].failed
-    assert w.writes == [(([5],), ([200],), True)]
+    assert w.writes == [(([5],), ([200],), False)]
 
 
 @pytest.mark.parametrize(
@@ -684,11 +727,18 @@ def _fail_writes(w: _StubWriterWorker) -> None:
     w.nixl_wrapper.check_xfer_state.return_value = "ERR"
 
 
-@pytest.mark.parametrize("cause", ["failed_write", "incompatible_peer", "no_handshake"])
+@pytest.mark.parametrize(
+    "cause",
+    ["failed_write", "failed_submission", "incompatible_peer", "no_handshake"],
+)
 def test_request_with_an_unwritten_chunk_is_pushed_whole(cause):
     w = _chunk_worker()
     if cause == "failed_write":
         _fail_writes(w)
+    elif cause == "failed_submission":  # `transfer` raised, handle released
+        w._xfer_blocks_for_req = lambda req_id, meta, notify=True: (
+            w._send_failures.add(req_id) or []
+        )
     elif cause == "incompatible_peer":  # e.g. a decode peer with a different TP
         w._chunk_path_supported = lambda job, reg_data: False
     else:  # D is not handshaked yet
@@ -697,9 +747,11 @@ def test_request_with_an_unwritten_chunk_is_pushed_whole(cause):
     w._process_chunk_jobs()
     w._poll_chunk_transfers()
     w._process_chunk_jobs()
-    # The rest of the request is not written, as it is pushed whole.
-    assert len(w.writes) == (1 if cause == "failed_write" else 0)
+    w._notify_completed_chunk_requests()
+    # Once a chunk fails, the rest is not written, as it is pushed whole.
+    assert len(w.writes) == (2 if cause == "failed_write" else 0)
     assert not any(notify for _, _, notify in w.writes)
+    assert w.notifs == []
 
     w._set_chunk_finished("req-p", ([1, 2],))
     w._process_chunk_handoffs()
@@ -771,29 +823,27 @@ def test_retired_request_settles_its_writes_and_drops_its_jobs(preempted):
     assert settled.is_set()
     assert len(w.writes) == 1
 
-    if preempted:
-        # The recomputed prompt is pushed again from the first block.
-        _publish(w, _chunk_job(0, 2))
-        w._process_chunk_jobs()
-        assert w.writes[1:] == [(([1, 2],), ([100, 101],), True)]
 
-
-@pytest.mark.parametrize("handed_off", [True, False])
-def test_request_preempted_during_its_handoff(handed_off):
+@pytest.mark.parametrize("notified", [False, True])
+def test_preempted_request_is_pushed_again_unless_d_was_notified(notified):
     w = _chunk_worker()
-    _fail_writes(w)
-    w.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE" if notified else "PROC"
     _publish(w, _chunk_job(0, 2))
-    w._process_chunk_jobs()
+    _run_writer_pass(w)
     settled = _retire(w, preempted=True)
-    w.nixl_wrapper.check_xfer_state.return_value = "DONE" if handed_off else "ERR"
-    w._poll_chunk_transfers()
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    _run_writer_pass(w)
     assert settled.is_set()
+    # D is notified only for a computation whose WRITEs all completed before
+    # the preemption.
+    assert w.notifs == (["req-d"] if notified else [])
 
-    # Once handed off, the recomputed prompt is not pushed again.
+    # D may already be decoding once notified, so the recomputed prompt is
+    # pushed again only if it was not.
     _publish(w, _chunk_job(0, 2))
-    w._process_chunk_jobs()
-    assert len(w.writes) == (1 if handed_off else 2)
+    _run_writer_pass(w)
+    assert len(w.writes) == (1 if notified else 2)
+    assert w.notifs == ["req-d"]
 
 
 def test_evicted_request_drops_its_chunk_jobs():
