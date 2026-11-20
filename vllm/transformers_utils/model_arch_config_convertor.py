@@ -83,7 +83,10 @@ class ModelArchConfigConvertorBase:
         return getattr(self.hf_text_config, "num_attention_heads", 0)
 
     def get_vocab_size(self) -> int:
-        return getattr(self.hf_text_config, "vocab_size", 0)
+        # Some configs (e.g. Inkling) give the padded embedding size as `vocab_size`
+        text_config = self.hf_text_config
+        unpadded = getattr(text_config, "unpadded_vocab_size", None)
+        return unpadded or getattr(text_config, "vocab_size", 0)
 
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
@@ -796,12 +799,6 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
 
-class InklingModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_vocab_size(self) -> int:
-        text_config = self.hf_text_config
-        return text_config.unpadded_vocab_size or text_config.vocab_size
-
-
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def _language_config(self) -> PreTrainedConfig:
         return self.hf_config.language_config
@@ -863,9 +860,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_text": Gemma4ModelArchConfigConvertor,
     "gemma4_unified": Gemma4ModelArchConfigConvertor,
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
-    "inkling_mm_model": InklingModelArchConfigConvertor,
-    "inkling_mtp": InklingModelArchConfigConvertor,
-    "inkling_text": InklingModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "longcat_flash": LongCatFlashModelArchConfigConvertor,
