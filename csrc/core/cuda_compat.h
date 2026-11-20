@@ -57,8 +57,34 @@ struct Utils {
 #ifndef USE_ROCM
   #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) \
     __shfl_down_sync(uint32_t(-1), var, lane_delta)
+  #define VLLM_SHFL_DOWN_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_down_sync(uint32_t(-1), var, lane_delta, width)
 #else
   #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) __shfl_down(var, lane_delta)
+  #define VLLM_SHFL_DOWN_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_down(var, lane_delta, width)
+#endif
+
+#ifndef USE_ROCM
+  #define VLLM_SHFL_SYNC_WIDTH(var, src_lane, width) \
+    __shfl_sync(uint32_t(-1), var, src_lane, width)
+  #define VLLM_SHFL_UP_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_up_sync(uint32_t(-1), var, lane_delta, width)
+#else
+  #define VLLM_SHFL_SYNC_WIDTH(var, src_lane, width) \
+    __shfl(var, src_lane, width)
+  #define VLLM_SHFL_UP_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_up(var, lane_delta, width)
+#endif
+
+// Ballot over the 32-lane group holding the calling lane (on wave64, its half
+// of the wavefront), restricted to the lanes in mask.
+#ifndef USE_ROCM
+  #define VLLM_BALLOT_SYNC_32(mask, pred) __ballot_sync(mask, pred)
+#else
+  #define VLLM_BALLOT_SYNC_32(mask, pred)                          \
+    (static_cast<uint32_t>(__ballot(pred) >> (__lane_id() & 32)) & \
+     static_cast<uint32_t>(mask))
 #endif
 
 #ifndef USE_ROCM
