@@ -15,10 +15,14 @@ pub enum Error {
     EmptyMessages,
     #[error("cannot continue the final message when the last message is not from the assistant")]
     ContinueFinalAssistantWithoutFinalAssistant,
+    #[error("{renderer} renderer does not support continue_final_message")]
+    UnsupportedContinueFinalMessage { renderer: &'static str },
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    #[error("chat template error: {0}")]
+    InvalidRequestChatTemplate(String),
     #[error("{message}")]
     ChatTemplateThrown { message: String },
     #[error("{0}")]
@@ -141,6 +145,8 @@ impl Error {
         match self {
             Self::EmptyMessages
             | Self::ContinueFinalAssistantWithoutFinalAssistant
+            | Self::UnsupportedContinueFinalMessage { .. }
+            | Self::InvalidRequestChatTemplate(_)
             | Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningEffort(_)
             | Self::InvalidReasoningControl { .. }
@@ -176,12 +182,24 @@ impl Error {
         }
     }
 
-    /// The request parameter a validation error refers to, reported as the
-    /// `param` of the OpenAI error object.
+    /// The canonical request parameter a validation error refers to, reported
+    /// as the `param` of the OpenAI error object.
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::Text(error) => error.param(),
-            Self::UnsupportedRequestChatTemplate => Some("chat_template"),
+            Self::EmptyMessages
+            | Self::UnsupportedChatRole { .. }
+            | Self::ToolReferenceNotFound { .. } => Some("messages"),
+            Self::ContinueFinalAssistantWithoutFinalAssistant
+            | Self::UnsupportedContinueFinalMessage { .. } => Some("continue_final_message"),
+            Self::InvalidReasoningEffort(_) => Some("reasoning_effort"),
+            Self::DuplicateToolName { .. } | Self::AllToolsDeferred => Some("tools"),
+            Self::ToolChoiceRequiresTools | Self::ToolChoiceFunctionNotFound { .. } => {
+                Some("tool_choice")
+            }
+            Self::UntrustedRequestChatTemplate
+            | Self::UnsupportedRequestChatTemplate
+            | Self::InvalidRequestChatTemplate(_) => Some("chat_template"),
             _ => None,
         }
     }

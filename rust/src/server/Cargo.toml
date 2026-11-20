@@ -47,7 +47,6 @@ tracing-futures.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
-validator.workspace = true
 vllm-build-info.workspace = true
 vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true

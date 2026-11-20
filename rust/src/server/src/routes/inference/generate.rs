@@ -13,6 +13,7 @@ use std::sync::Arc;
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{StreamExt as _, TryStreamExt as _, future, pin_mut};
@@ -36,7 +37,7 @@ use self::types::{
     PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
-pub(crate) use self::validate::validate_request_compat;
+pub(crate) use self::validate::validate_request;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::choices::{
@@ -49,7 +50,6 @@ use crate::routes::openai::utils::metrics::{
 use crate::routes::openai::utils::types::{ChatLogProbs, Usage};
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validate_n_limit;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::npy_base64;
@@ -60,8 +60,9 @@ use crate::utils::{openai_sse_stream, resolve_request_context, sse_response, uni
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
+    body: Result<Json<GenerateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(mut body) = body?;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
