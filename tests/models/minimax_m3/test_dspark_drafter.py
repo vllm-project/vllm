@@ -48,7 +48,7 @@ def _gfx950(monkeypatch):
 
 
 def test_supported_deployment():
-    assert dispatch._config_refusal(_vllm_config()) is None
+    assert dispatch.config_refusal(_vllm_config()) is None
 
 
 @pytest.mark.parametrize(
@@ -62,23 +62,23 @@ def test_supported_deployment():
     ],
 )
 def test_other_deployments_keep_the_stock_layers(overrides):
-    assert dispatch._config_refusal(_vllm_config(**overrides)) is not None
+    assert dispatch.config_refusal(_vllm_config(**overrides)) is not None
 
 
 def test_no_speculative_config():
     config = _vllm_config()
     config.speculative_config = None
-    assert dispatch._config_refusal(config) is not None
+    assert dispatch.config_refusal(config) is not None
 
 
 def test_not_gfx950(monkeypatch):
     monkeypatch.setattr(dispatch, "on_gfx950", lambda: False)
-    assert dispatch._config_refusal(_vllm_config()) is not None
+    assert dispatch.config_refusal(_vllm_config()) is not None
 
 
 def test_no_flydsl(monkeypatch):
     monkeypatch.setattr(dispatch, "_flydsl_available", lambda: False)
-    assert dispatch._config_refusal(_vllm_config()) is not None
+    assert dispatch.config_refusal(_vllm_config()) is not None
 
 
 # ---------------------------------------------------------------- TP4 numerics
