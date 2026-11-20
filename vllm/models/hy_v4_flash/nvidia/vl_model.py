@@ -19,7 +19,7 @@ from vllm.transformers_utils.processors.hy_v4 import (
     HYV4VLProcessorKwargs,
 )
 
-from .model import HYV4FlashForCausalLM, validate_runtime
+from .model import HYV4FlashForCausalLM
 
 
 class HYV4FlashVLProcessingInfo(HYV4VLProcessingInfo):
@@ -73,7 +73,6 @@ class HYV4FlashVLForConditionalGeneration(HYV4VLForConditionalGeneration):
     )
 
     def __init__(self, *, vllm_config, prefix=""):
-        validate_runtime(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.token_lookback_depth = self.language_model.token_lookback_depth
         engram_hash = self.language_model.model.engram_hash
