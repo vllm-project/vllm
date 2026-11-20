@@ -1605,10 +1605,18 @@ vllm bench serve \
 
 To benchmark [structured decisions](../models/structured_decisions_models.md), set
 `--backend vllm-systemone --endpoint /v1/systemone` or
-`--backend openai-decisions --endpoint /v1/decisions` with any text dataset.
+`--backend openai-decisions --endpoint /v1/decisions` with a dataset that produces
+one text prompt per request, such as `random` or `custom` JSONL. The matching
+`--endpoint` is required; the default `/v1/completions` is not supported.
+Batched prompts (`--random-batch-size > 1`) are rejected. Concurrent requests
+are supported.
+
 Each prompt is sent as the state with one choice, one yes/no and one score
-question; pass `--extra-body '{"questions": ...}'` to ask your own. Results are
-reported as for embeddings, with each question counted as one input.
+question; pass `--extra-body '{"questions": ...}'` to override these questions
+for every request. Results report latency, throughput and input-token usage,
+with each question counted as one input, as for embeddings. This benchmark
+does not evaluate decision accuracy or load per-item questions and labels from
+decision datasets.
 
 ### Reranker Benchmark
 

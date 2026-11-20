@@ -1213,7 +1213,16 @@ async def _async_request_decisions(
     *,
     input_field: str,
     questions: Any,
+    api_name: str,
+    url_suffix: str,
 ) -> RequestFuncOutput:
+    _validate_api_url(request_func_input.api_url, api_name, url_suffix)
+    if not isinstance(request_func_input.prompt, str):
+        raise ValueError(
+            "Decisions backends take one text prompt per request; "
+            "batched prompts (e.g. --random-batch-size > 1) are not supported."
+        )
+
     payload = {
         "model": request_func_input.model_name or request_func_input.model,
         input_field: request_func_input.prompt,
@@ -1252,10 +1261,18 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm-pooling": async_request_vllm_pooling,
     "vllm-rerank": async_request_vllm_rerank,
     "vllm-systemone": partial(
-        _async_request_decisions, input_field="state", questions=SYSTEMONE_QUESTIONS
+        _async_request_decisions,
+        input_field="state",
+        questions=SYSTEMONE_QUESTIONS,
+        api_name="vLLM structured decisions API",
+        url_suffix="systemone",
     ),
     "openai-decisions": partial(
-        _async_request_decisions, input_field="input", questions=DECISIONS_QUESTIONS
+        _async_request_decisions,
+        input_field="input",
+        questions=DECISIONS_QUESTIONS,
+        api_name="OpenAI Decisions API",
+        url_suffix="decisions",
     ),
 }
 
