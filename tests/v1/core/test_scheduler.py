@@ -28,11 +28,8 @@ from vllm.distributed.aux_output_connector.connector import (
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
-<<<<<<< HEAD
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
-=======
 from vllm.distributed.ec_transfer.ec_events import AllECCleared
->>>>>>> fa0829e287 ([Bugfix][EC]Fix EC event endpoint collision and idle cache-clear publishing)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
