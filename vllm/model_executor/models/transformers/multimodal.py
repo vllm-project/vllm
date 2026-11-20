@@ -1616,7 +1616,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
+        gathered = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
             {
                 "image_grid_thw",
@@ -1627,20 +1627,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             },
         )
 
-        image_grid_thw = kwargs.get("image_grid_thw", [])
-        video_grid_thw = kwargs.get("video_grid_thw", [])
-        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
-        audio_feature_lengths = kwargs.get("audio_feature_lengths", [])
+        def stack(name: str) -> torch.Tensor | None:
+            values = gathered.get(name)
+            return torch.stack(values) if values else None
 
-        image_grid_thw = torch.stack(image_grid_thw) if image_grid_thw else None
-        video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
-        second_per_grid_ts = (
-            torch.stack(second_per_grid_ts) if second_per_grid_ts else None
-        )
-        audio_feature_lengths = (
-            torch.stack(audio_feature_lengths) if audio_feature_lengths else None
-        )
-        use_audio_in_video = any(kwargs.get("use_audio_in_video", []))
+        use_audio_in_video = any(gathered.get("use_audio_in_video", [])) or None
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
         if not hasattr(self, "_get_rope_index_kwarg_names"):
@@ -1658,7 +1649,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         def accepts_kwarg(name: str) -> bool:
             return kwarg_names is None or name in kwarg_names
 
-        if audio_feature_lengths is not None and not accepts_kwarg("audio_seqlens"):
+        if gathered.get("audio_feature_lengths") and not accepts_kwarg("audio_seqlens"):
             raise NotImplementedError(
                 "Transformers modeling backend does not support audio inputs in "
                 "M-RoPE models whose `get_rope_index` takes no `audio_seqlens`."
@@ -1674,11 +1665,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         kwargs = {
             name: value
             for name, value in (
-                ("image_grid_thw", image_grid_thw),
-                ("video_grid_thw", video_grid_thw),
-                (seconds_name, second_per_grid_ts),
-                ("audio_seqlens", audio_feature_lengths),
-                ("use_audio_in_video", use_audio_in_video or None),
+                ("image_grid_thw", stack("image_grid_thw")),
+                ("video_grid_thw", stack("video_grid_thw")),
+                (seconds_name, stack("second_per_grid_ts")),
+                ("audio_seqlens", stack("audio_feature_lengths")),
+                ("use_audio_in_video", use_audio_in_video),
             )
             if value is not None or accepts_kwarg(name)
         }
