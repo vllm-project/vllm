@@ -205,7 +205,9 @@ class HiSparseConnectorScheduler:
         assert self.coordinator is not None
         for request_id in connector_output.finished_recving or ():
             self.coordinator.finish_host_import(
-                request_id, failed=request_id in connector_output.failed_recving
+                request_id,
+                failed=request_id in connector_output.failed_recving,
+                restore=request_id in self.requests,
             )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
