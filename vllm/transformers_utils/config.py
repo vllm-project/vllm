@@ -438,6 +438,7 @@ class HFConfigParser(ConfigParserBase):
 
             # Transformers < 5.20: original checkpoints lose their MoE width
             # (huggingface/transformers#49416)
+            # TODO: Delete once Transformers 5.20.0 is the minimum supported version
             dense_width = text_config.pop("dense_intermediate_size")
             text_config["moe_intermediate_size"] = text_config["intermediate_size"]
             text_config["intermediate_size"] = dense_width
