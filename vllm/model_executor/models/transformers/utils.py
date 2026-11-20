@@ -405,12 +405,12 @@ def _is_tensor_type(annotation: object) -> bool:
     )
 
 
-def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
+def infer_dynamic_arg_dims(cls: type[nn.Module], dim: int = 0) -> "DynamicArgDims":
     """Infer `dynamic_arg_dims` from the signature of `cls.forward`.
 
-    The 0-th dimension is dynamic for every argument which is either annotated
-    with a tensor type, optionally in a union with other types, or unannotated
-    with no default other than `None`. String annotations are not resolved.
+    `dim` is dynamic for every argument which is either annotated with a tensor
+    type, optionally in a union with other types, or unannotated with no default
+    other than `None`. String annotations are not resolved.
     """
     dims: DynamicArgDims = {}
     for name, param in inspect.signature(cls.forward).parameters.items():
@@ -422,7 +422,7 @@ def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
         is_tensor = any(map(_is_tensor_type, members))
         is_flag = param.default not in (None, param.empty)
         if is_tensor or (annotation is param.empty and not is_flag):
-            dims[name] = 0
+            dims[name] = dim
     return dims
 
 

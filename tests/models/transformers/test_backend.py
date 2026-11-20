@@ -217,8 +217,9 @@ def test_infer_dynamic_arg_dims():
         ):
             pass
 
-    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0, "logits_to_keep": 0}
-    assert infer_dynamic_arg_dims(Encoder) == expected
+    dynamic = ("pixel_values", "position_ids", "mask", "logits_to_keep")
+    assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
+    assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
