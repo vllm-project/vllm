@@ -1890,3 +1890,435 @@ def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens)
         intermediate % alignment == 0
     )
     assert _aiter_accepts_intermediate(padded, num_tokens)
+
+
+# FlyDSL a8w4 experts (VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4) -----------------
+
+_A8W4_OP_MODULE = "aiter.ops.flydsl.moe_a8w4_experts"
+
+
+@pytest.fixture
+def flydsl_a8w4_ops(monkeypatch: pytest.MonkeyPatch):
+    """rocm_aiter_ops with VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4=1."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    _assert_aiter_supported()
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4", "1")
+    _reload_envs()
+    rocm_aiter_ops.refresh_env_variables()
+    rocm_aiter_ops._flydsl_moe_a8w4_module.cache_clear()
+    monkeypatch.setattr(rocm_aiter_moe, "_FLYDSL_A8W4_WARM", set())
+    try:
+        yield rocm_aiter_ops
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops._flydsl_moe_a8w4_module.cache_clear()
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+class _A8W4OpStandIn:
+    """Stands in for `aiter.ops.flydsl.moe_a8w4_experts` (same token, top-k
+    and SwiGLU limit bounds) and records the expert ids it is handed."""
+
+    class A8W4ExpertWeights:
+        @classmethod
+        def from_shuffled(cls, w13, w13_scale, w2, w2_scale):
+            return (w13, w13_scale, w2, w2_scale)
+
+    def __init__(self):
+        self.calls: list[torch.Tensor] = []
+        self.warmups: list[int] = []
+
+    def moe_a8w4_experts_supported(
+        self, hidden, intermediate, num_experts, topk, num_tokens, swiglu_limit
+    ):
+        return topk in (3, 6) and 1 <= num_tokens <= 1024 and swiglu_limit == 10.0
+
+    def flydsl_moe_a8w4_experts_warmup(self, weights, topk, *, bf16_input):
+        assert bf16_input
+        self.warmups.append(topk)
+
+    def flydsl_moe_a8w4_experts(self, x, x_scales, weights, topk_weights, topk_ids):
+        assert x_scales is None and x.dtype == torch.bfloat16
+        self.calls.append(topk_ids.clone())
+        return torch.full_like(x, 2.0)
+
+
+def _a8w4_experts(
+    *,
+    num_experts: int = 8,
+    hidden: int = 256,
+    intermediate: int = 512,
+    topk: int = 6,
+    swiglu_limit: float | None = 10.0,
+    biased: bool = False,
+):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import (
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+    )
+    moe_config.swiglu_limit = swiglu_limit
+    bias = torch.zeros(num_experts, 2 * intermediate, device="cuda")
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=torch.zeros(
+            num_experts * 2 * intermediate, hidden // 32, device="cuda"
+        ),
+        w2_scale=torch.zeros(num_experts * hidden, intermediate // 32, device="cuda"),
+        w1_bias=bias if biased else None,
+    )
+    w1 = torch.zeros(num_experts, 2 * intermediate, hidden // 2, dtype=torch.uint8)
+    w2 = torch.zeros(num_experts, hidden, intermediate // 2, dtype=torch.uint8)
+    return AiterMxfp4Experts(moe_config, quant_config), w1.cuda(), w2.cuda()
+
+
+def _apply(experts, w1, w2, hidden_states, topk_weights, topk_ids, **overrides):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    output = torch.empty_like(hidden_states)
+    kwargs = dict(
+        output=output,
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=w1.shape[0],
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    kwargs.update(overrides)
+    experts.apply(**kwargs)
+    return output
+
+
+def test_aiter_flydsl_moe_a8w4_off_by_default_and_needs_the_op(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The FlyDSL a8w4 experts op is opt-in, and an AITER build without it
+    (ROCm/aiter#8381 not installed) keeps aiter.fused_moe."""
+    import sys
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4", raising=False)
+    _reload_envs()
+    rocm_aiter_ops.refresh_env_variables()
+    assert rocm_aiter_ops.flydsl_moe_a8w4() is None
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4", "1")
+    _reload_envs()
+    rocm_aiter_ops.refresh_env_variables()
+    # A None entry makes `import` raise ImportError, as on an AITER without it.
+    monkeypatch.setitem(sys.modules, _A8W4_OP_MODULE, None)
+    rocm_aiter_ops._flydsl_moe_a8w4_module.cache_clear()
+    try:
+        assert rocm_aiter_ops.flydsl_moe_a8w4() is None
+        experts, w1, w2 = _a8w4_experts()
+        hidden_states = torch.ones(4, 256, dtype=torch.bfloat16, device="cuda")
+        stock = torch.full_like(hidden_states, 1.0)
+        with mock.patch.object(rocm_aiter_ops, "fused_moe", return_value=stock):
+            out = _apply(
+                experts,
+                w1,
+                w2,
+                hidden_states,
+                torch.ones(4, 6, device="cuda"),
+                torch.zeros(4, 6, dtype=torch.int32, device="cuda"),
+            )
+        torch.testing.assert_close(out, stock, atol=0, rtol=0)
+    finally:
+        rocm_aiter_ops._flydsl_moe_a8w4_module.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("case", "takes_op"),
+    [
+        ("eligible", True),
+        ("too_many_tokens", False),
+        ("no_swiglu_limit", False),
+        ("swiglu_limit_7", False),
+        ("w13_bias", False),
+        ("swigluoai", False),
+        ("a4w4_dsv4", False),
+        ("prequantized_input", False),
+        ("ep_tokens_at_cap", True),
+        ("ep_tokens_above_cap", False),
+    ],
+)
+def test_aiter_mxfp4_experts_flydsl_a8w4_dispatch(
+    flydsl_a8w4_ops, monkeypatch: pytest.MonkeyPatch, case: str, takes_op: bool
+):
+    """Which MXFP4 MoE calls AiterMxfp4Experts sends to the FlyDSL a8w4 op;
+    every other call keeps aiter.fused_moe. Uses a stand-in for the op module so
+    it runs on any AITER build."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    op = _A8W4OpStandIn()
+    monkeypatch.setattr(
+        flydsl_a8w4_ops, "_flydsl_moe_a8w4_module", staticmethod(lambda: op)
+    )
+    experts, w1, w2 = _a8w4_experts(
+        swiglu_limit={"no_swiglu_limit": None, "swiglu_limit_7": 7.0}.get(case, 10.0),
+        biased=case == "w13_bias",
+    )
+    experts.moe_config.use_mxfp4_w4a4_dsv4 = case == "a4w4_dsv4"
+    num_tokens = {
+        "too_many_tokens": 1025,
+        "ep_tokens_at_cap": 192,
+        "ep_tokens_above_cap": 193,
+    }.get(case, 16)
+    hidden_states = torch.ones(num_tokens, 256, dtype=torch.bfloat16, device="cuda")
+    topk_ids = torch.randint(0, 8, (num_tokens, 6), dtype=torch.int32, device="cuda")
+    overrides: dict[str, Any] = {}
+    if case.startswith("ep_"):
+        # All 8 experts local: the mask maps every id to itself.
+        overrides["expert_map"] = torch.tensor([1] * 8 + [0], device="cuda")
+    if case == "swigluoai":
+        overrides["activation"] = MoEActivation.SWIGLUOAI
+    if case == "prequantized_input":
+        overrides["a1q_scale"] = torch.ones(num_tokens, 8, device="cuda")
+
+    stock = torch.full_like(hidden_states, 1.0)
+    with mock.patch.object(
+        flydsl_a8w4_ops, "fused_moe", return_value=stock
+    ) as fused_moe:
+        out = _apply(
+            experts,
+            w1,
+            w2,
+            hidden_states,
+            torch.ones(num_tokens, 6, device="cuda"),
+            topk_ids,
+            **overrides,
+        )
+
+    assert len(op.calls) == int(takes_op)
+    assert fused_moe.called == (not takes_op)
+    assert torch.all(out == (2.0 if takes_op else 1.0))
+    if takes_op:
+        # Compiled once per (device, local experts, top-k), before the call.
+        assert op.warmups == [6]
+        torch.testing.assert_close(op.calls[0], topk_ids, atol=0, rtol=0)
+
+
+def test_aiter_mxfp4_experts_flydsl_a8w4_maps_expert_mask_to_local_ids(
+    flydsl_a8w4_ops, monkeypatch: pytest.MonkeyPatch
+):
+    """With EP the AITER experts get global ids and the 0/1 expert mask; the op
+    must get local ids numbered in mask order (as AITER's MoE sorting numbers
+    them), -1 for experts on other ranks, and the mapping is rebuilt when the
+    mask changes."""
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        determine_expert_map,
+    )
+
+    op = _A8W4OpStandIn()
+    monkeypatch.setattr(
+        flydsl_a8w4_ops, "_flydsl_moe_a8w4_module", staticmethod(lambda: op)
+    )
+    global_experts, ep_size, ep_rank = 64, 8, 3
+    _, expert_map, expert_mask = determine_expert_map(
+        ep_size,
+        ep_rank,
+        global_experts,
+        expert_placement_strategy="round_robin",
+        return_expert_mask=True,
+    )
+    experts, w1, w2 = _a8w4_experts(num_experts=global_experts // ep_size)
+    topk_ids = torch.randint(0, global_experts, (32, 6), dtype=torch.int32)
+    hidden_states = torch.ones(32, 256, dtype=torch.bfloat16, device="cuda")
+    with mock.patch.object(flydsl_a8w4_ops, "fused_moe") as fused_moe:
+        for mask in (expert_mask.cuda(), torch.roll(expert_mask[:-1], 1).cuda()):
+            mask = torch.cat([mask[:global_experts], mask.new_zeros(1)])
+            _apply(
+                experts,
+                w1,
+                w2,
+                hidden_states,
+                torch.ones(32, 6, device="cuda"),
+                topk_ids.cuda(),
+                expert_map=mask,
+                global_num_experts=global_experts,
+            )
+    assert not fused_moe.called
+    want = expert_map[topk_ids.long()]
+    torch.testing.assert_close(op.calls[0].cpu(), want, atol=0, rtol=0)
+    rolled_map = torch.roll(expert_map, 1)
+    torch.testing.assert_close(
+        op.calls[1].cpu(), rolled_map[topk_ids.long()], atol=0, rtol=0
+    )
+
+
+def _dsv41_flash_expert_weights(num_experts: int, seed: int):
+    """Random DeepSeek-V4.1-Flash expert weights (hidden 5120, intermediate
+    2304) converted the way the AITER MXFP4 backend converts them at load."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+    )
+
+    hidden, inter = 5120, 2304
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+
+    def rand(lo: int, hi: int, *shape: int) -> torch.Tensor:
+        return torch.randint(
+            lo, hi, shape, dtype=torch.uint8, device="cuda", generator=gen
+        )
+
+    # E8M0 scales 2^-9 .. 2^-4 keep the gate/up values around the clamp of 10.
+    w13, w2, w13_s, w2_s, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+        mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        layer=torch.nn.Module(),
+        w13_weight=rand(0, 256, num_experts, 2 * inter, hidden // 2),
+        w2_weight=rand(0, 256, num_experts, hidden, inter // 2),
+        w13_weight_scale=rand(118, 124, num_experts, 2 * inter, hidden // 32),
+        w2_weight_scale=rand(118, 124, num_experts, hidden, inter // 32),
+        activation=MoEActivation.SILU,
+    )
+    return w13, w2, w13_s, w2_s
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+@pytest.mark.parametrize(
+    ("local_experts", "global_experts", "topk", "num_tokens"),
+    [
+        # DeepSeek-V4.1-Flash on EP8 (384 experts top-6, the DSpark draft's 128
+        # experts top-3) up to the EP token caps, and all experts local over
+        # the op's token range.
+        (48, 384, 6, 1),
+        (48, 384, 6, 192),
+        (16, 128, 3, 48),
+        (48, 48, 6, 1024),
+        (16, 16, 3, 640),
+    ],
+)
+@torch.inference_mode()
+def test_aiter_mxfp4_experts_flydsl_a8w4_matches_fused_moe(
+    flydsl_a8w4_ops,
+    monkeypatch: pytest.MonkeyPatch,
+    local_experts: int,
+    global_experts: int,
+    topk: int,
+    num_tokens: int,
+):
+    """On the tensors the AITER MXFP4 backend holds, AiterMxfp4Experts with the
+    FlyDSL a8w4 op matches aiter.fused_moe (the path it replaces), is bitwise
+    repeatable, and a CUDA graph captured after the first eager call replays new
+    inputs to the eager result.
+
+    Both paths quantize the input and the intermediate to MXFP8, which puts each
+    at cosine ~0.9988 from an fp32 reference on these weights; they agree with
+    each other to >= 0.99999 from 16 tokens and >= 0.99985 below, where
+    aiter.fused_moe picks other stage kernels."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import (
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        determine_expert_map,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+
+    op = flydsl_a8w4_ops.flydsl_moe_a8w4()
+    if op is None:
+        pytest.skip(f"{_A8W4_OP_MODULE} (ROCm/aiter#8381) is not installed")
+    launches: list[int] = []
+    launch = op.flydsl_moe_a8w4_experts
+    monkeypatch.setattr(
+        op,
+        "flydsl_moe_a8w4_experts",
+        lambda *args, **kwargs: launches.append(1) or launch(*args, **kwargs),
+    )
+    # The weight conversion sets it to 0 (fp8 activations in aiter.fused_moe).
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "0")
+    hidden = 5120
+    w13, w2, w13_s, w2_s = _dsv41_flash_expert_weights(local_experts, seed=topk)
+    moe_config = make_dummy_moe_config(
+        num_experts=global_experts,
+        num_local_experts=local_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=2304,
+    )
+    moe_config.swiglu_limit = 10.0
+    experts = AiterMxfp4Experts(
+        moe_config, mxfp4_w4a16_moe_quant_config(w1_scale=w13_s, w2_scale=w2_s)
+    )
+    expert_mask = None
+    if global_experts > local_experts:
+        _, _, expert_mask = determine_expert_map(
+            global_experts // local_experts, 2, global_experts, return_expert_mask=True
+        )
+        expert_mask = expert_mask.cuda()
+
+    def inputs(seed: int):
+        gen = torch.Generator(device="cuda").manual_seed(seed)
+        x = torch.randn(
+            num_tokens, hidden, device="cuda", generator=gen, dtype=torch.bfloat16
+        )
+        logits = torch.randn(num_tokens, global_experts, device="cuda", generator=gen)
+        weights, ids = torch.topk(torch.softmax(logits, dim=-1), topk, dim=-1)
+        return x, weights, ids.to(torch.int32)
+
+    def run(x, weights, ids):
+        return _apply(
+            experts,
+            w13,
+            w2,
+            x,
+            weights,
+            ids,
+            expert_map=expert_mask,
+            global_num_experts=global_experts,
+        )
+
+    x, weights, ids = inputs(0)
+    flydsl_a8w4_ops._FLYDSL_MOE_A8W4 = False
+    stock = run(x, weights, ids)
+    flydsl_a8w4_ops._FLYDSL_MOE_A8W4 = True
+    out = run(x, weights, ids)
+    assert launches  # the op ran (its first call compiles it)
+
+    assert not out.isnan().any()
+    if expert_mask is not None:
+        local = (expert_mask[ids.long()] > 0).any(dim=-1)
+        assert torch.all(out[~local] == 0) and torch.all(stock[~local] == 0)
+    cos = F.cosine_similarity(out.double().flatten(), stock.double().flatten(), dim=0)
+    assert cos >= 0.9998, cos.item()
+    torch.testing.assert_close(out, run(x, weights, ids), atol=0, rtol=0)
+
+    static = [t.clone() for t in (x, weights, ids)]
+    num_launches = len(launches)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_out = run(*static)
+    assert len(launches) == num_launches + 1
+    for t, new in zip(static, inputs(1)):
+        t.copy_(new)
+    graph.replay()
+    torch.testing.assert_close(graph_out, run(*inputs(1)), atol=0, rtol=0)

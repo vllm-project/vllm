@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -30,9 +31,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+from vllm.v1.worker.ubatching import dbo_enabled
 
 if TYPE_CHECKING:
     from aiter import ActivationType
+
+logger = init_logger(__name__)
 
 
 class AiterQuantType(IntEnum):
@@ -754,12 +758,27 @@ class AiterFp8ChannelExperts(AiterExperts):
         _write_moe_output(output, result)
 
 
+# (device index, local experts, top-k) whose FlyDSL a8w4 experts kernels are
+# compiled; see AiterMxfp4Experts._flydsl_a8w4_experts.
+_FLYDSL_A8W4_WARM: set[tuple[int | None, int, int]] = set()
+# Most tokens per top-k sent to the FlyDSL a8w4 op under EP (an expert mask):
+# every rank then gets all gathered tokens with ~1/8 of the routes local, the
+# op is sized by its token count, and aiter.fused_moe is faster above these
+# (MI355X, DeepSeek-V4.1-Flash EP8 with uniform routing).
+_FLYDSL_A8W4_EP_MAX_TOKENS = {6: 192, 3: 48}
+
+
 class AiterMxfp4Experts(AiterExperts):
     """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
     MXFP4-quantized dynamic activations. gfx950-only (not gfx1250), except for
     Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
 
     _AITER_QUANT_TYPE = AiterQuantType.BLOCK_1X32
+    # Single-entry caches of the FlyDSL a8w4 path: (key, weight wrapper) and
+    # (expert mask, global -> local expert ids). An EP update registers a new
+    # mask tensor rather than writing the old one.
+    _flydsl_a8w4_weights: tuple[tuple[int, ...], Any] | None = None
+    _flydsl_a8w4_ids: tuple[torch.Tensor, torch.Tensor] | None = None
 
     @staticmethod
     def _supports_quant_scheme(
@@ -780,3 +799,168 @@ class AiterMxfp4Experts(AiterExperts):
 
     def _extra_fused_moe_kwargs(self) -> dict:
         return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        if (
+            a1q_scale is None
+            and expert_tokens_meta is None
+            and not apply_router_weight_on_input
+            and output.dtype == torch.bfloat16
+        ):
+            result = self._flydsl_a8w4_experts(
+                hidden_states, w1, w2, topk_weights, topk_ids, activation, expert_map
+            )
+            if result is not None:
+                _write_moe_output(output, result)
+                return
+        super().apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            a1q_scale=a1q_scale,
+            a2_scale=a2_scale,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=expert_tokens_meta,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+
+    def _flydsl_a8w4_experts(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        expert_mask: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Run the call on AITER's FlyDSL a8w4 experts op if it takes it.
+
+        The op computes the a8w4 MoE that `aiter.fused_moe` runs on these
+        weights (bf16 input quantized to MXFP8, `silu(min(gate, limit)) *
+        clamp(up, -limit, limit)`, MXFP8 intermediate) from the same
+        preshuffled tensors, in two launches and with a deterministic top-k sum
+        instead of atomics. It covers DeepSeek-V4.1-Flash's routed experts:
+        hidden 5120, intermediate 2304, top-3 or top-6, at most 63 local
+        experts, 1-1024 tokens (under EP see `_FLYDSL_A8W4_EP_MAX_TOKENS`),
+        limit 10, gfx950.
+
+        The checks read host metadata only, so the choice is fixed per captured
+        token count. The kernels of a (device, local experts, top-k) compile on
+        its first eager call; under graph capture an uncompiled one stays on
+        `aiter.fused_moe`. Calls must not overlap on one device (the op keeps
+        one ready-counter workspace per device), hence the DBO exclusion.
+
+        Returns:
+            bf16 `[num_tokens, hidden]`, or None to use `aiter.fused_moe`.
+
+        """
+        op = rocm_aiter_ops.flydsl_moe_a8w4()
+        if op is None:
+            return None
+        quant_config, moe_config = self.quant_config, self.moe_config
+        num_tokens, topk = topk_ids.shape
+        num_experts, hidden = w1.shape[0], hidden_states.shape[1]
+        intermediate = w2.shape[-1] * 2
+        w1_scale, w2_scale = quant_config.w1_scale, quant_config.w2_scale
+        if (
+            not quant_config.use_mxfp4_w4a16
+            or w1_scale is None
+            or w2_scale is None
+            or moe_config.use_mxfp4_w4a4_dsv4
+            or activation != MoEActivation.SILU
+            or quant_config.w1_bias is not None
+            or quant_config.w2_bias is not None
+            or hidden_states.dtype != torch.bfloat16
+            or hidden != moe_config.hidden_dim_unpadded
+            or intermediate != moe_config.intermediate_size_per_partition_unpadded
+            or dbo_enabled()
+            or (
+                expert_mask is not None
+                and num_tokens > _FLYDSL_A8W4_EP_MAX_TOKENS.get(topk, 0)
+            )
+            or not op.moe_a8w4_experts_supported(
+                hidden,
+                intermediate,
+                num_experts,
+                topk,
+                num_tokens,
+                swiglu_limit=moe_config.swiglu_limit,
+            )
+        ):
+            return None
+
+        capturing = torch.cuda.is_current_stream_capturing()
+        if expert_mask is not None:
+            local_ids = self._flydsl_a8w4_local_ids(expert_mask, capturing)
+            if local_ids is None:
+                return None
+            topk_ids = local_ids.index_select(0, topk_ids.flatten()).view(
+                num_tokens, topk
+            )
+
+        key = (w1.data_ptr(), w2.data_ptr(), w1_scale.data_ptr(), w2_scale.data_ptr())
+        if self._flydsl_a8w4_weights is None or self._flydsl_a8w4_weights[0] != key:
+            self._flydsl_a8w4_weights = (
+                key,
+                op.A8W4ExpertWeights.from_shuffled(w1, w1_scale, w2, w2_scale),
+            )
+        weights = self._flydsl_a8w4_weights[1]
+
+        warm_key = (hidden_states.device.index, num_experts, topk)
+        if warm_key not in _FLYDSL_A8W4_WARM:
+            if capturing:
+                logger.warning_once(
+                    "FlyDSL a8w4 experts not compiled before graph capture; "
+                    "this graph uses aiter.fused_moe."
+                )
+                return None
+            op.flydsl_moe_a8w4_experts_warmup(weights, topk, bf16_input=True)
+            _FLYDSL_A8W4_WARM.add(warm_key)
+            logger.info(
+                "FlyDSL a8w4 experts compiled for %d local experts, top-%d.",
+                num_experts,
+                topk,
+            )
+        return op.flydsl_moe_a8w4_experts(
+            hidden_states.contiguous(), None, weights, topk_weights, topk_ids
+        )
+
+    def _flydsl_a8w4_local_ids(
+        self, expert_mask: torch.Tensor, capturing: bool
+    ) -> torch.Tensor | None:
+        """Global -> local expert id (-1 if not local) for the 0/1 expert mask,
+        numbered in mask order as AITER's MoE sorting numbers them."""
+        cached = self._flydsl_a8w4_ids
+        if cached is not None and cached[0] is expert_mask:
+            return cached[1]
+        if capturing:
+            return None
+        mask = expert_mask.to(torch.int32)
+        local_ids = torch.where(mask > 0, mask.cumsum(0, dtype=torch.int32) - 1, -1)
+        self._flydsl_a8w4_ids = (expert_mask, local_ids)
+        return local_ids
