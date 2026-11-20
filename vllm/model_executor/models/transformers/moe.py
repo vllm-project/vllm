@@ -242,9 +242,6 @@ class TransformersRoutedExperts(RoutedExperts):
 class MoEMixin(MixtureOfExperts, Base):
     mlp_layers: list[nn.Module]
     """MoE blocks whose experts were replaced, for the `MixtureOfExperts` methods."""
-    fused_shared_experts: dict[tuple[str, str], set[int]]
-    """`(shared expert, experts)` names within a layer -> indices of the layers
-    whose shared expert runs as extra routed experts (ROCm AITER)."""
 
     # Redeclared because `recursive_replace` assigns it below the first read
     num_local_physical_experts: int
@@ -276,9 +273,13 @@ class MoEMixin(MixtureOfExperts, Base):
         moe_block: nn.Module,
         prefix: str,
         intermediate_size: int,
+        fused_layers: dict[tuple[str, str], set[int]],
     ) -> dict[str, Any] | None:
         """`FusedMoE` kwargs running the block's shared expert as extra routed
-        experts (ROCm AITER), if it can."""
+        experts (ROCm AITER), if it can.
+
+        Records the layer index in `fused_layers` under the block's
+        `(shared expert, experts)` names, relative to the layer."""
         name = fuser.shared_name
         if name is None or fuser.scoring_func is None:
             return None
@@ -297,7 +298,7 @@ class MoEMixin(MixtureOfExperts, Base):
         idx = indices[0]
         block = ".".join(parts[idx + 1 :])
         key = (maybe_prefix(block, name), maybe_prefix(block, "experts"))
-        self.fused_shared_experts.setdefault(key, set()).add(int(parts[idx]))
+        fused_layers.setdefault(key, set()).add(int(parts[idx]))
         setattr(moe_block, name, None)
         moe_block.is_fused_shared_expert_enabled = True
         return dict(
@@ -382,7 +383,7 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # Down projections of shared experts consumed by FusedMoE
         shared_down_projs: list[tuple[nn.Module, str]] = []
-        self.fused_shared_experts = {}
+        fused_shared_layers: dict[tuple[str, str], set[int]] = {}
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
@@ -466,7 +467,11 @@ class MoEMixin(MixtureOfExperts, Base):
                         # gate/router and shared expert (if any) runs in MoERunner.
                         shared_experts = None
                         fse_kwargs = self._fused_shared_expert_kwargs(
-                            fuser, moe_block, prefix, kwargs["intermediate_size"]
+                            fuser,
+                            moe_block,
+                            prefix,
+                            kwargs["intermediate_size"],
+                            fused_shared_layers,
                         )
                         if fse_kwargs is not None:
                             kwargs |= fse_kwargs
@@ -572,7 +577,7 @@ class MoEMixin(MixtureOfExperts, Base):
                 ckpt_prefix=shared,
                 experts_prefix=experts,
             )
-            for (shared, experts), layers in self.fused_shared_experts.items()
+            for (shared, experts), layers in fused_shared_layers.items()
         ]
         self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=transforms)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
