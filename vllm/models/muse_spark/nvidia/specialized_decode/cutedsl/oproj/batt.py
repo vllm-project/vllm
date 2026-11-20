@@ -4,21 +4,21 @@
 post_attn_norm, gated FP32 residual, pre_ffn_norm) of the Muse Spark
 specialized decode.
 
-- ``OProjection``: this rank's row-parallel o_proj partial,
+- `OProjection`: this rank's row-parallel o_proj partial,
   [b, 128 * 64 / tp] x [8192, 128 * 64 / tp]^T -> BF16 [b, 8192]: on cuBLAS at
-  TP4 and TP16; at TP8 (``PACKAGE_GEMM_TPS``) on the package's small-M GEMM
+  TP4 and TP16; at TP8 (`PACKAGE_GEMM_TPS`) on the package's small-M GEMM
   (the unpooler's kernel, cutedsl/gemm/unpooler.py), whose epilogue also
   publishes the partial into the attention boundary's mailbox (zero-copy).
-- ``AttentionBoundary`` (an ``AttentionBoundaryProvider``):
+- `AttentionBoundary` (an `AttentionBoundaryProvider`):
   - TP4 and TP8: the all-reduce fused with the dual norm
     (all_reduce_dual_norm.py), one mailbox shared by every layer, summing in
     the order of the all-reduce the stock o_proj reaches, which the executor
     reads once at build from the backend that all-reduce resolved to
-    (``BuildContext.all_reduce_order``; TP4, one node: the MNNVL one-shot by
+    (`BuildContext.all_reduce_order`; TP4, one node: the MNNVL one-shot by
     default, the node-local one-shot when set; TP8, across trays: the MNNVL
     one-shot and two-shot);
   - TP16: the all-reduce op the executor is given
-    (``RoutedExpertsOps.all_reduce``: the TP communicator's MNNVL all-reduce,
+    (`RoutedExpertsOps.all_reduce`: the TP communicator's MNNVL all-reduce,
     the one the stock o_proj reaches), then the standalone dual norm.
   Both are bit for bit the stock all-reduce followed by the stock dual norm.
 """
@@ -53,13 +53,13 @@ class OProjection:
     """x BF16 [b, K] (this rank's attention output, K = 128 * 64 / tp) ->
     this rank's o_proj partial BF16 [b, 8192], before the all-reduce.
 
-    Without a mailbox: torch.mm into ``out`` (cuBLAS, as the stock o_proj),
+    Without a mailbox: torch.mm into `out` (cuBLAS, as the stock o_proj),
     bit for bit.
 
-    With ``mailbox`` (the fused attention boundary's, width 8192): the package
-    GEMM (``Unpooler`` with the ``OPROJ`` launch shape), which also multicasts
+    With `mailbox` (the fused attention boundary's, width 8192): the package
+    GEMM (`Unpooler` with the `OPROJ` launch shape), which also multicasts
     the partial into this rank's slot of the mailbox. Not bitwise to cuBLAS
-    (summation order); the boundary bound with ``published`` then runs its
+    (summation order); the boundary bound with `published` then runs its
     consumer alone.
     """
 
@@ -90,7 +90,7 @@ class OProjection:
         cls, ctx: Any, layer: nn.Module, *, rows: Sequence[int] = ROWS
     ) -> "OProjection":
         """From a stock decoder layer's o_proj; with the model's fused boundary
-        mailbox where it publishes into it (``producer_mailbox``)."""
+        mailbox where it publishes into it (`producer_mailbox`)."""
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
         o_proj = layer.self_attn.o_proj
@@ -109,8 +109,8 @@ class OProjection:
         return cls(o_proj.weight, rows, mailbox)
 
     def run(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-        """The partial, in ``out`` (and in the mailbox with the package GEMM:
-        the attention boundary bound with ``published`` must run next)."""
+        """The partial, in `out` (and in the mailbox with the package GEMM:
+        the attention boundary bound with `published` must run next)."""
         if self.gemm is not None:
             return self.gemm.run(x, out)
         return torch.mm(x, self.weight.t(), out=out)
@@ -125,7 +125,7 @@ _FUSED: "weakref.WeakKeyDictionary[nn.Module, AllReduceDualNorm]" = (
 def fused_all_reduce(ctx: Any) -> AllReduceDualNorm:
     """The model's mailbox, created on first use (collective over the TP group:
     every rank builds the same layers in the same order), summing in the order
-    of the stock TP all-reduce (``ctx.all_reduce_order``)."""
+    of the stock TP all-reduce (`ctx.all_reduce_order`)."""
     shared = _FUSED.get(ctx.backbone)
     if shared is None:
         tp = get_tp_group()
@@ -149,7 +149,7 @@ def fused_all_reduce(ctx: Any) -> AllReduceDualNorm:
 
 def producer_mailbox(ctx: Any) -> LamportMailbox | None:
     """The fused boundary's mailbox where the o_proj GEMM publishes its
-    partial into it (``PACKAGE_GEMM_TPS``), else None: the one place that
+    partial into it (`PACKAGE_GEMM_TPS`), else None: the one place that
     decides, for the o_proj (which GEMM) and the attention boundary (whether
     it publishes)."""
     return fused_all_reduce(ctx).mailbox if ctx.tp in PACKAGE_GEMM_TPS else None
@@ -162,9 +162,9 @@ def standalone_dual_norm(constants: DualNormConstants) -> DualNorm:
 
 
 class AttentionBoundary:
-    """The attention boundary (an ``AttentionBoundaryProvider``): ``partial``
-    BF16 [b, H] -> all-reduce, post_attn_norm, gated add into ``stream`` (FP32
-    [b, H], in place), pre_ffn_norm into ``out`` (BF16 [b, H])."""
+    """The attention boundary (an `AttentionBoundaryProvider`): `partial`
+    BF16 [b, H] -> all-reduce, post_attn_norm, gated add into `stream` (FP32
+    [b, H], in place), pre_ffn_norm into `out` (BF16 [b, H])."""
 
     def __init__(
         self,
@@ -192,8 +192,8 @@ class AttentionBoundary:
         *,
         all_reduce: AllReduce | None = None,
     ) -> "AttentionBoundary":
-        """``layer`` is a stock decoder layer; ``all_reduce`` the all-reduce op
-        (``RoutedExpertsOps.all_reduce``), given at TP16 only."""
+        """`layer` is a stock decoder layer; `all_reduce` the all-reduce op
+        (`RoutedExpertsOps.all_reduce`), given at TP16 only."""
         assert layer is not None
         post, connection, pre = layer.post_attn_norm, layer.add_attn, layer.pre_ffn_norm
         if any(n.variance_size_override is not None for n in (post, pre)):

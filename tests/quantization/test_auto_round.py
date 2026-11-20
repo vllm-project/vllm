@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
     INCXPULinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 MODELS = [
@@ -378,7 +379,7 @@ def test_inc_get_quant_method_unquantized_unknown_layer_returns_none() -> None:
 def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
     layer_factory,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for both
+    """`model.`-prefixed extra_config entries trigger early exit for both
     LinearBase and ParallelLMHead layers."""
     config = make_config(extra_config={"model.layer": {"bits": 16}})
     layer = layer_factory()
@@ -391,7 +392,7 @@ def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
 def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
     monkeypatch,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for
+    """`model.`-prefixed extra_config entries trigger early exit for
     RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
 
     class DummyUnquantizedFusedMoEMethod:
@@ -414,13 +415,80 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
 
 def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
-    """``model.``-prefixed extra_config entries return None for unhandled
+    """`model.`-prefixed extra_config entries return None for unhandled
     layer types (non-Linear, non-MoE)."""
     config = make_config(extra_config={"model.unknown": {"bits": 16}})
 
     method = config.get_quant_method(DummyLayer(), "unknown")
 
     assert method is None
+
+
+def _patch_safetensors_metadata(monkeypatch, metadata) -> None:
+    def fake_metadata(model_name, revision=None):
+        if isinstance(metadata, Exception):
+            raise metadata
+        return metadata
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.config.get_safetensors_params_metadata",
+        fake_metadata,
+    )
+
+
+def test_inc_maybe_update_config_detects_unquantized_checkpoint_modules(
+    monkeypatch,
+) -> None:
+    """A linear module stored as a float `weight` resolves to
+    UnquantizedLinearMethod even inside a quantized block, while a module
+    stored as `qweight` keeps the INC path."""
+    _patch_safetensors_metadata(
+        monkeypatch,
+        {
+            "model.layers.0.mlp.gate.weight": {"dtype": "BF16"},
+            "model.layers.1.mlp.gate.qweight": {"dtype": "I32"},
+            "model.layers.1.mlp.gate.qzeros": {"dtype": "I32"},
+            "model.layers.1.mlp.gate.scales": {"dtype": "F16"},
+            "model.norm.weight": {"dtype": "BF16"},
+        },
+    )
+    config = make_config(block_name_to_quantize="model.layers")
+    config.maybe_update_config("dummy-model")
+
+    assert config.checkpoint_unquantized_modules == {
+        "model.layers.0.mlp.gate",
+        "model.norm",
+    }
+    layer = object.__new__(LinearBase)
+    method = config.get_quant_method(layer, "model.layers.0.mlp.gate")
+    assert isinstance(method, UnquantizedLinearMethod)
+    assert not config._is_checkpoint_unquantized("model.layers.1.mlp.gate")
+
+
+def test_inc_checkpoint_unquantized_modules_follow_vllm_mapper(monkeypatch) -> None:
+    _patch_safetensors_metadata(
+        monkeypatch,
+        {"model.language_model.layers.0.mlp.gate.weight": {"dtype": "BF16"}},
+    )
+    config = make_config()
+    config.maybe_update_config("dummy-model")
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={"model.language_model.": "language_model.model."}
+        )
+    )
+
+    layer = object.__new__(LinearBase)
+    method = config.get_quant_method(layer, "language_model.model.layers.0.mlp.gate")
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_maybe_update_config_ignores_unreadable_metadata(monkeypatch) -> None:
+    _patch_safetensors_metadata(monkeypatch, OSError("no safetensors"))
+    config = make_config()
+    config.maybe_update_config("dummy-model")
+
+    assert config.checkpoint_unquantized_modules == set()
 
 
 def test_inc_config_parser_regex_match() -> None:
@@ -2166,9 +2234,9 @@ E2E_MODELS = [
 
 
 def _has_xpu_ops() -> bool:
-    """True when ``vllm._xpu_ops`` is importable.
+    """True when `vllm._xpu_ops` is importable.
 
-    ``apply_weights`` imports it for the activation quantizer, and the stubs
+    `apply_weights` imports it for the activation quantizer, and the stubs
     below patch through it, so tests that exercise that path cannot even be set
     up on a build without vllm-xpu-kernels installed.
     """
@@ -2184,8 +2252,8 @@ def _has_xpu_ops() -> bool:
 def _has_w4a8_kernel() -> bool:
     """True when this build can actually run the w4a8 GEMM.
 
-    The op is registered as a side effect of importing ``vllm._xpu_ops``, so it
-    is not visible on ``torch.ops._xpu_C`` until that import happens.
+    The op is registered as a side effect of importing `vllm._xpu_ops`, so it
+    is not visible on `torch.ops._xpu_C` until that import happens.
     """
     return _has_xpu_ops() and hasattr(torch.ops._xpu_C, "int4_gemm_w4a8")
 
@@ -2485,7 +2553,7 @@ def test_keeps_fp16_scales(w4a8_layer) -> None:
     """The kernel reads scales as fp16 regardless of activation dtype.
 
     Passing bf16 scales does not raise — it silently returns wrong results — so
-    an fp16 copy must exist, while the bf16 ``scales`` survive for the
+    an fp16 copy must exist, while the bf16 `scales` survive for the
     small-batch w4a16 fallback.
     """
     method, layer = w4a8_layer

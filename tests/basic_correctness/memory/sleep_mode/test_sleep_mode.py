@@ -209,7 +209,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
     With TP > 1 the LoRA logits processor carries
-    ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
+    `sharded_to_full_mapping_gpu`, a permanent index mapping used to
     reorder gathered logits. Level-2 sleep must preserve it, like the rest
     of the LoRA state.
     """
@@ -508,14 +508,18 @@ def test_deep_sleep_fp8_kvcache_with_undefined_remap(
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
 
-    original_create_and_map = cumem.create_and_map
+    original_create_and_map = cumem.CuMemAllocator._create_and_map
 
     def create_and_map_with_poison(handle) -> None:
         original_create_and_map(handle)
         _, size, ptr, _ = handle
         cumem.libcudart.cudaMemset(ptr, 0xA5, size)
 
-    monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
+    monkeypatch.setattr(
+        cumem.CuMemAllocator,
+        "_create_and_map",
+        staticmethod(create_and_map_with_poison),
+    )
 
     # New requests must overwrite undefined remapped KV bytes before reading them.
     llm.wake_up(tags=["kv_cache"])

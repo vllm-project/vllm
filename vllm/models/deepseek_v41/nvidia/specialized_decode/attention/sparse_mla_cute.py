@@ -12,22 +12,22 @@ active columns. TRTLLM-gen splits a token's 640 rows over at most 3 CTAs, so at
 one or two requests (6 or 12 tokens with DSpark) its kernel runs about 10 µs
 on a GPU of 152 SMs; most of that is the latency of one CTA's serial work.
 
-What this module computes. ``sparse_mla_decode`` writes, for each token ``t``
-and head ``h``, the BF16 attention output over the token's active columns ``c``
-(``c < lens[t]`` and ``indices[t, c] >= 0``)::
+What this module computes. `sparse_mla_decode` writes, for each token `t`
+and head `h`, the BF16 attention output over the token's active columns `c`
+(`c < lens[t]` and `indices[t, c] >= 0`)::
 
     s_c = bmm1_scale * q[t, h] . kv[c]
     p_c = exp(s_c - m)
     out[t, h] = bmm2_scale * sum_c p_c kv[c] / (sum_c p_c + exp(sink_h - m))
 
-where ``kv[c]`` is row ``indices[t, c]`` of the sliding-window pool for the
-first 128 columns and of the compressed pool for the others, ``m`` is the
+where `kv[c]` is row `indices[t, c]` of the sliding-window pool for the
+first 128 columns and of the compressed pool for the others, `m` is the
 maximum of the scores and the sink, and the sink term is omitted without sinks.
 A token with no active column gets zeros. This is what
-``trtllm_batch_decode_sparse_mla_dsv4`` computes for these shapes.
+`trtllm_batch_decode_sparse_mla_dsv4` computes for these shapes.
 
 How. One CTA of 128 threads takes one token and one 128-column chunk of its
-sparse set (chunk 0 = the sliding-window columns); the ``n = ceil(width / 128)``
+sparse set (chunk 0 = the sliding-window columns); the `n = ceil(width / 128)`
 chunks of a token form a thread block cluster, so a 640-wide layer runs 5 CTAs
 a token in parallel::
 
@@ -55,8 +55,8 @@ once its S MMAs are issued (programmatic dependent launch). Masked columns
 gather zeros and score -inf.
 
 Scope. Two CTAs fit an SM (about 78 KB of shared memory each), so a launch is
-one wave only while every token's cluster can be resident: ``_max_tokens`` allows
-2 x the device's resident clusters of ``n`` CTAs at one CTA an SM (on a 152-SM
+one wave only while every token's cluster can be resident: `_max_tokens` allows
+2 x the device's resident clusters of `n` CTAs at one CTA an SM (on a 152-SM
 GB300, 8 requests with DSpark at width 640).
 Larger batches keep TRTLLM-gen, which is faster once the clusters run in waves.
 """
@@ -173,7 +173,7 @@ def st_shared_v4(
 
 @dsl_user_op
 def st_shared_bf16(smem: Int32, value: Float32, *, loc=None, ip=None) -> None:
-    """Store ``value`` rounded to BF16 at a shared address."""
+    """Store `value` rounded to BF16 at a shared address."""
     _asm(
         None,
         [_v(Int32(smem), loc, ip), _v(Float32(value), loc, ip)],
@@ -237,7 +237,7 @@ def copy16_shared_to_global(smem: Int32, gmem: Int64, *, loc=None, ip=None) -> N
 def pack_e4m3x4(
     a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None
 ) -> Uint32:
-    """Four floats as E4M3 bytes, ``a`` in the lowest byte (round to nearest,
+    """Four floats as E4M3 bytes, `a` in the lowest byte (round to nearest,
     saturating)."""
     return Uint32(
         _asm(
@@ -265,7 +265,7 @@ def mma_f8(
     ip=None,
 ) -> None:
     """One tcgen05 FP8 MMA of this CTA: D (TMEM) = A x B (+ D if
-    ``accumulate``), A and B from shared memory descriptors."""
+    `accumulate`), A and B from shared memory descriptors."""
     _asm(
         None,
         [
@@ -288,8 +288,8 @@ def mma_f8(
 def st_async_peer_b32(
     smem: Int32, mbar: Int32, peer: Int32, value: Uint32, *, loc=None, ip=None
 ) -> None:
-    """Store a word at ``smem`` of cluster CTA ``peer`` (the same offset as a
-    local address), completing 4 bytes on the peer's ``mbar``."""
+    """Store a word at `smem` of cluster CTA `peer` (the same offset as a
+    local address), completing 4 bytes on the peer's `mbar`."""
     _asm(
         None,
         [_v(Int32(v), loc, ip) for v in (smem, mbar, peer)]
@@ -316,9 +316,9 @@ def bulk_copy_to_peer(
     loc=None,
     ip=None,
 ) -> None:
-    """Bulk-copy ``size`` bytes of this CTA's shared memory at ``source`` to
-    ``dest`` of cluster CTA ``peer`` (the same offset as a local address),
-    completing on the peer's ``mbar``."""
+    """Bulk-copy `size` bytes of this CTA's shared memory at `source` to
+    `dest` of cluster CTA `peer` (the same offset as a local address),
+    completing on the peer's `mbar`."""
     _asm(
         None,
         [_v(Int32(v), loc, ip) for v in (dest, source, size, mbar, peer)],
@@ -335,7 +335,7 @@ def bulk_copy_to_peer(
 
 class SparseMlaDecodeCute:
     """The sparse-MLA decode (module docstring) of tokens whose sparse sets
-    are at most ``chunks`` x 128 columns wide; ``has_sinks``: add each head's
+    are at most `chunks` x 128 columns wide; `has_sinks`: add each head's
     attention sink to the softmax denominator."""
 
     def __init__(self, chunks: int, has_sinks: bool) -> None:
@@ -370,10 +370,10 @@ class SparseMlaDecodeCute:
         tokens: Int32,
         stream: cuda.CUstream,
     ):
-        """Launch on ``stream``: one cluster of ``n`` CTAs a token. Pointers
+        """Launch on `stream`: one cluster of `n` CTAs a token. Pointers
         are addresses; strides are in elements (bytes for the FP8 query and
-        pools, BF16 elements for ``out``); ``scale_log2`` is
-        ``bmm1_scale * log2(e)``."""
+        pools, BF16 elements for `out`); `scale_log2` is
+        `bmm1_scale * log2(e)`."""
         self.kernel(
             q_ptr,
             q_stride,
@@ -797,7 +797,7 @@ class SparseMlaDecodeCute:
 
 @cache
 def _kernel(device_index: int, chunks: int, has_sinks: bool):
-    """``SparseMlaDecodeCute`` compiled for a device, chunk count and sinks."""
+    """`SparseMlaDecodeCute` compiled for a device, chunk count and sinks."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             SparseMlaDecodeCute(chunks, has_sinks),
@@ -823,8 +823,8 @@ def _kernel(device_index: int, chunks: int, has_sinks: bool):
 
 @cache
 def _max_tokens(device_index: int, chunks: int) -> int:
-    """Tokens whose clusters are all resident at once: ``CTAS_PER_SM`` times
-    the resident clusters of ``chunks`` CTAs at one CTA an SM."""
+    """Tokens whose clusters are all resident at once: `CTAS_PER_SM` times
+    the resident clusters of `chunks` CTAs at one CTA an SM."""
     with torch.accelerator.device_index(device_index):
         clusters = cutlass.utils.HardwareInfo(device_index).get_max_active_clusters(
             chunks
@@ -848,7 +848,7 @@ def precompile(device_index: int, has_sinks: bool) -> None:
 
 
 def _is_pool(cache: torch.Tensor) -> bool:
-    """An FP8 KV pool of 512-byte rows ``stride(-2)`` apart, 16-byte aligned."""
+    """An FP8 KV pool of 512-byte rows `stride(-2)` apart, 16-byte aligned."""
     return (
         cache.dtype == torch.float8_e4m3fn
         and cache.dim() >= 2
@@ -870,7 +870,7 @@ def supports_sparse_mla_cute(
     bmm2_scale: float | torch.Tensor,
     sinks: torch.Tensor | None,
 ) -> bool:
-    """Whether ``sparse_mla_decode`` takes these arguments: 16 FP8 query heads
+    """Whether `sparse_mla_decode` takes these arguments: 16 FP8 query heads
     of 512 (BF16 output), FP8 pools, int32 index rows of at most 640 columns,
     scalar scales, FP32 sinks, and a batch whose clusters are all resident."""
     if (
@@ -939,11 +939,11 @@ def sparse_mla_decode(
 
     Args:
         query: [tokens, 16, 512] FP8 E4M3.
-        swa_kv_cache: FP8 pool of 512-byte rows ``stride(-2)`` apart; the first
-            128 columns of ``sparse_indices`` are its row offsets.
+        swa_kv_cache: FP8 pool of 512-byte rows `stride(-2)` apart; the first
+            128 columns of `sparse_indices` are its row offsets.
         compressed_kv_cache: The pool of the other columns, likewise.
         sparse_indices: [tokens, width] int32 row offsets, -1 for none
-            (``width`` <= 640).
+            (`width` <= 640).
         sparse_topk_lens: [tokens] int32 active columns of each token.
         out: [tokens, 16, 512] BF16 attention output.
         bmm1_scale: Score scale (the softmax scale times the FP8 scales).

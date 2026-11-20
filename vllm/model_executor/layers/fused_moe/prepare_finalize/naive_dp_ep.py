@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 import torch
@@ -150,7 +150,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         return current_platform.is_rocm()
 
     @contextmanager
-    def _comm_region(self) -> Iterator[None]:
+    def _comm_region(self) -> Generator[None]:
         """Scope the dispatch/combine collective runs in.
 
         Without DBO the collective runs on the calling stream. Under DBO it
@@ -322,8 +322,10 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
+        assert a1_scale is None, "naive DP/EP dispatch quantizes its own input"
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
             a1, quant_config, defer_input_quant
         )
@@ -345,6 +347,37 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
 
         return a1q, a1q_scale, router_logits
+
+    def supports_precomputed_routing(self) -> bool:
+        return True
+
+    def prepare_routed(
+        self,
+        a1: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        """Quantize and dispatch topk weights and ids instead of logits."""
+        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
+        res = get_ep_group().dispatch(
+            a1q,
+            topk_weights,
+            topk_ids,
+            is_sequence_parallel=self.is_sequence_parallel,
+            extra_tensors=scales,
+        )
+        if scales is None:
+            assert len(res) == 3
+            a1q, topk_weights, topk_ids = res
+            return a1q, a1q_scale_orig, topk_weights, topk_ids
+        assert len(res) == 4
+        a1q, topk_weights, topk_ids, gathered_scales = res
+        a1q_scale = _unwrap_scale_and_prepare_for_moe(gathered_scales, quant_config)
+        return a1q, a1q_scale, topk_weights, topk_ids
 
     def finalize(
         self,

@@ -12,7 +12,7 @@ from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.rocm_octave_attn import RocmOctaveAttentionBackend
 from vllm.v1.attention.ops import rocm_octave as sq
-from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
 
 def _arch() -> str | None:
@@ -127,7 +127,7 @@ def test_decode_matches_reference(
 ):
     """Covers MTP verification: up to 4 consecutive query tokens per request,
     each with its own causal length, plus a padded query with no request.
-    ``use_wmma=False`` forces the portable kernel every architecture runs."""
+    `use_wmma=False` forces the portable kernel every architecture runs."""
     torch.manual_seed(1)
     dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
@@ -318,7 +318,7 @@ def test_kernels_follow_declared_cache_layouts(layout):
     signs = sq.sign_bits(HEAD).to(dev)
     sq.register_rope_dim(HEAD, ROPE)
     spec = RocmOctaveAttentionBackend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=BLOCK,
             num_kv_heads=hkv,
             head_size=HEAD,

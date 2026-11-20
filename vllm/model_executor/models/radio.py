@@ -8,32 +8,31 @@
 # Copyright (c) 2023-2026, NVIDIA CORPORATION.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # --------------------------------------------------------
-"""RADIO vision encoder, matching the ``RadioModel`` in the Transformers library.
+"""RADIO vision encoder, matching the `RadioModel` in the Transformers library.
 
-The module tree mirrors the Transformers ``RadioModel`` (``embeddings`` and an
-``encoder.layer`` stack of ``norm1``/``attention``/``layer_scale1``/``norm2``/
-``mlp``/``layer_scale2`` blocks). The vLLM-specific deviations are the fused
-``attention.qkv`` (a :class:`~vllm.model_executor.layers.linear.QKVParallelLinear`
-for TP/quantization, vs the split ``query``/``key``/``value`` in HF) and running
-input normalization in the processor instead of an ``input_conditioner`` module;
-the attention backend and MLP reuse vLLM's :class:`MMEncoderAttention` and
-:class:`~vllm.model_executor.models.intern_vit.InternMLP`. ``load_weights`` maps
+The module tree mirrors the Transformers `RadioModel` (`embeddings` and an
+`encoder.layer` stack of `norm1`/`attention`/`layer_scale1`/`norm2`/
+`mlp`/`layer_scale2` blocks). The vLLM-specific deviations are the fused
+`attention.qkv` (a `QKVParallelLinear`
+for TP/quantization, vs the split `query`/`key`/`value` in HF) and running
+input normalization in the processor instead of an `input_conditioner` module;
+the attention backend and MLP reuse vLLM's `MMEncoderAttention` and
+`InternMLP`. `load_weights` maps
 both native Transformers and legacy remote-code checkpoint keys onto this tree
-via :data:`hf_to_vllm_mapper`.
+via `hf_to_vllm_mapper`.
 """
 
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import partial
 from itertools import accumulate, repeat
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import PreTrainedConfig
+from transformers import PreTrainedConfig, RadioConfig
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -43,12 +42,9 @@ from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    split_tensor_along_last_dim,
-    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.intern_vit import InternMLP
@@ -87,13 +83,73 @@ def calc_seq_lens(sizes: list[tuple[int, int]], patch_size: int) -> list[int]:
     return [calc_seq_len(size, patch_size) for size in sizes]
 
 
+# (hidden_size, num_hidden_layers, num_attention_heads, intermediate_size)
+VIT_TIMM_DIM_BY_NAME: dict[str, tuple[int, int, int, int]] = {
+    "vit_small_patch16_224": (384, 12, 6, 1536),
+    "vit_base_patch16_224": (768, 12, 12, 3072),
+    "vit_large_patch16_224": (1024, 24, 16, 4096),
+    "vit_huge_patch16_224": (1280, 32, 16, 5120),
+    "vit_so400m_patch16_224": (1152, 27, 16, 4304),
+}
+
+
+def radio_config_from_args(
+    args: dict[str, Any],
+    *,
+    image_size: int = 224,
+    patch_size: int = 16,
+    norm_mean: list[float] | None = None,
+    norm_std: list[float] | None = None,
+    video_temporal_patch_size: int = 1,
+) -> RadioConfig:
+    """Build a `RadioConfig` from the timm-style `args` of remote-code checkpoints."""
+    model_name = args.get("model")
+    if model_name not in VIT_TIMM_DIM_BY_NAME:
+        raise ValueError(f"Unsupported vit model type: {model_name}")
+    hidden_size, num_layers, num_heads, intermediate_size = VIT_TIMM_DIM_BY_NAME[
+        model_name
+    ]
+    teachers = args.get("teachers") or []
+    num_cls_tokens = (
+        len({t["name"] for t in teachers}) if args.get("cls_token_per_teacher") else 1
+    )
+    num_registers = args.get("cpe_num_registers") or 0
+    if not num_registers and (multiple := args.get("register_multiple")):
+        num_registers = multiple - num_cls_tokens % multiple
+    summary_idxs = (
+        [i for i, t in enumerate(teachers) if t.get("use_summary", True)]
+        if teachers
+        else list(range(num_cls_tokens))
+    )
+    cpe_max_size = args.get("cpe_max_size", 2048)
+    norm_kwargs = {
+        k: v for k, v in (("norm_mean", norm_mean), ("norm_std", norm_std)) if v
+    }
+    return RadioConfig(
+        hidden_size=hidden_size,
+        num_hidden_layers=num_layers,
+        num_attention_heads=num_heads,
+        intermediate_size=intermediate_size,
+        image_size=image_size,
+        patch_size=patch_size,
+        max_img_size=round(cpe_max_size / patch_size) * patch_size,
+        num_cls_tokens=num_cls_tokens,
+        num_registers=num_registers,
+        summary_idxs=summary_idxs,
+        video_temporal_patch_size=(
+            video_temporal_patch_size if video_temporal_patch_size > 1 else None
+        ),
+        **norm_kwargs,
+    )
+
+
 class RadioPatchEmbeddings(nn.Module):
     """Cropped Position Embedding (CPE) patch generator, matching Transformers'
-    ``RadioPatchEmbeddings``, with additional support for dynamic multi-resolution
+    `RadioPatchEmbeddings`, with additional support for dynamic multi-resolution
     packing and video temporal compression.
     """
 
-    def __init__(self, config: PreTrainedConfig):
+    def __init__(self, config: PreTrainedConfig, image_size: input_dim_t | None = None):
         super().__init__()
         patch_size = config.patch_size
         embed_dim = config.hidden_size
@@ -103,13 +159,13 @@ class RadioPatchEmbeddings(nn.Module):
         max_input_dims = tuple(
             int(math.ceil(d / patch_size) * patch_size) for d in max_input_dims
         )
-        input_dims = to_2tuple(config.image_size)
+        input_dims = to_2tuple(image_size or config.image_size)
 
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.num_cls_tokens = config.num_cls_tokens
         self.num_registers = config.num_registers
-        self.temporal_patch_size = config.video_temporal_patch_size
+        self.temporal_patch_size = config.video_temporal_patch_size or 1
 
         self.cpe_mode = max_input_dims != input_dims
         self.num_rows = max_input_dims[0] // patch_size
@@ -123,11 +179,6 @@ class RadioPatchEmbeddings(nn.Module):
         )
 
         if self.temporal_patch_size > 1:
-            if not config.separate_video_embedder:
-                raise NotImplementedError(
-                    "Only separate_video_embedder=True is supported for"
-                    " temporal compression (video_temporal_patch_size > 1)"
-                )
             self.video_patch_projection = ViTPatchLinear(
                 patch_size,
                 embed_dim,
@@ -347,18 +398,18 @@ class ViTPatchLinear(nn.Linear):
         self.temporal_patch_size = temporal_patch_size
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class MaskMetadata:
     cu_seqlens: torch.Tensor
     max_seqlen: torch.Tensor
 
 
 class RadioAttention(nn.Module):
-    """RADIO self-attention: a fused ``qkv`` projection feeding the vLLM
+    """RADIO self-attention: a fused `qkv` projection feeding the vLLM
     attention backend, with optional QK-normalization and dynamic-resolution
-    packed attention (via ``mask_meta``). The fused counterpart of the
-    Transformers ``RadioAttention`` (which keeps ``query``/``key``/``value`` and
-    ``output.dense`` split); ``load_weights`` bridges the two."""
+    packed attention (via `mask_meta`). The fused counterpart of the
+    Transformers `RadioAttention` (which keeps `query`/`key`/`value` and
+    `output.dense` split); `load_weights` bridges the two."""
 
     def __init__(
         self,
@@ -403,18 +454,6 @@ class RadioAttention(nn.Module):
             prefix=f"{prefix}.qkv",
             disable_tp=use_data_parallel,
         )
-        self.qk_normalization = config.qk_normalization
-        if self.qk_normalization:
-            self.q_norm = RMSNorm(
-                self.dummy_dim,
-                eps=config.layer_norm_eps,
-                var_hidden_size=self.embed_dim,
-            )
-            self.k_norm = RMSNorm(
-                self.dummy_dim,
-                eps=config.layer_norm_eps,
-                var_hidden_size=self.embed_dim,
-            )
         self.proj = RowParallelLinear(
             self.dummy_dim,
             self.embed_dim,
@@ -429,20 +468,6 @@ class RadioAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def _apply_qk_norm(
-        self, q: torch.Tensor, k: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.tp_size > 1:
-            q = tensor_model_parallel_all_gather(q.contiguous())
-            k = tensor_model_parallel_all_gather(k.contiguous())
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        if self.tp_size > 1:
-            splitter = partial(split_tensor_along_last_dim, num_partitions=self.tp_size)
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-        return q, k
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -452,16 +477,13 @@ class RadioAttention(nn.Module):
         qkv, _ = self.qkv(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
 
-        if self.qk_normalization:
-            q, k = self._apply_qk_norm(q, k)
-
         out = self.attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
         out, _ = self.proj(out)
         return out
 
 
 class RadioLayerScale(nn.Module):
-    """LayerScale matching the Transformers ``RadioLayerScale``: a ``lambda1``
+    """LayerScale matching the Transformers `RadioLayerScale`: a `lambda1`
     parameter scaling the residual branch."""
 
     def __init__(self, config: PreTrainedConfig) -> None:
@@ -481,10 +503,10 @@ class RadioLayerScale(nn.Module):
     is_encoder=True,
 )
 class RadioLayer(nn.Module):
-    """RADIO transformer block, mirroring the Transformers ``RadioLayer``
-    (``norm1`` / ``attention`` / ``layer_scale1`` / ``norm2`` / ``mlp`` /
-    ``layer_scale2``). ``drop_path`` is an inference-time ``Identity``; the MLP
-    reuses :class:`InternMLP` (``fc1``/``fc2``, matching ``RadioMLP``)."""
+    """RADIO transformer block, mirroring the Transformers `RadioLayer`
+    (`norm1` / `attention` / `layer_scale1` / `norm2` / `mlp` /
+    `layer_scale2`). `drop_path` is an inference-time `Identity`; the MLP
+    reuses `InternMLP` (`fc1`/`fc2`, matching `RadioMLP`)."""
 
     def __init__(
         self,
@@ -524,8 +546,8 @@ class RadioLayer(nn.Module):
 
 
 class RadioVisionEncoder(nn.Module):
-    """RADIO encoder stack, mirroring the Transformers ``RadioEncoder`` module
-    tree (a ``layer`` ModuleList of :class:`RadioLayer`)."""
+    """RADIO encoder stack, mirroring the Transformers `RadioEncoder` module
+    tree (a `layer` ModuleList of `RadioLayer`)."""
 
     def __init__(
         self,
@@ -639,14 +661,15 @@ class RadioModel(nn.Module):
         *,
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
+        image_size: input_dim_t | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         self.config = config
-        self.temporal_patch_size = config.video_temporal_patch_size
+        self.temporal_patch_size = config.video_temporal_patch_size or 1
 
-        self.embeddings = RadioPatchEmbeddings(config)
+        self.embeddings = RadioPatchEmbeddings(config, image_size)
         self.encoder = RadioVisionEncoder(
             config=config,
             quant_config=quant_config,
@@ -655,19 +678,14 @@ class RadioModel(nn.Module):
             prefix=f"{prefix}.encoder",
         )
 
-        # summary_idxs selects which class tokens to gather: None (no teachers)
         # Only a compiled layer needs this; TORCH_SDPA pays one call per item for it.
         self.pack_uniform_batches = bool(self.encoder.layer) and not (
             self.encoder.layer[0].do_not_compile
         )
 
-        # keeps all class tokens; a list (possibly empty) gathers those indices.
-        if config.summary_idxs is not None:
-            self.register_buffer(
-                "summary_idxs", torch.tensor(config.summary_idxs, dtype=torch.long)
-            )
-        else:
-            self.summary_idxs = None
+        self.register_buffer(
+            "summary_idxs", torch.tensor(config.summary_idxs, dtype=torch.long)
+        )
 
     def forward(
         self,
@@ -712,7 +730,7 @@ class RadioModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load RADIO checkpoint weights, remapping legacy remote-code and
         native Transformers keys onto this module tree via
-        :data:`hf_to_vllm_mapper`."""
+        `hf_to_vllm_mapper`."""
         if isinstance(weights, dict):
             weights = weights.items()
         # Keep only tensors belonging to the RADIO tower (legacy ``radio_model.*``
@@ -762,11 +780,7 @@ class RadioModel(nn.Module):
             all_summary = torch.cat(summaries, dim=1)
             all_feat = torch.cat(all_patches, dim=1)
 
-        if self.summary_idxs is not None:
-            bb_summary = all_summary[:, self.summary_idxs]
-        else:
-            bb_summary = all_summary
-        return bb_summary.flatten(1), all_feat
+        return all_summary[:, self.summary_idxs].flatten(1), all_feat
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -797,7 +811,7 @@ class RadioModel(nn.Module):
     def _inter_image_mask_metadata(
         self, imgs_sizes: list[tuple[int, int]], device: torch.device
     ) -> MaskMetadata:
-        """Build mask metadata from image pixel sizes. Adds ``num_skip`` to each
+        """Build mask metadata from image pixel sizes. Adds `num_skip` to each
         sequence length (cls/register tokens) to match patch generator output."""
         patch_size = self.embeddings.patch_size
         num_skip = self.embeddings.num_skip
@@ -809,7 +823,7 @@ class RadioModel(nn.Module):
         self, seq_lens: list[int], device: torch.device
     ) -> MaskMetadata:
         """Build mask metadata from sequence lengths (already including
-        cls/register tokens, i.e. ``patch_count + num_skip`` per item)."""
+        cls/register tokens, i.e. `patch_count + num_skip` per item)."""
         assert len(seq_lens) > 0
         # torch.tensor(list, device=cuda) here is a blocking host copy per forward.
         cu_seqlens = async_tensor_h2d(

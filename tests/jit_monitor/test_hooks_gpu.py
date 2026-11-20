@@ -42,7 +42,7 @@ if _HAS_TRITON:
 
 
 def _run_add_kernel(n: int, block: int = 256, offset: int = 0) -> None:
-    """Launch ``_add_kernel`` with vectors of length *n*."""
+    """Launch `_add_kernel` with vectors of length *n*."""
     x = torch.randn(n + offset, device="cuda")[offset:]  # affect alignment
     y = torch.randn(n, device="cuda")
     out = torch.empty(n, device="cuda")
