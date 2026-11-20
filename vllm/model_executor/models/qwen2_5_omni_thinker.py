@@ -760,6 +760,22 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # call, but per-item caching can leave a video miss with an audio hit.
         # Such a request bypasses the cache.
         if not all(video_is_cached) and any(audio_is_cached):
+            audio_items = inputs.mm_data_items.get("audio")
+            if isinstance(audio_items, AudioProcessorItems) and any(
+                item is None for item in audio_items.get_all()
+            ):
+                # A data-less audio item only exists in the cache, and the
+                # cache stores processed kwargs rather than raw media, so the
+                # bypass below would hand `None` to the HF processor. Reject
+                # with an actionable message instead of an assertion deep in
+                # the processor.
+                raise VLLMValidationError(
+                    "This request pairs a new video with an audio track that is "
+                    "only referenced by UUID, so its data is not in the request. "
+                    "A new video must be processed together with its audio: send "
+                    "the audio data again, or reuse the cached video as well.",
+                    parameter="audio_url",
+                )
             inputs = replace(inputs, cache=None)
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)

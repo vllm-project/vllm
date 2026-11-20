@@ -24,6 +24,7 @@ from vllm.config.multimodal import (
     MultiModalDummyOptions,
     VideoDummyOptions,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
@@ -85,7 +86,10 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     cached_encode,
 )
-from vllm.multimodal.utils import get_use_audio_in_video
+from vllm.multimodal.utils import (
+    VIDEO_AUDIO_UUID_PREFIX,
+    get_use_audio_in_video,
+)
 from vllm.multimodal.video_prune.evs import (
     compute_retained_tokens_count,
     compute_retention_mask,
@@ -740,7 +744,33 @@ class NanoNemotronVLMultiModalProcessor(
                     f"num_videos={len(videos)}"
                 )
             audio_items = audios.get_all()
-            has_audio = [audio is not None for audio in audio_items]
+            audio_uuids = list((inputs.mm_uuid_items or {}).get("audio") or ())
+            # Pad so a request without UUIDs still yields one entry per audio.
+            audio_uuids += [None] * (len(audio_items) - len(audio_uuids))
+            # A `None` audio item is also a data-less reference to an audio
+            # item the client sent before; only the renderer's prefixed UUID
+            # marks a video without an audio track.
+            silent = [
+                audio is None
+                and (uuid is None or uuid.startswith(VIDEO_AUDIO_UUID_PREFIX))
+                for audio, uuid in zip(audio_items, audio_uuids, strict=True)
+            ]
+            data_less = [
+                audio is None and not is_silent
+                for audio, is_silent in zip(audio_items, silent, strict=True)
+            ]
+            if any(data_less):
+                # The audio data is not in the request and this path cannot
+                # read it back from the processor cache, which stores processed
+                # kwargs. Failing here beats silently dropping the track.
+                raise VLLMValidationError(
+                    "This request references an audio track by UUID without "
+                    "sending its data, and `use_audio_in_video` needs the audio "
+                    "data to interleave it with the video. Send the audio data "
+                    "again.",
+                    parameter="audio_url",
+                )
+            has_audio = [not is_silent for is_silent in silent]
             if not all(has_audio):
                 # The renderer degrades a video without an audio track to a
                 # None audio entry, which cannot be passed to the HF processor
