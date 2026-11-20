@@ -678,10 +678,10 @@ def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, sh
         )
         assert errors == [] and message is None
         for src, dst, length in zip(sources, destinations, lengths):
-            ctypes.memmove(dst, src, length)
+            ctypes.memmove(int(dst), int(src), int(length))
         assert torch.equal(host, expected_host)
         assert torch.equal(gpu, expected_gpu)
-        assert sum(lengths) == (5 if host_owner else 3) * page * sends_bytes
+        assert int(lengths.sum()) == (5 if host_owner else 3) * page * sends_bytes
 
 
 @pytest.mark.cpu_test
@@ -708,7 +708,7 @@ async def test_hisparse_full_prefix_hit_completes_without_writes(
     await producer.record_send_reqs(completed)
     ranks = producer.transfer_topo.handshake_target_ranks(4)
     sock = AsyncMock()
-    with patch.object(producer.engine, "batch_transfer_sync_write") as write:
+    with patch.object(producer.transfer_backend, "transfer_sync_arrays") as write:
         for index, rank in enumerate(ranks):
             host = torch.full((8, page), 0xCC, dtype=torch.uint8)
             gpu = torch.full((8, page), 0xDD, dtype=torch.uint8)
