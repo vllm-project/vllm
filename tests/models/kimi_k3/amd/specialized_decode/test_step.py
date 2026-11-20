@@ -157,7 +157,8 @@ def _zero_routed_experts() -> None:
             if isinstance(w2, torch.Tensor):
                 w2.data.view(torch.uint8).zero_()
                 zeroed += 1
-        assert zeroed, "no w2_weight tensors found - _zero_routed_experts is a no-op"
+        layers = len(routing._moe_layers(runner.model))
+        assert layers and zeroed == layers, f"zeroed {zeroed} of {layers} MoE layers"
         return install(runner, *args, **kwargs)
 
     routing.install_routing = install_routing
