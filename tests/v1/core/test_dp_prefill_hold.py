@@ -374,20 +374,6 @@ def test_finished_step_reports_prefill_chunks_only():
     assert done() == (1, m, m * (n + m / 2))
 
 
-def test_rank_without_a_free_slot_is_blocked():
-    """A rank whose slots are all taken cannot start its queued prefill, so it
-    offers none. Its last finished step is still reported for timing."""
-    scheduler, hold = _hold_scheduler(max_num_seqs=1)
-    running, queued = create_requests(num_requests=2, num_tokens=8)
-    scheduler.add_request(running)
-    _finish_step(scheduler, scheduler.schedule())
-    scheduler.add_request(queued)
-    row = hold.local_row()
-    assert row[dph._DONE] == 1 and row[dph._DONE_TOKENS] == 8
-    assert row[dph._DECODES] == 1
-    assert row[dph._BLOCKED] == 1 and row[dph._X] == 0
-
-
 def _kv_stopped_scheduler():
     """A hold scheduler with a running decode that leaves too few free KV
     blocks for a 300-token request, and the decode."""
@@ -422,22 +408,23 @@ def test_queue_scan_stops_where_kv_runs_out():
 
 
 def test_queue_scan_stops_where_running_slots_run_out():
-    """A release that stops on a full running set counts as one that stopped
-    for lack of KV blocks: the rank then offers only as many queued requests
-    as it has free slots."""
+    """A rank offers only as many queued requests as it has free running
+    slots, and none once they are all taken. Its last finished step is still
+    reported for timing."""
     scheduler, hold = _hold_scheduler(max_num_seqs=2)
     reqs = create_requests(num_requests=4, num_tokens=8)
     scheduler.add_request(reqs[0])
     _finish_step(scheduler, scheduler.schedule())
     for req in reqs[1:]:
         scheduler.add_request(req)
-    assert hold.local_row()[dph._QUEUED] == 3
-
-    _finish_step(scheduler, scheduler.schedule())
-    assert scheduler.prefill_kv_stopped
-    scheduler.finish_requests(reqs[0].request_id, RequestStatus.FINISHED_ABORTED)
     row = hold.local_row()
     assert row[dph._X] == 8 and row[dph._QUEUED] == 1
+
+    _finish_step(scheduler, scheduler.schedule())
+    row = hold.local_row()
+    assert row[dph._DONE] == 1 and row[dph._DONE_TOKENS] == 8
+    assert row[dph._DECODES] == 2
+    assert row[dph._WORK] == 1 and row[dph._X] == 0 and row[dph._QUEUED] == 0
 
 
 def test_request_past_the_target_bounds_only_the_hold(monkeypatch):

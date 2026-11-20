@@ -16,9 +16,9 @@ engine core's state sync, and every rank runs the same deterministic
   ahead of it may be held `(T - a - (k - 1) * e) / k - t_mix` more, where `e`
   is the time held so far, `t_mix` is the mixed step time and `T` is the TTFT
   target. A request that has waited `T` can no longer meet it, so from then
-  on its age is the time held so far. After a release stops for lack of KV
-  blocks or running slots, only the queue ahead of the first request that
-  does not fit counts.
+  on its age is the time held so far. Only what admission could take
+  counts: the queue ends at the first request without a free running slot
+  or, after a release stopped for lack of KV blocks, without the blocks.
 - Step costs come from an online least-squares fit of measured step times,
   with no latency model. Until the fit is pinned down, it releases.
 """
@@ -38,18 +38,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Layout of the row each rank reports per step.
-ROW_SIZE = 15
+ROW_SIZE = 14
 (
     _DONE,  # a step with scheduled tokens finished since the previous sync
     _PERIOD,  # seconds since the previous sync
     _DONE_TOKENS,  # prefill tokens of that step
     _DONE_ATTN,  # attention work of that step, sum(n * (ctx + n / 2))
     _WORK,  # has prefill work
-    _BLOCKED,  # has prefill work but no free slot to start it
     _X,  # prefill tokens it would run if released now, at most one budget
     _X_ATTN,  # attention work of those
     _DECODES,  # running decode requests
-    _QUEUED,  # requests with prefill work, 0 if blocked
+    _QUEUED,  # requests with prefill work it can start
     _SLACK,  # min over them of (T - age - (k - 1) * e) / k
     _ARRIVED,  # requests that arrived since the previous sync
     _ADMITTED,  # requests scheduled for the first time since the previous sync
@@ -187,8 +186,7 @@ class PrefillQueueState(NamedTuple):
     num_loaded: int
     max_active_reqs: int
     num_cached_tokens: Callable[["Request"], int]
-    # Free KV blocks if the last release stopped for lack of them or of
-    # running slots, else None.
+    # Free KV blocks if the last release stopped for lack of them, else None.
     kv_free_blocks: int | None
     num_blocks_needed: Callable[["Request"], int]
 
@@ -378,9 +376,6 @@ class PrefillHold:
         if not chunks and next(state.waiting(), None) is None:
             return row
         row[_WORK] = 1.0
-        if not chunks and len(state.running) >= state.max_active_reqs:
-            row[_BLOCKED] = 1.0
-            return row
 
         # Aborts, the finished step and finished KV loads may have changed the
         # queue since the prepared scan.
@@ -441,11 +436,11 @@ class PrefillHold:
         free = state.kv_free_blocks
         slots = state.max_active_reqs - len(state.running)
         for req in state.waiting():
+            slots -= 1
             if free is not None:
                 free -= state.num_blocks_needed(req)
-                slots -= 1
-                if free < 0 or slots < 0:  # admission stops here too
-                    return
+            if slots < 0 or (free is not None and free < 0):
+                return  # admission stops here too
             # A request holding KV blocks, such as a finished async KV load,
             # resumes from them.
             cached = req.num_computed_tokens or cached_tokens.get(req.request_id)
@@ -518,7 +513,8 @@ class PrefillHold:
             return "no_decode"
         if cold:
             return "cold"
-        blocked = [bool(r[_BLOCKED]) for r in rows]
+        # A rank with prefill work it cannot start admits no arrival either.
+        blocked = [r[_WORK] > 0 and r[_X] == 0 for r in rows]
         if not any(r[_WORK] for r in rows):
             # The next step may admit what arrives before it: hold if a typical
             # request alone on one rank would be held.

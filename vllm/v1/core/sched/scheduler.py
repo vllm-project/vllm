@@ -397,8 +397,7 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
-        # Whether the last release stopped for lack of KV blocks or running
-        # slots, or preempted.
+        # Whether the last release stopped for lack of KV blocks, or preempted.
         self.prefill_kv_stopped = False
         if self.scheduler_config.prefill_hold_ttft_target is not None:
             self.prefill_hold = PrefillHold(
@@ -1671,12 +1670,6 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
-                # A full running set stops admission as a lack of KV blocks does.
-                num_running = len(self.running) + self.num_waiting_for_streaming_input
-                stopped_on_kv |= (
-                    self.prefill_capacity_bound
-                    and num_running >= self.max_num_active_reqs
-                )
         if not defer_prefills:
             self.prefill_kv_stopped = stopped_on_kv
 
@@ -3093,7 +3086,8 @@ class Scheduler(SchedulerInterface):
             self._startable_waiting,
             self.get_request_counts()[1],
             len(self.finished_recving_kv_req_ids),
-            self.max_num_active_reqs,
+            # Sessions waiting for their next streaming input keep their slots.
+            self.max_num_active_reqs - self.num_waiting_for_streaming_input,
             self.kv_cache_manager.get_num_cached_tokens,
             self.kv_cache_manager.block_pool.get_num_free_blocks()
             - self._inflight_prefill_reserved_blocks()
