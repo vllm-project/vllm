@@ -20,6 +20,7 @@ Raw ROCm AITER helper-op coverage such as `group_fp8_quant` and
 This file only keeps the MoE-shaped integration angle for those helpers.
 """
 
+import dataclasses
 import importlib
 import math
 import warnings
@@ -193,6 +194,7 @@ def ref_moe_forward(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     activation: str = "silu",
+    swiglu_limit: float = 7.0,
 ) -> torch.Tensor:
     """Float32 mask-based MoE reference for the ROCm fused-MoE kernel."""
     num_tokens, hidden_dim = hidden_states.shape
@@ -226,8 +228,8 @@ def ref_moe_forward(
         elif activation == "gelu":
             act = F.gelu(gate) * up
         elif activation == "swigluoai":
-            gate = gate.clamp(max=7.0)
-            up = up.clamp(-7.0, 7.0)
+            gate = gate.clamp(max=swiglu_limit)
+            up = up.clamp(-swiglu_limit, swiglu_limit)
             act = gate * torch.sigmoid(1.702 * gate) * (up + 1)
         else:
             raise ValueError(f"Unknown activation: {activation}")
@@ -1365,6 +1367,76 @@ def test_aiter_fused_moe_gelu_accuracy():
         out.float(),
         ref_out,
         label="gelu_accuracy",
+        atol=0.05,
+        rtol=0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "moe_limit,quant_limit",
+    [(None, 1.0), (1.0, None), (4.0, 1.0)],
+)
+def test_aiter_fused_moe_swiglu_limit_accuracy(
+    moe_limit: float | None,
+    quant_limit: float | None,
+):
+    """`rocm_aiter_fused_experts` should clamp SwiGLU-OAI at the limit either
+    config carries, the quant config's first, as
+    `ApplyMoEActivationConfig.from_configs` resolves it. GPT-OSS MXFP4 sets
+    the limit on the quant config only."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterQuantType,
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=8,
+        hidden_dim=256,
+        intermediate_dim=512,
+        num_experts=4,
+        topk=2,
+        seed=5,
+    )
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(case["w1"], case["w2"])
+    moe_config = dataclasses.replace(
+        make_dummy_moe_config(
+            num_experts=4,
+            experts_per_token=2,
+            hidden_dim=256,
+            intermediate_size=512,
+            activation=MoEActivation.SWIGLUOAI,
+        ),
+        swiglu_limit=moe_limit,
+    )
+    out = rocm_aiter_fused_experts(
+        hidden_states=case["hidden_states"],
+        w1=w1_shuffled,
+        w2=w2_shuffled,
+        topk_weights=case["topk_weights"],
+        topk_ids=case["topk_ids"],
+        moe_config=moe_config,
+        quant_type=AiterQuantType.NO,
+        activation=MoEActivation.SWIGLUOAI,
+        quant_config=FusedMoEQuantConfig.make(gemm1_clamp_limit=quant_limit),
+    )
+    ref_out = ref_moe_forward(
+        case["hidden_states"],
+        case["w1"],
+        case["w2"],
+        case["topk_weights"],
+        case["topk_ids"],
+        activation="swigluoai",
+        swiglu_limit=1.0,
+    )
+
+    _assert_close_budget(
+        out.float(),
+        ref_out,
+        label=f"swiglu_limit_accuracy moe={moe_limit} quant={quant_limit}",
         atol=0.05,
         rtol=0.0,
     )

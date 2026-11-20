@@ -8,7 +8,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -451,6 +454,10 @@ def rocm_aiter_fused_experts(
             else GateMode.SEPARATED.value
         )
 
+    clamp_limit = ApplyMoEActivationConfig.from_configs(
+        moe_config, quant_config
+    ).clamp_limit
+
     return rocm_aiter_ops.fused_moe(
         hidden_states,
         w1,
@@ -473,9 +480,7 @@ def rocm_aiter_fused_experts(
         bias1=bias1,
         bias2=bias2,
         moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
-        swiglu_limit=(
-            0.0 if moe_config.swiglu_limit is None else float(moe_config.swiglu_limit)
-        ),
+        swiglu_limit=0.0 if clamp_limit is None else float(clamp_limit),
         beta=moe_config.activation_situ_beta,
         linear_beta=moe_config.activation_situ_linear_beta,
         shared_w1=shared_w1,
