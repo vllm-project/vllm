@@ -236,9 +236,11 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
 }
 
 /// A sampled token repeated among the top-k candidates, or several tokens
-/// decoding to the same string (byte fragments), share one entry. As in the
-/// Python frontend, the entry stays at its first position and keeps the highest
-/// logprob.
+/// decoding to the same string (byte fragments, which decode to "\u{fffd}"),
+/// share one entry. The entry stays where its first candidate is, so the token
+/// at this position, which the engine row puts first, keeps the first entry.
+/// It holds the highest logprob of its candidates; on a tie the earlier one
+/// stays. The Python frontend does the same after #65741.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
@@ -307,7 +309,8 @@ mod tests {
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{
-        decoded_logprobs_to_openai, decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
+        decoded_logprobs_to_openai, decoded_logprobs_to_openai_chat,
+        decoded_prompt_logprobs_to_openai, prompt_logprobs_to_maps,
     };
 
     #[test]
@@ -399,10 +402,11 @@ mod tests {
             .assert_eq(&top_logprobs(true));
     }
 
-    #[test]
-    fn completion_top_logprobs_keep_highest_on_string_collision() {
-        // Byte fragments: sampled `C` (rank 3), `A` and `B` all decode to "".
-        // The engine row is `[C, A, B, C, D]`.
+    /// Byte fragments: sampled `C` (rank 3), `A` and `B` all decode to the same
+    /// string, here "" (the logic does not depend on which string; the Rust
+    /// frontend decodes them to "\u{fffd}" until #63926). The engine row is
+    /// `[C, A, B, C, D]`.
+    fn colliding_logprobs() -> DecodedLogprobs {
         let mut logprobs = sample_logprobs();
         for entry in &mut logprobs.positions[0].entries {
             entry.token = String::new();
@@ -415,9 +419,55 @@ mod tests {
             logprob: -3.0,
             rank: 4,
         });
+        logprobs
+    }
+
+    #[test]
+    fn completion_top_logprobs_keep_highest_on_string_collision() {
+        let logprobs = colliding_logprobs();
+        let top_logprobs = |as_token_ids| {
+            let logprobs = decoded_logprobs_to_openai(&logprobs, 0, as_token_ids).unwrap();
+            serde_json::to_string(&logprobs.top_logprobs).unwrap()
+        };
+        expect_test::expect![[r#"[{"":-0.1,"D":-3.0}]"#]].assert_eq(&top_logprobs(false));
+        // Token IDs keep the candidates apart.
+        expect_test::expect![[
+            r#"[{"token_id:3":-2.0,"token_id:1":-0.1,"token_id:2":-1.0,"token_id:4":-3.0}]"#
+        ]]
+        .assert_eq(&top_logprobs(true));
+    }
+
+    #[test]
+    fn completion_top_logprobs_keep_sampled_entry_on_string_collision() {
+        // Sampled `A` (rank 1) and `B` decode to the same string, and `A` is the
+        // most likely: the engine row is `[A, A, B, C]` and `B` must not take
+        // over the shared entry.
+        let mut logprobs = sample_logprobs();
+        let entries = &mut logprobs.positions[0].entries;
+        entries[0].token = String::new();
+        entries[1].token = String::new();
+        let sampled = entries[0].clone();
+        entries.insert(0, sampled);
 
         let logprobs = decoded_logprobs_to_openai(&logprobs, 0, false).unwrap();
-        expect_test::expect![[r#"[{"":-0.1,"D":-3.0}]"#]]
+        assert_eq!(
+            logprobs.top_logprobs[0].as_ref().unwrap()[""],
+            logprobs.token_logprobs[0].unwrap()
+        );
+        expect_test::expect![[r#"[{"":-0.1,"C":-2.0}]"#]]
+            .assert_eq(&serde_json::to_string(&logprobs.top_logprobs).unwrap());
+    }
+
+    #[test]
+    fn echoed_prompt_top_logprobs_keep_highest_on_string_collision() {
+        let prompt_logprobs = vllm_text::DecodedPromptLogprobs {
+            first_token_id: 10,
+            first_token: "first".to_string(),
+            scored_positions: colliding_logprobs().positions,
+        };
+
+        let logprobs = decoded_prompt_logprobs_to_openai(&prompt_logprobs, 0, false).unwrap();
+        expect_test::expect![[r#"[null,{"":-0.1,"D":-3.0}]"#]]
             .assert_eq(&serde_json::to_string(&logprobs.top_logprobs).unwrap());
     }
 
