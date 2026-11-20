@@ -8,13 +8,13 @@ ToolStrictLevelName = Literal["auto", "function", "parameter"]
 
 
 class ToolStrictLevel(enum.IntEnum):
-    """Server-side floor for tool-call structural tags (``--tool-strict-level``).
+    """Server-side floor for tool-call structural tags (`--tool-strict-level`).
 
-    AUTO:      derive call constraints from ``tool_choice`` and argument-schema
-               enforcement from each tool's explicit ``strict`` field.
+    AUTO:      derive call constraints from `tool_choice` and argument-schema
+               enforcement from each tool's explicit `strict` field.
     FUNCTION:  constrain the tool-call envelope for every request with tools.
     PARAMETER: additionally pin argument schemas, as if every tool were
-               ``strict: true``.
+               `strict: true`.
     """
 
     AUTO = 0

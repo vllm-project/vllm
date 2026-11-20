@@ -58,6 +58,7 @@ def test_start_profile_forwards_session_overrides(
             "profile_prefix": "sharegpt_run-1",
             "delay_iterations": 5000,
             "max_iterations": 20,
+            "profiler_kwargs": {"record_shapes": True},
         },
     )
 
@@ -66,6 +67,7 @@ def test_start_profile_forwards_session_overrides(
         profile_prefix="sharegpt_run-1",
         delay_iterations=5000,
         max_iterations=20,
+        profiler_kwargs={"record_shapes": True},
     )
 
 
@@ -75,6 +77,7 @@ def test_start_profile_forwards_session_overrides(
         {"profile_prefix": 1},
         {"delay_iterations": "1"},
         {"max_iterations": "20"},
+        {"profiler_kwargs": "invalid"},
     ],
 )
 def test_start_profile_rejects_wrongly_typed_overrides(

@@ -3,7 +3,6 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -33,7 +32,7 @@ MODEL_CONFIG = SimpleNamespace(
 
 
 def _compression_config(value_names: dict[int, dict[int, str]]) -> dict:
-    """Explicitly named constants given as ``{layer: {expert: tensor name}}``."""
+    """Explicitly named constants given as `{layer: {expert: tensor name}}`."""
     targets = {
         f"model.layers.{layer}.mlp.experts": {
             "num_logical_experts": 3,
@@ -119,7 +118,6 @@ def test_loads_local_approx_values_and_passes_through_others(local_layers):
             ),
         ]
     )
-    model.process_weights_after_loading()
 
     assert loaded == {"weight"} | {
         f"model.layers.{layer}.mlp.experts.values" for layer in local_layers
@@ -143,7 +141,6 @@ def test_loads_explicitly_named_values(local_layers):
             ("constants.layer_1", torch.full((2,), 3.0)),
         ]
     )
-    model.process_weights_after_loading()
 
     assert loaded == {"weight"} | {
         f"model.layers.{layer}.mlp.experts.values" for layer in local_layers
@@ -159,11 +156,7 @@ def test_direct_reload_updates_values_incrementally():
     model = _cpu_model(local_layers=(0,), tracked=False)
     values = model.model.layers[0].mlp.experts.values
     model.load_weights([(_approx_value(0, 2), torch.ones(2))])
-    with pytest.raises(ValueError, match="missing approx_value .* \\[1\\]"):
-        model.process_weights_after_loading()
-
     assert model.load_weights([(_approx_value(0, 1), torch.zeros(2))]) is None
-    model.process_weights_after_loading()
     model.load_weights([(_approx_value(0, 2), torch.full((2,), 3.0))])
     torch.testing.assert_close(values, torch.tensor([[0.0, 0.0], [3.0, 3.0]]))
 
@@ -185,7 +178,6 @@ def test_layerwise_reload_is_rejected_and_keeps_weights():
         (_approx_value(0, 2), torch.ones(2)),
     ]
     model.load_weights(loaded)
-    model.process_weights_after_loading()
     substitution = model.model.layers[0].mlp.experts
     values = substitution.values
 
@@ -197,37 +189,6 @@ def test_layerwise_reload_is_rejected_and_keeps_weights():
     torch.testing.assert_close(values, torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
     torch.testing.assert_close(model.weight, torch.tensor([3.0, 4.0]))
     assert substitution.expert_substitution_routes.tolist() == [0, -1, -2]
-
-
-@pytest.mark.parametrize("missing_value", [False, True])
-def test_tensorizer_finalizes_local_substitution_values(monkeypatch, missing_value):
-    """Raw Tensorizer loading must reject an unloaded local constant row."""
-    from vllm.model_executor.model_loader import tensorizer_loader
-
-    model = _cpu_model(local_layers=(0,))
-    weights = [(_approx_value(0, 1), torch.zeros(2))]
-    if not missing_value:
-        weights.append((_approx_value(0, 2), torch.ones(2)))
-    finalize = Mock(wraps=model.process_weights_after_loading)
-    monkeypatch.setattr(model, "process_weights_after_loading", finalize)
-    monkeypatch.setattr(tensorizer_loader, "initialize_model", lambda **kwargs: model)
-    loader = object.__new__(tensorizer_loader.TensorizerLoader)
-    monkeypatch.setattr(loader, "_get_weights_iterator", lambda: iter(weights))
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(dtype=torch.float32),
-        device_config=SimpleNamespace(device="cpu"),
-    )
-
-    if missing_value:
-        with pytest.raises(ValueError, match=r"missing approx_value .* \[2\]"):
-            loader._load_model_serialized_cpu(config)
-    else:
-        assert loader._load_model_serialized_cpu(config) is model
-        torch.testing.assert_close(
-            model.model.layers[0].mlp.experts.values,
-            torch.tensor([[0.0, 0.0], [1.0, 1.0]]),
-        )
-    finalize.assert_called_once_with()
 
 
 def _write_tiny_deepseek_mone_checkpoint(

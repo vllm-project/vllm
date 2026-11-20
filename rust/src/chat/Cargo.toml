@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 asynk-strim-attr.workspace = true
+chrono.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
 half.workspace = true
@@ -34,6 +35,7 @@ trait-set.workspace = true
 uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
+vllm-metrics.workspace = true
 vllm-parser.workspace = true
 vllm-text.workspace = true
 vllm-tokenizer.workspace = true

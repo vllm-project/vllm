@@ -14,6 +14,7 @@ import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.determinism.batch_invariant import (
     enable_batch_invariant_mode,
     matmul_batch_invariant,
+    matmul_persistent,
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
@@ -150,8 +151,8 @@ def batch_invariant_mode():
 @pytest.mark.usefixtures("batch_invariant_mode")
 @pytest.mark.parametrize("op", ["mm", "addmm", "bmm"])
 def test_compiled_matmul_reaches_batch_invariant_out_overloads(op):
-    """Inductor lowers mm/addmm/bmm to ``extern_kernels.<op>(..., out=buf)``,
-    i.e. the ``.out`` overload, which eager never dispatches."""
+    """Inductor lowers mm/addmm/bmm to `extern_kernels.<op>(..., out=buf)`,
+    i.e. the `.out` overload, which eager never dispatches."""
     if (
         op != "bmm"
         and current_platform.is_cuda()
@@ -179,3 +180,45 @@ def test_compiled_matmul_reaches_batch_invariant_out_overloads(op):
         assert torch.equal(out, fn(xs)), f"compiled {op} bypassed the BI kernel (M={m})"
         row = out[..., needle, :] if row is None else row
         assert torch.equal(out[..., needle, :], row)
+
+
+requires_matmul_overrides = pytest.mark.skipif(
+    not (
+        current_platform.is_rocm() or current_platform.is_device_capability_family(80)
+    ),
+    reason="Triton matmul overrides are only installed on ROCm and SM8x",
+)
+
+
+@skip_unsupported
+@requires_matmul_overrides
+@pytest.mark.usefixtures("batch_invariant_mode")
+def test_mm_out_dtype_batch_invariance():
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+    a = torch.randn((32, 4096), dtype=torch.bfloat16, device=device)
+    w = torch.randn((8192, 4096), dtype=torch.bfloat16, device=device) * 0.02
+
+    def head(x):
+        return torch.mm(x, w.t(), out_dtype=torch.float32)
+
+    batch_output = head(a)
+    assert batch_output.dtype == torch.float32
+    torch.testing.assert_close(head(a[:1])[0], batch_output[0], rtol=0, atol=0)
+    assert torch.equal(
+        batch_output, matmul_persistent(a, w.t(), out_dtype=torch.float32)
+    )
+    assert torch.equal(torch.compile(head)(a), batch_output)
+
+
+@skip_unsupported
+@requires_matmul_overrides
+@pytest.mark.usefixtures("batch_invariant_mode")
+def test_mm_out_dtype_keeps_aten_dtype_checks():
+    a = torch.randn((4, 64), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    b = torch.randn((64, 32), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    with pytest.raises(RuntimeError, match="same as input dtype or fp32"):
+        torch.mm(a, b, out_dtype=torch.float16)
+    out = torch.empty((4, 32), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    with pytest.raises(RuntimeError, match="dtype of the provided out tensor"):
+        torch.mm(a, b, out_dtype=torch.float32, out=out)

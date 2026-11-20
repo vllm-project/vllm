@@ -29,10 +29,10 @@ def dummy_kernel_registry(
 ):
     """Context manager providing a register function with automatic config setup.
 
-    Yields a ``register`` callable with the same signature as
-    ``register_kernel``.  Before applying the real decorator it writes a
-    config JSON for the kernel name (from ``op_name`` or ``fn.__name__``)
-    into a temporary directory backed by a fresh ``ConfigManager``.
+    Yields a `register` callable with the same signature as
+    `register_kernel`.  Before applying the real decorator it writes a
+    config JSON for the kernel name (from `op_name` or `fn.__name__`)
+    into a temporary directory backed by a fresh `ConfigManager`.
     """
     if configs is None:
         configs = DEFAULT_CONFIGS

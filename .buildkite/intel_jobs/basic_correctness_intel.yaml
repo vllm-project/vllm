@@ -20,10 +20,33 @@ steps:
   - vllm/
   - tests/basic_correctness/memory/
   - tests/basic_correctness/cpu_offload/
+  # MRV2 model state remains in the weights pool on XPU (vllm-project/vllm#63548).
+  # Re-enable Mamba deep sleep once XPU nested memory pools are supported.
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s basic_correctness/cpu_offload &&
-      pytest -v -s basic_correctness/memory'
+      pytest -v -s
+      basic_correctness/memory
+      --deselect="tests/basic_correctness/memory/cumem/test_cumem.py::test_basic_cumem"
+      --deselect="tests/basic_correctness/memory/sleep_mode/test_sleep_mode.py::test_deep_sleep[vllm-project/mamba2-codestral-v0.1-tiny-random]"'
+
+- label: ":intel: (BMG) CPU Offload"
+  key: basic-correctness-cpu-offload-intel-k8s
+  timeout_in_minutes: 45
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+    VLLM_WORKER_MULTIPROC_METHOD: spawn
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/memory/
+  - tests/basic_correctness/cpu_offload/
+  commands:
+  - cd tests
+  - pytest -v -s basic_correctness/cpu_offload

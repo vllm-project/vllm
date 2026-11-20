@@ -56,6 +56,13 @@ def test_ray_bundle_indices_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_RAY_BUNDLE_INDICES" not in envs.compile_factors()
 
 
+def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Only bounds chat template rendering in the Rust frontend.
+    monkeypatch.setenv("VLLM_CHAT_TEMPLATE_FUEL", "2000000")
+
+    assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
