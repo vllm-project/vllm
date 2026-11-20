@@ -25,12 +25,14 @@ from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
+    HiSparseResidentManager,
     MambaManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiddenStateCacheSpec,
+    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheGroup,
     KVCacheGroupRole,
@@ -581,32 +583,26 @@ def test_hisparse_indexer_tier_defaults_to_host_pool_tokens(host_pool_gib, expec
     assert offloading_config.default_num_blocks == expected
 
 
-def test_hisparse_partial_group_size_survives_scheduler_flattening():
-    """Worker and scheduler representations must produce identical mmap rows."""
-    layer_specs = {name: _full_attention_spec() for name in ("indexer.0", "indexer.1")}
-    source = make_kv_cache_group(
-        ["source"],
-        _full_attention_spec(),
-        host_resident=True,
+def test_hisparse_indexer_tier_is_single_copy_under_tp():
+    """The resident groups' raw pages carry no TP metadata; they must not
+    force a copy of the replicated indexer per rank."""
+    source = make_kv_cache_group(["source"], _mla_spec(), host_resident=True)
+    indexer = make_kv_cache_group(
+        ["indexer"], _mla_spec(head_size=128), role=KVCacheGroupRole.HISPARSE_INDEXER
     )
-    indexer = make_kv_cache_group_from_specs(
-        layer_specs, role=KVCacheGroupRole.HISPARSE_INDEXER
+    resident = make_kv_cache_group(
+        ["source.hisparse_resident"],
+        HiSparsePageSpec(block_size=16, page_size=_MLA_PAGE),
+        manager_cls=HiSparseResidentManager,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
-        kv_cache_groups=[source, indexer],
+        kv_cache_groups=[source, indexer, resident],
         hisparse_host_num_blocks=4,
     )
 
-    config = _make_vllm_config()
-    worker = build_offloading_config(config, kv_cache_config)
-    scheduler = build_offloading_config(
-        config, generate_scheduler_kv_cache_config([kv_cache_config])
-    )
-
-    assert worker.worker_kv_bytes_per_block == scheduler.worker_kv_bytes_per_block
-    assert worker.worker_kv_bytes_per_block == indexer.page_size_bytes
+    assert _replicated_layout(kv_cache_config)
 
 
 def test_zero_blocks_skips_tensor_layout_validation():

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
 from dataclasses import dataclass, replace
 
 from vllm.config import VllmConfig
@@ -432,15 +431,13 @@ def _build_hisparse_kv_cache_tensors(
     *,
     host_resident: bool = False,
 ) -> list[KVCacheTensor]:
+    from vllm.v1.core.kv_cache_planning import _group_layers_by_spec
+
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
     tensors: list[KVCacheTensor] = []
     for group in kv_cache_groups:
-        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
-        for layer_name, spec in group.kv_cache_specs.items():
-            layers_by_spec[spec].append(layer_name)
-
         byte_offset = 0
-        for spec, layer_names in layers_by_spec.items():
+        for spec, layer_names in _group_layers_by_spec(group).items():
             if isinstance(spec, HiSparsePageSpec):
                 if not layout.is_block_outermost:
                     raise ValueError("HiSparse requires a block-outermost KV layout.")
