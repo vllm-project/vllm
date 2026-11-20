@@ -94,7 +94,7 @@ class MambaHybridModelState(DefaultModelState):
         # mamba state across block boundaries runs as a fused GPU kernel reusing
         # the postprocess copy machinery, so the per-step src columns and the
         # running state_idx are kept GPU-resident.
-        self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        self.prefix_caching = self.cache_config.enable_prefix_caching
         self._use_replayssm_trackers = vllm_config.use_replayssm_trackers
         if self._use_replayssm_trackers:
             self._is_prefilling_gpu = torch.zeros(
@@ -103,10 +103,10 @@ class MambaHybridModelState(DefaultModelState):
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
-        if self._align_mode or self._use_replayssm_trackers:
+        if self.prefix_caching or self._use_replayssm_trackers:
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
-        if self._align_mode:
+        if self.prefix_caching:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
@@ -121,7 +121,7 @@ class MambaHybridModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
-        if self._align_mode:
+        if self.prefix_caching:
             # Seed the running state block from the resumed/prefilled position.
             # The column is in mamba blocks. cache_config.block_size is the
             # min over prefix-cacheable groups, so a drafter group with its own
@@ -140,7 +140,7 @@ class MambaHybridModelState(DefaultModelState):
                 kv_cache_config,
                 self.vllm_config.compilation_config.static_forward_context,
             )
-        if not (self._align_mode or self._use_replayssm_trackers):
+        if not (self.prefix_caching or self._use_replayssm_trackers):
             return
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
@@ -184,7 +184,7 @@ class MambaHybridModelState(DefaultModelState):
         Copy from the worker's previous live column to its actual new column.
         ReplaySSM also migrates its shared trackers. Dummy runs skip this.
         """
-        if not self._align_mode:
+        if not self.prefix_caching:
             return
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
@@ -300,7 +300,7 @@ class MambaHybridModelState(DefaultModelState):
             )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        if self._align_mode:
+        if self.prefix_caching:
             ctx = self._mamba_ctx
             assert ctx is not None
             aligned_index_builders = []
@@ -395,7 +395,9 @@ class MambaHybridModelState(DefaultModelState):
             self.recoverssm.commit_step(
                 num_sampled,
                 idx_mapping,
-                state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
+                state_indices=(
+                    self._mamba_state_idx_gpu if self.prefix_caching else None
+                ),
                 num_accepted_tokens=self.num_accepted_tokens_gpu,
             )
 
@@ -406,7 +408,7 @@ class MambaHybridModelState(DefaultModelState):
         # acceptance leaves the sequence non-block-aligned. num_computed_tokens
         # already holds the post-step advanced count.
         if (
-            self._align_mode
+            self.prefix_caching
             and num_computed_tokens is not None
             and self._mamba_ctx is not None
         ):
@@ -457,11 +459,11 @@ class MambaHybridModelState(DefaultModelState):
             # runs the migration kernel, so the acceptance buffer is exact.
             num_accepted_tokens=(
                 ctx.num_accepted_tokens_snapshot
-                if self._align_mode
+                if self.prefix_caching
                 else self.num_accepted_tokens_gpu
             ),
             is_prefilling=self._is_prefilling_gpu[:num_reqs],
-            live_cols=(self._mamba_state_idx_gpu if self._align_mode else None),
+            live_cols=(self._mamba_state_idx_gpu if self.prefix_caching else None),
             num_reqs=num_reqs,
         )
 
