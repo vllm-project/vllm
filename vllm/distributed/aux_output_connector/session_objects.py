@@ -8,6 +8,7 @@ import json
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
@@ -194,11 +195,11 @@ class SessionObjectWriter:
     `_PUT_RETRY_INTERVAL_S`, without the objects already written, and queuing
     and draining wait while it is. Once writes have been pending for
     `put_stall_timeout_s` without a successful put, the rest of the batch is
-    dropped, and later batches get one attempt each until a put succeeds
-    again. A dropped object is absent from the store; the response that lists
-    it is not changed. While a store call does not return for
-    `put_stall_timeout_s`, queuing drops new batches and draining does not
-    wait."""
+    dropped, and later batches get one attempt each until a put succeeds with
+    no refusal in the last `put_stall_timeout_s`. A dropped object is absent
+    from the store; the response that lists it is not changed. Once a store
+    call has not returned for `put_stall_timeout_s`, queuing and draining stop
+    waiting for it, and the puts queued behind it are dropped."""
 
     def __init__(
         self,
@@ -211,12 +212,17 @@ class SessionObjectWriter:
     ) -> None:
         self._store = store
         self._unremoved: list[str] = []
+        self._deferred: deque[str] = deque()
         self._key_prefix = key_prefix
         self._fields = fields
         self._put_stall_timeout_s = put_stall_timeout_s
         self._last_progress = time.monotonic()
+        self._last_refusal = float("-inf")
         self._busy_since: float | None = None
         self._dropped = 0
+        self._enqueued = 0
+        self._taken = 0
+        self._abandon_upto = 0
         self._closed = threading.Event()
         self._queue: queue.Queue[tuple[list[str], list[bytes] | None] | None] = (
             queue.Queue(maxsize=max_pending_batches)
@@ -234,6 +240,7 @@ class SessionObjectWriter:
             if batch is None:
                 self._queue.task_done()
                 return
+            self._taken += 1
             try:
                 if self._error is None:
                     self._write(batch)
@@ -286,9 +293,13 @@ class SessionObjectWriter:
             return
         attempts = 0
         while keys:
+            if self._taken <= self._abandon_upto:
+                self._drop(keys, "a store call hung while they were queued")
+                return
             try:
                 self._call(self._store.put_batch, keys[:1], values[:1])
             except BlockObjectStoreError as error:
+                self._last_refusal = time.monotonic()
                 attempts += 1
                 if attempts & (attempts - 1) == 0 or attempts % 32 == 0:
                     self._remove([])
@@ -303,7 +314,11 @@ class SessionObjectWriter:
                 keys, values = keys[1:], values[1:]
                 attempts = 0
                 self._last_progress = time.monotonic()
-                if self._dropped:
+                if (
+                    self._dropped
+                    and self._last_progress - self._last_refusal
+                    >= self._put_stall_timeout_s
+                ):
                     logger.warning(
                         "Auxiliary output objects are written again; %d were dropped.",
                         self._dropped,
@@ -311,7 +326,8 @@ class SessionObjectWriter:
                     self._dropped = 0
 
     def _remove(self, keys: list[str]) -> None:
-        keys = self._unremoved + keys
+        deferred = [self._deferred.popleft() for _ in range(len(self._deferred))]
+        keys = self._unremoved + deferred + keys
         codes = self._call(self._store.remove, keys) if keys else []
         self._unremoved = [
             key
@@ -331,28 +347,34 @@ class SessionObjectWriter:
         if not self._queue.unfinished_tasks:
             self._last_progress = time.monotonic()
         while True:
+            hung = self._hung()
             try:
-                self._queue.put(batch, timeout=_PUT_RETRY_INTERVAL_S)
+                self._queue.put(batch, not hung, _PUT_RETRY_INTERVAL_S)
+                self._enqueued += 1
                 return
             except queue.Full:
                 self.check()
-                if self._hung():
-                    self._drop(batch[0], "a store call hangs")
+                if hung:
+                    self._abandon_upto = self._enqueued
+                    keys, values = batch
+                    if values is None:
+                        self._deferred.extend(keys)
+                    else:
+                        self._drop(keys, "a store call hangs")
                     return
 
     def drain(self, timeout_s: float | None = None) -> None:
-        """Wait until the queued writes are written or dropped, unless a store
-        call hangs; raise `BlockObjectStoreError` if writing failed other than
-        in the store, or `timeout_s` passed."""
+        """Wait until the queued writes are written or dropped, or a store call
+        hangs; raise `BlockObjectStoreError` if writing failed other than in
+        the store, or `timeout_s` passed."""
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
-        if self._unremoved:
+        if self._unremoved or self._deferred:
             self._put(([], None))
         with self._queue.all_tasks_done:
-            while (
-                self._queue.unfinished_tasks
-                and self._error is None
-                and not self._hung()
-            ):
+            while self._queue.unfinished_tasks and self._error is None:
+                if self._hung():
+                    self._abandon_upto = self._enqueued
+                    break
                 if deadline is not None and time.monotonic() >= deadline:
                     raise BlockObjectStoreError(
                         "auxiliary output objects were not written in time"

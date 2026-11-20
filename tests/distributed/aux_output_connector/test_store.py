@@ -2846,8 +2846,8 @@ def test_session_object_writer_drops_writes_its_queue_cannot_take_behind_a_hang(
     finally:
         release.set()
         assert _run_within(writer.close) is None
-    assert list(client.objects) == ["job/s/tail/0", "job/s/tail/1"]
-    assert writer._dropped == 0
+    assert list(client.objects) == ["job/s/tail/0"]
+    assert writer._dropped == 1
 
 
 @pytest.mark.parametrize("failures", [3, None], ids=["store-recovers", "store-stalls"])
@@ -3188,30 +3188,36 @@ def test_session_object_writer_drain_waits_while_writes_progress(monkeypatch):
 @pytest.mark.parametrize(
     "code", [-200, -800, -900], ids=["no-memory", "holder-gone", "master-gone"]
 )
-def test_session_object_writer_drops_what_the_store_refuses_and_recovers(code):
+def test_session_object_writer_drops_what_the_store_refuses_and_recovers(
+    monkeypatch, code
+):
+    now = [0.0]
+    monkeypatch.setattr(
+        session_objects_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    refusals = {"0": 9, "1": 9, "2": 0, "3": 9, "4": 0, "5": 2}
     attempts: list[str] = []
-    client, writer = _timed_writer(lambda keys: attempts.append(keys[0]), 1.0, 1)
-    rows = np.zeros((1, 1), dtype=np.uint8)
-    client.code = code
+
+    def put(keys):
+        index = keys[0].rsplit("/", 1)[1]
+        attempts.append(index)
+        if attempts.count(index) <= refusals[index]:
+            now[0] += 0.375
+            return code
+        return 0
+
+    client, writer = _timed_writer(put, 1.0, 1)
     try:
-        writer.add_tail("job/s/tail/0", rows, {})
-        writer.drain(timeout_s=10)
-        writer.add_tail("job/s/tail/1", rows, {})
-        writer.drain(timeout_s=0.5)
-        client.code = 0
-        writer.add_tail("job/s/tail/2", rows, {})
-        writer.drain(timeout_s=10)
-        client.code = code
-        writer.add_tail("job/s/tail/3", rows, {})
-        while attempts.count("job/s/tail/3") < 2:
-            time.sleep(0.01)
-        client.code = 0
-        writer.drain(timeout_s=10)
+        for index in refusals:
+            if index == "4":
+                now[0] += 1.0
+            writer.add_tail(f"job/s/tail/{index}", np.zeros((1, 1), np.uint8), {})
+            assert _run_within(writer.drain) is None
         writer.check()
     finally:
         assert _run_within(writer.close) is None
-    assert attempts.count("job/s/tail/0") > 1 and attempts.count("job/s/tail/1") == 1
-    assert list(client.objects) == ["job/s/tail/2", "job/s/tail/3"]
+    assert [attempts.count(index) for index in refusals] == [3, 1, 1, 1, 1, 3]
+    assert list(client.objects) == [f"job/s/tail/{index}" for index in "245"]
     assert writer._dropped == 0
 
 
@@ -3240,6 +3246,31 @@ def test_session_object_writer_drain_stops_waiting_once_a_put_hangs():
     assert list(client.objects) == ["job/s/tail/0"]
 
 
+def test_session_object_writer_defers_removals_its_queue_cannot_take_behind_a_hang():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def put(keys):
+        entered.set()
+        release.wait(30)
+
+    client, writer = _timed_writer(put, 0.5, 1)
+    try:
+        writer.add_tail("job/s/tail/0", np.zeros((1, 1), dtype=np.uint8), {})
+        assert entered.wait(10)
+        writer.remove(["job/s/tail/0"])
+        assert _run_within(lambda: writer.remove(["job/s/tail/1"])) is None
+        release.set()
+        assert _run_within(writer.drain) is None
+        writer.check()
+    finally:
+        release.set()
+        assert _run_within(writer.close) is None
+    assert not client.objects
+    removed = sorted(key for keys in client.removes for key in keys)
+    assert removed == ["job/s/tail/0", "job/s/tail/1"]
+
+
 def test_session_object_writer_close_stops_retrying():
     attempts = []
     client, writer = _timed_writer(lambda keys: attempts.append(keys), 600.0, 1)
@@ -3261,31 +3292,26 @@ def test_session_object_writer_does_not_count_idle_time_toward_the_stall_deadlin
     monkeypatch, idle_s
 ):
     now = [0.0]
-    writer_waiting = threading.Event()
-    checked = threading.Event()
-
-    def monotonic():
-        if threading.current_thread().name == "vllm-aux-object-writer":
-            writer_waiting.set()
-            checked.wait(10)
-        elif writer_waiting.is_set():
-            checked.set()
-        return now[0]
-
     monkeypatch.setattr(
-        session_objects_module, "time", SimpleNamespace(monotonic=monotonic)
+        session_objects_module, "time", SimpleNamespace(monotonic=lambda: now[0])
     )
-    client, writer = _timed_writer(lambda keys: None, 600.0, 1)
+    attempts: list[str] = []
+
+    def put(keys):
+        attempts.append(keys[0])
+        return -200 if attempts.count(keys[0]) == 1 else 0
+
+    client, writer = _timed_writer(put, 600.0, 1)
     keys = [f"job/s/tail/{index}" for index in range(2)]
     try:
         for key in keys:
             now[0] += idle_s
-            writer.check()
             writer.add_tail(key, np.zeros((1, 1), dtype=np.uint8), {})
             assert _run_within(writer.drain) is None
     finally:
         assert _run_within(writer.close) is None
     assert list(client.objects) == keys
+    assert attempts == [keys[0], keys[0], keys[1], keys[1]]
 
 
 def test_session_object_writer_drain_returns_after_close():

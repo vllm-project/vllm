@@ -188,9 +188,22 @@ class _Capturer:
 @pytest.mark.parametrize(
     "hard_pin", [None, True, False], ids=["default", "hard-pin", "no-pin"]
 )
+@pytest.mark.parametrize(
+    "execute_timeout_s,put_stall_timeout_s",
+    [("20", 7.0), ("10", 5.0)],
+    ids=["configured", "half-the-step-timeout"],
+)
 def test_output_rank_writes_objects_to_the_configured_master(
-    mooncake, monkeypatch, first_tp_rank, last_stage, masters, hard_pin
+    mooncake,
+    monkeypatch,
+    first_tp_rank,
+    last_stage,
+    masters,
+    hard_pin,
+    execute_timeout_s,
+    put_stall_timeout_s,
 ):
+    monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", execute_timeout_s)
     import vllm.distributed.aux_output_connector.connector as aux_connector
     import vllm.distributed.aux_output_connector.worker as aux_worker
 
@@ -236,7 +249,9 @@ def test_output_rank_writes_objects_to_the_configured_master(
     assert connected == masters
     pins = [config.with_hard_pin for config in replicate_configs]
     assert pins == [bool(hard_pin)] * len(masters)
-    assert [kwargs["put_stall_timeout_s"] for kwargs in writers] == [7.0] * len(masters)
+    assert [kwargs["put_stall_timeout_s"] for kwargs in writers] == [
+        put_stall_timeout_s
+    ] * len(masters)
 
 
 _ECMASCRIPT_SYNTAX_CHARACTERS = set("^$\\.*+?()[]{}|")
