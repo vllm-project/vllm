@@ -248,6 +248,10 @@ pub struct RenderArgs {
     /// applies to rendering.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Multimodal processor options as JSON, merged into each modality's
+    /// checkpoint configuration before its processor is constructed.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
+    mm_processor_kwargs: HashMap<String, Value>,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -293,6 +297,7 @@ impl RenderArgs {
             language_model_only: self.language_model_only,
             dtype: self.dtype.model_dtype(),
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_kwargs: self.mm_processor_kwargs,
             tls,
         }
     }
@@ -488,6 +493,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+
+    /// Arguments to be forwarded to the model's processor for multi-modal data,
+    /// e.g., image processor.
+    /// Merged into the checkpoint processor configuration at startup.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub mm_processor_kwargs: HashMap<String, Value>,
 
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
@@ -963,6 +975,15 @@ impl SharedRuntimeArgs {
         })
     }
 
+    /// Return the multimodal processor kwargs as JSON for managed Python engine
+    /// forwarding, or `None` when nothing is configured.
+    pub fn mm_processor_kwargs_json(&self) -> Option<String> {
+        (!self.mm_processor_kwargs.is_empty()).then(|| {
+            serde_json::to_string(&self.mm_processor_kwargs)
+                .expect("mm-processor-kwargs serialization should not fail")
+        })
+    }
+
     /// Apply fallback logic for configuration from env variables, using
     /// `lookup` to read the environment.
     fn apply_env_fallbacks(
@@ -1080,6 +1101,7 @@ impl SharedRuntimeArgs {
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_kwargs: self.mm_processor_kwargs,
             lora_modules: self.lora_modules,
             default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
@@ -1173,6 +1195,7 @@ impl SharedRuntimeArgs {
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_kwargs: self.mm_processor_kwargs,
             lora_modules: self.lora_modules,
             default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
@@ -1583,6 +1606,11 @@ impl ServeArgs {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
+        }
+        if let Some(mm_processor_kwargs) = self.runtime.mm_processor_kwargs_json() {
+            managed_engine
+                .python_args
+                .extend(["--mm-processor-kwargs".to_string(), mm_processor_kwargs]);
         }
         // The engine checks the adapters against the model at startup, as it
         // does under the Python frontend.
