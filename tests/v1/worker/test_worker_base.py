@@ -53,8 +53,16 @@ def make_wrapper(monkeypatch):
         def shutdown(self):
             self.events.append("shutdown")
 
+    class NoArgumentWorker(Worker):
+        # Match hardware plugins whose public loader predates this keyword.
+        def load_model(self):  # type: ignore[override]
+            self.events.append("load")
+            if getattr(self, "fail_load", False):
+                raise RuntimeError("load failed")
+
     classes = {
-        cls.__name__: cls for cls in (Worker, ExtensionA, ExtensionB, FailingExtension)
+        cls.__name__: cls
+        for cls in (Worker, NoArgumentWorker, ExtensionA, ExtensionB, FailingExtension)
     }
     monkeypatch.setattr(worker_base, "resolve_obj_by_qualname", classes.__getitem__)
     monkeypatch.setattr(
@@ -63,10 +71,10 @@ def make_wrapper(monkeypatch):
         lambda *_args, **_kwargs: None,
     )
 
-    def make(extension: str) -> WorkerWrapperBase:
+    def make(extension: str, worker: str = "Worker") -> WorkerWrapperBase:
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
-                worker_cls="Worker", worker_extension_cls=extension
+                worker_cls=worker, worker_extension_cls=extension
             ),
             enable_trace_function_call_for_thread=lambda: None,
         )
@@ -122,3 +130,21 @@ def test_after_load_hook_is_not_called_when_model_load_fails(make_wrapper):
         "before-load-a:False",
         "load:False",
     ]
+
+
+def test_model_load_hooks_support_no_argument_hardware_worker(make_wrapper):
+    wrapper = make_wrapper("ExtensionA", worker="NoArgumentWorker")
+    wrapper.load_model()
+    assert wrapper.worker.events == [
+        "device",
+        "init-a",
+        "before-load-a:False",
+        "load",
+        "after-load-a:False",
+    ]
+
+
+def test_model_load_without_configured_extension(make_wrapper):
+    wrapper = make_wrapper("", worker="NoArgumentWorker")
+    wrapper.load_model()
+    assert wrapper.worker.events == ["device", "load"]
