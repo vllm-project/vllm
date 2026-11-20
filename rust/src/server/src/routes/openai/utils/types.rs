@@ -200,11 +200,11 @@ mod tests {
 // Validation helpers
 // ============================================================================
 
-/// Validates top_p: 0.0 < top_p <= 1.0.
+/// Validates top_p: 0.0 <= top_p <= 1.0.
 pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError> {
-    if !(top_p > 0.0 && top_p <= 1.0) {
+    if !(0.0..=1.0).contains(&top_p) {
         return Err(validator::ValidationError::new(
-            "top_p must be in (0, 1] - greater than 0.0 and at most 1.0",
+            "top_p must be in [0, 1] - at least 0.0 and at most 1.0",
         ));
     }
     Ok(())

@@ -75,6 +75,22 @@ def test_multiple_sampling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
 
+@pytest.mark.skip_global_cleanup
+def test_top_p_zero_samples_most_likely_token(llm: LLM):
+    """OpenAI allows top_p=0, which keeps only the most likely token."""
+    sampling_params = SamplingParams(
+        temperature=1.0, top_p=0.0, seed=0, max_tokens=16, logprobs=1
+    )
+    for output in llm.generate(PROMPTS, sampling_params=sampling_params):
+        completion = output.outputs[0]
+        for token_id, logprobs in zip(completion.token_ids, completion.logprobs):
+            assert logprobs is not None
+            # Compare logprobs, not ranks: tokens tied for the top logit are
+            # all kept, and rank breaks the tie by token id.
+            best = max(lp.logprob for lp in logprobs.values())
+            assert logprobs[token_id].logprob == best
+
+
 def test_multiple_priority(llm: LLM):
     # Generate works when priority is None
     outputs = llm.generate(PROMPTS, sampling_params=None, priority=None)
