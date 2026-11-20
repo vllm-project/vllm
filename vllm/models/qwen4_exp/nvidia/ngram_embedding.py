@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.model_executor.model_loader.reload.types import WeightReloadValidator
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -263,12 +264,13 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         raise RuntimeError("PLE disk offload does not support prefetch")
 
 
-class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding):
+class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding, WeightReloadValidator):
     """Serve FP8 PLE rows from shards split over an NVLink or RDMA peer group."""
 
-    weight_reload_error = (
-        "Qwen4Exp Engram pool tables cannot reload weights; restart the group"
-    )
+    def validate_weight_reload(self) -> None:
+        raise RuntimeError(
+            "Qwen4Exp Engram pool tables cannot reload weights; restart the group"
+        )
 
     def __init__(
         self,

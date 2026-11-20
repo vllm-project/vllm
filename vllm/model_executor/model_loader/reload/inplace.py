@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.utils import weights_already_processed
 
 from .lifecycle import finish_reload, start_reload
+from .types import WeightReloadValidator
 
 logger = init_logger(__name__)
 
@@ -41,8 +42,8 @@ def reload_weights(
     """Reload a model's weights in place from a weights iterator or from disk.
 
     Callers are responsible for invalidating any state derived from the old
-    weights (e.g. LoRA, encoder and multimodal caches). A module can declare
-    a `weight_reload_error` to reject reload before either format writes.
+    weights (e.g. LoRA, encoder and multimodal caches). Modules that implement
+    `WeightReloadValidator` can reject reload before either format writes.
 
     Args:
         vllm_config: config of the model being reloaded. If `weights_path` is
@@ -56,8 +57,8 @@ def reload_weights(
 
     """
     for module in model.modules():
-        if error := getattr(module, "weight_reload_error", None):
-            raise RuntimeError(error)
+        if isinstance(module, WeightReloadValidator):
+            module.validate_weight_reload()
 
     model_config = vllm_config.model_config
     # TODO(@kylesayrs): generalize to all runners and loaders
