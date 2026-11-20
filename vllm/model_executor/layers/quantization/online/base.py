@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
     QuantizationConfigArgs,
@@ -44,8 +45,17 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineMoEMethod,
     OnlineLinearBase,
 )
+from vllm.model_executor.layers.quantization.online.int4 import (
+    Int4PerGroup32AsymLMHeadMethod,
+)
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    OnlineLMHeadMethodBase,
+)
+from vllm.model_executor.layers.quantization.online.loading import (
+    checkpoint_method,
 )
 from vllm.model_executor.layers.quantization.online.lut_b import (
     LutBOnlineMoEMethod,
@@ -61,6 +71,7 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    Nvfp4WeightOnlyOnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     find_matching_patterns,
@@ -76,6 +87,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static32,
+    kInt4Static32Asym,
     kInt8StaticChannelSym,
     kLutBStatic,
     kMxfp4Static,
@@ -102,6 +114,9 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    kNvfp4Static: Nvfp4WeightOnlyOnlineLinearMethod,
+    # lm_head only (`OnlineLMHeadMethodBase`).
+    kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
 }
 
 # Online linear methods validated with `QuantSpec.hadamard_size`.
@@ -305,6 +320,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
+        if issubclass(cls, OnlineLMHeadMethodBase) and not issubclass(
+            layer_cls, ParallelLMHead
+        ):
+            raise ValueError(
+                f"weight={spec.weight} quantizes only the lm_head: select it "
+                "with a quantization_config.targets pattern naming the "
+                f"lm_head, not for {layer_cls.__name__} layers."
+            )
         # TODO: InputHadamardLinearMethod is format-agnostic; allow the
         # remaining linear methods and MoE once validated.
         if (
@@ -377,7 +400,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             raise NotImplementedError(
                 f"{prefix}: {quant_method_cls.__name__} does not support the "
                 "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
-                "with `activation: null`)."
+                "with `activation: null`) or `int4_per_group_32_asym`."
             )
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(
@@ -493,6 +516,15 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 target_pattern,
             )
             assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+            default = getattr(quant_method_cls, "activation_quant_key", None)
+            if envs.VLLM_RELOAD_MODE == "direct":
+                method = checkpoint_method(layer, quant_spec, default)
+                if method is None:
+                    raise NotImplementedError(
+                        f"{prefix}: online {quant_key_str} does not support "
+                        "VLLM_RELOAD_MODE=direct"
+                    )
+                return method
             kwargs = {}
             if quant_method_cls.accepts_activation_override:
                 kwargs["activation_quant_key"] = quant_spec.activation
