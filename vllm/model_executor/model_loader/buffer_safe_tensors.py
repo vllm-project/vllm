@@ -34,9 +34,9 @@ The safetensors container format is trivial and stable: an 8-byte
 little-endian header length, a JSON header, then the data section. Only
 the header is parsed, once per shard.
 
-safetensors 0.9 exposes the offsets through ``get_tensor_meta``, but
+safetensors 0.9 exposes the offsets through `get_tensor_meta`, but
 that API does not exist in 0.8.x, which vLLM still supports
-(``safetensors >= 0.6.2``). Upstream also has no way to serve a view
+(`safetensors >= 0.6.2`). Upstream also has no way to serve a view
 over a caller-provided buffer: its storage is always the file's own
 mapping.
 """
@@ -80,9 +80,9 @@ _SAFETENSORS_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
 def byte_memoryview(tensor: torch.Tensor) -> memoryview:
     """A writable byte view over a tensor's memory.
 
-    ``tensor.numpy()`` cannot be used: a pinned tensor has no numpy
+    `tensor.numpy()` cannot be used: a pinned tensor has no numpy
     representation. Going through ctypes and the tensor's address works
-    for both pinned and pageable tensors, and lets ``os.preadv`` write
+    for both pinned and pageable tensors, and lets `os.preadv` write
     straight into the buffer.
     """
     nbytes = tensor.numel() * tensor.element_size()
@@ -106,7 +106,7 @@ def pread_exact(fd: int, nbytes: int, offset: int) -> bytes:
 def read_safetensors_header(fd: int, size: int) -> tuple[dict[str, Any], int]:
     """Return the file's header and the offset at which its data starts.
 
-    The header is read through ``os.pread`` on the same descriptor the
+    The header is read through `os.pread` on the same descriptor the
     data section is read from, so the file is opened once and every byte
     of it is covered by that descriptor's read calls.
 

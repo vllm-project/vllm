@@ -10,7 +10,7 @@ The obvious shape is one big pinned buffer per shard: the whole data
 section is read into it and the IO threads fill it in blocks. That has
 two problems on a network filesystem.
 
-Pinning cost. ``cudaHostAlloc`` pins pages at about 1.4 GB/s on an A100
+Pinning cost. `cudaHostAlloc` pins pages at about 1.4 GB/s on an A100
 - 22 ms for a 32 MiB buffer. Pinning a 4.8 GiB shard therefore costs
 several seconds, once per shard, before a single byte is read. One
 buffer per thread is pinned once and reused for every shard.
@@ -26,7 +26,7 @@ The shape of a read
 Each IO thread owns one pinned buffer and reads the shard's tensors
 into it in batches. A batch is a set of tensors whose bytes fit in the
 buffer; a tensor bigger than the buffer gets a batch of its own. A
-tensor is read with a single ``pread(2)`` straight into the thread's
+tensor is read with a single `pread(2)` straight into the thread's
 buffer, so the bytes are touched once, and a tensor nobody asked for
 is never fetched at all.
 
@@ -95,9 +95,9 @@ _TensorSpec = tuple[int, str, str, int, int]
 def byte_memoryview(tensor: torch.Tensor) -> memoryview:
     """A writable byte view over a tensor's memory.
 
-    ``tensor.numpy()`` cannot be used: a pinned tensor has no numpy
+    `tensor.numpy()` cannot be used: a pinned tensor has no numpy
     representation. Going through ctypes and the tensor's address works
-    for both pinned and pageable tensors, and lets ``os.preadv`` write
+    for both pinned and pageable tensors, and lets `os.preadv` write
     straight into the buffer.
     """
     nbytes = tensor.numel() * tensor.element_size()
@@ -121,7 +121,7 @@ def pread_exact(fd: int, nbytes: int, offset: int) -> bytes:
 def read_safetensors_header(fd: int, size: int) -> tuple[dict[str, Any], int]:
     """Return the file's header and the offset at which its data starts.
 
-    The header is read through ``os.pread`` on the same descriptor the
+    The header is read through `os.pread` on the same descriptor the
     data section is read from, so the file is opened once and every byte
     of it is covered by that descriptor's read calls.
 
