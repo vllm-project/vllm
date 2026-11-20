@@ -63,6 +63,8 @@ if TYPE_CHECKING:
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB: int = 2048
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
+    VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_DUMP: str | None = None
+    VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_LOAD: str | None = None
     VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
@@ -1178,6 +1180,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Clamped to max_model_len - query_len. Default: 8192 tokens
     "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": lambda: int(
         os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "8192")
+    ),
+    # If set, rank 0 writes the adaptive-verification cost curves it profiled at
+    # startup to this JSON file, with a fingerprint of the configuration that
+    # shaped them. Cannot be combined with
+    # VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_LOAD.
+    "VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_DUMP": lambda: os.getenv(
+        "VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_DUMP", None
+    ),
+    # If set, rank 0 reads the adaptive-verification cost curves from this file
+    # (written by VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_DUMP) instead of using
+    # the ones it profiled at startup. A missing, corrupt or mismatching file
+    # logs a warning and keeps the profiled curves.
+    "VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_LOAD": lambda: os.getenv(
+        "VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_LOAD", None
     ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests

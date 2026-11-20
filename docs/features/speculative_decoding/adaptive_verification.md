@@ -65,3 +65,19 @@ Step costs are profiled against a synthetic KV context, 8192 tokens by default. 
 ```bash
 export VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN=131072
 ```
+
+## Saving and reusing the cost profile
+
+The cost profile is measured once at startup, so a boot on a busy GPU or a node that has not reached its steady clocks prices every later step from a skewed profile, and two boots of the same configuration can differ. To inspect a profile, or to pin one that was measured on a quiet node, write the profiled curves to a file on one boot and read them back on later boots:
+
+```bash
+# Boot 1: profile as usual and write the curves.
+export VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_DUMP=/var/lib/vllm/av_cost_curves.json
+
+# Later boots: use the stored curves instead of the freshly profiled ones.
+export VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_LOAD=/var/lib/vllm/av_cost_curves.json
+```
+
+The file holds the profiled curves (not the derived tables) and a fingerprint of what shapes them: the model and engine configuration, the capture sizes, the profiling context length, the tensor-parallel size, the GPU and the torch and CUDA versions. A boot only uses a file whose fingerprint matches its own. A missing, corrupt or mismatching file is never used silently: rank 0 logs a warning naming the fields that differ and keeps the profiled curves. Setting both variables fails at startup, since dumping and pinning at once is ambiguous. With neither variable set, nothing changes.
+
+The profile runs again if the KV cache is resized after startup, so the file is overwritten on each profile and holds the last one.
