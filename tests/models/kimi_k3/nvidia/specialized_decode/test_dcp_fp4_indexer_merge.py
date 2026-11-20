@@ -179,14 +179,16 @@ def _local_shard(cache, table, ends, world, rank):
 def _check(group):
     from types import SimpleNamespace
 
-    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer import (
-        FusedIndexer,
-    )
-    from vllm.v1.attention.ops.dcp_topk_merge import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
         dcp_merge_local_topk,
         dcp_topk_merge_fits,
     )
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import dcp_topk_merge_rows
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        dcp_topk_merge_rows,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer import (
+        FusedIndexer,
+    )
 
     world, rank = group.world_size, group.rank_in_group
     n = dcp_merge_local_topk(TOPK, world)
@@ -296,7 +298,7 @@ def run_worker(rank, world, local_rank, init_method):
         init_distributed_environment,
         initialize_model_parallel,
     )
-    from vllm.v1.attention.ops.dcp_topk_merge import init_dcp_topk_merge
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import init_dcp_topk_merge
 
     torch.accelerator.set_device_index(local_rank)
     config = VllmConfig()

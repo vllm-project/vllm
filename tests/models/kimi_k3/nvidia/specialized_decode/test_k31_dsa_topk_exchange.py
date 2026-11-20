@@ -122,10 +122,10 @@ def _shard(cache, table, ends, requests, world, rank):
 
 
 def _check(group):
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.topk_exchange import (  # noqa: E501
         reserve,
     )
-    from vllm.v1.attention.ops.dcp_topk_merge import dcp_merge_local_topk
 
     world, rank = group.world_size, group.rank_in_group
     n = dcp_merge_local_topk(TOPK, world)
@@ -142,11 +142,13 @@ def _merge_local_select(fused, rows, logits, row_ends, args):
     """#63's NCCL merge over the fused local select's B' rows (its push-variant
     kernel; the pushes it also makes carry the current epoch and are rewritten
     by the next exchange call)."""
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        dcp_topk_merge_rows,
+    )
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
         stream,
         to_cute,
     )
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import dcp_topk_merge_rows
 
     local, _ = fused.exchange_kernels[rows, Q]
     out, valid = fused.out[:rows], fused.valid[:rows]
@@ -193,10 +195,12 @@ def _check_requests(group, exchange, n, requests):
     with a saturated rank."""
     from types import SimpleNamespace
 
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        dcp_topk_merge_rows,
+    )
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer import (
         FusedIndexer,
     )
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import dcp_topk_merge_rows
 
     world, rank = group.world_size, group.rank_in_group
     device = torch.device("cuda", torch.accelerator.current_device_index())
@@ -344,7 +348,7 @@ def run_worker(rank, world, init_method):
         init_distributed_environment,
         initialize_model_parallel,
     )
-    from vllm.v1.attention.ops.dcp_topk_merge import init_dcp_topk_merge
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import init_dcp_topk_merge
 
     torch.accelerator.set_device_index(rank)
     config = VllmConfig()

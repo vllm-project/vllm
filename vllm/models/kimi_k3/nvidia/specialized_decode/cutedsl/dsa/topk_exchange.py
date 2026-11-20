@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DCP top-k candidate exchange over NVLink and its exact merge (K3.1 DSA decode).
 
-The #63 one-round merge (`vllm/v1/attention/ops/dcp_topk_merge`) all-gathers
+The #63 one-round merge (`vllm/models/kimi_k3/nvidia/ops/dcp_topk_merge`) all-gathers
 every rank's local top-N B' rows with NCCL (a 1-CTA ring all-gather of ~19 us
 at DCP8 plus its launch gap), then selects (one kernel) and rescues saturated
 rows (a second kernel). Here, instead:
@@ -58,7 +58,7 @@ from cutlass import Int32, Int64, Uint16, Uint32, Uint64
 from cutlass.cute.runtime import make_fake_stream
 
 from vllm.cute_utils import recast_val
-from vllm.v1.attention.ops.dcp_topk_merge import (
+from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
     LOCAL_INDEX_BITS,
     packed_row_words,
     rescue_slots,
@@ -249,7 +249,7 @@ def reserve(group, device, world, rank, rows, local_topk):
 def build_merge(rows, topk, local_topk, world, block_size, emit_ids, digits=False):
     """`ExchangeMerge` of `rows` rows (see the module docstring); `digits`:
     its "digits" first round (`merge_select`)."""
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels as stock
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels as stock
 
     from .indexer import low_digit, shared_add, shared_or, warp_inclusive
 

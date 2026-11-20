@@ -14,8 +14,8 @@ The kernel's bits against one CTA per row: `test_specialized_decode_fp4_indexer.
 
 import pytest
 
+from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
 from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import indexer
-from vllm.v1.attention.ops.dcp_topk_merge import dcp_merge_local_topk
 
 
 @pytest.mark.parametrize("world", [2, 4, 8, 16, 32])

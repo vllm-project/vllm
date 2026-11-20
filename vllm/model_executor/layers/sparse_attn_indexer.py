@@ -43,7 +43,6 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
-    SparseIndexerTopk,
     deep_select_topk,
     get_indexer_topk,
     is_deep_select_supported,
@@ -70,7 +69,7 @@ from vllm.utils.deep_gemm import (
     mqa_logits_use_mx_scales,
 )
 from vllm.utils.import_utils import has_cutedsl
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -86,11 +85,6 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.attention.ops.dcp_topk_merge import (
-    dcp_topk_merge_fits,
-    init_dcp_topk_merge,
-    packed_row_words,
-)
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -130,68 +124,6 @@ def _assert_cutedsl_dcp_merge_supported(
             f"DCP sparse-indexer merge requires index_topk in (512, 1024, 2048); "
             f"got {k}."
         )
-
-
-def _use_dcp_decode_topk_merge(
-    dcp_local_topk: int,
-    has_global_seq_lens: bool,
-    cp_interleave: int,
-    has_candidate_blocks: bool,
-    num_rows: int,
-    topk_tokens: int,
-) -> bool:
-    """Whether a decode step merges the DCP top-k in one round from each
-    rank's packed local top-`dcp_local_topk`. The packed ids decode as
-    `local * W + rank`, which needs interleave 1, and the exact merge's
-    rescue workspace bounds the rows of one call (same on every DCP rank;
-    larger steps take the generic merge)."""
-    if not (
-        dcp_local_topk > 0
-        and has_global_seq_lens
-        and cp_interleave == 1
-        and not has_candidate_blocks
-    ):
-        return False
-    return dcp_topk_merge_fits(num_rows, topk_tokens, dcp_local_topk)
-
-
-def _dcp_topk_merge_reads_logits(logits: torch.Tensor, dcp_local_topk: int) -> bool:
-    """Whether the packed merge's DeepSelect can read these decode logits
-    directly (SM100's bf16), which skips their FP32 copy."""
-    return logits.dtype == torch.bfloat16 and is_deep_select_supported(
-        logits, dcp_local_topk
-    )
-
-
-def _decode_logits_profile_bytes(
-    num_rows: int,
-    max_model_len: int,
-    logits_dtype: torch.dtype,
-    row_align: int,
-    fp32_decode_logits: bool,
-    dcp_local_topk: int,
-    dcp_world_size: int,
-) -> int:
-    """Peak bytes a decode step's top-k inputs hold: DeepGEMM's
-    `[num_rows, max_model_len]` logits at a `row_align`-padded stride,
-    plus either their FP32 copy (`fp32_decode_logits`) or, when the packed
-    DCP merge runs (`dcp_local_topk > 0`), its packed rows and their
-    all-gather (the local top-N ids are freed once packed)."""
-    stride = round_up(max_model_len, row_align)
-    logits_bytes = num_rows * stride * logits_dtype.itemsize
-    if dcp_local_topk > 0 and _dcp_topk_merge_reads_logits(
-        torch.empty_strided(
-            (num_rows, max_model_len), (stride, 1), dtype=logits_dtype, device="meta"
-        ),
-        dcp_local_topk,
-    ):
-        packed_bytes = (
-            num_rows * packed_row_words(dcp_local_topk) * torch.int32.itemsize
-        )
-        return logits_bytes + packed_bytes * (1 + dcp_world_size)
-    if fp32_decode_logits and logits_dtype != torch.float32:
-        return logits_bytes + num_rows * stride * torch.float32.itemsize
-    return logits_bytes
 
 
 def _get_direct_dcp_topk_workspace(
@@ -696,7 +628,6 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
-    dcp_local_topk: int = 0,
     logits_dtype: torch.dtype = torch.float32,
     dcp_direct_topk_max_rows: int = 0,
 ) -> torch.Tensor:
@@ -780,37 +711,22 @@ def sparse_attn_indexer(
         split_kv = 384 if current_platform.is_device_capability_family(100) else 256
         row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
         copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
+        decode_copy_bytes = copy_bytes if fp32_decode_logits else 0
         if chunk_decode:
             # A decode chunk holds at most the budget, read in place by top-k.
             max_decode_tokens = min(
                 max_decode_tokens,
                 decode_budget // (logits_dtype.itemsize * max_model_len),
             )
-            fp32_decode_logits = False
+            decode_copy_bytes = 0
         prefill_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        # Same gate as a decode step: the packed DCP merge reads the bf16
-        # logits, so its steps hold no FP32 copy.
-        use_dcp_topk_merge = _use_dcp_decode_topk_merge(
-            dcp_local_topk,
-            dcp_world_size > 1,
-            cp_kv_cache_interleave_size,
-            candidate_blocks is not None,
-            max_decode_tokens,
-            topk_tokens,
-        )
         max_logits_bytes = max(
             prefill_budget
             // torch.float32.itemsize
             * (logits_dtype.itemsize + copy_bytes),
-            _decode_logits_profile_bytes(
-                max_decode_tokens,
-                max_model_len,
-                logits_dtype,
-                row_align,
-                fp32_decode_logits,
-                dcp_local_topk if use_dcp_topk_merge else 0,
-                dcp_world_size,
-            ),
+            max_decode_tokens
+            * round_up(max_model_len, row_align)
+            * (logits_dtype.itemsize + decode_copy_bytes),
         )
         _ = torch.empty(
             max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
@@ -1238,14 +1154,6 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        use_dcp_topk_merge = _use_dcp_decode_topk_merge(
-            dcp_local_topk,
-            decode_metadata.global_seq_lens is not None,
-            cp_kv_cache_interleave_size,
-            candidate_blocks is not None,
-            num_padded_tokens,
-            topk_tokens,
-        )
         if chunk_decode:
             assert decode_metadata.indices is not None
             assert decode_metadata.global_seq_lens is None
@@ -1316,17 +1224,11 @@ def sparse_attn_indexer(
                 logits_dtype=logits_dtype,
                 indices=decode_metadata.indices,
             )
-            use_dcp_topk_merge = use_dcp_topk_merge and _dcp_topk_merge_reads_logits(
-                logits, dcp_local_topk
-            )
             # Keeping bf16 halves top-k/candidate reads. SM100 decode is varlen:
             # one context length per row.
-            if not use_dcp_topk_merge and (
-                dcp_world_size != 1
-                or not get_indexer_topk(topk_backend).takes_bf16_logits(
-                    logits, topk_tokens, logits.shape[0]
-                )
-            ):
+            if dcp_world_size != 1 or not get_indexer_topk(
+                topk_backend
+            ).takes_bf16_logits(logits, topk_tokens, logits.shape[0]):
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -1364,42 +1266,29 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if use_dcp_topk_merge:
-            from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
-                dcp_topk_merge,
-            )
+        # The backend comes from the layer (config is only readable at model
+        # construction); dispatchers are cached per backend.
+        get_indexer_topk(topk_backend)(
+            logits,
+            seq_lens,
+            next_n,
+            topk_indices,
+            topk_tokens,
+            attn_metadata_narrowed.max_seq_len,
+        )
 
-            # Interleave 1: local lengths are at most cdiv(max_model_len, W).
-            dcp_topk_merge(
+        if decode_metadata.global_seq_lens is not None:
+            _merge_dcp_topk_global(
                 logits,
-                SparseIndexerTopk._row_ends(seq_lens, next_n, num_rows).contiguous(),
-                topk_indices,
-                dcp_local_topk,
-                max_local_len=cdiv(max_model_len, dcp_world_size),
-            )
-        else:
-            # The backend comes from the layer (config is only readable at
-            # model construction); dispatchers are cached per backend.
-            get_indexer_topk(topk_backend)(
-                logits,
-                seq_lens,
-                next_n,
                 topk_indices,
                 topk_tokens,
-                attn_metadata_narrowed.max_seq_len,
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
+                logits_dtype=logits_dtype,
+                num_positions=max_model_len,
+                direct_max_rows=dcp_direct_topk_max_rows,
             )
-            if decode_metadata.global_seq_lens is not None:
-                _merge_dcp_topk_global(
-                    logits,
-                    topk_indices,
-                    topk_tokens,
-                    dcp_rank,
-                    dcp_world_size,
-                    cp_kv_cache_interleave_size,
-                    logits_dtype=logits_dtype,
-                    num_positions=max_model_len,
-                    direct_max_rows=dcp_direct_topk_max_rows,
-                )
 
         if needs_padded_path:
             # if padded, we need to unpack
@@ -1443,7 +1332,6 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
-    dcp_local_topk: int = 0,
     logits_dtype: torch.dtype = torch.float32,
     dcp_direct_topk_max_rows: int = 0,
 ) -> torch.Tensor:
@@ -1532,9 +1420,6 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
-        # Decode merges each rank's packed local top-N in one exchange (exact;
-        # 0 keeps the generic merge). Collective over the DCP group.
-        self.dcp_local_topk = init_dcp_topk_merge(vllm_config, topk_tokens)
         self.dcp_direct_topk_max_rows = 0
         if (
             self.dcp_world_size > 1
@@ -1645,7 +1530,6 @@ class SparseAttnIndexer(CustomOp):
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
-            dcp_local_topk=self.dcp_local_topk,
             logits_dtype=self.logits_dtype,
             dcp_direct_topk_max_rows=self.dcp_direct_topk_max_rows,
         )

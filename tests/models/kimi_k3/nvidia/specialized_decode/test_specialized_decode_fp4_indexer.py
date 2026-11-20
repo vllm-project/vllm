@@ -660,8 +660,13 @@ def _local_select(rows, n, pitch, world, clusters=1):
 
 def _local_workspace(world, rank, max_rows, topk, n):
     """A rescue workspace whose W peers are this GPU's own buffers."""
-    from vllm.v1.attention.ops.dcp_topk_merge import packed_row_words, rescue_slots
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import DCPTopkRescueWorkspace
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
+        packed_row_words,
+        rescue_slots,
+    )
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        DCPTopkRescueWorkspace,
+    )
 
     ws = DCPTopkRescueWorkspace.__new__(DCPTopkRescueWorkspace)
     slots = rescue_slots(topk, n)
@@ -702,6 +707,11 @@ def test_dcp_topk_exchange_merge(case):
     threshold score (the merge's tie ranking and its radix fallback)."""
     from types import SimpleNamespace as NS
 
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        _RowsOutput,
+        dcp_topk_select,
+    )
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
         dynamic_view,
         stream,
@@ -710,11 +720,6 @@ def test_dcp_topk_exchange_merge(case):
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.topk_exchange import (  # noqa: E501
         ExchangeMerge,
         ll_pairs,
-    )
-    from vllm.v1.attention.ops.dcp_topk_merge import dcp_merge_local_topk
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
-        _RowsOutput,
-        dcp_topk_select,
     )
 
     contexts, q, kind = EXCHANGE_CASES[case]
@@ -845,6 +850,11 @@ def test_dcp16_topk_exchange_merge_digits(case, monkeypatch):
     (the rotated row order)."""
     from types import SimpleNamespace as NS
 
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        _RowsOutput,
+        dcp_topk_select,
+    )
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
         dynamic_view,
         stream,
@@ -852,11 +862,6 @@ def test_dcp16_topk_exchange_merge_digits(case, monkeypatch):
     )
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import (
         topk_exchange as tx,
-    )
-    from vllm.v1.attention.ops.dcp_topk_merge import dcp_merge_local_topk
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
-        _RowsOutput,
-        dcp_topk_select,
     )
 
     contexts, q, kind, rank0 = EXCHANGE16_CASES[case]
@@ -1016,6 +1021,7 @@ def test_local_topk_cluster_bitwise(case):
     that overflow (every key tied: passes 2-4 on every CTA of the cluster), tens of
     ties at the threshold ("coarse") and hundreds at the maximum ("top_ties"); both
     epoch parities and two exchange ranks."""
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
         dynamic_view,
         stream,
@@ -1027,7 +1033,6 @@ def test_local_topk_cluster_bitwise(case):
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import (
         topk_exchange as tx,
     )
-    from vllm.v1.attention.ops.dcp_topk_merge import dcp_merge_local_topk
 
     world, rows, pitch = 16, 8, LOCAL_CLUSTER_PITCH
     assert indexer.local_cluster(world, rows) == 4
