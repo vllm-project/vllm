@@ -6,8 +6,9 @@ Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
 
 import inspect
+import sys
 from abc import ABC
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -438,6 +439,7 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     assert kernels == original
 
 
+@pytest.mark.parametrize("backend", ["auto", "xpu_woq"])
 @pytest.mark.parametrize("native_fp8", [False, True])
 @pytest.mark.parametrize("block", [False, True])
 @patch.object(XPUFp8W8A16BlockScaledMMKernel, "is_supported", return_value=(True, None))
@@ -446,23 +448,42 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
 @patch.object(XPUW8A8FP8LinearKernel, "is_supported", return_value=(True, None))
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_xpu_fp8_kernel_preference(
-    platform_mock, _w8a8, _w8a16, _blk, _blk16, block, native_fp8
+    platform_mock, _w8a8, _w8a16, _blk, _blk16, block, native_fp8, backend
 ):
-    """Xe3p (native FP8) prefers W8A8; other XPUs prefer weight-only W8A16."""
+    """Xe3p (native FP8) prefers W8A8; other XPUs prefer weight-only W8A16.
+
+    --linear-backend=xpu_woq keeps W8A16 even on Xe3p.
+    """
     platform_mock._enum = PlatformEnum.XPU
     platform_mock.is_xpu.return_value = True
     if block:
         act_key, w_key = kFp8Dynamic128Sym, kFp8Static128BlockSym
         expected = (
-            XPUFp8BlockScaledMMKernel if native_fp8 else XPUFp8W8A16BlockScaledMMKernel
+            XPUFp8BlockScaledMMKernel
+            if native_fp8 and backend == "auto"
+            else XPUFp8W8A16BlockScaledMMKernel
         )
     else:
         act_key = w_key = kFp8StaticTensorSym
-        expected = XPUW8A8FP8LinearKernel if native_fp8 else XPUW8A16FP8LinearKernel
+        expected = (
+            XPUW8A8FP8LinearKernel
+            if native_fp8 and backend == "auto"
+            else XPUW8A16FP8LinearKernel
+        )
 
-    config = VllmConfig(kernel_config=KernelConfig(linear_backend="auto"))
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
     with (
-        patch.object(XPUW8A8FP8LinearKernel, "has_native_fp8", return_value=native_fp8),
+        # vllm._xpu_ops needs vllm_xpu_kernels, so stub it for non-XPU CI.
+        patch.dict(
+            sys.modules,
+            {
+                "vllm._xpu_ops": MagicMock(
+                    xpu_ops=MagicMock(
+                        supports_fp8_compute=MagicMock(return_value=native_fp8)
+                    )
+                )
+            },
+        ),
         set_current_vllm_config(config),
     ):
         kernel = init_fp8_linear_kernel(

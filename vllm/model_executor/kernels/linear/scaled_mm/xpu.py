@@ -65,17 +65,6 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
             return False, "XPUW8A8FP8Linear only support FP8 activation dtype"
         return True, None
 
-    @classmethod
-    def has_native_fp8(cls) -> bool:
-        """Whether the device runs FP8 GEMMs natively (Xe3p: CRI, Nova Lake-P).
-
-        False if the installed vllm-xpu-kernels lacks the arch query.
-        """
-        try:
-            return bool(torch.ops._xpu_C.is_xe3p_arch())
-        except (AttributeError, RuntimeError):
-            return False
-
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
