@@ -2,25 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSpark's Markov draft sampling as one AITER FlyDSL launch on gfx950.
 
-`DSparkSpeculator._sample_markov_chain` runs, for each of the 5 draft steps,
-the Markov embedding of the previous token, the bias GEMV over the vocabulary,
-the Gumbel sample with the bias fused in and the token copy. AITER's
-`flydsl_markov_chain_sample` runs all 5 steps of up to 160 requests in one
-persistent launch. Its Gumbel draws are vLLM's (`gumbel_sample` with
-`is_drafting=True`, fp32), and it writes the same `bf16(base + bias)` rows
-into the draft logits cache. The bias is summed in another order than
-vLLM's GEMV, so a value can differ in its last bf16 bit, as in
-fused_markov.py. That changes only which tokens the draft proposes, because
-the rejection sampler verifies every draft token against the target.
-
-Enabled by VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER=1.
-`resolve` decides once per speculator from its load-time state and compiles
-the kernels, before any CUDA graph capture. `sample_markov_chain` then checks
-only host-side tensor metadata, so every captured row count records the
-path it takes.
-
-The kernel's workgroups wait for each other, so it needs the GPU's CUs to
-itself: it is the last launch of the draft step, on the current stream.
+AITER's `flydsl_markov_chain_sample` runs all 5 draft steps of up to 160
+requests in one launch, with vLLM's Gumbel draws (`gumbel_sample` with
+`is_drafting=True`), and writes the same `bf16(base + bias)` draft logits
+cache rows up to the last bf16 bit of the bias, which it sums in another order
+than vLLM's GEMV. The kernel's workgroups wait for each other, so it is the
+last launch of the draft step, on the current stream.
 """
 
 from types import ModuleType
@@ -34,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def _why_not(spec, model, flydsl: ModuleType) -> str | None:
-    """Why this speculator keeps vLLM's Markov loop, or None."""
+    """Returns why `spec` keeps vLLM's Markov loop, or None."""
     if spec.draft_logits is None:
         return "greedy drafts"
     if spec.draft_logits.row_mapping is not None:
@@ -72,9 +59,19 @@ def _why_not(spec, model, flydsl: ModuleType) -> str | None:
 
 
 def resolve(spec, model) -> ModuleType | None:
-    """The AITER op module if it runs this speculator's Markov sampling, else
-    None. Compiles the kernels and allocates their workspace, so it must run
-    outside CUDA graph capture."""
+    """Decides once per speculator whether the AITER op samples its drafts.
+
+    Compiles the kernels and allocates their workspace, so it must run outside
+    CUDA graph capture.
+
+    Args:
+        spec: The `DSparkSpeculator`, after `load_model`.
+        model: Its DeepSeek-V4.1 draft model.
+
+    Returns:
+        The AITER op module, or None to keep vLLM's loop.
+
+    """
     if not current_platform.is_rocm():
         return None
     from vllm._aiter_ops import rocm_aiter_ops
@@ -108,17 +105,38 @@ def sample_markov_chain(
     out_tokens: torch.Tensor,
     prev_indices: torch.Tensor | None,
 ) -> bool:
-    """`DSparkSpeculator._sample_markov_chain` for `base_logits`
-    `[rows, steps, vocab]` in one launch: writes `out_tokens` and the draft
-    logits cache. Returns False, having done nothing, for a call the kernel
-    does not take."""
+    """Runs `DSparkSpeculator._sample_markov_chain` in one launch.
+
+    Checks only host-side metadata of the per-call tensors, so each captured
+    row count records its path. The speculator's persistent buffers (input
+    ids, maps, positions, temperature, seeds, draft tokens) are not
+    re-checked: the op raises `ValueError` if their layout ever changes.
+
+    Args:
+        flydsl: The module `resolve` returned.
+        spec: The `DSparkSpeculator`.
+        model: Its draft model.
+        base_logits: `[rows, steps, vocab]` draft logits before the bias.
+        prev: Input ids; step 0's previous token is `prev[prev_indices]`.
+        idx_map: `[rows, steps]` request-state slots.
+        sample_pos: `[rows, steps]` positions of the predicted tokens.
+        out_tokens: `[rows, steps]` draft tokens to write.
+        prev_indices: Anchor indices into `prev`.
+
+    Returns:
+        False, having done nothing, if the op does not take this call.
+
+    """
     rows, steps, vocab = base_logits.shape
     if (
         prev_indices is None
+        or prev_indices.dtype != torch.int64
         or base_logits.dtype != torch.bfloat16
         or base_logits.stride(2) != 1
         or base_logits.stride(1) % 2
         or base_logits.stride(0) != steps * base_logits.stride(1)
+        or base_logits.data_ptr() % 8
+        or rows * base_logits.stride(0) * 2 >= 1 << 31
     ):
         return False
     head = model.model.markov_head

@@ -4203,11 +4203,18 @@ class rocm_aiter_ops:
     @functools.cache
     def _flydsl_markov_sampler_module() -> Any | None:
         try:
-            return importlib.import_module("aiter.ops.flydsl.markov_chain_sample")
+            module = importlib.import_module("aiter.ops.flydsl.markov_chain_sample")
+            for name in (
+                "markov_chain_sample_unsupported_reason",
+                "warmup_markov_chain_sample",
+                "flydsl_markov_chain_sample",
+            ):
+                getattr(module, name)
+            return module
         except Exception as e:
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER is set, but the AITER "
-                "FlyDSL Markov sampler could not be imported (%s); using vLLM's "
+                "FlyDSL Markov sampler is unavailable (%s); using vLLM's "
                 "DSpark Markov sampling.",
                 e,
             )
@@ -4216,9 +4223,9 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def flydsl_markov_sampler(cls) -> Any | None:
-        """The `aiter.ops.flydsl.markov_chain_sample` module if
-        VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER is on, this is gfx950 and it
-        imports, else None."""
+        """Returns the `aiter.ops.flydsl.markov_chain_sample` module, or None
+        if the flag is off, this is not gfx950, or the module or its API is
+        missing."""
         from vllm.platforms.rocm import on_gfx950
 
         if not (cls._AITER_ENABLED and cls._FLYDSL_MARKOV_SAMPLER and on_gfx950()):

@@ -1458,9 +1458,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Run DeepSeek-V4.1's DSpark Markov draft sampling (5 steps, vocabulary
     # 129280, probabilistic drafts) as one AITER FlyDSL launch (requires
-    # VLLM_ROCM_USE_AITER=1). Speculators with a confidence head, a reduced
-    # draft vocabulary, a draft watermarker, an acceptance estimator or fp64
-    # Gumbel draws keep vLLM's loop. gfx950 only. Disabled by default.
+    # VLLM_ROCM_USE_AITER=1). Speculators with a confidence head (adaptive
+    # verification), a reduced draft vocabulary, a draft watermarker, an
+    # acceptance estimator or fp64 Gumbel draws keep vLLM's loop. gfx950 only.
+    # Disabled by default.
     "VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_MARKOV_SAMPLER", "False").lower()
         in ("true", "1")
