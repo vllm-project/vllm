@@ -306,10 +306,11 @@ def select_unquantized_moe_backend(
         return oracle.return_or_raise(UnquantizedMoeBackend.MOONEP, AVAILABLE_BACKENDS)
 
     runner_backend = moe_config.moe_backend
-    # 'humming' and 'marlin' are quantization-only; an unquantized layer (e.g.
-    # excluded via modules_to_not_convert, or an unquantized MTP draft of a
-    # quantized model) falls through to auto instead of erroring.
-    if runner_backend not in ["auto", "humming", "marlin"]:
+    # 'humming', 'marlin' and the RDNA3 int4 backends are quantization-only; an
+    # unquantized layer (e.g. excluded via modules_to_not_convert, or an
+    # unquantized MTP draft of a quantized model) falls through to auto instead
+    # of erroring.
+    if runner_backend not in ["auto", "humming", "marlin", "rdna3", "rdna3_int4_int8"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             moe_config.activation_format.is_batched
