@@ -31,7 +31,7 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
 )
 from vllm.models.deepseek_v41.amd.mono.stages.dims import MOE_INTER
 
-from .moe_host import EXPERTS, GROUP, HIDDEN, LIMIT, TOPK
+from .shapes import EXPERTS, GROUP, HIDDEN, LIMIT, TOPK
 
 # The default stream of a launch: the current one (`mono/layer.py`).
 _STREAM = fx.Stream(None)
@@ -47,7 +47,9 @@ KB_WAVE = KB // WAVES  # 20 a wave
 ROUND = 4
 AHEAD = 2
 LOG2E = 1.4426950408889634
-GROUP_WORDS = 4 + GROUP  # a pick group's table row (`moe_host.pick_groups`)
+GROUP_WORDS = (
+    4 + GROUP
+)  # a pick group's table row (`pick_groups` in the tests' `dsv41_largestep_ref`)
 
 
 def _w_round_loads(w, ws, e, n_rows, tile, kb0, lane):

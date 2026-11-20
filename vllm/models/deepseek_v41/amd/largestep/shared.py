@@ -25,7 +25,7 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
 from vllm.models.deepseek_v41.amd.mono.common.plan import BLOCKS
 from vllm.models.deepseek_v41.amd.mono.stages.dims import MOE_INTER
 
-from .moe_host import HIDDEN, LIMIT
+from .shapes import HIDDEN, LIMIT
 
 THREADS = 512
 WAVES = THREADS // 64

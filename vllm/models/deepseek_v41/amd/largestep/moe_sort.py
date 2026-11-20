@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The decode step's picks sorted into groups of 16 picks of one expert, on
-the GPU, bit for bit the table of `moe_host.pick_groups`, so the routed MoE
-needs no host step inside a CUDA graph. Table int32 [G, 4 + 16]: the
+the GPU, bit for bit the table of `pick_groups` in the tests'
+`dsv41_largestep_ref`, so the routed MoE needs no host step inside a CUDA
+graph. Table int32 [G, 4 + 16]: the
 expert, three zeros, then 16 picks (-1 past the last). `count` gets G.
 """
 
@@ -15,7 +16,7 @@ from flydsl.expr.typing import Int32, Int64, T
 from vllm.models.deepseek_v41.amd.mono.attention.device import kernel_symbol
 from vllm.models.deepseek_v41.amd.mono.common.ops import rsrc
 
-from .moe_host import EXPERTS, GROUP, TOPK
+from .shapes import EXPERTS, GROUP, TOPK
 
 THREADS = 512
 MAX_ROWS = 256
@@ -41,11 +42,15 @@ def build_moe_sort(experts: int = EXPERTS):
         tid = fx.thread_idx.x
         fx.ptr_store(fx.Int32(0), cnt + tid)
         gpu.barrier()
-        # 1. count
+        # 1. count. The router gives CUDA graph padding rows expert -1
+        # (VLLM_MOE_SKIP_PADDING). Such a pick is not counted: -1 as an LDS
+        # index would add to the word before `cnt`. Step 3 never matches it,
+        # so it is left out of every group.
         for i in range(tid, picks, THREADS):
             e = fx.Int32(bo.buffer_load(rsrc(topk_ids), i, vec_width=1, dtype=T.i32))
             fx.ptr_store(e, ids + i)
-            fx.llvm.atomic_add(cnt + e, fx.Int32(1), syncscope="workgroup")
+            if (e >= 0) & (e < experts):
+                fx.llvm.atomic_add(cnt + e, fx.Int32(1), syncscope="workgroup")
         gpu.barrier()
         # 2. groups an expert, then an inclusive prefix sum (two LDS buffers,
         # each step reads one and writes the other)

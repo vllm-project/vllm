@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host-side reference pieces of the gfx942 large-step MoE, for the tests:
-the pick groups (`pick_groups`, the table `moe_sort` writes), the
-activation quantization the kernels use (`quant_rows`), and torch
-references of the routed and shared experts.
+"""Torch references of the gfx942 large-step MoE, for its tests: the pick
+groups (`pick_groups`, the table `moe_sort` writes), the activation
+quantization the kernels use (`quant_rows`), and the routed and shared
+experts. Host versions of the device helpers in `mono/common/mx`.
 """
 
 import torch
 
-GROUP = 16  # picks a group: one MFMA's N
-HIDDEN = 5120
-LIMIT = 10.0  # DeepSeek-V4.1's swiglu_limit
-EXPERTS, TOPK = 384, 6  # the target model's routing
+from vllm.models.deepseek_v41.amd.largestep.shapes import (  # noqa: F401
+    EXPERTS,
+    GROUP,
+    HIDDEN,
+    LIMIT,
+    TOPK,
+)
+
 # 8-value chunk orders: even K first, then odd (`weights942.EVEN_ODD`)
 EVEN_ODD = [0, 2, 4, 6, 1, 3, 5, 7]
 

@@ -116,6 +116,7 @@ steps:
   - tests/models/common/specialized_decode/inputs.py
   - tests/models/common/specialized_decode/reference.py
   - tests/kernels/models/amd/test_dsv41_largestep_moe.py
+  - tests/kernels/models/amd/dsv41_largestep_ref.py
   commands:
   - >-
     pytest -v -s
