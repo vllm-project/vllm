@@ -1322,6 +1322,8 @@ pass a tensor of shape `(..., hidden_size of LM)` for each item to the correspon
     in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+To reject embeddings of a single modality, set `"allow_embeds": false` for it in `--limit-mm-per-prompt`,
+e.g. `--limit-mm-per-prompt '{"video": {"count": 0, "allow_embeds": false}}'`.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.

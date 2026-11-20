@@ -14,23 +14,27 @@ user cannot pre-plant a malicious socket at a predictable path.
 import glob
 import json
 import os
-import pickle
 import socket
 import stat
 import struct
 import tempfile
-import time
 from dataclasses import dataclass, fields
-from typing import Any, Literal, NamedTuple
+from typing import Any, NamedTuple
 
 import torch
-from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+    StorageRecord,
+)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
+    _LEN_STRUCT,
+    _recv_exact,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
 )
@@ -44,10 +48,6 @@ from vllm.utils.network_utils import split_host_port
 SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
-_LEN_STRUCT = struct.Struct("!Q")
-# Sanity bound for a single message. IPC handles are tiny; only small
-# non-CUDA tensors are ever shipped by value.
-MAX_MSG_SIZE = 1 << 34
 # Bound for one JSON message on the remote D2D control plane. A remote peer
 # is authenticated before any payload is decoded, so that plane must not be
 # pickle: recv_msg would deserialize attacker-controlled bytes before the
@@ -81,8 +81,8 @@ class UnsupportedPlatformForIPCError(Exception):
 def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
-    Only CUDA/ROCm tensors get a real IPC handle from `TensorEntry`; other
-    platforms (e.g. XPU) would silently ship every tensor by value instead.
+    Only CUDA/ROCm storages get a real IPC handle from `TensorEntry`; other
+    platforms (e.g. XPU) would silently ship every storage by value instead.
 
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
@@ -359,6 +359,11 @@ class WeightCacheKey:
     repacked), so weights processed for one backend are wrong for another."""
     linear_backend: str = "auto"
     linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
+    language_model_only: bool = False
+    mm_encoder_only: bool = False
+    mm_disabled_modalities: tuple[str, ...] = ()
+    """With the two flags above, decides which components (e.g. the vision
+    tower) are built; skipped ones are absent from the daemon's export."""
 
     @classmethod
     def from_model_config(
@@ -396,6 +401,8 @@ class WeightCacheKey:
         linear_backend_per_quant = tuple(
             sorted((kernel_config.linear_backend_per_quant or {}).items())
         )
+        mm_config = model_config.multimodal_config
+        mm_limits = mm_config.limit_per_prompt if mm_config else {}
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -424,6 +431,11 @@ class WeightCacheKey:
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
             linear_backend_per_quant=linear_backend_per_quant,
+            language_model_only=bool(mm_config and mm_config.language_model_only),
+            mm_encoder_only=bool(mm_config and mm_config.mm_encoder_only),
+            mm_disabled_modalities=tuple(
+                sorted(m for m, opts in mm_limits.items() if opts.count == 0)
+            ),
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -434,49 +446,15 @@ class WeightCacheKey:
         ]
 
 
-TensorKind = Literal["param", "buffer"]
-"""Whether a cached tensor is a model parameter or a buffer."""
-
-
-@dataclass(slots=True)
-class TensorEntry:
-    """A single cached tensor.
-
-    CUDA tensors are exported as `torch.multiprocessing` reduction args
-    (CUDA IPC handles); non-CUDA tensors are shipped by value.
-    """
-
-    kind: TensorKind
-    ipc_args: tuple | None = None
-    cpu_tensor: torch.Tensor | None = None
-
-    @classmethod
-    def from_tensor(cls, tensor: torch.Tensor, kind: TensorKind) -> "TensorEntry":
-        tensor = tensor.detach()
-        if tensor.is_cuda:
-            _, ipc_args = reduce_tensor(tensor)
-            return cls(kind=kind, ipc_args=ipc_args)
-        return cls(kind=kind, cpu_tensor=tensor.cpu())
-
-    def rebuild(self, device_index: int) -> torch.Tensor:
-        if self.ipc_args is None:
-            assert self.cpu_tensor is not None
-            return self.cpu_tensor
-        args = list(self.ipc_args)
-        # Index 6 of the args from reduce_tensor is the device index. It must
-        # be retargeted to the local index since the daemon and the engine may
-        # have different CUDA_VISIBLE_DEVICES mappings.
-        args[6] = device_index
-        return rebuild_cuda_tensor(*args)
-
-
 class WeightCacheState(NamedTuple):
-    """Client-side decode of a daemon's get_state response payload."""
+    """Consumer-side DTO decoded from a daemon's get_state response."""
 
-    entries: dict[str, TensorEntry]
-    """Model tensors, exported as CUDA IPC handles or shipped by value."""
+    manifest: dict
+    """Logical tensor views over the imported storages."""
+    storages: list[StorageRecord]
+    """Storage records rebuilt on the consumer's device."""
     aliases: dict[str, str]
-    """Duplicate (tied) weight names aliased to their canonical entry."""
+    """Duplicate (tied) weight names aliased to their canonical tensor."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 
@@ -486,19 +464,6 @@ def parse_seed_address(address: str) -> str | tuple[str, int]:
     if "/" in address or ":" not in address:
         return os.path.expanduser(address)
     return split_host_port(address)
-
-
-def send_msg(sock: socket.socket, obj: Any) -> None:
-    payload = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
-    sock.sendall(_LEN_STRUCT.pack(len(payload)))
-    sock.sendall(payload)
-
-
-def recv_msg(sock: socket.socket) -> Any:
-    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
-    if length > MAX_MSG_SIZE:
-        raise ValueError(f"Message size {length} exceeds limit {MAX_MSG_SIZE}")
-    return pickle.loads(_recv_exact(sock, length))
 
 
 def send_json(sock: socket.socket, obj: Any) -> None:
@@ -528,20 +493,3 @@ def recv_json(
     if length > max_size:
         raise ValueError(f"Message size {length} exceeds limit {max_size}")
     return json.loads(_recv_exact(sock, length, deadline))
-
-
-def _recv_exact(
-    sock: socket.socket, num_bytes: int, deadline: float | None = None
-) -> bytes:
-    buf = bytearray()
-    while len(buf) < num_bytes:
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Peer did not send its message in time")
-            sock.settimeout(remaining)
-        chunk = sock.recv(num_bytes - len(buf))
-        if not chunk:
-            raise ConnectionError("Socket closed while receiving message")
-        buf.extend(chunk)
-    return bytes(buf)

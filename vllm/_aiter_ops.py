@@ -14,7 +14,6 @@ import torch.distributed as dist
 from torch._ops import OpOverload
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
@@ -921,6 +920,117 @@ def _rocm_aiter_w8a8_gemm_fake(
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
     return Y
+
+
+def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rocm_use_aiter_fp4_asm_gemm: bool = False,
+    out_dtype: torch.dtype | None = torch.bfloat16,
+    x_scales: torch.Tensor | None = None,
+    hadamard_rotate: bool = False,
+) -> torch.Tensor:
+    """With `hadamard_rotate`, the HIP quant of the ASM path rotates each
+    32-element block of `x` by the orthonormal Sylvester Hadamard matrix
+    (`block_hadamard_rotate`); `weight` must be rotated the same way."""
+    assert not (hadamard_rotate and x_scales is not None), (
+        "hadamard_rotate needs an unquantized x"
+    )
+    # Only AITER releases with the fused rotation take the argument.
+    quant_kwargs = {"hadamard_rotate": True} if hadamard_rotate else {}
+    from aiter.ops.triton.gemm_afp4wfp4 import (
+        gemm_afp4wfp4,
+        gemm_afp4wfp4_preshuffle,
+    )
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    M = x.shape[0]
+    N = weight.shape[0]
+    K = weight.shape[1]
+    if rocm_use_aiter_fp4_asm_gemm:
+        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+        # The preshuffle kernel's tuned configs split K in some M buckets.
+        if (
+            M <= 64
+            and not envs.VLLM_BATCH_INVARIANT
+            and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+        ):
+            if x_scales is None:
+                # use hip quant kernel for performance
+                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=M >= 32, **quant_kwargs)
+            else:
+                x_q = x
+                x_s = x_scales
+
+            if M >= 32:
+                x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
+            else:
+                x_s = x_s[:M, ...].view(torch.uint8)
+
+            y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
+            gemm_afp4wfp4_preshuffle(
+                x_q.view(torch.uint8),
+                weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
+                x_s,
+                weight_scale.view(torch.uint8).view(weight_scale.shape[0] // 32, -1),
+                out_dtype,
+                y,
+            )
+        else:
+            if x_scales is None:
+                # use hip quant kernel for performance
+                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True, **quant_kwargs)
+            else:
+                x_q = x
+                x_s = x_scales
+
+            y = gemm_a4w4(
+                x_q,
+                weight.view(x_q.dtype),
+                x_s,
+                weight_scale.view(x_s.dtype),
+                dtype=out_dtype,
+                bpreshuffle=True,
+            )
+        return y[:M]
+    else:
+        assert not hadamard_rotate, "hadamard_rotate needs the ASM GEMM path"
+        if x_scales is None:
+            x_q, x_s = dynamic_mxfp4_quant(x)
+        else:
+            x_q = x
+            x_s = x_scales
+        y = torch.empty(
+            x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
+        )
+
+        config = None
+        if envs.VLLM_BATCH_INVARIANT:
+            # The configs split K in some M buckets (up to M <= 256 for
+            # tuned shapes). Keep the tile, drop the split.
+            from aiter.ops.triton.gemm_afp4wfp4 import _get_config
+
+            config, _ = _get_config(M, N, K)
+            config = dict(config, NUM_KSPLIT=1)
+
+        gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y, config)
+        return y
+
+
+def _rocm_aiter_mxfp4_gemm_dynamic_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rocm_use_aiter_fp4_asm_gemm: bool = False,
+    out_dtype: torch.dtype | None = torch.bfloat16,
+    x_scales: torch.Tensor | None = None,
+    hadamard_rotate: bool = False,
+) -> torch.Tensor:
+    return torch.empty(
+        (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
+    )
 
 
 def _rocm_aiter_preshuffled_per_token_w8a8_gemm_impl(
@@ -2182,8 +2292,7 @@ def _flat_sigmoid_bias_topk_is_profitable(
     where it is a Triton launch from Python against a single C++ dispatch --
     measured at -1.8% to -3.5% end-to-end throughput with --enforce-eager.
     Stream capture is the test because it holds for every graph vLLM records,
-    FULL and PIECEWISE, under either model runner, while the forward context's
-    cudagraph_runtime_mode reads NONE during the V2 model runner's FULL capture.
+    FULL and PIECEWISE, under either model runner.
     """
     from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
         can_use_sigmoid_bias_flat_topk,
@@ -2784,6 +2893,28 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
+    @classmethod
+    @if_aiter_supported
+    def is_fused_gdn_decode_enabled(cls) -> bool:
+        """Fused conv1d + delta-rule + gated-RMSNorm GDN decode kernel available."""
+        from vllm.platforms.rocm import on_gfx950
+
+        if not (cls._AITER_ENABLED and on_gfx950()):
+            return False
+        try:
+            from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (
+                fused_gdn_decode_qkvz,
+            )
+        except ImportError:
+            return False
+        import inspect
+
+        # qkvz_layout, query_start_loc and out are added in ROCm/aiter#6488.
+        params = inspect.signature(fused_gdn_decode_qkvz).parameters
+        return (
+            "qkvz_layout" in params and "query_start_loc" in params and "out" in params
+        )
+
     @staticmethod
     def _gdn_flydsl_prefill_kernels_importable() -> bool:
         try:
@@ -2850,6 +2981,86 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import get_cdna_version
 
         return cls._AITER_ENABLED and get_cdna_version() == 4
+
+    @classmethod
+    @if_aiter_supported
+    def is_hc_two_stage_enabled(cls) -> bool:
+        """Whether the FlyDSL two-stage HyperConnection kernels are used."""
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls._AITER_ENABLED and get_cdna_version() in (3, 4)
+
+    # Decode graphs pad to 1, 2, 4 or 8 tokens. On MI355X and MI325X the
+    # two-stage kernels beat the Triton chain up to 4 tokens and lose to it at 8.
+    _HC_TWO_STAGE_MAX_TOKENS = 4
+
+    @classmethod
+    def hc_two_stage_max_tokens(
+        cls, hyper_hidden_size: int, down_rows: int, hc_count: int, hc_lowrank: int
+    ) -> int:
+        """Largest token count to run the two-stage skinny decode kernels at
+        for this shape, or 0 when they cannot be built for it. AITER takes up
+        to `DECODE_MAX_M` tokens, but above `_HC_TWO_STAGE_MAX_TOKENS` the
+        Triton chain is faster."""
+        from aiter.ops.flydsl.kernels.hyper_connection_gated_residual.k1 import (
+            DECODE_MAX_M,
+            skinny_decode_supported,
+        )
+
+        if not skinny_decode_supported(
+            hyper_hidden_size, down_rows, hc_count, hc_lowrank
+        ):
+            return 0
+        return min(DECODE_MAX_M, cls._HC_TWO_STAGE_MAX_TOKENS)
+
+    @staticmethod
+    def hc_fold_norm_weight(
+        w_down_inject: torch.Tensor, norm_weight: torch.Tensor, hc_count: int
+    ) -> torch.Tensor:
+        """Bake the grouped GemmaRMSNorm `(1 + w)` into the merged down+inject
+        weight, which the two-stage skinny decode kernels require."""
+        from aiter.ops.flydsl.kernels.hyper_connection_gated_residual import (
+            fold_norm_weight,
+        )
+
+        return fold_norm_weight(
+            w_down_merged=w_down_inject, norm_weight=norm_weight, hc_count=hc_count
+        )
+
+    @staticmethod
+    def hc_two_stage_combine_and_mix(
+        residual: torch.Tensor,
+        block_output: torch.Tensor,
+        injection: torch.Tensor,
+        norm_weight: torch.Tensor,
+        w_down_inject_folded: torch.Tensor,
+        w_up: torch.Tensor,
+        hc_count: int,
+        hc_lowrank: int,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Combine a pending block output into the HC streams, then mix them.
+
+        Returns `(residual, block_input, injection)`. The injection is a
+        column slice of a `[tokens, w_down_inject_folded.shape[0]]` buffer.
+        """
+        from aiter.ops.flydsl.kernels.hyper_connection_gated_residual import (
+            flydsl_gr_two_stage_combine_and_mix,
+        )
+
+        return flydsl_gr_two_stage_combine_and_mix(
+            residual=residual,
+            block_output=block_output,
+            injection=injection,
+            norm_weight=norm_weight,
+            w_down=w_down_inject_folded[:hc_lowrank],
+            w_up=w_up,
+            w_inject=w_down_inject_folded[hc_lowrank : hc_lowrank + hc_count],
+            hc_count=hc_count,
+            eps=eps,
+            w_down_merged=w_down_inject_folded,
+            fold_w=True,
+        )
 
     @classmethod
     @functools.cache
@@ -3098,7 +3309,7 @@ class rocm_aiter_ops:
             assert max_valid_seq_len is not None
             # AITER v0.1.19 decode is one-block only. This measured gfx950
             # FP32/k=1024 compressed-row boundary is independent of the native
-            # split-count boundary in sampler.cu.
+            # split-count boundary in csrc/attention/dsa/topk/top_k_per_row.cu.
             if (
                 num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
                 and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
@@ -3289,6 +3500,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_w8a8_gemm",
                 op_func=_rocm_aiter_w8a8_gemm_impl,
                 fake_impl=_rocm_aiter_w8a8_gemm_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_mxfp4_gemm_dynamic_quant",
+                op_func=_rocm_aiter_mxfp4_gemm_dynamic_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_mxfp4_gemm_dynamic_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
@@ -3623,6 +3842,26 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def mxfp4_gemm_dynamic_quant(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
+        hadamard_rotate: bool = False,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_mxfp4_gemm_dynamic_quant(
+            x,
+            weight,
+            weight_scale,
+            rocm_use_aiter_fp4_asm_gemm,
+            out_dtype,
+            x_scales,
+            hadamard_rotate,
+        )
 
     @staticmethod
     def preshuffled_per_token_w8a8_gemm(
@@ -4330,6 +4569,10 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
+        per_tensor_q_scale: torch.Tensor | None = None,
+        k_out_unquantized: torch.Tensor | None = None,
     ):
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
             fused_qk_norm_rope_cache_pts_quant_shuffle,
@@ -4361,6 +4604,10 @@ class rocm_aiter_ops:
             block_size,
             x,
             rotary_dim,
+            v_norm,
+            q_out_fp8,
+            per_tensor_q_scale,
+            k_out_unquantized,
         )
 
     @staticmethod
@@ -4385,6 +4632,8 @@ class rocm_aiter_ops:
         kv_cache_dtype: str,
         use_shuffle_layout: bool,
         return_kv: bool,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
@@ -4395,18 +4644,16 @@ class rocm_aiter_ops:
         per-tensor CPU scalars. return_kv says whether the impl consumes
         k_out (FA and ROCM_ATTN prefill do; unified reads K from the cache and
         passes False, so the kernel skips that store). For fp8 caches the
-        kernel emits k_out in the cache dtype, so a returned k_out is
-        converted to the activation dtype.
+        kernel writes the pre-quant K into k_out via k_out_unquantized. When
+        q_out_fp8 is set, the kernel also writes Q statically quantized by the
+        fp32 device scalar q_scale (fp8 caches only).
         """
         is_fp8_cache = kv_cache_dtype.startswith("fp8")
-        dequant_k_out = return_kv and is_fp8_cache
-        kernel_k_out = k_out
+        write_unquantized = return_kv and is_fp8_cache
         if is_fp8_cache:
             fp8_dtype = current_platform.fp8_dtype()
             key_cache = key_cache.view(fp8_dtype)
             value_cache = value_cache.view(fp8_dtype)
-        if dequant_k_out:
-            kernel_k_out = torch.empty_like(k_out, dtype=fp8_dtype)
         # Partial-rotary support (e.g. GLM-4.7 applies rotary to only a prefix
         # of each head's channel dim).
         rotary_dim = cos_sin_cache.shape[-1]
@@ -4429,16 +4676,17 @@ class rocm_aiter_ops:
             slot_mapping=slot_mapping,
             k_scale=k_scale,
             v_scale=v_scale,
-            k_out=kernel_k_out,
+            k_out=None if write_unquantized else k_out,
             v_out=None,
             return_kv=return_kv,
             use_shuffle_layout=use_shuffle_layout,
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
+            k_out_unquantized=k_out if write_unquantized else None,
+            q_out_fp8=q_out_fp8,
+            per_tensor_q_scale=q_scale,
         )
-        if dequant_k_out:
-            ops.convert_fp8(k_out, kernel_k_out, float(k_scale), kv_cache_dtype)
 
     @staticmethod
     def fused_qk_norm_mrope_and_cache(
@@ -4696,6 +4944,32 @@ class rocm_aiter_ops:
             prequant=prequant,
             y_scale=y_scale,
         )
+
+    @staticmethod
+    def triton_bf16_bmm(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        Y: torch.Tensor,
+    ) -> torch.Tensor:
+        """Y[b] = X[b] @ W[b]^T with X (B, M, K), W (B, N, K), Y (B, M, N).
+
+        Inputs and output may be strided views.
+        """
+        from aiter.ops.triton.batched_gemm_bf16 import batched_gemm_bf16
+
+        return batched_gemm_bf16(X, W, dtype=Y.dtype, YQ=Y, backend="triton")
+
+    @staticmethod
+    @functools.cache
+    def is_triton_bf16_bmm_tuned(B: int, M: int, N: int, K: int) -> bool:
+        """Whether AITER has a tuned triton_bf16_bmm config for this shape on
+        the current GPU."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            return _triton_gemm_config_is_tuned("BATCHED_GEMM-A16W16", N, K, M=M, B=B)
+        except (AssertionError, ImportError, KeyError, OSError, TypeError):
+            return False
 
     @staticmethod
     def fused_bf16_bmm_cat_quant_pad_mla(

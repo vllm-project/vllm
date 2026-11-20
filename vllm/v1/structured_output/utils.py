@@ -53,24 +53,8 @@ def allocate_token_bitmask(num_rows: int, vocab_size: int) -> torch.Tensor:
         A contiguous, int32 CPU tensor initialized to allow every token.
 
     """
-    from vllm.utils.torch_utils import PIN_MEMORY
-
     shape = (num_rows, (vocab_size + 31) // 32)
-    try:
-        return torch.full(
-            shape,
-            -1,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=PIN_MEMORY,
-        )
-    except RuntimeError as e:
-        if not PIN_MEMORY:
-            raise
-        logger.warning(
-            "Failed to pin memory: %s. Falling back to non-pinned memory.", e
-        )
-        return torch.full(shape, -1, dtype=torch.int32, device="cpu")
+    return torch.full(shape, -1, dtype=torch.int32, device="cpu")
 
 
 def strip_speculative_padding(token_ids: list[int]) -> list[int]:

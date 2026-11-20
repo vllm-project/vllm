@@ -176,6 +176,10 @@ The following extra parameters are supported:
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
+With the Python frontend's HF renderer, an assistant message with `content` set to
+`null`, `""`, or `[]` and a non-empty top-level `refusal` string renders like an
+explicit refusal content part. Non-empty `content` takes precedence.
+
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
 see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more information.
@@ -183,6 +187,12 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
+
+`/v1/chat/completions/batch` uses the same `VLLM_MAX_COMPLETION_PROMPTS`
+limit as `/v1/completions`. It accepts up to 1,024 conversations in the outer
+`messages` list by default. Set the variable to a positive integer before
+starting the server to change the limit. Larger batches receive HTTP 400
+before any conversation is preprocessed.
 
 With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
 
