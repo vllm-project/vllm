@@ -463,6 +463,20 @@ showpage
         image_io.load_base64("image/png", payload)
 
 
+def test_image_media_io_rejects_icns(tmp_path):
+    path = tmp_path / "icon.icns"
+    Image.new("RGB", (128, 128), "blue").save(path)
+    data = path.read_bytes()
+    image_io = ImageMediaIO()
+
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_io.load_bytes(data)
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_io.load_file(path)
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_io.load_base64("image/png", base64.b64encode(data).decode("ascii"))
+
+
 def test_image_media_io_accepts_common_raster_formats(tmp_path):
     """Common Pillow-writable raster formats remain loadable."""
     image_io = ImageMediaIO()
