@@ -242,3 +242,82 @@ def test_additional_tools_item_without_tools_list_rejected() -> None:
     with pytest.raises(VLLMValidationError) as exc_info:
         ResponsesRequest.model_validate({"input": [item]})
     assert exc_info.value.parameter == "input"
+
+
+def _function_tool(name: str, description: str = "") -> dict:
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "parameters": {"type": "object", "properties": {}},
+    }
+
+
+def test_additional_tools_deduplicated() -> None:
+    """Repeated definitions are offered once; a namespace split across items
+    is merged, so a named choice of a repeated namespaced tool is unambiguous."""
+    clock = _codex_additional_tools_item()
+    timer = _codex_additional_tools_item()
+    timer["tools"][0]["tools"][0]["name"] = "timer"
+    weather = _function_tool("get_weather")
+    request = ResponsesRequest.model_validate(
+        {
+            "input": [
+                clock,
+                {**_codex_additional_tools_item(), "tools": [weather]},
+                {"role": "user", "content": "hi"},
+                _codex_additional_tools_item(),
+                timer,
+            ],
+            "tools": [weather],
+            "tool_choice": {"type": "function", "name": "sleep"},
+        }
+    )
+
+    assert [tool.name for tool in request.tools] == ["get_weather", "clock"]
+    assert [tool.name for tool in request.tools[1].tools] == ["sleep", "timer"]
+    assert request.tool_choice.name == "clock__sleep"
+
+
+def test_additional_tools_redefinition_last_wins_in_place() -> None:
+    def item(*tools: dict) -> dict:
+        return {"type": "additional_tools", "role": "developer", "tools": list(tools)}
+
+    def clock(*tools: dict) -> dict:
+        return {
+            "type": "namespace",
+            "name": "clock",
+            "description": "",
+            "tools": list(tools),
+        }
+
+    request = ResponsesRequest.model_validate(
+        {
+            "input": [
+                item(clock(_function_tool("sleep", "v1"), _function_tool("timer"))),
+                item(_function_tool("get_weather", "v2")),
+                {"role": "user", "content": "hi"},
+                item(clock(_function_tool("sleep", "v2"))),
+            ],
+            "tools": [_function_tool("get_weather", "v1"), _function_tool("get_time")],
+        }
+    )
+
+    assert [tool.name for tool in request.tools] == ["get_weather", "get_time", "clock"]
+    assert request.tools[0].description == "v2"
+    assert [(t.name, t.description) for t in request.tools[2].tools] == [
+        ("sleep", "v2"),
+        ("timer", ""),
+    ]
+
+
+@pytest.mark.parametrize("with_item", [True, False])
+@pytest.mark.parametrize("tools", [5, "abc", {"type": "function"}])
+def test_non_list_tools_rejected_by_field_validation(tools, with_item) -> None:
+    items = [_codex_additional_tools_item()] if with_item else []
+    with pytest.raises(ValidationError) as exc_info:
+        ResponsesRequest.model_validate(
+            {"input": [*items, {"role": "user", "content": "hi"}], "tools": tools}
+        )
+    (error,) = exc_info.value.errors()
+    assert error["loc"] == ("tools",) and error["type"] == "list_type"
