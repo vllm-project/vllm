@@ -19,8 +19,17 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
+from vllm.renderers.cohere import CohereRenderer
+from vllm.renderers.deepseek_v4 import DeepseekV4Renderer, DeepseekV41Renderer
+from vllm.renderers.deepseek_v32 import DeepseekV32Renderer
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.inkling import InklingRenderer
+from vllm.renderers.inkling_encoding import (
+    OPTIONAL_SPECIAL_TOKENS,
+    SPECIAL_TOKEN_SPELLINGS,
+)
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.kimi_k3 import KimiK3Renderer
 from vllm.tokenizers.hf import get_cached_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
@@ -97,17 +106,18 @@ class DummyTokenizer:
     def __call__(self, text: str, **kwargs):
         # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
         # unify the output type), so mirror a real tokenizer's BatchEncoding.
-        encoding = {"input_ids": self.encode(text, **kwargs)}
-        if kwargs.get("return_special_tokens_mask"):
-            # `encode` adds no special tokens.
-            encoding["special_tokens_mask"] = [0] * len(encoding["input_ids"])
-        return encoding
+        return {"input_ids": self.encode(text, **kwargs)}
 
 
-def _cls_sep_tokenizer(**kwargs: Any) -> TokenizersBackend:
-    """A real HF tokenizer that wraps every prompt in `[CLS] ... [SEP]`."""
+def _cls_sep_tokenizer(*words: str, **kwargs: Any) -> TokenizersBackend:
+    """A real HF tokenizer that wraps every prompt in `[CLS] ... [SEP]`.
+
+    `words` are added to the vocab after `a` to `j`.
+    """
     vocab = {"[UNK]": 0, "[CLS]": 1, "[SEP]": 2}
-    vocab |= {word: i for i, word in enumerate("abcdefghij", start=len(vocab))}
+    vocab |= {
+        word: i for i, word in enumerate([*"abcdefghij", *words], start=len(vocab))
+    }
     backend = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     backend.post_processor = processors.TemplateProcessing(
@@ -493,12 +503,31 @@ class TestRenderPrompt:
         assert results[0]["prompt_token_ids"] == list(range(5))
 
     @pytest.mark.parametrize("truncation_side", ["left", "right"])
-    def test_explicit_side_keeps_special_tokens(self, truncation_side):
+    @pytest.mark.parametrize(
+        "renderer_cls",
+        [
+            HfRenderer,
+            CohereRenderer,
+            DeepseekV32Renderer,
+            DeepseekV4Renderer,
+            DeepseekV41Renderer,
+            InklingRenderer,
+            KimiK3Renderer,
+        ],
+        ids=lambda cls: cls.__name__,
+    )
+    def test_explicit_side_keeps_special_tokens(self, renderer_cls, truncation_side):
         """Truncating from an explicit side must keep the tokens that the
         tokenizer adds, as the tokenizer's own truncation does."""
-        renderer = HfRenderer(
+        # Inkling looks up its framing tokens in the vocab when it is built.
+        inkling_tokens = [
+            spellings[0]
+            for token, spellings in SPECIAL_TOKEN_SPELLINGS.items()
+            if token not in OPTIONAL_SPECIAL_TOKENS
+        ]
+        renderer = renderer_cls(
             MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
-            tokenizer=_cls_sep_tokenizer(),
+            tokenizer=_cls_sep_tokenizer(*inkling_tokens),
         )
         text = "a b c d e f g h i j"
 
@@ -521,7 +550,8 @@ class TestRenderPrompt:
         # `.get`, as the result is typed as any `TokPrompt` and not every
         # member of that union has these keys.
         assert results[0].get("prompt_token_ids") == expected["input_ids"]
-        assert results[0].get("prompt_token_offsets") == expected["offset_mapping"]
+        if renderer._can_produce_offsets():
+            assert results[0].get("prompt_token_offsets") == expected["offset_mapping"]
 
     def test_padding_with_left_truncation_keeps_the_prompt(self):
         """Padding must not be truncated away.
