@@ -122,7 +122,17 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             activation_key,
             activation_format,
         )
-        if not supported or not current_platform.is_cuda_alike():
+        if not supported:
+            return supported, reason
+
+        if activation_key == kInt8StaticTensorSym:
+            if moe_config.is_lora_enabled:
+                return False, "static INT8 activation quantization with LoRA"
+            par = moe_config.moe_parallel_config
+            if par.use_all2all_kernels and not par.use_ag_rs_all2all_kernels:
+                return False, "static INT8 activation quantization with all2all"
+
+        if not current_platform.is_cuda_alike():
             return supported, reason
 
         padded_num_experts = (moe_config.num_experts + 31) // 32 * 32
@@ -136,11 +146,14 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        *,
+        activation_key: QuantKey | None = None,
     ):
         # Whether quantized MOE runs natively, or through
         # higher-precision + activation QDQ.
         self.quantization_emulation = False
         self._enable_sorted_a_tma = True
+        self.activation_key = activation_key
         super().__init__(moe_config, quant_config)
 
     @staticmethod
@@ -149,13 +162,17 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # Defer activation quantization to apply() only when LoRA is active AND
-        # tokens are dispatched across ranks (DP+EP all2all).
-        return (
+        lora_needs_gathered_input = (
             self._lora_context is not None
             and self.quant_dtype is not None
             and self.moe_config.moe_parallel_config.use_all2all_kernels
         )
+        return lora_needs_gathered_input or self.activation_key == kInt8StaticTensorSym
+
+    def router_weight_application(self) -> mk.RouterWeightApplication:
+        if self.activation_key == kInt8StaticTensorSym:
+            return mk.RouterWeightApplication.GEMM1
+        return mk.RouterWeightApplication.PREPARE
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -188,14 +205,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
-            # Activations are consumed as float and quantized to int8
-            # dynamically inside the kernel, so only dynamic-activation int8
-            # schemes are supported (static-activation int8 is not).
             supported += [
                 # per-channel weight + dynamic per-token activation
                 (kInt8StaticChannelSym, kInt8DynamicTokenSym),
                 # per-tensor weight + dynamic per-tensor activation
                 (kInt8StaticTensorSym, kInt8DynamicTensorSym),
+                (kInt8StaticChannelSym, kInt8StaticTensorSym),
+                (kInt8StaticTensorSym, kInt8StaticTensorSym),
             ]
         if current_platform.supports_fp8():
             supported += [
@@ -331,12 +347,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.int8,
         ]
 
-        # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
-        # prepare step deferred activation quantization to this kernel:
-        # `hidden_states` arrives unquantized. Keep the unquantized tensor for
-        # the LoRA shrink input and quantize a copy here for the base GEMM
-        # (mirrors what the prepare step would have done, but after the
-        # all-gather so the layout matches the gathered topk_ids / token map).
+        # Quantize gathered activations after dispatch when prepare deferred
+        # quantization. LoRA also needs the floating-point gathered input.
         lora_unquantized_hidden_states: torch.Tensor | None = None
         if self.expects_unquantized_inputs:
             assert a1q_scale is None
@@ -366,20 +378,21 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             block_shape=self.block_shape,
         )
 
-        if hidden_states.dtype == torch.bfloat16:
+        compute_dtype = (
+            self.moe_config.in_dtype
+            if self.activation_key == kInt8StaticTensorSym
+            else hidden_states.dtype
+        )
+        if compute_dtype == torch.bfloat16:
             compute_type = tl.bfloat16
-        elif hidden_states.dtype == torch.float16:
+        elif compute_dtype == torch.float16:
             compute_type = tl.float16
-        elif hidden_states.dtype == torch.float32:
+        elif compute_dtype == torch.float32:
             compute_type = tl.float32
-        elif (
-            hidden_states.dtype == torch.float8_e4m3fn
-            or hidden_states.dtype == torch.float8_e4m3fnuz
-            or hidden_states.dtype == torch.int8
-        ):
+        elif compute_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.int8):
             compute_type = tl.bfloat16
         else:
-            raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
+            raise ValueError(f"Unsupported compute_type: {compute_dtype}")
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
@@ -522,6 +535,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             else (a1q_scale if a1q_scale is not None else self.a1_scale)
         )
 
+        # Legacy static INT8 applies routing after GEMM1 bias, before SiLU.
+        weight_in_gemm1 = (
+            apply_router_weight_on_input
+            and self.router_weight_application() == mk.RouterWeightApplication.GEMM1
+        )
+
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
                 hidden_states,
@@ -529,11 +548,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 intermediate_cache1,
                 input_scale,
                 self.w1_scale,
-                None,  # topk_weights
+                topk_weights if weight_in_gemm1 else None,
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
-                False,  # mul_routed_weights
+                weight_in_gemm1,
                 top_k_num,
                 config,
                 compute_type=compute_type,
