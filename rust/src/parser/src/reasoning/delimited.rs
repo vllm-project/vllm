@@ -9,7 +9,9 @@ use winnow::stream::StreamIsPartial;
 use xgrammar_structural_tag::format::Format;
 
 use super::{ReasoningDelta, ReasoningError, Result};
-use crate::utils::{Marker, SpecialToken, attributed_with_markers, safe_text_len_mul};
+use crate::utils::{
+    Attributed, Marker, SpecialToken, attributed_with_markers, peek_markers, safe_text_len_mul,
+};
 
 /// Build a delimited reasoning parser with fixed text at each boundary.
 pub(crate) struct DelimitedReasoningParserBuilder {
@@ -20,6 +22,7 @@ pub(crate) struct DelimitedReasoningParserBuilder {
     after_start: &'static str,
     before_end: &'static str,
     after_end: &'static str,
+    implicit_ends: Vec<Marker>,
 }
 
 impl DelimitedReasoningParserBuilder {
@@ -37,6 +40,7 @@ impl DelimitedReasoningParserBuilder {
             after_start: "",
             before_end: "",
             after_end: "",
+            implicit_ends: Vec::new(),
         }
     }
 
@@ -61,6 +65,14 @@ impl DelimitedReasoningParserBuilder {
     /// Consume fixed text immediately after the end marker.
     pub(crate) fn with_after_end(mut self, after_end: &'static str) -> Self {
         self.after_end = after_end;
+        self
+    }
+
+    /// End reasoning without the end marker where any of `markers` begins,
+    /// such as a tool-call opener the model emits before closing its
+    /// reasoning. The marker itself stays in the content, for the tool parser.
+    pub(crate) fn with_implicit_ends(mut self, markers: impl IntoIterator<Item = Marker>) -> Self {
+        self.implicit_ends.extend(markers);
         self
     }
 
@@ -97,6 +109,7 @@ impl DelimitedReasoningParserBuilder {
             end_token_id,
             after_start: self.after_start,
             after_end: self.after_end,
+            implicit_ends: self.implicit_ends,
             current_in_reasoning: false,
             prompt_closed_reasoning: false,
             buffer: DecodedText::default(),
@@ -131,6 +144,8 @@ pub(crate) struct DelimitedReasoningParser {
     end_token_id: u32,
     after_start: &'static str,
     after_end: &'static str,
+    /// Markers that end reasoning in place of the end marker.
+    implicit_ends: Vec<Marker>,
 
     // Mutable state.
     current_in_reasoning: bool,
@@ -241,23 +256,42 @@ impl DelimitedReasoningParser {
             } else {
                 (&self.start, &self.framed_start)
             };
+            let implicit_ends: &[Marker] = if self.current_in_reasoning {
+                &self.implicit_ends
+            } else {
+                &[]
+            };
             let mut input = attributed_with_markers(&self.buffer, &());
             if finishing {
                 // Partial delimiters at the end of the stream are body text.
                 let _ = input.complete();
             }
-            let boundary = alt((framed_marker, marker)).map(str::len).parse_next(&mut input);
+            let boundary = alt((
+                alt((framed_marker, marker))
+                    .map(|delimiter: &str| Boundary::Delimiter(delimiter.len())),
+                |input: &mut Attributed<'_>| {
+                    peek_markers(input, implicit_ends).map(|_| Boundary::ImplicitEnd)
+                },
+            ))
+            .parse_next(&mut input);
             let body_len = match boundary {
-                Ok(boundary_len) => {
+                Ok(boundary) => {
                     // Zero-width tokens before the delimiter stay in the current state.
                     let body = self.buffer.drain_prefix(0);
                     self.push_body(&mut delta, body);
-                    let _ = self.buffer.drain_prefix(boundary_len);
                     self.current_in_reasoning = !self.current_in_reasoning;
-                    self.pending_after = if self.current_in_reasoning {
-                        self.after_start
-                    } else {
-                        self.after_end
+                    self.pending_after = match boundary {
+                        Boundary::Delimiter(len) => {
+                            let _ = self.buffer.drain_prefix(len);
+                            if self.current_in_reasoning {
+                                self.after_start
+                            } else {
+                                self.after_end
+                            }
+                        }
+                        // The marker stays in the buffer as content, and the
+                        // end framing does not apply without the end marker.
+                        Boundary::ImplicitEnd => "",
                     };
                     continue;
                 }
@@ -265,7 +299,11 @@ impl DelimitedReasoningParser {
                 Err(ErrMode::Incomplete(_)) => None,
                 // Body text runs up to the next delimiter that may start; the
                 // rest is held back. Fails only on an empty input.
-                Err(_) => safe_text_len_mul(&mut input, &[framed_marker, marker]).ok(),
+                Err(_) => {
+                    let stops: Vec<&Marker> =
+                        [framed_marker, marker].into_iter().chain(implicit_ends).collect();
+                    safe_text_len_mul(&mut input, &stops).ok()
+                }
             };
             let body = self.buffer.drain_prefix(body_len.unwrap_or(0));
             self.push_body(&mut delta, body);
@@ -283,6 +321,14 @@ impl DelimitedReasoningParser {
             delta.push_content(body);
         }
     }
+}
+
+/// A reasoning boundary at the cursor.
+enum Boundary {
+    /// The start or end delimiter, of this length including its framing.
+    Delimiter(usize),
+    /// An implicit end marker, which stays in the buffer.
+    ImplicitEnd,
 }
 
 /// Determine the reasoning state implied by the last prompt boundary, if any.

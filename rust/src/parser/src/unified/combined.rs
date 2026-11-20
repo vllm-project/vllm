@@ -182,15 +182,15 @@ mod tests {
         full_format_from_builder_for_test,
     };
     use crate::reasoning::{
-        DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, Glm45ReasoningParser,
-        Glm47ReasoningParser, KimiK2ReasoningParser, MiniMaxM2ReasoningParser,
-        NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningParser,
-        Step3ReasoningParser,
+        DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, DeepSeekV41ReasoningParser,
+        Glm45ReasoningParser, Glm47ReasoningParser, KimiK2ReasoningParser,
+        MiniMaxM2ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
+        ReasoningParser, Step3ReasoningParser,
     };
     use crate::tool::{
         DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-        Glm47MoeToolParser, KimiK2ToolParser, MinimaxM2ToolParser, Qwen3CoderToolParser,
-        Qwen3JsonToolParser, Tool, ToolParser,
+        DeepSeekV41ToolParser, Glm47MoeToolParser, KimiK2ToolParser, MinimaxM2ToolParser,
+        Qwen3CoderToolParser, Qwen3JsonToolParser, Tool, ToolParser,
     };
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
 
@@ -501,6 +501,44 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn combined_parser_emits_deepseek_v41_tool_calls_opened_inside_reasoning() {
+        let pieces = [
+            "reason",
+            "\n\n<｜DSML｜ calls>\n",
+            "<｜DSML｜ invoke name=\"get_weather\">\n",
+            "<｜DSML｜ parameter name=\"location\" string=\"true\">Paris</｜DSML｜ parameter>\n",
+            "</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+        ];
+        let whole = pieces.concat();
+        let whole_chunks = [whole.as_str()];
+        for chunks in [pieces.as_slice(), whole_chunks.as_slice()] {
+            let tools = test_tools();
+            let reasoning = DeepSeekV41ReasoningParser::create(Arc::new(tokenizer())).unwrap();
+            let tool = DeepSeekV41ToolParser::create(&tools, Arc::new(tokenizer())).unwrap();
+            let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
+            parser.initialize(&[256]).unwrap();
+
+            let output = collect(&mut parser, chunks);
+            let mut reasoning = String::new();
+            let mut name = None;
+            let mut arguments = String::new();
+            for event in output.events {
+                match event {
+                    UnifiedParserEvent::Reasoning(piece) => reasoning.push_str(&piece.text),
+                    UnifiedParserEvent::ToolCall(call) => {
+                        name = name.or(call.name);
+                        arguments.push_str(&call.arguments);
+                    }
+                    UnifiedParserEvent::Text(text) => panic!("unexpected text {text:?}"),
+                }
+            }
+            assert_eq!(reasoning, "reason\n\n");
+            assert_eq!(name.as_deref(), Some("get_weather"));
+            assert_eq!(arguments, r#"{"location": "Paris"}"#);
+        }
     }
 
     #[test]

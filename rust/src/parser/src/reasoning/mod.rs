@@ -20,6 +20,7 @@
 mod cohere_cmd;
 mod deepseek_r1;
 mod deepseek_v3;
+mod deepseek_v41;
 mod delimited;
 mod glm45;
 mod hy;
@@ -38,6 +39,7 @@ use crate::output_grammar::{self, OutputGrammarContext};
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
 pub use self::deepseek_v3::DeepSeekV3ReasoningParser;
+pub use self::deepseek_v41::DeepSeekV41ReasoningParser;
 pub(crate) use self::delimited::{
     DelimitedReasoningParser, DelimitedReasoningParserBuilder, last_reasoning_boundary,
 };
@@ -56,8 +58,6 @@ pub type Step3ReasoningParser = DeepSeekR1ReasoningParser;
 
 /// DeepSeek V4 currently shares the DeepSeek V3 reasoning parser.
 pub type DeepSeekV4ReasoningParser = DeepSeekV3ReasoningParser;
-/// DeepSeek V4.1 uses bare `<think>...</think>` delimiters.
-pub type DeepSeekV41ReasoningParser = DeepSeekV3ReasoningParser;
 /// GLM-4.7 and GLM-5 use bare reasoning delimiters.
 pub type Glm47ReasoningParser = DeepSeekV3ReasoningParser;
 /// Kimi K2 currently shares the DeepSeek V3 reasoning parser.
