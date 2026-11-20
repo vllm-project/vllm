@@ -50,8 +50,10 @@ def dsv4_swa_replay_enabled(vllm_config: VllmConfig) -> bool:
     V4 needs about `sliding_window * num_layers` replayed tokens for an exact
     window state, so the one-window replay is an approximation.
     """
+    if not current_platform.is_rocm():
+        return False
     kv_transfer_config = vllm_config.kv_transfer_config
-    if not current_platform.is_rocm() or kv_transfer_config is None:
+    if kv_transfer_config is None:
         return False
     from vllm.distributed.kv_transfer.kv_connector.factory import (
         KVConnectorFactory,
