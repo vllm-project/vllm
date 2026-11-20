@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for HF_HUB_OFFLINE mode"""
+"""Tests for HF_HUB_OFFLINE mode."""
 
 import importlib
 import sys
@@ -32,7 +32,6 @@ MODEL_CONFIGS = [
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.95,
         "max_model_len": 64,
         "max_num_batched_tokens": 64,
         "max_num_seqs": 64,

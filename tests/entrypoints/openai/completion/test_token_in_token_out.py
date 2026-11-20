@@ -39,8 +39,7 @@ def server():
 
 @pytest.mark.asyncio
 async def test_token_in_token_out_and_logprobs(server):
-    """
-    Test token-in-token-out and token_ids align with prompt_logprobs
+    """Test token-in-token-out and token_ids align with prompt_logprobs
     & logprobs when return_tokens_as_token_ids is enabled.
     """
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)

@@ -51,6 +51,9 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
+NCCL_UNIQUE_ID_BYTES = ctypes.sizeof(ncclUniqueId)
+
+
 # Mirror of NCCL's versioned ncclCommProperties_t (nccl_device/core.h,
 # v2.31.2-1, 144 bytes). ncclCommQueryProperties fills fields gated by the
 # version the caller declares in props.version, not by props.size, so never
@@ -170,7 +173,7 @@ class ncclRedOpTypeEnum:
         raise ValueError(f"Unsupported op: {op}")
 
 
-@dataclass
+@dataclass(slots=True)
 class Function:
     name: str
     restype: Any
@@ -181,6 +184,8 @@ class NCCLLibrary:
     exported_functions = [
         # const char* ncclGetErrorString(ncclResult_t result)
         Function("ncclGetErrorString", ctypes.c_char_p, [ncclResult_t]),
+        # const char* ncclGetLastError(ncclComm_t comm)
+        Function("ncclGetLastError", ctypes.c_char_p, [ncclComm_t]),
         # ncclResult_t  ncclGetVersion(int *version);
         Function("ncclGetVersion", ncclResult_t, [ctypes.POINTER(ctypes.c_int)]),
         # ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId);
@@ -329,6 +334,10 @@ class NCCLLibrary:
         # shutdown when peer ranks may already be gone.
         # ncclResult_t  ncclCommAbort(ncclComm_t comm);
         Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
+        # ncclResult_t ncclCommSuspend(ncclComm_t comm, int flags);
+        Function("ncclCommSuspend", ncclResult_t, [ncclComm_t, ctypes.c_int]),
+        # ncclResult_t ncclCommResume(ncclComm_t comm);
+        Function("ncclCommResume", ncclResult_t, [ncclComm_t]),
         # ncclResult_t ncclGroupStart();
         Function("ncclGroupStart", ncclResult_t, []),
         # ncclResult_t ncclGroupEnd();
@@ -417,16 +426,41 @@ class NCCLLibrary:
                     elif func.name == "ncclCommQueryProperties":
                         # Optional on NCCL versions older than 2.29.
                         continue
+                    elif func.name == "ncclGetLastError":
+                        # Only used to enrich error messages.
+                        continue
+                    elif func.name in ("ncclCommSuspend", "ncclCommResume"):
+                        # RCCL doesn't export these; NCCL >= 2.29.7 does, and
+                        # vLLM's CUDA path already requires that version.
+                        # PyNcclCommunicator checks has_symbol() before
+                        # calling either.
+                        if current_platform.is_rocm():
+                            continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
 
+    def has_symbol(self, name: str) -> bool:
+        """Whether the loaded NCCL/RCCL library exports the given symbol."""
+        return name in self._funcs
+
     def ncclGetErrorString(self, result: ncclResult_t) -> str:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")
+
+    def ncclGetLastError(self) -> str | None:
+        # NCCL does not clear this after later successful calls, so only read it
+        # right after a call has failed.
+        if "ncclGetLastError" not in self._funcs:
+            return None
+        message = self._funcs["ncclGetLastError"](None)
+        return message.decode("utf-8", errors="replace") if message else None
 
     def NCCL_CHECK(self, result: ncclResult_t) -> None:
         if result != 0:
             error_str = self.ncclGetErrorString(result)
+            last_error = self.ncclGetLastError()
+            if last_error:
+                error_str += f"\nLast error:\n{last_error}"
             raise RuntimeError(f"NCCL error: {error_str}")
 
     def ncclGetRawVersion(self) -> int:
@@ -598,6 +632,12 @@ class NCCLLibrary:
 
     def ncclCommAbort(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm))
+
+    def ncclCommSuspend(self, comm: ncclComm_t, flags: int) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommSuspend"](comm, flags))
+
+    def ncclCommResume(self, comm: ncclComm_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommResume"](comm))
 
     def ncclGroupStart(self) -> None:
         self.NCCL_CHECK(self._funcs["ncclGroupStart"]())

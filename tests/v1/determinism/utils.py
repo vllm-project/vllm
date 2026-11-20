@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import pytest
 import torch
+from transformers import AutoTokenizer
 
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
@@ -34,12 +35,16 @@ DEVICE_BACKENDS: dict[str, DeviceConfig] = {
         available=current_platform.is_xpu() and HAS_TRITON,
         backends=["TRITON_ATTN"],
     ),
+    "rocm": DeviceConfig(
+        available=current_platform.is_rocm() and HAS_TRITON,
+        backends=["TRITON_ATTN"],
+    ),
 }
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
 TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 
-# Override backends for MLA models (MLA only supported on CUDA).
+# Override backends for MLA models.
 if os.getenv("VLLM_TEST_MODEL"):
     config = get_config(TEST_MODEL, trust_remote_code=False)
     if ModelArchConfigConvertorBase(config, config.get_text_config()).is_deepseek_mla():
@@ -52,6 +57,10 @@ if os.getenv("VLLM_TEST_MODEL"):
             available=DEVICE_BACKENDS["xpu"].available,
             backends=[],
         )
+        DEVICE_BACKENDS["rocm"] = DeviceConfig(
+            available=DEVICE_BACKENDS["rocm"].available,
+            backends=["TRITON_MLA"],
+        )
 
 # Only include backends for devices that are actually available.
 BACKENDS: list[str] = sorted(
@@ -60,12 +69,22 @@ BACKENDS: list[str] = sorted(
 
 skip_unsupported = pytest.mark.skipif(
     not any(cfg.available for cfg in DEVICE_BACKENDS.values()),
-    reason="Requires CUDA >= Ampere (SM80) or Intel XPU with Triton",
+    reason="Requires CUDA >= Ampere (SM80), ROCm, or Intel XPU with Triton",
 )
 
 skip_if_not_cuda = pytest.mark.skipif(
     not DEVICE_BACKENDS["cuda"].available,
     reason="Requires CUDA >= Ampere (SM80)",
+)
+
+skip_if_not_cuda_alike = pytest.mark.skipif(
+    not (DEVICE_BACKENDS["cuda"].available or DEVICE_BACKENDS["rocm"].available),
+    reason="Requires CUDA >= Ampere (SM80) or ROCm",
+)
+
+requires_mx = pytest.mark.skipif(
+    not (current_platform.is_rocm() and current_platform.supports_mx()),
+    reason="requires a ROCm device with native MX support (gfx95x)",
 )
 
 
@@ -113,6 +132,41 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
         base_prompt = padding_text + base_prompt
 
     return base_prompt
+
+
+_FILLER_PHRASES = [
+    "the quick brown fox jumps over a lazy dog",
+    "distant thunder rolls across quiet valleys",
+    "researchers measure deterministic attention kernels",
+    "logprobs are compared between batches of different sizes",
+]
+
+_FILLER_TOKENIZER = None
+
+
+def _prompt_with_tokens(target_tokens: int) -> str:
+    """Build a prompt of exactly `target_tokens` tokens.
+
+    An attention backend can only be shown to be batch-invariant over a KV
+    length spanning several kernel blocks. `_random_prompt` tops out at a few
+    hundred tokens, which fits in one block, so every backend looks invariant
+    there regardless of how it reduces across blocks.
+
+    Args:
+        target_tokens: Prompt length, in tokens of `TEST_MODEL`'s tokenizer.
+
+    Returns:
+        A prompt tokenizing to exactly `target_tokens` tokens.
+
+    """
+    global _FILLER_TOKENIZER
+    if _FILLER_TOKENIZER is None:
+        _FILLER_TOKENIZER = AutoTokenizer.from_pretrained(TEST_MODEL)
+    text = " ".join(
+        random.choice(_FILLER_PHRASES) for _ in range(max(4, target_tokens // 4))
+    )
+    ids = _FILLER_TOKENIZER(text, add_special_tokens=False).input_ids[:target_tokens]
+    return _FILLER_TOKENIZER.decode(ids)
 
 
 def _extract_step_logprobs(request_output):

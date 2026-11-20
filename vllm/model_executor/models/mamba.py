@@ -52,14 +52,14 @@ class MambaDecoderLayer(nn.Module):
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        is_lora_enabled: bool | None = False,
+        is_lora_enabled: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
         self.is_falcon_mamba = config.model_type == "falcon_mamba"
         self.is_lora_enabled = is_lora_enabled
-        mixer_rms_eps = config.mixer_rms_eps if self.is_falcon_mamba else None
+        mixer_rms_eps = config.mixer_rms_eps if self.is_falcon_mamba else 1e-5
         self.mixer = MambaMixer(
             hidden_size=config.hidden_size,
             ssm_state_size=config.state_size,

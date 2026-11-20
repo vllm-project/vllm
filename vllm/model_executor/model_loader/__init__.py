@@ -24,6 +24,10 @@ from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     get_model_cls,
 )
+from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
+    PeerModelLoader,
+)
 
 logger = init_logger(__name__)
 
@@ -35,9 +39,11 @@ LoadFormats = Literal[
     "dummy",
     "fastsafetensors",
     "instanttensor",
+    "ipc_cache",
     "mistral",
     "modelexpress",
     "npcache",
+    "peer_cache",
     "pt",
     "runai_streamer",
     "runai_streamer_sharded",
@@ -51,9 +57,11 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
     "instanttensor": DefaultModelLoader,
+    "ipc_cache": IpcModelLoader,
     "mistral": DefaultModelLoader,
     "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
+    "peer_cache": PeerModelLoader,
     "pt": DefaultModelLoader,
     "runai_streamer": RunaiModelStreamerLoader,
     "runai_streamer_sharded": ShardedStateLoader,
@@ -91,6 +99,7 @@ def register_model_loader(load_format: str):
         >>> load_config = LoadConfig(load_format="my_loader")
         >>> type(get_model_loader(load_config))
         <class 'MyModelLoader'>
+
     """  # noqa: E501
 
     def _wrapper(model_loader_cls):
@@ -150,6 +159,8 @@ __all__ = [
     "ModelExpressModelLoader",
     "DefaultModelLoader",
     "DummyModelLoader",
+    "IpcModelLoader",
+    "PeerModelLoader",
     "RunaiModelStreamerLoader",
     "ShardedStateLoader",
     "TensorizerLoader",

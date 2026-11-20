@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-RLHF with FSDP2 training and vLLM expert-parallel inference using **CUDA IPC**
+"""RLHF with FSDP2 training and vLLM expert-parallel inference using **CUDA IPC**
 weight transfer and **packed** tensors.
 
 Multi-rank version of `rlhf_http_ipc.py`: the trainer is 4 FSDP2 Ray actors
@@ -24,8 +23,8 @@ Both sides share each GPU, so the server is capped with
   3. packed IPC transfer          — overwrite weights with room to spare
   4. `/wake_up?tags=kv_cache&tags=scheduling` — re-allocate KV cache, resume
 
-Every FSDP rank builds an ``IPCTrainerWeightTransferEngine`` (via ``trainer_init``)
-and calls ``send_weights()``; all ranks join the IPC handle all-gather, and only
+Every FSDP rank builds an `IPCTrainerWeightTransferEngine` (via `trainer_init`)
+and calls `send_weights()`; all ranks join the IPC handle all-gather, and only
 rank 0 (the sender) ships the merged handles and drives the server.
 
 This example was run on 4xH100.

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import math
 
 import pytest
@@ -12,8 +13,10 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.models.kimi_k25_vit import (
+    Learnable2DInterpPosEmbDivided_fixed,
+)
 from vllm.model_executor.models.vision import (
-    FusedInputNorm,
     get_load_balance_assignment,
     resolve_visual_encoder_outputs,
     run_dp_sharded_mrope_vision_model,
@@ -22,7 +25,7 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 
 pytestmark = pytest.mark.cpu_test
 
@@ -41,9 +44,7 @@ pytestmark = pytest.mark.cpu_test
 def test_resolve_visual_encoder_outputs(
     select_layers, num_layers_loaded, max_possible_layers, expected_features
 ):
-    """
-    Test that offsets are correctly handled for vision feature layers.
-    """
+    """Test that offsets are correctly handled for vision feature layers."""
     encoder_outputs = [torch.tensor([idx]) for idx in range(num_layers_loaded + 1)]
     output_tensor = resolve_visual_encoder_outputs(
         encoder_outputs=encoder_outputs,
@@ -94,11 +95,9 @@ def test_run_dp_sharded_vision_model(batch_size: int):
 def run_dp_sharded_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_vision_model produces the same results as
+    """Test that run_dp_sharded_vision_model produces the same results as
     calling the model directly.
     """
-
     # Set random seed for reproducibility
     set_random_seed(0)
 
@@ -282,8 +281,7 @@ def test_run_dp_sharded_mrope_vision_model(batch_size: int):
 def run_dp_sharded_mrope_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_mrope_vision_model produces the same results as
+    """Test that run_dp_sharded_mrope_vision_model produces the same results as
     calling the model directly.
     """
     # Set random seed for reproducibility
@@ -495,60 +493,21 @@ def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
     assert output.shape[1] == vision_model.out_hidden_size
 
 
-def _reference_input_norm(
-    pixel_values: torch.Tensor,
-    image_mean: list[float],
-    image_std: list[float],
-    rescale_factor: float,
-    channel: int,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    """Straightforward per-channel affine: (x * rescale - mean) / std."""
-    patches, size = pixel_values.shape
-    patch_size = size // channel
-    mean = torch.tensor(image_mean, dtype=torch.float32).view(1, channel, 1)
-    std = torch.tensor(image_std, dtype=torch.float32).view(1, channel, 1)
-    x = pixel_values.to(torch.float32).view(patches, channel, patch_size)
-    x = (x * rescale_factor - mean) / std
-    return x.view(patches, size).to(out_dtype)
+@pytest.mark.parametrize("t", [1, 2, 4])
+def test_pos_emb_keeps_dtype_for_video_chunks(t: int):
+    """Video chunks (t > 1) add the float32 `time_weight` buffer; the output
+    must keep the tower's dtype even when the tower is not cast after
+    construction (e.g. ModelOpt-quantized checkpoints)."""
+    height, width, dim = 4, 4, 8
+    with set_default_torch_dtype(torch.bfloat16):
+        pos_emb = Learnable2DInterpPosEmbDivided_fixed(
+            height=height, width=width, num_frames=4, dim=dim
+        )
+    assert pos_emb.weight.dtype == torch.bfloat16
+    assert pos_emb.time_weight.dtype == torch.float32
 
+    cast_pos_emb = copy.deepcopy(pos_emb).to(torch.bfloat16)
 
-@pytest.mark.parametrize("num_patches", [1, 37, 70000])
-def test_fused_input_norm_matches_reference(num_patches: int):
-    """FusedInputNorm must equal the plain affine, including for num_patches
-    above the cuDNN batch-norm grid limit (~65535) that previously raised
-    CUDNN_STATUS_INTERNAL_ERROR (issue #51717)."""
-    channel = 3
-    patch_size = 14 * 14
-    image_mean = [0.48145466, 0.4578275, 0.40821073]
-    image_std = [0.26862954, 0.26130258, 0.27577711]
-    rescale_factor = 1.0 / 255.0
-
-    set_random_seed(0)
-    pixel_values = torch.randint(
-        0, 256, (num_patches, channel * patch_size), dtype=torch.float32
-    )
-
-    norm = FusedInputNorm(
-        image_mean=image_mean,
-        image_std=image_std,
-        rescale_factor=rescale_factor,
-        channel=channel,
-    )
-    assert not norm.is_identity
-
-    out = norm(pixel_values, visual_dtype=torch.float32)
-    expected = _reference_input_norm(
-        pixel_values, image_mean, image_std, rescale_factor, channel, torch.float32
-    )
-    torch.testing.assert_close(out, expected)
-
-
-def test_fused_input_norm_identity_passthrough():
-    """The identity configuration returns the input unchanged (cast only)."""
-    norm = FusedInputNorm.identity()
-    assert norm.is_identity
-
-    pixel_values = torch.randn(8, 3 * 196, dtype=torch.float32)
-    out = norm(pixel_values, visual_dtype=torch.bfloat16)
-    torch.testing.assert_close(out, pixel_values.to(torch.bfloat16))
+    x = torch.zeros(t * height * width, dim, dtype=torch.bfloat16)
+    grid = [[t, height, width]]
+    torch.testing.assert_close(pos_emb(x, grid), cast_pos_emb(x, grid), rtol=0, atol=0)

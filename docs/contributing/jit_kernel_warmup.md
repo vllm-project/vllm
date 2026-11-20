@@ -17,7 +17,7 @@ Each warmable kernel defines its compile-key mapping and compile-only entry poin
 
 Here, a **kernel wrapper** (or just **wrapper**) is an instance of a concrete `VllmJitKernel` subclass.
 
-Expose one wrapper near the kernel's normal runtime entry point. Prefer this shape:
+Expose one wrapper near the kernel's normal runtime entry point. Prefer this backend-agnostic shape:
 
 ```python
 class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
@@ -43,14 +43,14 @@ class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
         return self.kernel(...)
 
 
-MY_KERNEL = MyKernel()
+_MY_KERNEL = MyKernel()
 ```
 
 `CompileKey`, `dispatch(...)`, and `get_warmup_keys(...)` are backend-agnostic. Backend-specific behavior belongs in `kernel(...)`, `compile(...)`, and `__call__(...)`.
 
 The module-level singleton should be used by warmup and by the runtime call path. This keeps dispatch behavior shared instead of duplicated.
 
-`VllmJitKernel.warmup(...)` compiles every key returned by `get_warmup_keys(...)`; wrappers should not reimplement it.
+`VllmJitKernel.warmup(...)` materializes every key returned by `get_warmup_keys(...)`; wrappers should not reimplement it.
 
 ### Choose Compile-Key Fields
 
@@ -70,18 +70,20 @@ def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
 
 Use independent ranges or alternatives for cartesian products, `zip_inputs(...)` for coupled rows, and `_when` for validity constraints. The complete syntax is documented in [Search-Space Reference](#2-search-space-reference).
 
-### Compile Without Launching
+### Materialize Without Launching
 
-`compile(compile_key)` means "make this specialization available". Depending on the backend, that may compile from source, call a compile-only API, load an already-built artifact, or compile on cache miss.
+The base contract uses `compile(compile_key)` internally to mean "make this specialization available". Depending on the backend, that may compile from source, call a compile-only API, load an already-built artifact, or compile on cache miss. Contributors only implement this hook when their backend helper does not provide it.
 
-`compile(...)` should not launch a real inference workload or allocate real tensors. Each DSL should expose fake tensor/spec descriptors suitable for compilation only.
+For Triton, implement `warmup_inputs(...)`. `@kernel_launcher` binds those inputs to `__call__(...)`, whose body returns the runtime grid and derived launch arguments as a `LaunchSpec`. The shared helper then routes that specification to the normal kernel launch or to `kernel.warmup(...)` during startup.
+
+Materialization should not launch a real inference workload or allocate real tensors. `TritonWarmupTensor(..., strides=None)` represents compact row-major storage; provide explicit representative strides for padded, transposed, or otherwise strided runtime inputs.
 
 ### Register the Selected Wrapper
 
 Register the wrapper where the runtime implementation is selected:
 
 ```python
-MY_KERNEL.register_warmup()
+_MY_KERNEL.register_warmup()
 ```
 
 Registration records metadata only. It does not compile or launch the kernel. Repeated registrations from equivalent layers are allowed and deduplicated later.
@@ -92,7 +94,7 @@ Registration records metadata only. It does not compile or launch the kernel. Re
 - Keep specialization mapping in `dispatch(...)` instead of duplicating it in warmup code.
 - Use fake tensors or backend compile-only descriptors; never perform a dummy runtime launch.
 - Keep registration metadata-only so model construction remains cheap and side-effect free.
-- Compile registered kernels only through `kernel_warmup()`.
+- Materialize registered kernels only through `kernel_warmup()`.
 - Keep runtime execution and startup compilation separate and easy to review.
 - Use one module-level wrapper instance for registration and runtime calls.
 

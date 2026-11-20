@@ -8,7 +8,6 @@ from unittest.mock import patch
 import pytest
 
 from vllm import SamplingParams
-from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine.input_processor import InputProcessor
@@ -80,11 +79,19 @@ def _validate(enable_trace_replay: bool) -> None:
         model_config=SimpleNamespace(
             return_sampling_mask=False,
             enable_trace_replay=enable_trace_replay,
+            is_diffusion=False,
         ),
-        vllm_config=SimpleNamespace(reasoning_config=None),
+        vllm_config=SimpleNamespace(
+            reasoning_config=None,
+            # Engine has no watermark configuration.
+            _check_supports_watermarking=lambda params: False,
+        ),
+        resolve_watermarking=lambda params: False,
         speculative_config=None,
         structured_outputs_config=None,
+        diffusion_config=None,
         tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
     )
     params = SamplingParams(trace_decode_token_ids=[1, 2, 3])
     with patch.object(SamplingParams, "verify"):
@@ -98,13 +105,3 @@ def test_trace_request_rejected_when_feature_disabled():
 
 def test_trace_request_accepted_when_feature_enabled():
     _validate(enable_trace_replay=True)
-
-
-def test_trace_replay_requires_v2_model_runner():
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(enable_trace_replay=True),
-        use_v2_model_runner=False,
-    )
-
-    with pytest.raises(ValueError, match="trace replay requires Model Runner V2"):
-        VllmConfig._verify_trace_replay_config(config)

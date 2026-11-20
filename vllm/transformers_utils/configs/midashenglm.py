@@ -22,13 +22,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
     Qwen2_5OmniTextConfig,
 )
 
 
-class DashengConfig(PretrainedConfig):
+class DashengConfig(PreTrainedConfig):
     model_type = "midashenglm_dasheng_encoder"
 
     def __init__(
@@ -80,7 +80,7 @@ class DashengConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class MiDashengLMConfig(PretrainedConfig):
+class MiDashengLMConfig(PreTrainedConfig):
     model_type = "midashenglm"
 
     def __init__(

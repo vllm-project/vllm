@@ -3,29 +3,38 @@
 """Native Inkling chat renderer for the Python frontend.
 
 Mirrors the Rust frontend's native Inkling renderer
-(``rust/src/chat/src/renderer/inkling/mod.rs``): chat messages are rendered
+(`rust/src/chat/src/renderer/inkling/mod.rs`): chat messages are rendered
 directly to token ids — Inkling has no Jinja chat template and no faithful
 text form.
 
-The encoding logic lives in ``inkling_encoding.py`` behind a narrow
+The encoding logic lives in `inkling_encoding.py` behind a narrow
 "OpenAI messages + tools -> token ids" call; see the swap-point comment
-in :meth:`InklingRenderer._render` for adopting a standalone Inkling
+in `InklingRenderer._render` for adopting a standalone Inkling
 input-processing library (mistral-common style) later.
 """
 
+import contextlib
+
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
-from .inkling_encoding import SPECIAL_TOKEN_SPELLINGS, render_inkling_messages
+from .inkling_encoding import (
+    CONTENT_MODEL_END_SAMPLING,
+    DEFAULT_REASONING_EFFORT,
+    OPTIONAL_SPECIAL_TOKENS,
+    SPECIAL_TOKEN_SPELLINGS,
+    render_inkling2_messages,
+    render_inkling_messages,
+)
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
@@ -42,12 +51,10 @@ _NAMED_REASONING_EFFORT = {
     "max": 0.99,
 }
 
-_DEFAULT_REASONING_EFFORT = 0.9
-
 
 def _resolve_reasoning_effort(value: object) -> float | int | None:
     if value is None:
-        return _DEFAULT_REASONING_EFFORT
+        return DEFAULT_REASONING_EFFORT
     if isinstance(value, str):
         return _NAMED_REASONING_EFFORT.get(value)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -55,16 +62,32 @@ def _resolve_reasoning_effort(value: object) -> float | int | None:
     return value
 
 
+def _resolve_inkling2_reasoning_effort(value: object) -> float:
+    """Like the reference, also accept numeric strings and reject the rest."""
+    if isinstance(value, str) and value not in _NAMED_REASONING_EFFORT:
+        with contextlib.suppress(ValueError):
+            value = float(value)
+    effort = _resolve_reasoning_effort(value)
+    if effort is None:
+        raise ValueError(f"invalid Inkling reasoning_effort: {value!r}")
+    return float(effort)
+
+
 class _HfBackedTmlTokenizer:
     """Adapts an HF tokenizer to the encoding core's tokenizer protocol.
 
     Special-token ids are resolved from the tokenizer vocab at
     construction (never hardcoded), trying each known spelling — the Inkling
-    HF vocab exposes some semantic slots as ``<|unused_NNNNNN|>`` tokens.
+    HF vocab exposes some semantic slots as `<|unused_NNNNNN|>` tokens.
     """
 
-    def __init__(self, tokenizer: HfTokenizer) -> None:
+    def __init__(
+        self, tokenizer: HfTokenizer, split_special_tokens: bool = False
+    ) -> None:
         self._tokenizer = tokenizer
+        self._encode_kwargs = (
+            {"split_special_tokens": True} if split_special_tokens else {}
+        )
 
         vocab = tokenizer.get_vocab()
         special_ids: dict[str, int] = {}
@@ -76,16 +99,22 @@ class _HfBackedTmlTokenizer:
                     special_ids[token] = token_id
                     break
             else:
-                missing.append(token)
+                if token not in OPTIONAL_SPECIAL_TOKENS:
+                    missing.append(token)
         if missing:
             raise ValueError(f"Inkling tokenizer is missing special tokens: {missing}")
         self._special_ids = special_ids
 
     def encode_text(self, text: str) -> list[int]:
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return self._tokenizer.encode(
+            text, add_special_tokens=False, **self._encode_kwargs
+        )
 
     def encode_special(self, token: str) -> int:
-        return self._special_ids[token]
+        try:
+            return self._special_ids[token]
+        except KeyError:
+            raise ValueError(f"Inkling tokenizer does not define {token}") from None
 
 
 class InklingRenderer(BaseRenderer[HfTokenizer]):
@@ -96,7 +125,14 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
     ) -> None:
         super().__init__(config, tokenizer)
 
-        self._inkling_tokenizer = _HfBackedTmlTokenizer(self.get_tokenizer())
+        # Inkling2 shares the format but has its own reference rendering, and
+        # payload text never encodes to framing tokens.
+        self._is_inkling2 = (
+            getattr(self.model_config.hf_config, "model_type", None) == "inkling2"
+        )
+        self._inkling_tokenizer = _HfBackedTmlTokenizer(
+            self.get_tokenizer(), split_special_tokens=self._is_inkling2
+        )
         self._render_async = make_async(self._render, executor=self._executor)
 
     def _render(
@@ -106,21 +142,33 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
     ) -> list[int]:
         kwargs = params.chat_template_kwargs or {}
 
-        if kwargs.get("continue_final_message"):
+        if not self._is_inkling2 and kwargs.get("continue_final_message"):
             raise ValueError("Inkling renderer does not support continue_final_message")
-
-        reasoning_effort = _resolve_reasoning_effort(kwargs.get("reasoning_effort"))
 
         try:
             # Swap point: to adopt a standalone Inkling input-processing
-            # library, replace this call (and the _HfBackedTmlTokenizer
+            # library, replace these calls (and the _HfBackedTmlTokenizer
             # adapter above) with the library's renderer.
+            if self._is_inkling2:
+                return render_inkling2_messages(
+                    messages,
+                    self._inkling_tokenizer,
+                    tools=kwargs.get("tools"),
+                    tool_choice=params.tool_choice,
+                    parallel_tool_calls=params.parallel_tool_calls,
+                    reasoning_effort=_resolve_inkling2_reasoning_effort(
+                        kwargs.get("reasoning_effort")
+                    ),
+                    continue_final_message=bool(kwargs.get("continue_final_message")),
+                )
             return render_inkling_messages(
                 messages,
                 self._inkling_tokenizer,
                 add_generation_prompt=kwargs.get("add_generation_prompt", True),
                 tools=kwargs.get("tools"),
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=_resolve_reasoning_effort(
+                    kwargs.get("reasoning_effort")
+                ),
             )
         except ValueError:
             raise
@@ -130,6 +178,12 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
         except Exception as e:
             logger.exception("Error while rendering Inkling chat messages")
             raise ValueError(str(e)) from e
+
+    def get_eos_token_id(self) -> int | None:
+        eos_token_id = super().get_eos_token_id()
+        if eos_token_id is None:
+            return self._inkling_tokenizer.encode_special(CONTENT_MODEL_END_SAMPLING)
+        return eos_token_id
 
     def render_messages(
         self,
