@@ -2195,6 +2195,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.hf_output_len = args.output_len
         args.spec_bench_output_len = args.output_len
         args.prefix_repetition_output_len = args.output_len
+        args.speed_bench_output_len = args.output_len
 
     # when using random datasets, default to ignoring EOS
     # so generation runs to the requested length
