@@ -148,50 +148,6 @@ def load_global_u32x4(
 
 
 @dsl_user_op
-def load_global_u32(pointer: cute.Pointer, *, loc=None, ip=None) -> Uint32:
-    address = pointer.toint(loc=loc, ip=ip)
-    return Uint32(
-        _asm(
-            T.i32(),
-            [address.ir_value(loc=loc, ip=ip)],
-            "ld.global.u32 $0, [$1];",
-            "=r,l",
-            side_effects=False,
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
-def load_global_u32_predicated(
-    pointer: cute.Pointer, predicate: Int32, *, loc=None, ip=None
-) -> Uint32:
-    address = pointer.toint(loc=loc, ip=ip)
-    return Uint32(
-        _asm(
-            T.i32(),
-            [
-                address.ir_value(loc=loc, ip=ip),
-                Int32(predicate).ir_value(loc=loc, ip=ip),
-            ],
-            (
-                "{\n\t"
-                ".reg .pred p;\n\t"
-                "setp.ne.s32 p, $2, 0;\n\t"
-                "@!p mov.u32 $0, 0;\n\t"
-                "@p ld.global.u32 $0, [$1];\n\t"
-                "}"
-            ),
-            "=r,l,r",
-            side_effects=False,
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
 def load_global_u32x2(pointer: cute.Pointer, *, loc=None, ip=None):
     address = pointer.toint(loc=loc, ip=ip)
     loaded = _asm(
@@ -204,55 +160,6 @@ def load_global_u32x2(pointer: cute.Pointer, *, loc=None, ip=None):
         ip=ip,
     )
     return _words(loaded, 2, loc=loc, ip=ip)
-
-
-@dsl_user_op
-def load_global_u32x2_predicated(
-    pointer: cute.Pointer, predicate: Int32, *, loc=None, ip=None
-):
-    address = pointer.toint(loc=loc, ip=ip)
-    loaded = _asm(
-        llvm.StructType.get_literal([T.i32()] * 2),
-        [
-            address.ir_value(loc=loc, ip=ip),
-            Int32(predicate).ir_value(loc=loc, ip=ip),
-        ],
-        (
-            "{\n\t"
-            ".reg .pred p;\n\t"
-            "setp.ne.s32 p, $3, 0;\n\t"
-            "@!p mov.u32 $0, 0;\n\t"
-            "@!p mov.u32 $1, 0;\n\t"
-            "@p ld.global.v2.u32 {$0, $1}, [$2];\n\t"
-            "}"
-        ),
-        "=r,=r,l,r",
-        side_effects=False,
-        loc=loc,
-        ip=ip,
-    )
-    return _words(loaded, 2, loc=loc, ip=ip)
-
-
-@dsl_user_op
-def load_global_u32x4_address(
-    address: Int64,
-    *,
-    volatile: cutlass.Constexpr[bool] = False,
-    loc=None,
-    ip=None,
-):
-    opcode = "ld.volatile.global.v4.u32" if volatile else "ld.global.v4.u32"
-    loaded = _asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [address.ir_value(loc=loc, ip=ip)],
-        f"{opcode} {{$0, $1, $2, $3}}, [$4];",
-        "=r,=r,=r,=r,l",
-        side_effects=volatile,
-        loc=loc,
-        ip=ip,
-    )
-    return _words(loaded, 4, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -269,35 +176,6 @@ def load_global_bf16_as_f32(address: Int64, *, loc=None, ip=None) -> Float32:
                 "}"
             ),
             "=f,l",
-            side_effects=False,
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
-def load_global_bf16_as_f32_predicated(
-    address: Int64, predicate: Int32, *, loc=None, ip=None
-) -> Float32:
-    return Float32(
-        _asm(
-            T.f32(),
-            [
-                address.ir_value(loc=loc, ip=ip),
-                Int32(predicate).ir_value(loc=loc, ip=ip),
-            ],
-            (
-                "{\n\t"
-                ".reg .pred p;\n\t"
-                ".reg .b16 bits;\n\t"
-                "setp.ne.s32 p, $2, 0;\n\t"
-                "@!p mov.b16 bits, 0;\n\t"
-                "@p ld.global.b16 bits, [$1];\n\t"
-                "cvt.f32.bf16 $0, bits;\n\t"
-                "}"
-            ),
-            "=f,l,r",
             side_effects=False,
             loc=loc,
             ip=ip,
@@ -466,6 +344,45 @@ def bf16x2_to_f32x2(word: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float3
     )
 
 
+@dsl_user_op
+def e4m3x4_to_bf16x4(word: Uint32, *, loc=None, ip=None) -> tuple[Uint32, Uint32]:
+    """The four E4M3 bytes of `word` widened to BF16 (exact): (bytes 0-1,
+    bytes 2-3) as BF16 pairs, the lower byte in the lower half."""
+    pair = _asm(
+        llvm.StructType.get_literal([T.i32()] * 2),
+        [Uint32(word).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b16 lo, hi;\n\tmov.b32 {lo, hi}, $2;\n\t"
+        "cvt.rn.bf16x2.e4m3x2 $0, lo;\n\tcvt.rn.bf16x2.e4m3x2 $1, hi;\n\t}",
+        "=r,=r,r",
+        side_effects=False,
+        loc=loc,
+        ip=ip,
+    )
+    return _unpack(pair, Uint32, 2, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def quant_e4m3x2(
+    lo: Float32, hi: Float32, inv_scale: Float32, *, loc=None, ip=None
+) -> Uint32:
+    """`lo * inv_scale` and `hi * inv_scale` (round to nearest) as saturated
+    E4M3 bytes, lo in bits 0-7 and hi in bits 8-15: the FP8 KV cache store of
+    `reshape_and_cache_flash`."""
+    return Uint32(
+        _asm(
+            T.i32(),
+            _ir([Float32(hi), Float32(lo), Float32(inv_scale)], loc=loc, ip=ip),
+            "{\n\t.reg .f32 a, b;\n\t.reg .b16 q;\n\t"
+            "mul.rn.f32 a, $1, $3;\n\tmul.rn.f32 b, $2, $3;\n\t"
+            "cvt.rn.satfinite.e4m3x2.f32 q, a, b;\n\tcvt.u32.u16 $0, q;\n\t}",
+            "=r,f,f,f",
+            side_effects=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
 # FP32 arithmetic as explicit PTX: the rounding of each op is the one named, and
 # nothing contracts across them (inline asm results are opaque to LLVM).
 def _f32_op(text: str, constraints: str, operands, loc, ip) -> Float32:
@@ -563,17 +480,6 @@ def packed_u32x4_to_f16x8(packed, *, loc=None, ip=None):
         ip=ip,
     )
     return cute.TensorSSA(values, VEC_BF16, Float16)
-
-
-@dsl_user_op
-def packed_u32_to_bf16x2(packed: Uint32, *, loc=None, ip=None):
-    values = llvm.bitcast(
-        ir.VectorType.get([2], BFloat16.mlir_type, loc=loc),
-        packed.ir_value(loc=loc, ip=ip),
-        loc=loc,
-        ip=ip,
-    )
-    return cute.TensorSSA(values, 2, BFloat16)
 
 
 @dsl_user_op
@@ -749,78 +655,6 @@ def load_shared_u32x4_unpacked(address: Int32, *, loc=None, ip=None) -> tuple:
 
 
 @dsl_user_op
-def store_shared_u32x4(pointer: cute.Pointer, packed, *, loc=None, ip=None) -> None:
-    address = pointer.toint(loc=loc, ip=ip)
-    words = [packed[index].ir_value(loc=loc, ip=ip) for index in range(4)]
-    _asm(
-        None,
-        [Int32(address).ir_value(loc=loc, ip=ip), *words],
-        "st.shared.v4.u32 [$0], {$1, $2, $3, $4};",
-        "r,r,r,r,r",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def cpasync_bulk_g2s(
-    gmem_ptr: cute.Pointer,
-    smem_ptr: cute.Pointer,
-    barrier_ptr: cute.Pointer,
-    size_bytes: Int32,
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    operands = [
-        gmem_ptr.toint(loc=loc, ip=ip).ir_value(),
-        smem_ptr.toint(loc=loc, ip=ip).ir_value(),
-        barrier_ptr.toint(loc=loc, ip=ip).ir_value(),
-        size_bytes.ir_value(loc=loc, ip=ip),
-        Int64(L2_EVICT_FIRST).ir_value(),
-    ]
-    _asm(
-        None,
-        operands,
-        (
-            "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"
-            ".L2::cache_hint [$1], [$0], $3, [$2], $4;"
-        ),
-        "l,r,r,r,l",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def fence_proxy_async_shared_cta(*, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [],
-        "fence.proxy.async.shared::cta;",
-        "",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def remote_release_add1_u32(address: Int64, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [address.ir_value(loc=loc, ip=ip)],
-        "red.release.sys.global.add.u32 [$0], 1;",
-        "l",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
 def atomic_add1_acq_rel_u32(pointer: cute.Pointer, *, loc=None, ip=None) -> Uint32:
     """Add 1 to the global word at `pointer` and return its value before
     (acquire-release, GPU scope): a ticket."""
@@ -836,33 +670,6 @@ def atomic_add1_acq_rel_u32(pointer: cute.Pointer, *, loc=None, ip=None) -> Uint
             ip=ip,
         )
     )
-
-
-@dsl_user_op
-def ldmc_bf16x8(address: Int64, predicate: Int32 | None = None, *, loc=None, ip=None):
-    """Reduce-load eight BF16s; an omitted predicate loads, false returns zeros."""
-    predicate = Int32(1) if predicate is None else Int32(predicate)
-    loaded = _asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [address.ir_value(loc=loc, ip=ip), predicate.ir_value(loc=loc, ip=ip)],
-        (
-            "{\n\t"
-            ".reg .pred p;\n\t"
-            "setp.ne.s32 p, $5, 0;\n\t"
-            "@!p mov.u32 $0, 0;\n\t"
-            "@!p mov.u32 $1, 0;\n\t"
-            "@!p mov.u32 $2, 0;\n\t"
-            "@!p mov.u32 $3, 0;\n\t"
-            "@p multimem.ld_reduce.relaxed.sys.global.add.acc::f32.v4.bf16x2 "
-            "{$0, $1, $2, $3}, [$4];\n\t"
-            "}"
-        ),
-        "=r,=r,=r,=r,l,r",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-    return _words(loaded, 4, loc=loc, ip=ip)
 
 
 @dsl_user_op

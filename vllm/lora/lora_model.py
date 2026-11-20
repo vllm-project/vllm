@@ -21,7 +21,7 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MoEEPLoadSpec:
     """Per-expert-parallel slicing metadata for one FusedMoEFactory LoRA module.
 
