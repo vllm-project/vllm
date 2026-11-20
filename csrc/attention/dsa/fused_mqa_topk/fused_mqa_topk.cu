@@ -13,7 +13,7 @@
 // sparse-attention indexer scoring with top-k selection without materializing
 // the full logits matrix, using classic sample-based threshold filtering.
 
-#include "../torch_utils.h"
+#include "torch_utils.h"
 
 #include <torch/headeronly/core/ScalarType.h>
 
