@@ -54,7 +54,13 @@ def _check_frozen_kv_scales(model: torch.nn.Module) -> None:
                 continue
             if not config.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 continue
-        names = set().union(*(impl.frozen_kv_scale_names or "qkv" for impl in impls))
+        names = set().union(
+            *(
+                impl.frozen_kv_scale_names or "qkv"
+                for impl in impls
+                if impl.frozen_kv_scales
+            )
+        )
         # Layerwise reload rounds scales to BF16; ignore that.
         if all(
             math.isclose(new, old, rel_tol=2**-8)

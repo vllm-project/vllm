@@ -1611,6 +1611,8 @@ def test_kv_scale_reload(vllm_runner):
         reloaded = llm.generate_greedy_logprobs(prompts, 8, num_logprobs=5)
 
     assert reloaded_perp < 10
+    if not current_platform.is_cuda():
+        return
     # Decode replays CUDA graphs captured with the dummy KV scales.
     check_logprobs_close(
         outputs_0_lst=cold, outputs_1_lst=reloaded, name_0="cold", name_1="reloaded"

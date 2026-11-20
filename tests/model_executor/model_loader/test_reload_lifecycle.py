@@ -195,7 +195,9 @@ def test_update_refused_when_decode_keeps_startup_kv_scales(monkeypatch):
         frozen_kv_scales="full_graph",
         frozen_kv_scale_names=frozenset("q"),
     )
-    impl.get_impl_variants = lambda: (impl,)
+    # A composite's unflagged variant does not widen the checked scales.
+    plain = SimpleNamespace(frozen_kv_scales=None, frozen_kv_scale_names=None)
+    impl.get_impl_variants = lambda: (impl, plain)
     model = torch.nn.Module()
     model.attn = torch.nn.Module()
     model.attn.impl = impl
