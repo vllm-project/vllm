@@ -15,8 +15,8 @@ def num_offload_blocks(
 ) -> int:
     """The offload pool size in blocks, the same on every worker and the
     scheduler: as many blocks as fit in `capacity_bytes` on the pipeline stage
-    with the largest blocks, or with `bytes_per_block`, this worker's, when the
-    stages are unknown.
+    with the largest blocks. Without `pipeline_stages`, the caller's
+    `bytes_per_block` (its own stage's) sizes the pool.
     """
     largest = max(
         (stage.bytes_per_block for stage in kv_cache_config.pipeline_stages),

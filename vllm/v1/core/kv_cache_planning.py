@@ -9,7 +9,7 @@ from dataclasses import replace
 from functools import partial, reduce
 from typing import TYPE_CHECKING, Any
 
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -1018,33 +1018,6 @@ def _get_packed_kv_cache_groups(
     return groups
 
 
-def _warn_if_unannotated_eagle_mamba(
-    spec_config: SpeculativeConfig,
-    kv_cache_groups: list[KVCacheGroup],
-) -> None:
-    """Warn when no KV cache group could be identified as the draft model's.
-
-    Args:
-        spec_config: Config supplying the speculative method.
-        kv_cache_groups: Groups as they will be handed to consumers.
-
-    """
-    if any(group.is_eagle_group for group in kv_cache_groups):
-        return
-    mamba_groups = [
-        idx
-        for idx, group in enumerate(kv_cache_groups)
-        if issubclass(group.manager_cls, MambaManager)
-    ]
-    if not mamba_groups:
-        return
-    logger.warning(
-        "Speculative decoding (method=%s) is enabled but no KV cache group "
-        "could be identified as the draft model's.",
-        spec_config.method,
-    )
-
-
 def _largest_divisor_at_most(value: int, limit: int) -> int:
     for candidate in range(min(value, limit), 0, -1):
         if value % candidate == 0:
@@ -1482,8 +1455,8 @@ def _project_kv_cache_groups_to_worker(
 
 
 def get_pipeline_stages(
+    vllm_config: VllmConfig,
     kv_cache_configs: list[KVCacheConfig],
-    pipeline_parallel_size: int,
 ) -> tuple[KVCacheStage, ...]:
     """The KV cache of every pipeline stage.
 
@@ -1492,17 +1465,20 @@ def get_pipeline_stages(
     describes it.
 
     Args:
+        vllm_config: The global VllmConfig.
         kv_cache_configs: The KV cache config of each worker.
-        pipeline_parallel_size: The number of pipeline stages.
 
     Returns:
-        One `KVCacheStage` per PP rank, or an empty tuple when the workers do
-        not split evenly into the stages.
+        One `KVCacheStage` per PP rank, or an empty tuple when the configs do
+        not cover every stage, as under the external launcher, where each
+        engine core plans only its own worker.
 
     """
+    pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
     num_workers = len(kv_cache_configs)
     if num_workers == 0 or num_workers % pipeline_parallel_size:
         return ()
+    builder = get_kv_cache_config_builder(vllm_config)
     workers_per_stage = num_workers // pipeline_parallel_size
     stages: list[KVCacheStage] = []
     for first in range(0, num_workers, workers_per_stage):
@@ -1512,19 +1488,11 @@ def get_pipeline_stages(
             == [g.layer_names for g in config.kv_cache_groups]
             for worker in range(first, first + workers_per_stage)
         ), "Workers of one pipeline stage must hold the same KV cache layers."
-        # Every device tensor spans the one device allocation.
-        device_bytes = next(
-            (t.size for t in config.kv_cache_tensors if not t.host_resident), 0
-        )
         stages.append(
             KVCacheStage(
-                # Copies, as a model runner adds KV-sharing layers to the groups
-                # of its own config in place.
-                kv_cache_groups=tuple(
-                    replace(group, kv_cache_specs=dict(group.kv_cache_specs))
-                    for group in config.kv_cache_groups
-                ),
-                bytes_per_block=device_bytes // config.num_blocks,
+                bytes_per_block=_pool_bytes_per_block_from_builder(
+                    builder, vllm_config, config.kv_cache_groups
+                )
             )
         )
     return tuple(stages)
@@ -1681,6 +1649,36 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
+def resolve_mamba_block_size(
+    vllm_config: VllmConfig,
+    layer_configs: list[dict[str, KVCacheLayerConfig]],
+) -> int | None:
+    """Mamba block size for every worker's align-mode Mamba specs, or None if
+    the workers already agree.
+
+    Each worker sizes its Mamba blocks from the attention layers it holds, which
+    a pipeline stage may lack, but the scheduler aligns every Mamba group to one
+    size. The result is the largest size that every attention block size of the
+    model is a multiple of.
+    """
+    if vllm_config.cache_config.mamba_cache_mode != "align":
+        return None
+    configs = [lc for worker in layer_configs for lc in worker.values()]
+    mamba_sizes = {
+        lc.spec.block_size for lc in configs if isinstance(lc.spec, MambaSpec)
+    }
+    if len(mamba_sizes) <= 1:
+        return None
+    return math.gcd(
+        *(
+            lc.spec.block_size
+            for lc in configs
+            if not isinstance(lc.spec, MambaSpec)
+            and lc.manager_cls.prefix_cacheable(lc.manager_config)
+        )
+    )
+
+
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
@@ -1704,7 +1702,7 @@ def get_global_kv_cache_groups(
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every sliding window with how many extra tokens to retain in the window.
-    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
+    extra_retained_tokens = vllm_config.num_reprefillable_tokens
     for layer_name, layer_config in merged_layer_configs.items():
         config = layer_config.manager_config
         if isinstance(config.params, SlidingWindowManager.Params):
@@ -1718,18 +1716,7 @@ def get_global_kv_cache_groups(
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_layer_configs may be modified in-place.
-    global_kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, vllm_config, merged_layer_configs
-    )
-    spec_config = vllm_config.speculative_config
-    if spec_config is not None and spec_config.use_eagle_block_drop():
-        draft_layer_names = {
-            name for name, config in merged_layer_configs.items() if config.is_draft
-        }
-        for group in global_kv_cache_groups:
-            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
-        _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
-    return global_kv_cache_groups
+    return get_kv_cache_groups_from_builder(builder, vllm_config, merged_layer_configs)
 
 
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):

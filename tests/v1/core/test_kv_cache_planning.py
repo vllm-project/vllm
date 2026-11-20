@@ -795,8 +795,8 @@ def test_project_kv_cache_groups_to_worker():
 
 
 def test_pipeline_stages_describe_every_stage():
-    """Every worker learns each PP stage's group projections and block size in
-    bytes; the groups stay fixed when a worker later edits its own."""
+    """Every worker learns each PP stage's block size in bytes, draft layers on
+    the last stage included."""
     layer = new_kv_cache_layer()
     stage0 = {"layer0": layer, "layer1": layer}
     stage1 = {
@@ -808,21 +808,15 @@ def test_pipeline_stages_describe_every_stage():
     layer_configs = [stage0, stage0, stage1, stage1]
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = 2
     kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**30] * 4)
 
-    stages = get_pipeline_stages(kv_cache_configs, 2)
+    stages = get_pipeline_stages(vllm_config, kv_cache_configs)
 
-    assert [[g.layer_names for g in stage.kv_cache_groups] for stage in stages] == [
-        [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
-        for worker in (0, 2)
-    ]
     page = kv_cache_planning._get_layer_block_stride(layer.spec)
     assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
-    draft_stage_layers = ["layer2", "layer3", "draft.layer0"]
-    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
-    kv_cache_configs[2].kv_cache_groups[0].kv_cache_specs["shared"] = layer.spec
-    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
-    assert get_pipeline_stages(kv_cache_configs[:3], 2) == ()
+    # An engine core that plans only its own worker cannot describe the stages.
+    assert get_pipeline_stages(vllm_config, kv_cache_configs[:1]) == ()
 
 
 def _pipeline_layer_specs(partition: list[int]) -> list[list[str]]:
@@ -2073,7 +2067,6 @@ def test_unify_hybrid_kv_cache_specs():
     kv_cache_spec["draft_layer_2"] = replace(
         before_spec_2,
         spec=replace(before_spec_2.spec, dcp_sharded=False),
-        is_draft=True,
     )
     kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_layer(block_size=64)
@@ -2084,7 +2077,6 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["draft_layer_2"] == replace(
         expected_spec_2, spec=replace(expected_spec_2.spec, dcp_sharded=False)
     )
-    assert kv_cache_spec["draft_layer_2"].is_draft
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_layer()
@@ -2316,104 +2308,6 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
-def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
-    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
-    config.cache_config.kv_cache_layout = "BLHNC"
-    config.speculative_config = fake_speculative_config(
-        method="dflash",
-        use_eagle=lambda: True,
-        use_eagle_block_drop=lambda: use_eagle_block_drop,
-        use_multi_module_mtp=lambda: False,
-        draft_model_config=SimpleNamespace(architectures=[]),
-    )
-    configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
-    return generate_scheduler_kv_cache_config(configs).kv_cache_groups
-
-
-def _as_draft(spec):
-    return replace(spec, is_draft=True)
-
-
-def _hybrid_specs(draft=True):
-    """Qwen3.5-shaped [GDN x3, full-attn] x2, plus an MTP full-attn layer."""
-    specs = {}
-    for i in range(8):
-        specs[f"layers.{i}"] = (
-            new_kv_cache_layer()
-            if i % 4 == 3
-            else new_mamba_layer(mamba_cache_mode="align")
-        )
-    if draft:
-        specs["mtp.0"] = _as_draft(new_kv_cache_layer())
-    return specs
-
-
-_DRAFT_SPEC_SHAPES = {
-    "uniform": lambda: {
-        "layers.0": new_kv_cache_layer(),
-        "draft.0": _as_draft(new_kv_cache_layer()),
-    },
-    "hybrid": _hybrid_specs,
-    "draft_spans_groups": lambda: {
-        "layers.0": new_mla_layer(),
-        "layers.1": new_swa_mla_layer(head_size=1024),
-        "mtp.0": _as_draft(new_mla_layer()),
-        "mtp.1": _as_draft(new_swa_mla_layer(head_size=1024)),
-    },
-}
-
-
-@pytest.mark.parametrize(
-    "make_specs", _DRAFT_SPEC_SHAPES.values(), ids=list(_DRAFT_SPEC_SHAPES)
-)
-@pytest.mark.parametrize("pp", [1, 2])
-def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
-    specs = make_specs()
-    draft_layers = {name for name, spec in specs.items() if spec.is_draft}
-    untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
-    groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.kv_cache_specs, g.manager_config) for g in groups] == [
-        (g.kv_cache_specs, g.manager_config)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
-
-    worker_specs = [
-        {n: s for n, s in specs.items() if n not in draft_layers},
-        {n: s for n, s in specs.items() if n in draft_layers},
-    ]
-    scheduler_groups = _spec_decode_kv_cache_groups(
-        [specs] if pp == 1 else worker_specs
-    )
-    assert [g.is_eagle_group for g in scheduler_groups] == [
-        bool(draft_layers & set(g.layer_names)) for g in groups
-    ]
-
-
-def test_no_eagle_groups_without_eagle_block_drop():
-    groups = _spec_decode_kv_cache_groups([_hybrid_specs()], use_eagle_block_drop=False)
-    assert not any(g.is_eagle_group for g in groups)
-
-
-@pytest.mark.parametrize(
-    "make_specs,warns",
-    [
-        (lambda: _hybrid_specs(draft=False), True),
-        (
-            lambda: {
-                "layers.0": new_kv_cache_layer(),
-                "draft.0": new_kv_cache_layer(),
-            },
-            False,
-        ),
-    ],
-    ids=["untagged_hybrid", "untagged_uniform_attention"],
-)
-def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vllm):
-    _spec_decode_kv_cache_groups([make_specs()])
-    warned = "could be identified as the draft model's" in caplog_vllm.text
-    assert warned == warns
-
-
 @pytest.mark.parametrize(
     ("method", "num_lookahead_tokens"),
     [("dflash", 4), ("dspark", 3), ("eagle", None)],
@@ -2436,7 +2330,6 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
             hf_config=SimpleNamespace(), architectures=[]
         ),
         use_eagle=lambda: True,
-        use_eagle_block_drop=lambda: method == "eagle",
         use_dflash=lambda: method == "dflash",
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,
@@ -2469,7 +2362,7 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
     layers = {
         "layers.0": full_layer(new_kv_cache_spec()),
         "layers.1": target_layer,
-        "draft.0": _as_draft(draft_layer),
+        "draft.0": draft_layer,
     }
     configs = get_kv_cache_configs(config, [layers], [2**30])
     manager_config_by_layer = {
