@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -1321,7 +1321,9 @@ def _apply_candidate_mask_strided(
     )
 
 
-def _max_decode_logits_rows(num_batched_tokens: int) -> int:
+def _max_decode_logits_rows(
+    num_batched_tokens: int, vllm_config: VllmConfig | None = None
+) -> int:
     """Upper bound on decode rows the paged-MQA logits buffer can ever hold.
 
     `rocm_fp8_paged_mqa_logits` sizes its workspace as
@@ -1332,12 +1334,14 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     but scales with `max_model_len`, so at the model's full context it asks
     for tens of TiB and the engine cannot start. Take whichever valid bound is
     smaller; the workspace is locked after profiling, so it must not be under-
-    estimated.
+    estimated. `vllm_config` defaults to the current one; pass it outside a
+    config context (e.g. kernel warm-up), where the loose bound is returned.
     """
-    try:
-        vllm_config = get_current_vllm_config()
-    except Exception:
-        return num_batched_tokens
+    if vllm_config is None:
+        try:
+            vllm_config = get_current_vllm_config()
+        except Exception:
+            return num_batched_tokens
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
     if not max_num_seqs:

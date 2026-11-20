@@ -1461,6 +1461,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (aiter.ops.flydsl.mxfp4_indexer_topk) where it is faster than the
     # paged MXFP4 MQA logits + top-k chain. gfx950 only; needs
     # VLLM_ROCM_USE_AITER and an aiter build with the op, else the chain runs.
+    # The JIT warm-up (enable_jit_warmup) runs its launches before graph
+    # capture; without it, captured graphs keep the chain.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK", "False").lower()

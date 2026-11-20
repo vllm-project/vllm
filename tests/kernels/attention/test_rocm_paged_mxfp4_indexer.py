@@ -20,7 +20,11 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("ROCm-only", allow_module_level=True)
 
-from vllm.config import CUDAGraphMode
+from tests.v1.attention.utils import create_vllm_config
+from vllm.config import CUDAGraphMode, SpeculativeConfig, set_current_vllm_config
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseMQAIndexer
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.models.deepseek_v41.amd.rocm import (
     _compute_global_topk_ragged_indices_and_indptr_old,
     _mxfp4_decode_row_lens,
@@ -28,6 +32,7 @@ from vllm.models.deepseek_v41.amd.rocm import (
     rocm_mxfp4_indexer_k_store,
     rocm_mxfp4_indexer_q_quant,
 )
+from vllm.models.deepseek_v41.attention import DeepseekV4IndexerCache
 from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
@@ -42,7 +47,11 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     plan_prefill_chunks,
 )
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
-from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+from vllm.v1.worker.workspace import (
+    init_workspace_manager,
+    lock_workspace,
+    reset_workspace_manager,
+)
 
 if get_cdna_version() != 4:
     pytest.skip("CDNA4-only", allow_module_level=True)
@@ -546,7 +555,8 @@ def _fused_topk_op():
 
 @pytest.fixture
 def _fused_topk(monkeypatch):
-    """VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK on, recording aiter's launches."""
+    """VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK on, recording aiter's launches
+    and their rows."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK", "1")
     ops._aiter_fused_topk.cache_clear()
@@ -556,9 +566,9 @@ def _fused_topk(monkeypatch):
     def spy(name):
         launch = getattr(mod, name)
 
-        def recorded(*args, **kwargs):
-            launched.append(name)
-            return launch(*args, **kwargs)
+        def recorded(q, *args, **kwargs):
+            launched.append((name, q.shape[0]))
+            return launch(q, *args, **kwargs)
 
         return recorded
 
@@ -574,15 +584,28 @@ def _fused_topk(monkeypatch):
 @pytest.mark.parametrize(
     "mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL], ids=["eager", "full"]
 )
-def test_fused_topk_decode_layers_match_reference(monkeypatch, _fused_topk, mode):
+@pytest.mark.parametrize(
+    "seq_lens, eager_dense",
+    [
+        ([70000, 3000, 66000], True),
+        # A zero-length ratio-2 row, rows under the 2048 candidate blocks, and
+        # a 20000-entry dense bound, below aiter's dense crossover.
+        ([40000, 6, 9000, 20000], False),
+    ],
+    ids=["long", "short"],
+)
+def test_fused_topk_decode_layers_match_reference(
+    monkeypatch, _fused_topk, mode, seq_lens, eager_dense
+):
     """V4.1's sizes (top-512 among 2048 8-token candidate blocks) with the
-    fused op on. An eager step runs the dense, source and consumer layers on
-    it, bounded by the step's longest row. FULL keeps the dense and source
-    layers on the chain, whose candidate blocks come out ascending for the
-    fused consumer, and a captured consumer replays like an eager one."""
+    fused op on. An eager step runs the dense (above aiter's crossover),
+    source and consumer layers on it, bounded by the step's longest row. FULL
+    keeps the dense and source layers on the chain, whose candidate blocks
+    come out ascending (-1 padded) for the fused consumer; a consumer launch
+    that never ran is captured on the chain, and once it ran, replays like an
+    eager call."""
     set_random_seed(0)
     topk, pool_blocks, next_n = 512, 2048, 6
-    seq_lens = [70000, 52000, 66000]
     case = _Case(seq_lens, 128, max_len=max(seq_lens))
     rows = [(r, n - next_n + j) for r, n in enumerate(seq_lens) for j in range(next_n)]
     num_rows = len(rows)
@@ -675,6 +698,23 @@ def test_fused_topk_decode_layers_match_reference(monkeypatch, _fused_topk, mode
             pool_blocks * CAND_BLOCK,
         )
 
+    if mode == CUDAGraphMode.FULL:
+        # Load the chain's kernels with the flag off, then capture with it on
+        # before the fused launch of this row count ever ran.
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK", "0")
+        ops._aiter_fused_topk.cache_clear()
+        consumer(buffer())
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK", "1")
+        ops._aiter_fused_topk.cache_clear()
+        graph, chained = torch.cuda.CUDAGraph(), buffer()
+        with torch.cuda.graph(graph):
+            consumer(chained)
+        graph.replay()
+        torch.accelerator.synchronize()
+        for i in range(num_rows):
+            _assert_topk(chained[i], allowed[i], topk)
+        assert _fused_topk == []
+
     out = buffer()
     consumer(out)
     for i in range(num_rows):
@@ -682,8 +722,8 @@ def test_fused_topk_decode_layers_match_reference(monkeypatch, _fused_topk, mode
     assert bool((out[num_rows:] == 7).all())
     expected = ["flydsl_mxfp4_indexer_candidate_topk"]
     if mode == CUDAGraphMode.NONE:
-        expected = ["flydsl_mxfp4_indexer_topk"] * 2 + expected
-    assert _fused_topk == expected
+        expected = ["flydsl_mxfp4_indexer_topk"] * (1 + eager_dense) + expected
+    assert _fused_topk == [(name, num_rows) for name in expected]
 
     if mode == CUDAGraphMode.FULL:
         graph, replayed = torch.cuda.CUDAGraph(), buffer()
@@ -694,7 +734,54 @@ def test_fused_topk_decode_layers_match_reference(monkeypatch, _fused_topk, mode
         consumer(out)
         torch.accelerator.synchronize()
         assert torch.equal(replayed, out)
-        assert _fused_topk == expected * 3
+        assert len(_fused_topk) == 3
+
+
+@pytest.mark.skipif(
+    _fused_topk_op() is None, reason="aiter has no fused MXFP4 indexer top-k"
+)
+def test_fused_topk_warmup_fits_the_profile_reservation(monkeypatch, _fused_topk):
+    """The JIT warm-up runs outside any config context, after the profile run
+    reserved the op's scratch for max_num_seqs x next_n decode rows. Its
+    launches stop there; past them they would grow the workspace beyond
+    vLLM's memory accounting (here the locked workspace would raise)."""
+    max_model_len, max_num_seqs, next_n = 1 << 19, 8, 6
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    config = create_vllm_config(
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
+        max_model_len=max_model_len,
+        block_size=64,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=2048,
+    )
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=next_n - 1
+    )
+    registry = JitWarmupRegistry(config)
+    with set_current_vllm_config(config), registry.activate():
+        k_cache = DeepseekV4IndexerCache(
+            WIDTH, torch.uint8, "indexer", config.cache_config
+        )
+        layer = RocmSparseMQAIndexer(
+            k_cache,
+            512,
+            HEAD_DIM,
+            max_model_len,
+            torch.empty(2048, 512, dtype=torch.int32, device=DEVICE),
+            torch.empty(2048, 2048, dtype=torch.int32, device=DEVICE),
+            CAND_BLOCK,
+        )
+    k_cache.bind_kv_cache(
+        torch.zeros(4, 1, 64, WIDTH, dtype=torch.uint8, device=DEVICE)
+    )
+    q, q_scale, weights, _ = _queries(2048)
+    with set_current_vllm_config(config), set_forward_context(None, config):
+        layer(torch.empty(2048, 1, device=DEVICE), (q, q_scale), None, weights)
+    lock_workspace()
+
+    registry.warmup()
+    rows = [n for _, n in _fused_topk]
+    assert rows and max(rows) == max_num_seqs * next_n
 
 
 @pytest.mark.parametrize("k", [TOPK, 512, 1024])

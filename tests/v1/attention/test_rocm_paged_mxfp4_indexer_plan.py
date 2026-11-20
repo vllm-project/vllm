@@ -19,7 +19,7 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm-only", allow_module_level=True)
 
 from tests.v1.attention.utils import create_vllm_config
-from vllm.config import SpeculativeConfig
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_paged_mxfp4_indexer
 from vllm.v1.attention.backends.mla.indexer import (
@@ -38,6 +38,7 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     split_prefill_chunks,
 )
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     RocmPagedMxfp4CacheLayout,
     _fill_topk_rows,
@@ -457,31 +458,6 @@ def test_decode_metadata_matches_torch_path(monkeypatch, cls, ratio, adaptive):
         assert out.decode.requires_padding == ref.decode.requires_padding
 
 
-class _FusedTopkOp:
-    """Stands in for aiter's fused MXFP4 indexer top-k module: its crossover
-    helper and launchers, recording what reaches them."""
-
-    MXFP4_INDEXER_MAX_ENTRIES = 1 << 20
-
-    def __init__(self, preferred: bool = True):
-        self.preferred = preferred
-        self.asked: list[tuple[int, int, bool]] = []
-        self.launches: list[tuple[str, int, int]] = []
-
-    def mxfp4_indexer_dense_preferred(self, max_ctx, rows, source=False):
-        self.asked.append((max_ctx, rows, source))
-        return self.preferred
-
-    def mxfp4_indexer_workspace_bytes(self, rows, max_ctx, layer="dense"):
-        return 0
-
-    def flydsl_mxfp4_indexer_topk(self, q, *args, max_ctx, **kwargs):
-        self.launches.append(("topk", q.shape[0], max_ctx))
-
-    def flydsl_mxfp4_indexer_candidate_topk(self, q, *args, max_ctx, **kwargs):
-        self.launches.append(("candidate", q.shape[0], max_ctx))
-
-
 @pytest.fixture
 def _fused_topk_cache():
     ops._aiter_fused_topk.cache_clear()
@@ -501,97 +477,18 @@ def test_fused_topk_needs_the_flag_and_aiters_op(
     assert ops._aiter_fused_topk() is None
 
 
-@pytest.mark.parametrize(
-    "kind, step, static, captured, want",
-    [
-        # Eager steps: bounded by the step's longest row, capped at the model's.
-        ("consumer", 70000, 131072, False, 70000),
-        ("consumer", 200000, 131072, False, 131072),
-        # The consumers lost to the gather chain below 16384 entries.
-        ("consumer", 9000, 131072, False, None),
-        # A captured launch replays at any length: the static bound, from
-        # 512K entries.
-        ("consumer", 9000, 1 << 20, True, 1 << 20),
-        ("consumer", 9000, 1 << 19, True, 1 << 19),
-        ("consumer", 200000, 1 << 18, True, None),
-        ("dense", 70000, 1 << 20, True, None),
-        ("source", 70000, 1 << 20, True, None),
-    ],
-)
-def test_fused_topk_bound(kind, step, static, captured, want):
-    op = _FusedTopkOp()
-    assert ops._fused_topk_max_ctx(op, kind, 18, step, static, captured) == want
-    assert op.asked == []
-
-
-@pytest.mark.parametrize("preferred", [True, False])
-@pytest.mark.parametrize("kind", ["dense", "source"])
-def test_fused_topk_dense_layers_follow_aiters_crossover(kind, preferred):
-    op = _FusedTopkOp(preferred)
-    got = ops._fused_topk_max_ctx(op, kind, 96, 300000, 524288, False)
-    assert got == (300000 if preferred else None)
-    assert op.asked == [(300000, 96, kind == "source")]
-
-
-def test_fused_topk_captures_only_launches_that_ran_eagerly(monkeypatch):
-    """Under capture the op would compile and load its kernels mid-capture
-    unless the same launch ran eagerly at the static bound before."""
-    monkeypatch.setattr(ops, "_fused_topk_compiled", set())
-    capturing = False
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
-    op = _FusedTopkOp()
-    rows, static = 12, 1 << 20
-    kv = torch.zeros(4, 64, 1, 68, dtype=torch.uint8)
-
-    def launch(kind, max_ctx, rows=rows):
-        q = torch.zeros(rows, 32, 64, dtype=torch.uint8)
-        cands = torch.zeros(rows, 2048, dtype=torch.int32)
-        return ops._launch_fused_topk(
-            op,
-            kind,
-            q,
-            *(None,) * 2,
-            kv,
-            *(None,) * 2,
-            None if kind == "dense" else cands,
-            None,
-            6,
-            max_ctx,
-            static,
-        )
-
-    capturing = True
-    assert not launch("consumer", static)
-    capturing = False
-    assert launch("consumer", static) and launch("dense", 65536)
-    capturing = True
-    assert launch("consumer", static)
-    # Not at the static bound, or another row count: never captured.
-    assert not launch("dense", 65536)
-    assert not launch("consumer", static, rows=18)
-    assert op.launches == [
-        ("candidate", rows, static),
-        ("topk", rows, 65536),
-        ("candidate", rows, static),
-    ]
-
-
-def test_fused_topk_tiers_cover_every_bound_below_the_static_one():
-    assert ops._fused_topk_tiers(131072) == [4096 << i for i in range(6)]
-    assert ops._fused_topk_tiers(100000) == [4096 << i for i in range(5)] + [100000]
-    assert ops._fused_topk_tiers(1000) == [1000]
-
-
-def test_fused_topk_reserves_its_largest_scratch(monkeypatch):
-    class Op(_FusedTopkOp):
-        def mxfp4_indexer_workspace_bytes(self, rows, max_ctx, layer="dense"):
-            return rows * min(max_ctx, 65536) * (layer == "source")
-
-    monkeypatch.setattr(ops, "_aiter_fused_topk", lambda: Op())
-    ops._fused_topk_workspace_bytes.cache_clear()
-    try:
-        assert ops._fused_topk_workspace_bytes("source", 96, 1 << 21) == 96 * 65536
-        assert ops._fused_topk_workspace_bytes("dense", 96, 1 << 21) == 0
-        assert ops._fused_topk_workspace_bytes(None, 96, 1 << 21) == 0
-    finally:
-        ops._fused_topk_workspace_bytes.cache_clear()
+def test_decode_rows_bound_outside_a_config_context():
+    """Kernel warm-up runs outside any config context: given the config, the
+    decode row bound is the one the profile run reserves scratch for
+    (max_num_seqs x next_n), not max_num_batched_tokens."""
+    config = create_vllm_config(
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
+        max_num_seqs=8,
+        max_num_batched_tokens=2048,
+    )
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=5
+    )
+    assert _max_decode_logits_rows(2048, config) == 48
+    with set_current_vllm_config(config):
+        assert _max_decode_logits_rows(2048) == 48

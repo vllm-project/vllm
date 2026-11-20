@@ -338,13 +338,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     _warmup_gemm_rs_ar()
 
-    if current_platform.is_rocm():
-        from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-            rocm_mxfp4_indexer_topk_warmup,
-        )
-
-        rocm_mxfp4_indexer_topk_warmup(worker)
-
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
         # to the shared JIT warmup infrastructure.
