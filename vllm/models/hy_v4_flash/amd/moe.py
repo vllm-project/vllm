@@ -8,8 +8,9 @@ from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.models.hy_v4.nvidia.moe import HYV4FeedForward, HYV4MoEFused
 from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
+
+from .hy_v4.moe import HYV4FeedForward, HYV4MoEFused
 
 
 class HYV4FlashFeedForward(HYV4FeedForward):

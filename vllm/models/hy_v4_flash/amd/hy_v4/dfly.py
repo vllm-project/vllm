@@ -33,12 +33,18 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
+from vllm.models.hy_v4.dfly_config import HYV4DFlySpeculatorConfig
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
 
-from ..dfly_config import HYV4DFlySpeculatorConfig
+from ..swa import FlashPackedSparseBackend
+from .attention import HYV4MLAAttention
 from .model import HYV4DecoderLayer
 from .moe import HYV4FeedForward
 from .mrope import set_token_rope
@@ -171,7 +177,28 @@ class HYV4DFlyFeedForward(HYV4FeedForward):
         self.act_fn = mlp.act_fn
 
 
+class HYV4DFlyAttention(HYV4MLAAttention):
+    """Draft attention on `FlashPackedSparseBackend`.
+
+    Draft top-k rows are not front-packed, which the stock AITER sparse path
+    requires.
+    """
+
+    def _resolve_sink_backend(
+        self, kv_cache_dtype: str
+    ) -> type[AttentionBackend] | None:
+        backend = super()._resolve_sink_backend(kv_cache_dtype)
+        if backend is not ROCMAiterMLASparseBackend:
+            name = backend.get_name() if backend is not None else None
+            raise NotImplementedError(
+                "HYV4 DFly on ROCm requires the ROCM_AITER_MLA_SPARSE draft "
+                f"backend, got {name}"
+            )
+        return FlashPackedSparseBackend
+
+
 class HYV4DFlyDecoderLayer(HYV4DecoderLayer):
+    attention_cls: type[HYV4MLAAttention] = HYV4DFlyAttention
     feed_forward_cls: type[HYV4FeedForward] = HYV4DFlyFeedForward
 
 
@@ -248,8 +275,8 @@ class HYV4DFlyModel(nn.Module):
         for layer in self.layers:
             attn = layer.self_attn
             if (
-                attn.learnable_sink
-                and not attn.mla_attn.get_attn_backend().supports_sink()
+                not attn.learnable_sink
+                or attn.mla_attn.get_attn_backend() is not FlashPackedSparseBackend
             ):
                 raise ValueError("DFly requires a backend that applies learnable sinks")
             attn.use_hpc_gated_mla = False
@@ -335,8 +362,8 @@ class HYV4DFlyForCausalLM(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        if not current_platform.is_cuda():
-            raise NotImplementedError("HYV4 DFly currently requires NVIDIA CUDA")
+        if not current_platform.is_rocm():
+            raise NotImplementedError("The HYV4 DFly AMD implementation requires ROCm")
         self.model = HYV4DFlyModel(vllm_config, maybe_prefix(prefix, "model"))
         self.config = self.model.config
         self.has_own_embed_tokens = False

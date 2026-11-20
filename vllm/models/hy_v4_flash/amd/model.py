@@ -19,15 +19,15 @@ from vllm.models.hy_v4.amd.triton_ihc import (
     triton_ihc_post_pre_rms_norm,
     triton_ihc_supported,
 )
-from vllm.models.hy_v4.nvidia.model import (
-    HYV4DecoderLayer,
-    HYV4ForCausalLM,
-    HYV4Model,
-)
 from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from .hy_v4.model import (
+    HYV4DecoderLayer,
+    HYV4ForCausalLM,
+    HYV4Model,
+)
 from .moe import HYV4FlashFeedForward, HYV4FlashMoE
 
 _EXPERT_WEIGHT = re.compile(

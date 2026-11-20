@@ -17,10 +17,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
-from vllm.models.hy_v4.nvidia.attention import HYV4MLAAttention
 from vllm.models.hy_v4_flash.configs import SLIDING_ATTENTION
 
 from .compressed_indexer import FlashCompressedIndexer
+from .hy_v4.attention import HYV4MLAAttention
 from .swa import FlashSparseBackend, FlashSWABackend, FlashWindowIndexer
 
 

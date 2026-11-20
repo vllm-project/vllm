@@ -21,7 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only HY V4 model compatible with HuggingFace weights (NVIDIA)."""
+"""Inference-only HY V4 model compatible with HuggingFace weights (ROCm)."""
 
 import typing
 from collections.abc import Callable, Iterable, MutableSequence, Sequence
@@ -68,7 +68,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.hy_v4.nvidia.mrope import set_token_rope
+from vllm.models.hy_v4.amd.hc import HYV4HCHeadLayer, HYV4HCLayer
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -77,8 +77,8 @@ from .attention import (
     is_skip_topk_indexer_weight,
     sparse_layer_ids,
 )
-from .hc import HYV4HCHeadLayer, HYV4HCLayer
 from .moe import HYV4FeedForward, HYV4MoEFused
+from .mrope import set_token_rope
 
 logger = init_logger(__name__)
 
@@ -104,6 +104,7 @@ class HYV4DecoderLayer(nn.Module):
     otherwise it uses the standard single-stream residual.
     """
 
+    attention_cls = HYV4MLAAttention
     feed_forward_cls = HYV4FeedForward
 
     def __init__(
@@ -125,7 +126,7 @@ class HYV4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        self.self_attn = HYV4MLAAttention(
+        self.self_attn = self.attention_cls(
             vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,
