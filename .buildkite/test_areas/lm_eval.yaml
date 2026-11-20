@@ -431,6 +431,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval ReplaySSM"
   key: lm-eval-replayssm-2xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   optional: true
@@ -456,6 +457,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-replayssm.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval ReplaySSM"
       dind: false
       device: mi355_2
@@ -476,6 +478,7 @@ steps:
       - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
       - vllm/model_executor/layers/mamba/ops/replayssm_config.py
       - vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_output_only.py
+      - vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_spec.py
       - vllm/model_executor/warmup/kernel_warmup.py
       - vllm/model_executor/warmup/replayssm_warmup.py
       - vllm/v1/attention/backends/mamba_attn.py
@@ -571,7 +574,6 @@ steps:
       - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
-      - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_next.py
       - vllm/model_executor/models/qwen3_next_mtp.py
