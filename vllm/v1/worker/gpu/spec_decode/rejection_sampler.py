@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Iterator
+from types import ModuleType
 from typing import Any
 
 import numpy as np
@@ -8,6 +9,8 @@ import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -23,6 +26,8 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+
+logger = init_logger(__name__)
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -187,6 +192,83 @@ class RejectionSampler:
         elif rejection_sample_method == "fly":
             assert spec_config.fly_window_size is not None
             self.fly_window_size = spec_config.fly_window_size
+        self.flydsl_rejection_sampler = self._init_flydsl_rejection_sampler(device)
+
+    def _init_flydsl_rejection_sampler(self, device: torch.device) -> ModuleType | None:
+        """The AITER FlyDSL rejection sampler, if enabled and this config's
+        verification can use it: the standard or synthetic method with no
+        watermark, FLy window, adaptive verification, fp64 Gumbel, sampling
+        mask, processed logprobs or trace replay. Which steps it takes is
+        decided per call.
+        """
+        if not current_platform.is_rocm():
+            return None
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        flydsl = rocm_aiter_ops.flydsl_rejection_sampler()
+        sampler = self.sampler
+        if (
+            flydsl is None
+            or self.num_speculative_steps != flydsl.REJECTION_SAMPLE_NUM_SPEC
+            or sampler.sampling_states.vocab_size != flydsl.REJECTION_SAMPLE_VOCAB
+            or self.use_block_verification
+            or self.fly_window_size > 0
+            or self.watermark_key is not None
+            or self.enable_adaptive_verification
+            or sampler.use_fp64_gumbel
+            or sampler.return_sampling_mask
+            or sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+            or sampler.trace_replay_state is not None
+        ):
+            return None
+        # Compiles the kernels and allocates the workspace before any capture.
+        flydsl.warmup_rejection_sample_standard(device)
+        logger.info_once("Using the AITER FlyDSL rejection sampler.")
+        return flydsl
+
+    def _flydsl_rejection_sample(
+        self,
+        logits: torch.Tensor,
+        draft_logits: DraftLogitsCache | None,
+        draft_sampled: torch.Tensor,
+        pos: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """`(sampled, num_sampled)` from the AITER FlyDSL rejection sampler, or
+        None if it does not take this step.
+
+        The kernel divides the raw bf16 logits by the temperature itself, so it
+        takes only steps whose requests need no other logits processing. It
+        also needs the replicated draft logits and every request to verify all
+        its drafts: `logits` must hold `num_reqs * (num_speculative_steps + 1)`
+        rows, and no request has more. The checks read host state only.
+        """
+        flydsl = self.flydsl_rejection_sampler
+        assert flydsl is not None
+        if (
+            logits.dtype != torch.bfloat16
+            or draft_logits is None
+            or draft_logits.row_mapping is not None
+            or np.any(self.sampler.may_mask_logits[idx_mapping_np])
+            or not flydsl.rejection_sample_standard_supported(
+                logits,
+                draft_logits.values,
+                idx_mapping.shape[0],
+                self.num_speculative_steps,
+            )
+        ):
+            return None
+        return flydsl.flydsl_rejection_sample_standard(
+            logits,
+            draft_logits.values,
+            draft_sampled.to(torch.int64),
+            pos.to(torch.int64),
+            idx_mapping.to(torch.int32),
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.seeds.gpu,
+            synthetic_rates=self.synthetic_conditional_rates,
+        )
 
     def _get_logprobs_tensors(
         self,
@@ -273,6 +355,13 @@ class RejectionSampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.flydsl_rejection_sampler is not None:
+            flydsl_sampled = self._flydsl_rejection_sample(
+                logits, draft_logits, draft_sampled, pos, idx_mapping, idx_mapping_np
+            )
+            if flydsl_sampled is not None:
+                return logits, *flydsl_sampled
+
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,

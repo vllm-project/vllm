@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
+    VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1454,6 +1455,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
     "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
+    ),
+    # Verify speculative drafts with the AITER FlyDSL rejection sampler
+    # (requires VLLM_ROCM_USE_AITER=1). It takes the standard and synthetic
+    # methods for 5 drafts per request over a 129280-token vocabulary with a
+    # replicated bf16 draft-logits cache (DeepSeek-V4.1 DSpark); other steps,
+    # requests with top-k/top-p/min-p, penalties or logits processors, and
+    # processed logprobs stay on the Triton path. gfx950 only. Disabled by
+    # default.
+    "VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
