@@ -1246,7 +1246,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and alibi_slopes is None
             and sinks is None
             and not logits_soft_cap
-            and get_cdna_version() == 4
+            and get_cdna_version() in (3, 4)
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
         if self.use_fp8_extend_query:
@@ -1258,7 +1258,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             logger.info_once(
                 "AITER FA: use_prefill_query_quantization is not used for "
                 "layers with a sliding window, ALiBi, sinks or soft cap; it "
-                "needs gfx950 and an FP8 e4m3 KV cache in the default layout."
+                "needs gfx942 or gfx950 and an FP8 KV cache in the default layout."
             )
 
         if attn_type != AttentionType.DECODER:

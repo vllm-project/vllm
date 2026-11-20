@@ -1039,7 +1039,7 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.skipif(get_cdna_version() != 4, reason="gfx950 gluon FP8 path only")
+@pytest.mark.skipif(get_cdna_version() not in (3, 4), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("num_heads", NUM_HEADS_PAIRS)
 @pytest.mark.parametrize("q_scale", [1.0, 4.0])
@@ -1201,7 +1201,7 @@ def test_aiter_fa_fp8_query_gate(monkeypatch, case, expected):
     from vllm.config import set_current_vllm_config
     from vllm.v1.attention.backends import rocm_aiter_fa
 
-    monkeypatch.setattr(rocm_aiter_fa, "get_cdna_version", lambda: 4)
+    monkeypatch.setattr(rocm_aiter_fa, "get_cdna_version", lambda: 3)
     monkeypatch.setattr(
         rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", case == "shuffled_kv_layout"
     )
