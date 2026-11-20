@@ -336,8 +336,8 @@ impl RequestMetricsTracker {
             self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
         let e2e_latency_seconds = received_at - self.arrival_time;
         let decode_time_seconds = diff_or_zero(self.last_token_ts, self.first_token_ts);
-        // TPOT needs a decode interval, so requests with fewer than two
-        // generated tokens (e.g. P/D prefill with max_tokens=1) have none.
+        // TPOT needs a decode interval.
+        // A request with fewer than two generated tokens (P/D prefill, max_tokens=1) has none.
         let time_per_output_token_seconds = (self.num_generation_tokens > 1).then(|| {
             diff_or_zero(self.last_token_ts, self.first_token_ts)
                 / (self.num_generation_tokens - 1) as f64
