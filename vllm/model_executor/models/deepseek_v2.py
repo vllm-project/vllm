@@ -1809,6 +1809,10 @@ class DeepseekV2ForCausalLM(
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
     model_cls = DeepseekV2Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

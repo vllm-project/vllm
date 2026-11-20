@@ -14,7 +14,14 @@ from vllm.lora.utils import (
     parse_fine_tuned_lora_name,
     replace_submodule,
 )
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
+
+
+def test_deepseek_v2_lora_supports_embeddings_and_lm_head():
+    embedding_modules = DeepseekV2ForCausalLM.embedding_modules
+    assert embedding_modules.get("embed_tokens") == "input_embeddings"
+    assert embedding_modules.get("lm_head") == "output_embeddings"
 
 
 class LoRANameParserTestConfig(NamedTuple):
