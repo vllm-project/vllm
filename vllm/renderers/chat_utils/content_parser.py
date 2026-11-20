@@ -175,7 +175,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 _ENABLE_PROMPT_EMBEDS_ERROR, parameter="prompt_embeds"
             )
 
-        tensor = safe_load_prompt_embeds(self.model_config, data.encode())
+        tensor = safe_load_prompt_embeds(self.model_config, data)
         self._tracker.add("prompt_embeds", (tensor, None))
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
@@ -369,16 +369,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             )
 
         self._tracker.add(
-            "prompt_embeds", partial(self._load_prompt_embeds_async, data.encode())
+            "prompt_embeds", partial(self._load_prompt_embeds_async, data)
         )
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
-    async def _load_prompt_embeds_async(
-        self, data_bytes: bytes
-    ) -> tuple[torch.Tensor, None]:
+    async def _load_prompt_embeds_async(self, data: str) -> tuple[torch.Tensor, None]:
         # Second tuple slot fills the tracker's generic `(item, uuid | None)`
         # contract. prompt_embeds has no UUID concept, so it's always `None`.
-        tensor = await safe_load_prompt_embeds_async(self.model_config, data_bytes)
+        tensor = await safe_load_prompt_embeds_async(self.model_config, data)
         return tensor, None
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):

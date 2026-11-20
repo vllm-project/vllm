@@ -141,6 +141,8 @@ class P2PSourceInfo:
     kv_request_id: str
     peer_id: str
     do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
+    # Mutable per-request state; retained across decoder preemptions.
+    pd_fetch_submitted: bool = False
 
 
 @dataclass(slots=True)
@@ -200,7 +202,7 @@ def _annotate_req_context(req_context: ReqContext) -> None:
         req_context.set_state(dest)
 
 
-@dataclass
+@dataclass(slots=True)
 class _UnboundStoreBatch:
     """A submit_store batch parked at the manager before any peer has fetched.
 
@@ -432,7 +434,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # key) entry and returns RETRY; flush_pending_lookups()
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
-        # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
         # Until the peer acks the handshake, prefill locally rather than wait
         # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
         if source.do_probe:
@@ -446,8 +447,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 return LookupResult.MISS
             return LookupResult.RETRY
 
-        # PD consumer (we are the decoder): all kv blocks should be on the
-        # prefiller side. Return HIT immediately.
+        # PD stores bind to round 0. A later fetch after preemption or partial
+        # promotion cannot be supplied and would wait out the PD load timeout.
+        if source.pd_fetch_submitted:
+            return LookupResult.MISS
         return LookupResult.HIT
 
     @override
@@ -663,6 +666,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.ready,
         )
         session.request_blocks(job_id, kv_request_id, keys, block_ids)
+        if not source.do_probe:
+            source.pd_fetch_submitted = True
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
