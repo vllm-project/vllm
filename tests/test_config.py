@@ -2290,6 +2290,11 @@ _PEER_GROUP = {
 )
 def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        staticmethod(lambda device_id=0: DeviceCapability(8, 9)),
+    )
     config = ParallelConfig(
         **({"data_parallel_size": 2} | parallel), distributed_executor_backend="mp"
     )
