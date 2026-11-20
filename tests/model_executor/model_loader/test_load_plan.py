@@ -32,6 +32,7 @@ from vllm.model_executor.model_loader.reload import (
     plan_loads,
     start_reload,
 )
+from vllm.model_executor.model_loader.reload.direct import track_loaded_params
 from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -68,6 +69,7 @@ class _Toy(torch.nn.Module):
 
     def load_weights(self, weights):
         params = dict(self.named_parameters(remove_duplicate=False))
+        loaded = set()
         for name, weight in weights:
             if name in self.skipped:
                 continue
@@ -75,9 +77,12 @@ class _Toy(torch.nn.Module):
                 target, shard = self.stacked[name]
                 param = params[target]
                 param.weight_loader(param, weight, shard)
+                loaded.add(target)
                 continue
             param = params[name]
             getattr(param, "weight_loader", default_weight_loader)(param, weight)
+            loaded.add(name)
+        return loaded
 
 
 def _checkpoint(shapes: dict, seed: int) -> dict[str, torch.Tensor]:
@@ -191,12 +196,14 @@ _LINEAR_SHAPES = {
 }
 
 
-def _linear_model():
+def _linear_model(padding_size=0):
     def make():
         model = _Toy()
         kw = dict(bias=False, params_dtype=BF16)
         model.qkv_proj = QKVParallelLinear(8, 2, 4, 2, **kw)
-        model.gate_up_proj = MergedColumnParallelLinear(8, [6, 6], **kw)
+        model.gate_up_proj = MergedColumnParallelLinear(
+            8, [6, 6], padding_size=padding_size, **kw
+        )
         model.down_proj = RowParallelLinear(6, 8, **kw)
         model.stacked = {
             "q_proj.weight": ("qkv_proj.weight", "q"),
@@ -208,6 +215,29 @@ def _linear_model():
         return model
 
     return make
+
+
+def test_padded_merged_reuses_load_plan_without_preserving_stale_padding(
+    default_vllm_config, dist_init
+):
+    make = _linear_model(padding_size=3)
+    model = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
+    address = model.gate_up_proj.weight.data_ptr()
+    plan = None
+    for seed in (1, 2):
+        with torch.no_grad():
+            model.gate_up_proj.weight[-3:].fill_(float("nan"))
+        start_reload(model)
+        if plan is None:
+            plan = _plan(model, _LINEAR_SHAPES)
+            assert plan.get_dest("gate_proj.weight") is not None
+        weights = _checkpoint(_LINEAR_SHAPES, seed=seed)
+        _planned_reload(model, plan, weights)
+        expected = _cold_start(make, weights)
+        torch.testing.assert_close(
+            model.gate_up_proj.weight, expected.gate_up_proj.weight, rtol=0, atol=0
+        )
+        assert model.gate_up_proj.weight.data_ptr() == address
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -292,6 +322,23 @@ def _toy_model():
     model.strided.weight = _param(4, 3, loader=_step_loader)
     model.skipped = frozenset({"lm_head.weight"})
     return model
+
+
+def test_planned_update_is_checked_for_completeness():
+    """Names the plan copies count as loaded; one left out fails at finish."""
+    model = _toy_model()
+    track_loaded_params(model)  # as a direct-mode cold start does
+    model.load_weights(_checkpoint(_TOY_SHAPES, seed=0).items())
+    process_weights_after_loading(model, _MODEL_CONFIG, _CPU)
+    start_reload(model)
+    plan = _plan(model, _TOY_SHAPES)
+    new = _checkpoint(_TOY_SHAPES, seed=1)
+    _planned_reload(model, plan, new)
+    assert plan.get_dest("proj.weight")  # a direct name
+    start_reload(model)
+    partial = {n: t for n, t in new.items() if n != "proj.weight"}
+    with pytest.raises(RuntimeError, match=r"did not load 1 .*proj\.weight"):
+        _planned_reload(model, plan, partial)
 
 
 def test_toy_loaders():
@@ -437,7 +484,7 @@ def test_fallbacks(loader, reason):
 def test_noop_to_and_constant_fill_stay_direct():
     """A constant write into a checkpoint tensor (padding, as
     `VocabParallelEmbedding` fills) runs while planning and stays out of
-    the plan: post-load processing owns padding."""
+    the plan: replays don't redo it."""
 
     def loader(param, loaded):
         param[4:].fill_(1)

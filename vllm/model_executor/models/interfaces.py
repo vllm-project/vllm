@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheLayerConfig
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -691,8 +691,8 @@ class SupportsKVCacheGrouping(Protocol):
     def get_kv_cache_groups(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: dict[str, "KVCacheSpec"],
-    ) -> list["KVCacheGroupSpec"]:
+        layer_configs: dict[str, "KVCacheLayerConfig"],
+    ) -> list["KVCacheGroup"]:
         """Split the model's layers into logical KV cache groups."""
         ...
 
@@ -1923,7 +1923,15 @@ class SupportsEncoderCudaGraph(Protocol):
         `encoder_cudagraph_max_vision_items_per_batch` are not explicitly
         specified by the user.
         """
-        ...
+        # Min: about one small image (224x224, patch_size=14, 2x2 merge ->
+        # 64 tokens).
+        return (
+            64,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.max_model_len,
+            ),
+        )
 
     def get_encoder_cudagraph_item_specs(
         self,
@@ -2030,7 +2038,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.

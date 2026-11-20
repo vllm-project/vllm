@@ -5,15 +5,13 @@ import gc
 import random
 import string
 import sys
-import weakref
 
 import pytest
 import torch
 from PIL import Image
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -98,31 +96,24 @@ def _format_mib(num_bytes: int | None) -> str:
 
 
 @pytest.fixture(scope="function")
-def llm(monkeypatch):
+def llm(vllm_runner, monkeypatch):
+    # In process, so the tests can measure memory and read the worker's state.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    extra_kwargs = {}
+    if current_platform.is_rocm():
+        extra_kwargs["attention_backend"] = "TRITON_ATTN"
 
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm_kwargs = dict(
-        model=maybe_model_redirect(MODEL_NAME),
+    with vllm_runner(
+        maybe_model_redirect(MODEL_NAME),
         enforce_eager=True,
+        enable_chunked_prefill=None,
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=REQUESTS_PER_ROUND,
         limit_mm_per_prompt={"image": 1},
-        seed=0,
-        disable_log_stats=True,
         gpu_memory_utilization=0.8,
-    )
-    if current_platform.is_rocm():
-        llm_kwargs["attention_backend"] = "TRITON_ATTN"
-
-    llm = LLM(**llm_kwargs)
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        **extra_kwargs,
+    ) as runner:
+        yield runner.llm
 
 
 @pytest.mark.core_model

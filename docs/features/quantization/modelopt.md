@@ -24,7 +24,8 @@ following `quantization.quant_algo` values:
   activations (use `quantization="modelopt_int8"`): a symmetric int8 `weight`
   and a `weight_scale` per `group_size` input elements (for example 16 or 32).
   `group_size` is required. vLLM serves these layers with its mixed-precision
-  (WNA16) kernels, such as Marlin and Humming. MoE experts are not supported.
+  (WNA16) kernels, such as Marlin and Humming on NVIDIA and Triton on ROCm.
+  MoE experts are not supported.
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
   (use `quantization="modelopt_mixed"`). Each layer may use any format above;
   `INT8_PB_WO` layers take their own `group_size`. A token embedding marked
@@ -70,9 +71,13 @@ optimization for comparisons.
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
+FP8 weights get random codes across the FP8 range, as checkpoints use it, so
+compute-bound steps draw realistic power (a narrow range runs faster than real
+weights on power-capped GPUs).
 ModelOpt NVFP4 MoE layers initialize positive quantization scales with matching
 gate/up global scales, including for FlashInfer MegaMoE
-(`--moe-backend flashinfer_moe_ep_cutedsl`).
+(`--moe-backend flashinfer_moe_ep_cutedsl`). On SM107 GPUs, see
+[FlashInfer MegaMoE on SM107](../../serving/expert_parallel_deployment.md#flashinfer-megamoe-on-sm107).
 Muse Spark's NVIDIA `deep_gemm_mega_moe` backend also supports dummy loading:
 it initializes valid NVFP4 scales and finalizes its expert weights and residual
 constants before the first forward. Enable expert parallelism for this backend.

@@ -8,6 +8,7 @@ from dataclasses import dataclass, fields
 from typing import Annotated, Any, ClassVar, Literal, TypedDict, cast
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -97,6 +98,7 @@ from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
+    _RootConfig,
     get_fp8_padded_hidden_size,
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
@@ -449,6 +451,9 @@ class PixtralEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "merge_indices",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
+            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
+                tower.attn_backend, "cu_seqlens"
+            ),
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -566,17 +571,17 @@ class PixtralEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         features = self.encoder_cudagraph_vision_tower.forward_packed(
-            inputs["patches"],
-            inputs["positions"],
-            inputs["cu_seqlens"],
-            inputs["max_seqlen"],
-            inputs.get("sequence_lengths"),
+            values["patches"],
+            values["positions"],
+            values["cu_seqlens"],
+            values["max_seqlen"],
+            values.get("sequence_lengths"),
         )
-        return self.project_packed_image_features(features, inputs.get("merge_indices"))
+        return self.project_packed_image_features(features, values.get("merge_indices"))
 
     def encoder_eager_forward(
         self,
@@ -601,6 +606,29 @@ class PixtralForConditionalGeneration(
     PixtralEncoderCudaGraphMixin,
 ):
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wq(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.q_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wk(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.k_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wv(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.v_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wo(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.o_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w1(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.feed_forward.gate_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w2(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.feed_forward.down_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w3(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.feed_forward.up_proj",
+        },
         orig_to_new_prefix={
             "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_encoder.",
@@ -649,6 +677,10 @@ class PixtralForConditionalGeneration(
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+        # a text model with its own Model Runner V2 state (e.g. Mistral Large 4's
+        # specialized decode) keeps it under this wrapper
+        if hasattr(self.language_model, "get_model_state_cls"):
+            self.get_model_state_cls = self.language_model.get_model_state_cls
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_encoder = VisionTransformer(
@@ -929,7 +961,7 @@ class PixtralForConditionalGeneration(
 
 
 # Vision encoder
-@dataclass
+@dataclass(slots=True)
 class VisionEncoderArgs:
     hidden_size: int
     num_channels: int
@@ -1517,6 +1549,15 @@ def get_sub_grids(
 
 
 class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
+    def __init__(
+        self,
+        hf_config: _RootConfig[PixtralVisionConfig],
+        image_size: int | None = None,
+    ) -> None:
+        super().__init__(hf_config)
+        # The image processor's `size["longest_edge"]`, if given
+        self.image_size = image_size or self.vision_config.image_size
+
     def get_num_image_tokens(
         self,
         *,
@@ -1530,7 +1571,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return ncols * nrows
 
     def get_image_size(self) -> int:
-        return self.vision_config.image_size
+        return self.image_size
 
     def get_patch_size(self) -> int:
         # spatial_merge_size is needed for Mistral3

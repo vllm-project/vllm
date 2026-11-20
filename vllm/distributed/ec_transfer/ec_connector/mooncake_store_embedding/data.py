@@ -17,7 +17,7 @@ def make_embedding_key(namespace: str, identifier: str) -> str:
     return f"{namespace}@id:{identifier}"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TensorSpec:
     """Contiguous output contract used by the Encoder and Store codec."""
 

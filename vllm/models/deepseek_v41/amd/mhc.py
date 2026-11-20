@@ -4,12 +4,17 @@
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.mhc.triton import mhc_post_collapse_rms_norm_triton
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
     MHCPreDelayedOp,
+    _aiter_mhc_supported,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.models.deepseek_v4.amd.model import attach_mxfp8_input
 from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.torch_utils import aux_stream
 
@@ -39,6 +44,22 @@ class MHCOverlapStream:
         self.stream = stream
         self._fork_event = torch.cuda.Event()
         self._join_event = torch.cuda.Event()
+        self._mega_mhc_ready = False
+
+    def prepare_mega_mhc(self, hidden_size: int, device: torch.device) -> None:
+        """Allocate AITER Mega-MHC's per-stream scratch on the side stream.
+
+        The gates run there only inside FULL graph capture, which cannot
+        allocate it; sizing it for `MHC_OVERLAP_MAX_TOKENS` covers every
+        batch the overlap captures.
+        """
+        if self._mega_mhc_ready:
+            return
+        with torch.cuda.stream(self.stream):
+            rocm_aiter_ops.mega_mhc_prepare_stream(
+                MHC_OVERLAP_MAX_TOKENS, hidden_size, device
+            )
+        self._mega_mhc_ready = True
 
     def fork(self) -> None:
         self._fork_event.record()
@@ -67,6 +88,7 @@ def mhc_pre_delayed_overlap(
     sublayer_out: torch.Tensor | None = None,
     post_layer_mix: torch.Tensor | None = None,
     comb_res_mix: torch.Tensor | None = None,
+    fn_packed: torch.Tensor | None = None,
     *,
     overlap: MHCOverlapStream,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -106,6 +128,7 @@ def mhc_pre_delayed_overlap(
             sublayer_out=sublayer_out,
             post_layer_mix=post_layer_mix,
             comb_res_mix=comb_res_mix,
+            fn_packed=fn_packed,
         )
     residual, layer_input = mhc_post_collapse_rms_norm_triton(
         residual,
@@ -132,9 +155,99 @@ def mhc_pre_delayed_overlap(
             pre_mix=pre_mix,
             norm_weight=norm_weight,
             norm_eps=norm_eps,
+            fn_packed=fn_packed,
         )
     for tensor in (residual, pre_mix):
         tensor.record_stream(stream)
     for tensor in (post_mix, comb_mix, next_pre_mix):
         tensor.record_stream(main)
     return residual, post_mix, comb_mix, layer_input, next_pre_mix
+
+
+def mhc_pre_delayed_mxfp8(
+    pre_delayed: MHCPreDelayedOp,
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None = None,
+    x: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+    sublayer_out: torch.Tensor | None = None,
+    post_layer_mix: torch.Tensor | None = None,
+    comb_res_mix: torch.Tensor | None = None,
+    fn_packed: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`pre_delayed` whose Mega-MHC seam also writes the layer input as MXFP8.
+
+    The sublayer's first GEMM then reads that copy (see `attach_mxfp8_input`)
+    instead of quantizing the bf16 layer input in a separate launch. Seams
+    `pre_delayed` would not run on Mega-MHC are left to it.
+    """
+    if (
+        not HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
+        or x is not None
+        or norm_weight is None
+        or fn_packed is None
+        or norm_weight.dtype != torch.bfloat16
+        or not _aiter_mhc_supported(residual, norm_weight, supports_norm=True)
+    ):
+        return pre_delayed(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix=pre_mix,
+            x=x,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            sublayer_out=sublayer_out,
+            post_layer_mix=post_layer_mix,
+            comb_res_mix=comb_res_mix,
+            fn_packed=fn_packed,
+        )
+    residual_out = torch.empty_like(residual) if sublayer_out is not None else None
+    post_mix, comb_mix, layer_input, next_pre_mix, values, scales = (
+        rocm_aiter_ops.mhc_mega_post_pre_delayed_rms_norm_mxfp8(
+            residual,
+            fn_packed,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix,
+            sublayer_out,
+            post_layer_mix,
+            comb_res_mix,
+            norm_weight,
+            norm_eps,
+            residual_out,
+        )
+    )
+    attach_mxfp8_input(
+        layer_input,
+        QuantizedActivation(
+            values, scales, layer_input.dtype, layer_input.shape, kMxfp8Dynamic
+        ),
+    )
+    return (
+        residual if residual_out is None else residual_out,
+        post_mix,
+        comb_mix,
+        layer_input,
+        next_pre_mix,
+    )

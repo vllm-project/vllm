@@ -139,7 +139,6 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
     monkeypatch.setenv("VLLM_MLA_DISABLE", "1")
     with vllm_runner(
         model_name="Qwen/Qwen3.5-0.8B-Base",
-        trust_remote_code=True,
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
         max_model_len=2048,
