@@ -80,10 +80,11 @@ def test_chatglm3_lora(chatglm3_lora_files):
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 @multi_gpu_test(num_gpus=4)
-def test_chatglm3_lora_tp4(chatglm3_lora_files):
-    llm = vllm.LLM(
+def test_chatglm3_lora_tp4(chatglm3_lora_files, vllm_runner):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=512,
+        enable_chunked_prefill=None,
         enable_lora=True,
         max_loras=2,
         max_lora_rank=64,
@@ -94,14 +95,13 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
         ),
-    )
-
-    output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i] == EXPECTED_LORA_OUTPUT[i]
-    output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+    ) as runner:
+        output1 = do_sample(runner.llm, chatglm3_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output1[i] == EXPECTED_LORA_OUTPUT[i]
+        output2 = do_sample(runner.llm, chatglm3_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
 @multi_gpu_test(num_gpus=4)
