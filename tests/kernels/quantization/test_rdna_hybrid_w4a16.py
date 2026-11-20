@@ -36,6 +36,7 @@ LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
 MEDIUM_SKINNY_LIMIT_ELEMENTS = hybrid_module.MEDIUM_SKINNY_LIMIT_ELEMENTS
 MIN_DENSE_M = hybrid_module.MIN_DENSE_M
 triton_w4a16_skinny_fmt_gemm = hybrid_module.triton_w4a16_skinny_fmt_gemm
+_select_skinny_gfx1151_config = hybrid_module._select_skinny_gfx1151_config
 
 
 # ---------------------------------------------------------------------------
@@ -300,10 +301,15 @@ def _make_prefill_case(M, K, N, G, dtype, has_zp):
 @pytest.mark.parametrize(
     "M,K,N,G",
     [
+        (16, 512, 1024, 128),
         (17, 256, 512, 32),
         (32, 512, 256, 64),
         (33, 512, 512, 128),
+        (48, 256, 1024, 32),
         (64, 1024, 256, 128),
+        (80, 256, 512, 32),
+        (96, 1024, 256, 32),
+        (96, 1024, 256, 128),
         (129, 256, 512, 32),
         (160, 256, 1024, 64),
         (256, 512, 512, 128),
@@ -338,6 +344,31 @@ def test_triton_prefill_gemm_matches_reference(dtype, zp_mode, M, K, N, G):
     )
     ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp_raw, G, bias=None)
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+@pytest.mark.parametrize(
+    "M,K,N,G,expected",
+    [
+        # Wide N at 33..64: the ladder's (64, 64, 32, 4) ran at ~30 GB/s.
+        (48, 5120, 34816, 128, (64, 32, 64, 2)),
+        (48, 5120, 34816, 32, (64, 32, 32, 4)),
+        # A g32 tall-K or non-wide shape keeps the ladder tile.
+        (48, 1024, 256, 32, (64, 64, 32, 4)),
+        # The decode selector starts at M=9; M=8 still keeps the override.
+        (8, 4096, 6144, 128, (128, 64, 128, 8)),
+        # M=32 keeps the ladder rather than taking a 33..64 decode tile.
+        (32, 5120, 34816, 128, (32, 32, 128, 4)),
+        # An overridden (prefill-tuned) shape keeps its override only above 64.
+        (16, 4096, 6144, 128, (16, 32, 128, 2)),
+        (96, 4096, 6144, 128, (128, 64, 128, 8)),
+        # Tall K at 65..128: the ladder's (64, 16, 64, 1) ran at ~10 GB/s on g32.
+        (96, 17408, 5120, 32, (128, 128, 32, 8)),
+    ],
+)
+def test_gfx1151_bf16_decode_tile_selection(M, K, N, G, expected):
+    """bf16 decode-sized M on gfx1151 picks the swept tiles."""
+    tile = _select_skinny_gfx1151_config(M, N, K, G, torch.bfloat16)[:4]
+    assert tile == expected
 
 
 # ---------------------------------------------------------------------------

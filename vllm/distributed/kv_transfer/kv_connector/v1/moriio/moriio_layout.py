@@ -732,6 +732,72 @@ def _element_runs(
     ]
 
 
+class Nvfp4PageSplit(NamedTuple):
+    """Bytes per token of one KV head in the data and scale parts of a side."""
+
+    data_bytes: int
+    scale_bytes: int
+
+
+def get_nvfp4_page_split(spec: KVCacheSpec | None) -> Nvfp4PageSplit | None:
+    """How a packed NVFP4 page splits its K/V sides, None for other caches.
+
+    The page is `[K side | V side]`, and each side stores every KV head's FP4
+    data (two values a byte) before every KV head's block scales (one byte per
+    16 values). Its `2 * num_kv_heads` head slots of data + scale bytes are
+    therefore not per-head rows: a KV head is one data run and one scale run
+    per side.
+    """
+    if not (
+        isinstance(spec, AttentionSpec)
+        and spec.kv_quant_mode.is_nvfp4
+        and spec.state_content_bytes is not None
+    ):
+        return None
+    split = Nvfp4PageSplit(spec.head_size // 2, spec.head_size // 16)
+    if (
+        spec.kv_head_major_slots
+        or spec.head_size_v != spec.head_size
+        or spec.num_heads != 2 * spec.num_kv_heads
+        or spec.state_content_bytes != sum(split)
+    ):
+        raise ValueError(
+            "MoRIIO cannot slice KV heads of this packed NVFP4 page: "
+            f"num_head_slots={spec.num_head_slots}, "
+            f"state_content_bytes={spec.state_content_bytes}, "
+            f"kv_head_major_slots={spec.kv_head_major_slots}"
+        )
+    return split
+
+
+def _nvfp4_head_runs(
+    layout: HeadLayout, split: Nvfp4PageSplit, first_head: int, num_heads: int
+) -> list[tuple[int, int]]:
+    """(offset in block, size) runs of KV heads of a split NVFP4 page.
+
+    A data run and a scale run per side, K side first. The page must be
+    head-major, as the kernels writing it require.
+    """
+    hb = layout.head_bytes
+    if not (
+        layout.plane_offsets == (0,)
+        and layout.num_heads % 2 == 0
+        and hb == sum(split)
+        and layout.token_stride == hb
+        and layout.head_stride == layout.num_tokens * hb
+    ):
+        raise ValueError(f"Not a head-major NVFP4 page: {layout}")
+    num_kv_heads = layout.num_heads // 2
+    data = layout.num_tokens * split.data_bytes
+    scale = layout.num_tokens * split.scale_bytes
+    runs: list[tuple[int, int]] = []
+    for side in (0, num_kv_heads * layout.head_stride):
+        runs.append((side + first_head * data, num_heads * data))
+        scales = side + num_kv_heads * data
+        runs.append((scales + first_head * scale, num_heads * scale))
+    return runs
+
+
 def compute_head_slice_offsets(
     local: HeadLayout,
     remote: HeadLayout,
@@ -743,12 +809,15 @@ def compute_head_slice_offsets(
     merge_fn: Callable[
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
+    nvfp4_split: Nvfp4PageSplit | None = None,
 ) -> tuple[list[int], list[int], list[int]]:
     """Offsets copying `num_heads` heads of each local block into a remote one.
 
     Local heads `[local_head, local_head + num_heads)` land on remote heads
     `[remote_head, remote_head + num_heads)`; every other remote head is
-    left for the producer rank that holds it.
+    left for the producer rank that holds it. With `nvfp4_split` the heads
+    are the KV heads of a packed NVFP4 page (see `get_nvfp4_page_split`),
+    not its head slots.
     """
     if (
         local.num_tokens != remote.num_tokens
@@ -759,29 +828,37 @@ def compute_head_slice_offsets(
             "MoRIIO head slicing needs the same block size, head size and K/V "
             f"planes on both sides, got local {local} and remote {remote}"
         )
+    slots_per_head = 1 if nvfp4_split is None else 2
+    local_heads = local.num_heads // slots_per_head
+    remote_heads = remote.num_heads // slots_per_head
     if not (
         local_head >= 0
-        and local_head + num_heads <= local.num_heads
+        and local_head + num_heads <= local_heads
         and remote_head >= 0
-        and remote_head + num_heads <= remote.num_heads
+        and remote_head + num_heads <= remote_heads
     ):
         raise ValueError(
             f"Head slice local [{local_head}, {local_head + num_heads}) / remote "
             f"[{remote_head}, {remote_head + num_heads}) is outside "
-            f"{local.num_heads} / {remote.num_heads} heads"
+            f"{local_heads} / {remote_heads} heads"
         )
     if len(local_block_ids) > len(remote_block_ids):
         raise ValueError(
             "local_block_ids longer than remote_block_ids: "
             f"{len(local_block_ids)} > {len(remote_block_ids)}"
         )
-    local_kind, local_runs = _head_runs(local, local_head, num_heads)
-    remote_kind, remote_runs = _head_runs(remote, remote_head, num_heads)
-    if local_kind != remote_kind:
-        # The two sides order heads and tokens differently: pair single
-        # (token, head) runs, which merge_fn coalesces where both are adjacent.
-        local_runs = _element_runs(local, local_head, num_heads)
-        remote_runs = _element_runs(remote, remote_head, num_heads)
+    if nvfp4_split is not None:
+        local_runs = _nvfp4_head_runs(local, nvfp4_split, local_head, num_heads)
+        remote_runs = _nvfp4_head_runs(remote, nvfp4_split, remote_head, num_heads)
+    else:
+        local_kind, local_runs = _head_runs(local, local_head, num_heads)
+        remote_kind, remote_runs = _head_runs(remote, remote_head, num_heads)
+        if local_kind != remote_kind:
+            # The two sides order heads and tokens differently: pair single
+            # (token, head) runs, which merge_fn coalesces where both are
+            # adjacent.
+            local_runs = _element_runs(local, local_head, num_heads)
+            remote_runs = _element_runs(remote, remote_head, num_heads)
 
     offset_local: list[int] = []
     offset_remote: list[int] = []
