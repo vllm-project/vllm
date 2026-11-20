@@ -48,7 +48,7 @@ async def health_generate(
     if client is None:
         return Response(status_code=200)
     try:
-        await client.check_health_gpu(timeout_s)
+        await client.check_health_generate(timeout_s)
         return Response(status_code=200)
     except EngineDeadError:
         content = {"status": "not_ready", "reason": "engine_dead"}

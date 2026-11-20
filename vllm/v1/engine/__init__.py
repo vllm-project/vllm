@@ -67,7 +67,7 @@ class EEPNotificationType(enum.Enum):
 
 
 class EngineHealthState(enum.StrEnum):
-    """EngineCore answer to a `check_health_gpu` utility call."""
+    """EngineCore answer to a `check_health_generate` utility call."""
 
     OK = "ok"
     BUSY = "busy"

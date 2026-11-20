@@ -1163,11 +1163,11 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
-    async def check_health_gpu(self, timeout_s: float) -> None:
+    async def check_health_generate(self, timeout_s: float) -> None:
         """Check that every EngineCore can run the model.
 
         Each EngineCore reports whether it is sleeping or busy; an idle one
-        runs a GPU probe.
+        runs a forward probe.
 
         Args:
             timeout_s: How long to wait for each EngineCore before reporting
@@ -1193,7 +1193,7 @@ class AsyncLLM(EngineClient):
         task = self._health_probe_tasks.get(engine_rank)
         if task is None or task.done():
             task = asyncio.create_task(
-                self.engine_core.check_health_gpu_async(engine_rank)
+                self.engine_core.check_health_generate_async(engine_rank)
             )
             task.add_done_callback(
                 lambda done: None if done.cancelled() else done.exception()
@@ -1233,7 +1233,7 @@ class AsyncLLM(EngineClient):
             )
         if timed_out:
             raise EngineUnhealthyError(
-                f"GPU health check timed out after {timeout:g}s "
+                f"Health check timed out after {timeout:g}s "
                 f"(engine ranks: {timed_out})",
                 reason="probe_timeout",
                 engine_ranks=timed_out,
@@ -1241,7 +1241,7 @@ class AsyncLLM(EngineClient):
             )
         if failed:
             raise EngineUnhealthyError(
-                f"GPU health check failed (engine ranks: {list(failed)})",
+                f"Health check failed (engine ranks: {list(failed)})",
                 reason="probe_failed",
                 engine_ranks=list(failed),
                 error=repr(next(iter(failed.values()))),

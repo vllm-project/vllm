@@ -152,7 +152,7 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
-    def check_health_gpu(self) -> str | None:
+    def probe_forward(self) -> str | None:
         """Readiness probe for `/health_generate`: run a dummy forward pass and
         wait for it to complete on the device.
 
@@ -162,7 +162,7 @@ class WorkerBase:
             queues stay in step.
 
         """
-        return f"{type(self).__name__} does not implement check_health_gpu"
+        return f"{type(self).__name__} does not implement probe_forward"
 
     def notify_kv_cache_ready(self) -> None:
         """Finish startup device work before notifying the worker connector."""

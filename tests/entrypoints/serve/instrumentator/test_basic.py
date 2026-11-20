@@ -251,7 +251,7 @@ async def test_health_generate_response(error, expected_body):
 
     mock_request = Mock(spec=Request)
     mock_engine_client = AsyncMock()
-    mock_engine_client.check_health_gpu.side_effect = error
+    mock_engine_client.check_health_generate.side_effect = error
     mock_request.app.state.engine_client = mock_engine_client
 
     response = await health_generate(mock_request, timeout_s=20.0)

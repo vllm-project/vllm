@@ -72,20 +72,15 @@ def test_dense_latent_cuda_error_while_idle():
         assert srv.wait_until_unready() is not None
 
 
-def test_cuda_error_on_non_output_pp_stage():
+def test_probe_checks_every_pp_stage():
     """The probe checks every worker, not only the last PP stage that returns
-    model outputs; PP dummy runs do not communicate across stages."""
-    args = ["--pipeline-parallel-size", "2"]
-    with ready_probe_server(DENSE_MODEL, args) as srv:
-        assert srv.status() == 200
-        srv.rpc("fault_ima_now_on_worker", "0")
-        assert srv.status() == 503
+    model outputs; PP dummy runs do not communicate across stages.
 
-
-def test_probe_failure_on_one_worker_keeps_serving():
-    """A probe that fails on one worker reports 503 without leaving its other
-    replies queued for the next RPC. With PP=2 the last stage returns model
-    outputs, so a stale probe reply would be read as the next step's output."""
+    A probe that raises on one worker reports 503 without leaving its other
+    replies queued for the next RPC, where the last stage's reply would be read
+    as the next step's output. Then a CUDA fault on that worker, which the
+    engine does not survive, is caught too.
+    """
     args = ["--pipeline-parallel-size", "2"]
     with ready_probe_server(DENSE_MODEL, args) as srv:
         assert srv.status() == 200
@@ -93,3 +88,6 @@ def test_probe_failure_on_one_worker_keeps_serving():
         assert srv.ready_body()["reason"] == "probe_failed"
         assert srv.generate() == 200
         assert srv.status() == 200
+
+        srv.rpc("fault_ima_now_on_worker", "0")
+        assert srv.status() == 503

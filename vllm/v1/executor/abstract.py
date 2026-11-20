@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
@@ -332,14 +333,15 @@ class Executor(ABC):
         """Returns the iteration records the output worker has completed."""
         return self.collective_rpc("execute_dummy_batch")[0]
 
-    def check_health_gpu(self) -> None:
-        self._raise_probe_errors(self.collective_rpc("check_health_gpu"))
-
-    @staticmethod
-    def _raise_probe_errors(errors: list[str | None]) -> None:
+    def probe_forward(self) -> None:
+        # Unlike execute_dummy_batch, wait for every rank: PP stages other
+        # than the output rank fail independently.
+        errors = self.collective_rpc(
+            "probe_forward", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+        )
         for rank, error in enumerate(errors):
             if error is not None:
-                raise RuntimeError(f"GPU probe failed on worker {rank}: {error}")
+                raise RuntimeError(f"Forward probe failed on worker {rank}: {error}")
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")

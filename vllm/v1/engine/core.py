@@ -1793,20 +1793,20 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
-    def check_health_gpu(self) -> EngineHealthState:
+    def check_health_generate(self) -> EngineHealthState:
         """Health check served by the busy loop between steps.
 
-        A busy engine adds no GPU work; an idle one runs the GPU probe.
+        A busy engine adds no GPU work; an idle one runs the forward probe.
         """
         if self.is_sleeping():
             return EngineHealthState.SLEEPING
         if self.has_work():
             return EngineHealthState.BUSY
-        self._probe_gpu()
+        self._probe_forward()
         return EngineHealthState.OK
 
-    def _probe_gpu(self) -> None:
-        self.model_executor.check_health_gpu()
+    def _probe_forward(self) -> None:
+        self.model_executor.probe_forward()
 
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
@@ -2730,7 +2730,7 @@ class DPEngineCoreProc(EngineCoreProc):
         ):
             self.engines_running = True
 
-    def _probe_gpu(self) -> None:
+    def _probe_forward(self) -> None:
         """Liveness only: the reply proves the busy loop is not wedged.
 
         A dummy batch here would run outside the DP wave and could deadlock

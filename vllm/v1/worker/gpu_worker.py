@@ -1650,6 +1650,9 @@ class Worker(WorkerBase):
 
     @time_dummy_batch  # returns the iteration records that have completed
     def execute_dummy_batch(self) -> None:
+        self._run_dummy_batch()
+
+    def _run_dummy_batch(self) -> None:
         self.model_runner._dummy_run(
             self.model_runner.decode_query_len,
             uniform_decode=True,
@@ -1657,12 +1660,14 @@ class Worker(WorkerBase):
             num_active_loras=0,
         )
 
-    def check_health_gpu(self) -> str | None:
+    def probe_forward(self) -> str | None:
         try:
-            self.execute_dummy_batch()
+            # Untimed: the iteration records go out with the engine's own
+            # dummy batches, and the probe would drop them.
+            self._run_dummy_batch()
             self.synchronize_device()
         except Exception as e:
-            logger.exception("GPU health probe failed")
+            logger.exception("Forward probe failed")
             # The engine keeps serving: undo the dummy run's connector disable.
             self.model_runner.kv_connector.set_disabled(False)
             return repr(e)

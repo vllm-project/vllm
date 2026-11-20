@@ -10,7 +10,7 @@ import requests
 
 from tests.utils import RemoteOpenAIServer
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 
 PROBE_TIMEOUT_S = 5.0
 DETECT_DEADLINE_S = PROBE_TIMEOUT_S + 15.0
@@ -161,7 +161,7 @@ def ready_probe_server(model: str, extra_args: list[str]):
         "--gpu-memory-utilization",
         "0.2",
         "--worker-extension-cls",
-        "tests.v1.engine.readiness.fault_injection.FaultInjectionWorkerExtension",
+        f"{__package__}.fault_injection.FaultInjectionWorkerExtension",
         *extra_args,
     ]
     with RemoteOpenAIServer(model, args, env_dict=env) as server:
