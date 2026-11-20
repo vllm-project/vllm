@@ -1066,8 +1066,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 cached_encode(tokenizer, entry["replacement"], add_special_tokens=False)
             )
 
-        audio_token_id = self.info._get_placeholder_id("audio")
         if load_audio_from_video:
+            audio_token_id = self.info._get_placeholder_id("audio")
             replacements["audio"] = [
                 seq for seq in replacements["video"] if audio_token_id in seq
             ]
@@ -1085,7 +1085,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 )
             elif modality == "audio":
                 hf_inputs["num_audio_tokens"] = _count_embed_tokens(
-                    seqs, audio_token_id
+                    seqs, self.info._get_placeholder_id("audio")
                 )
             elif modality == "video":
                 grid = hf_inputs.get("video_grid_thw")
