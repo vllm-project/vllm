@@ -89,7 +89,7 @@ _MAX_DUMMY_SIDE = 10_000
 _MIN_DUMMY_SIDE = 224
 
 
-def _get_audio_in_video(kwargs: Mapping[str, object]) -> object | None:
+def _get_load_audio_from_video(kwargs: Mapping[str, object]) -> object | None:
     """Fused audio-in-video setting, preferring `load_audio_from_video`."""
     if (value := kwargs.get("load_audio_from_video")) is not None:
         return value
@@ -98,22 +98,22 @@ def _get_audio_in_video(kwargs: Mapping[str, object]) -> object | None:
 
 
 def _get_embed_token_id(
-    replacement_ids: torch.Tensor, preferred: int | None = None
+    replacement_ids: torch.Tensor, placeholder_id: int | None = None
 ) -> int:
     """The token an expansion repeats is the one holding the embeddings."""
-    if preferred is not None and int(replacement_ids.eq(preferred).sum()) > 1:
-        return preferred
+    if placeholder_id is not None and (replacement_ids == placeholder_id).sum() > 1:
+        return placeholder_id
     return int(replacement_ids.mode().values)
 
 
 def _count_embed_tokens(
-    seqs: list[list[int]], preferred: int | None = None
+    seqs: list[list[int]], placeholder_id: int | None = None
 ) -> torch.Tensor:
     """Number of embedding tokens in each item's replacement."""
     counts = []
     for seq in seqs:
         ids = torch.tensor(seq)
-        counts.append(int(ids.eq(_get_embed_token_id(ids, preferred)).sum()))
+        counts.append(int(ids.eq(_get_embed_token_id(ids, placeholder_id)).sum()))
     return torch.tensor(counts)
 
 
@@ -185,7 +185,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def _fuses_audio_into_video(self) -> bool:
-        return bool(_get_audio_in_video(self.ctx.get_merged_mm_kwargs({})))
+        return bool(_get_load_audio_from_video(self.ctx.get_merged_mm_kwargs({})))
 
     def _get_audio_sampling_rate(self) -> float:
         sub = self._get_audio_processor()
@@ -835,7 +835,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         for modality, items in out_mm_kwargs.items():
             token = getattr(hf_processor, f"{modality}_token")
             target = get_target_token_ids(token)
-            preferred = target[0] if len(target) == 1 else None
+            placeholder_id = target[0] if len(target) == 1 else None
             # Popped so they are neither cached nor sent to the model; the updates
             # they produce are cached alongside the item instead
             replacements = []
@@ -844,7 +844,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 assert isinstance(ids, torch.Tensor)
                 replacements.append(
                     PromptUpdateDetails.select_token_id(
-                        ids.tolist(), _get_embed_token_id(ids, preferred)
+                        ids.tolist(), _get_embed_token_id(ids, placeholder_id)
                     )
                 )
             updates.append(
@@ -976,7 +976,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         assert isinstance(prompt_text, str)
 
         use_audio_in_video = self.info._fuses_audio_into_video
-        override = _get_audio_in_video(hf_kwargs)
+        override = _get_load_audio_from_video(hf_kwargs)
         if override is not None and bool(override) != use_audio_in_video:
             raise ValueError(
                 "load_audio_from_video is a server-level setting and cannot be "
