@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -14,9 +15,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
+    track_loaded_params,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 VOCAB_SIZE = 16
 HIDDEN_SIZE = 4
@@ -35,6 +38,9 @@ class UntiedModel(nn.Module):
         self.language_model.lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
         self.embed_tokens.weight.data.fill_(1.0)
         self.lm_head.weight.data.fill_(1.0)
+
+    def load_weights(self, weights):
+        return AutoWeightsLoader(self).load_weights(weights)
 
     @property
     def embed_tokens(self) -> VocabParallelEmbedding:
@@ -115,3 +121,30 @@ def test_direct_reload_keeps_cold_start_tying(monkeypatch):
         assert model.lm_head.weight is not model.embed_tokens.weight
         assert torch.all(model.lm_head.weight == lm_head_value)
         assert torch.all(model.embed_tokens.weight == 1.0)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+def test_direct_reload_of_retied_head_under_lora(monkeypatch):
+    """A re-tied lm_head is delivered through the embeddings even after LoRA
+    renames them `embed_tokens.base_layer.weight`."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    model_config = make_model_config(untied_by_checkpoint=True)
+    device = torch.device("cpu")
+    model = UntiedModel()
+    full = torch.full((VOCAB_SIZE, HIDDEN_SIZE), 2.0)
+    ckpt = {
+        "language_model.model.embed_tokens.weight": full,
+        "language_model.lm_head.weight": full,
+    }
+    track_loaded_params(model)
+    model.load_weights(ckpt.items())
+    process_weights_after_loading(model, model_config, device)
+    assert model.lm_head.weight is model.embed_tokens.weight
+    lm = model.language_model
+    lm.model.embed_tokens = VocabParallelEmbeddingWithLoRA(lm.model.embed_tokens)
+
+    begin_direct_reload(model)
+    model.load_weights((n, w + 1) for n, w in ckpt.items())
+    finish_direct_reload(model, model_config, device)
+    assert torch.all(model.lm_head.weight[:VOCAB_SIZE] == 3.0)

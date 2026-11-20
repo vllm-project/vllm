@@ -435,6 +435,14 @@ TRTLLM_MOE = dict(kernel_config={**KERNEL_CONFIG, "moe_backend": "flashinfer_trt
 REFIT_CASES = [
     # one GPU
     RefitCase("qwen3", "bf16", "Qwen/Qwen3-0.6B", marks=NIGHTLY),
+    # LoRA renames the re-tied embeddings `embed_tokens.base_layer.weight`
+    RefitCase(
+        "qwen3-lora",
+        "bf16",
+        "Qwen/Qwen3-0.6B",
+        engine=dict(enable_lora=True),
+        marks=NIGHTLY,
+    ),
     RefitCase("qwen3", "fp8-block", "inference-optimization/Qwen3-0.6B-FP8_BLOCK"),
     RefitCase(
         "qwen3", "w4a16", "inference-optimization/Qwen3-0.6B-W4A16-G128", marks=NIGHTLY

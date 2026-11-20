@@ -128,11 +128,17 @@ def mark_loaded(model: torch.nn.Module, name: str) -> None:
         names.add(name)
 
 
+def _unwrapped(name: str) -> str:
+    """`name` as cold start knew it: LoRA wraps layers after, as `x.base_layer`."""
+    return name.replace(".base_layer.", ".")
+
+
 def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) -> None:
     """Raise unless the update loaded every parameter cold start loaded, except
     those level 2 sleep preserves because the update does not rewrite them.
     `load_weights` reports parameter names, whatever checkpoint names fed
-    them (fused or per-expert); a tied parameter counts under either name."""
+    them (fused or per-expert), modulo LoRA wrapping; a tied parameter counts
+    under either name."""
     loaded = model.__dict__.pop("_loaded_params", None)
     required = model.__dict__.get("_required_params")
     if loaded is None or required is None:  # the model does not report loads
@@ -141,13 +147,21 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         model._required_params = loaded
         return
     preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
-    params = dict(model.named_parameters(remove_duplicate=False))
-    delivered = {params.get(n, n) for n in loaded}
+
+    params = {
+        _unwrapped(n): p for n, p in model.named_parameters(remove_duplicate=False)
+    }
+
+    def resolve(name: str) -> torch.Tensor | str:
+        name = _unwrapped(name)
+        return params.get(name, name)
+
+    delivered = {resolve(n) for n in loaded}
     missing = sorted(
         n
         for n in required
-        if params.get(n, n) not in delivered
-        and not any(fnmatchcase(n, p) for p in preserved)
+        if resolve(n) not in delivered
+        and not any(fnmatchcase(_unwrapped(n), _unwrapped(p)) for p in preserved)
     )
     if missing:
         raise RuntimeError(
@@ -222,7 +236,7 @@ def _check_params_kept(model: torch.nn.Module) -> None:
     replaced = [
         name
         for name, p in model.named_parameters(remove_duplicate=False)
-        if name in model._ckpt_param_names and not hasattr(p, "_ckpt")
+        if _unwrapped(name) in model._ckpt_param_names and not hasattr(p, "_ckpt")
     ]
     if replaced:
         raise RuntimeError(
