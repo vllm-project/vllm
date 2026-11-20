@@ -162,10 +162,9 @@ def test_decode_passes_shuffle_views_to_gluon(monkeypatch, kv_row_size):
         lambda **kwargs: kernel_args.update(kwargs),
     )
     monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", True)
-    impl = object.__new__(AiterFlashAttentionGluonImpl)
-    impl.use_gluon_decode, impl.scale = True, 256**-0.5
-    impl.num_kv_heads, impl.head_size = 4, 256
-    impl.kv_cache_dtype = "auto"
+    impl = AiterFlashAttentionGluonImpl(24, 256, 256**-0.5, 4, None, None, "auto")
+    # Force the gluon path so the call wiring is checked off gfx950 too.
+    impl.use_gluon_decode = True
     kv_cache = torch.zeros(3, 2, 16, 4 * 256, dtype=torch.bfloat16)
     key_cache, value_cache = impl._split_kv_cache(kv_cache)
     assert not key_cache.is_contiguous()
