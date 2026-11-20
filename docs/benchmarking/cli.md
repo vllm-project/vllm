@@ -1611,6 +1611,9 @@ one text prompt per request, such as `random` or `custom` JSONL. The matching
 Batched prompts (`--random-batch-size > 1`) are rejected. Concurrent requests
 are supported.
 
+These backends send plain text and let the server apply the chat template.
+Client-side templating is skipped automatically; `--skip-chat-template` is not required.
+
 Each prompt is sent as the state with one choice, one yes/no and one score
 question; pass `--extra-body '{"questions": ...}'` to override these questions
 for every request. Results report latency, throughput and input-token usage,
