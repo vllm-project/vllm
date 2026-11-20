@@ -34,6 +34,7 @@ const TRACKED_HANDLERS: &[&str] = &[
     "/v1/rerank",
     "/v2/rerank",
     "/inference/v1/generate",
+    "/generative_scoring",
 ];
 
 /// Track frontend-local in-flight inference requests for the `/load` endpoint.

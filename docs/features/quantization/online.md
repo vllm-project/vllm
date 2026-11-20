@@ -149,6 +149,15 @@ quantization:
 vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_32
 ```
 
+Likewise, for int4 (GPTQ, AWQ, compressed-tensors WNA16) MoE checkpoints on
+RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects the `rdna3_int4_int8` MoE
+backend, which decodes batches of up to 64 tokens with int8 activations;
+larger batches run the Triton WNA16 kernels with 16-bit activations:
+
+```bash
+vllm serve <int4-moe-model> --quantization-config.moe.activation int8_per_group_32
+```
+
 ### Re-quantizing layers to a different precision
 
 An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
@@ -165,6 +174,7 @@ Currently supported combinations are:
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized FP8 MoE with dynamic activation quantization (`fp8`, compressed-tensors, Quark; per-tensor, per-channel or block weight scales) | any online MoE method | Target-specific hardware requirements |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
