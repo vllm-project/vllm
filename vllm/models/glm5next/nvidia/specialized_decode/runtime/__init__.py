@@ -7,7 +7,7 @@ GB300 TP4, enabled by default; `decode_backend=stock` disables it.
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     max_context: int
     # Tokens per request in a verify step (1 + draft tokens; 1 without speculation).
@@ -164,6 +164,11 @@ def unsupported(vllm_config) -> list[str]:
             vllm_config.cache_config.use_replayssm
             or vllm_config.cache_config.use_kda_recoverssm,
             "ReplaySSM / RecoverSSM (--use-replayssm)",
+        ),
+        # The KDA decode reads its projection weights directly as BF16.
+        (
+            getattr(quant, "online_quantization_config", None) is not None,
+            "online quantization (--quantization-config)",
         ),
     )
     return [reason for failed, reason in checks if failed]

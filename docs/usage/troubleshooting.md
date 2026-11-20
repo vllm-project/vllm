@@ -30,6 +30,27 @@ In most cases, this should lead to higher quality responses, because the model c
 
 You can check if this is happening by trying the old defaults with `--generation-config vllm` for online and `generation_config="vllm"` for offline. If, after trying this, your generation quality improves we would recommend continuing to use the vLLM defaults and petition the model creator on <https://huggingface.co> to update their default `generation_config.json` so that it produces better quality generations.
 
+## Check which backends a model runs on
+
+After loading a model, vLLM logs a table of the attention backend and the linear and MoE kernels its layers selected, with the layers that run each. It is on by default and logged once per model:
+
+```text
+Backends selected for Qwen3MoeForCausalLM (Qwen/Qwen3-30B-A3B-FP8):
+  layer     | count | backend                                                       | modules
+  attention |    48 | FLASHINFER                                                    | model.layers.[0-47].self_attn.attn
+  linear    |    50 | unquantized [w=bfloat16]                                      | model.embed_tokens, model.layers.[0-47].mlp.gate, lm_head
+  linear    |    96 | DeepGemmFp8BlockScaledMMKernel                                | model.layers.[0-47].self_attn.{qkv_proj,o_proj}
+  moe       |    48 | TrtLlmFp8ExpertsMonolithic [w=float8_e4m3fn, a=float8_e4m3fn] | model.layers.[0-47].mlp.experts.routed_experts
+```
+
+Each row is one backend: the kind of layer, how many layers run it, the kernel or attention backend selected, and the layer names with index ranges collapsed. Unquantized linear layers show their weight dtype instead of a kernel. MoE rows also show the weight and activation precision the kernel runs, so `a=none` means activations are not quantized. Shared experts that are not fused into the routed experts are linear layers and appear in the `linear` rows.
+
+The table replaces the individual `Using <backend> ...` and `Selected <kernel> for ...` lines, which are now logged at DEBUG where each selection is made, along with the candidates that were considered: set `VLLM_LOGGING_LEVEL=DEBUG` to see them. Selections that explain a fallback or an override are still logged at INFO or WARNING.
+
+If loading the weights fails, the table is logged before the error with the selections made up to that point (its first line ends in `before loading failed`); MoE rows then show the experts class without the precision.
+
+For the full module tree instead, set `VLLM_LOG_MODEL_INSPECTION=1` or call `LLM.get_model_inspection()`.
+
 ## Enable more logging
 
 If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:

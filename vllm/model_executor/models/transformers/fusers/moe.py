@@ -192,7 +192,7 @@ def _moe_block_forward(self: nn.Module, hidden_states: torch.Tensor) -> torch.Te
     return out.reshape(orig_shape)
 
 
-@dataclass
+@dataclass(slots=True)
 class MoEBlockFuser:
     """Fuser for MoE block `experts`, `gate` and `shared_experts` (optional)."""
 

@@ -75,7 +75,6 @@ from vllm.config import (
 from vllm.config.cache import (
     CacheDType,
     KVOffloadingBackend,
-    MambaCacheMode,
     MambaDType,
     PrefixCachingHashAlgo,
 )
@@ -110,12 +109,13 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DBOSchedule,
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, replace
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
@@ -452,18 +452,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
-    "--log-config-file is deprecated and will be removed in v0.33.0. "
-    "Use --logging-config.pylogging_config_file instead."
-)
-
-
-_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
-    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
-    "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
-)
-
-
 _IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
     "ir_op_priority (--ir-op-priority) is deprecated because vLLM IR is being "
     "removed. It will be removed in v0.34.0."
@@ -474,14 +462,6 @@ _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
     "--disable-cascade-attn is deprecated and has no effect since cascade "
     "attention has been removed. It will be removed in v0.33.0."
 )
-
-
-class DeprecatedLogConfigFileAction(argparse.Action):
-    """Warn when the legacy `--log-config-file` option is used."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
-        setattr(namespace, self.dest, values)
 
 
 @dataclass
@@ -580,6 +560,7 @@ class EngineArgs:
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    dbo_schedule: DBOSchedule | None = ParallelConfig.dbo_schedule
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
@@ -653,7 +634,7 @@ class EngineArgs:
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
     language_model_only: bool = MultiModalConfig.language_model_only
-    limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
+    limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
@@ -671,6 +652,9 @@ class EngineArgs:
     )
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
+    )
+    mm_shm_cache_buffer_name: str = get_field(
+        MultiModalConfig, "mm_shm_cache_buffer_name"
     )
     mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
@@ -716,6 +700,7 @@ class EngineArgs:
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+    encoder_cache_size: int | None = None
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
@@ -792,7 +777,6 @@ class EngineArgs:
 
     logging_config: LoggingConfig | None = None
     log_level: LogLevel | None = None
-    log_config_file: str | None = None
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -826,7 +810,6 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
-    mamba_cache_mode: MambaCacheMode | None = None
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
@@ -853,6 +836,7 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
+    async_scheduling_depth: int = SchedulerConfig.async_scheduling_depth
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -1367,6 +1351,7 @@ class EngineArgs:
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
+        parallel_group.add_argument("--dbo-schedule", **parallel_kwargs["dbo_schedule"])
         parallel_group.add_argument(
             "--disable-nccl-for-dp-synchronization",
             **parallel_kwargs["disable_nccl_for_dp_synchronization"],
@@ -1460,14 +1445,6 @@ class EngineArgs:
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
-            "--mamba-cache-mode",
-            **{
-                **cache_kwargs["mamba_cache_mode"],
-                "default": None,
-                "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
-            },
-        )
-        cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
             **cache_kwargs["enable_mamba_shared_prefix_checkpoint"],
         )
@@ -1546,6 +1523,10 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-shm-cache-max-object-size-mb",
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-shm-cache-buffer-name",
+            **multimodal_kwargs["mm_shm_cache_buffer_name"],
         )
         multimodal_group.add_argument(
             "--mm-encoder-only", **multimodal_kwargs["mm_encoder_only"]
@@ -1688,16 +1669,6 @@ class EngineArgs:
                 "Overrides that field if both are specified."
             ),
         )
-        logging_group.add_argument(
-            "--log-config-file",
-            dest="log_config_file",
-            default=argparse.SUPPRESS,
-            metavar="PYLOGGING_CONFIG_FILE",
-            action=DeprecatedLogConfigFileAction,
-            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
-        )
-        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
-        # compatibility mapping in create_logging_config() in v0.33.0.
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1826,6 +1797,9 @@ class EngineArgs:
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
         )
         scheduler_group.add_argument(
+            "--encoder-cache-size", **scheduler_kwargs["encoder_cache_size"]
+        )
+        scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
         scheduler_group.add_argument(
@@ -1851,6 +1825,9 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
+        )
+        scheduler_group.add_argument(
+            "--async-scheduling-depth", **scheduler_kwargs["async_scheduling_depth"]
         )
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
@@ -2077,6 +2054,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_shm_cache_buffer_name=self.mm_shm_cache_buffer_name,
             mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
@@ -2280,10 +2258,6 @@ class EngineArgs:
         config = self.logging_config or LoggingConfig()
         if self.log_level is not None:
             config = dataclasses.replace(config, log_level=self.log_level)
-        if self.log_config_file is not None:
-            config = dataclasses.replace(
-                config, pylogging_config_file=self.log_config_file
-            )
         return config
 
     def create_engine_config(
@@ -2345,8 +2319,6 @@ class EngineArgs:
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
-        if self.mamba_cache_mode is not None:
-            logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
@@ -2643,6 +2615,7 @@ class EngineArgs:
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            dbo_schedule=self.dbo_schedule,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
@@ -2676,6 +2649,14 @@ class EngineArgs:
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
         )
+        if (
+            envs.VLLM_PP_LAYER_PARTITION is not None
+            and parallel_config.pipeline_parallel_size == 1
+        ):
+            logger.warning(
+                "VLLM_PP_LAYER_PARTITION is ignored because pipeline "
+                "parallelism is disabled."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -2713,6 +2694,7 @@ class EngineArgs:
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
+            encoder_cache_size=self.encoder_cache_size,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
@@ -2728,6 +2710,7 @@ class EngineArgs:
             cache_aware_admission_threshold=self.cache_aware_admission_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            async_scheduling_depth=self.async_scheduling_depth,
             stream_interval=self.stream_interval,
         )
 
@@ -2780,9 +2763,9 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Reuse the validator to handle "auto" and string-to-enum conversion
-            attention_config.backend = AttentionConfig.validate_backend_before(
-                self.attention_backend
+            attention_config = replace(
+                attention_config,
+                backend=self.attention_backend,
             )
 
         # Batch-invariant mode requires deterministic attention behavior.
