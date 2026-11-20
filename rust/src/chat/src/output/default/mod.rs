@@ -38,7 +38,8 @@ use crate::{Error, Result as ChatResult};
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
     parser: Box<dyn UnifiedParser>,
-    has_parser: bool,
+    /// Mirrors Python's configured parser, including requests without tools.
+    has_configured_parser: bool,
     max_tool_calls: Option<usize>,
     /// Request facts the initialized parser needs to build its output grammar.
     /// Absent for the plain-text-only processor, which never builds one.
@@ -99,6 +100,7 @@ impl DefaultChatOutputProcessor {
     ) -> ChatResult<Self> {
         let tool_name = tool_call_parser.resolve_tool_name(model_id);
         let reasoning_name = reasoning_parser.resolve_reasoning_name(model_id);
+        let has_configured_parser = tool_name.is_some() || reasoning_name.is_some();
         // `hf` is opt-in: `Auto` never selects it, but a usable template is worth a hint.
         let auto = [tool_call_parser, reasoning_parser]
             .iter()
@@ -111,14 +113,14 @@ impl DefaultChatOutputProcessor {
                 );
             });
         }
-        let (parser, has_parser) = if let Some(parser) = Self::resolve_optional_unified_parser(
+        let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
             request.tools(),
             tokenizer.clone(),
             response_template,
             tool_name,
             reasoning_name,
         )? {
-            (parser, true)
+            parser
         } else {
             let tool_parser = Self::resolve_tool_parser(
                 &request.tool_context,
@@ -128,12 +130,7 @@ impl DefaultChatOutputProcessor {
             )?;
             let reasoning_parser =
                 Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
-            let has_parser = reasoning_parser.is_some() || tool_parser.is_some();
-            (
-                Box::new(CombinedParser::new(reasoning_parser, tool_parser))
-                    as Box<dyn UnifiedParser>,
-                has_parser,
-            )
+            Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
         };
 
         if parser.preserve_special_tokens() {
@@ -144,7 +141,7 @@ impl DefaultChatOutputProcessor {
 
         Ok(Self {
             parser,
-            has_parser,
+            has_configured_parser,
             max_tool_calls: request.max_tool_calls(),
             grammar_inputs: Some(GrammarInputs {
                 tools: request.tools().to_vec(),
@@ -164,7 +161,7 @@ impl DefaultChatOutputProcessor {
     pub fn plain_text_only() -> Self {
         Self {
             parser: Box::new(CombinedParser::plain_text_only()),
-            has_parser: false,
+            has_configured_parser: false,
             max_tool_calls: None,
             grammar_inputs: None,
         }
@@ -305,7 +302,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// 1. [`unified_event_stream`] — reasoning and tool-call parsing
     /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
-        let parsed = unified_event_stream(decoded, self.parser, self.has_parser);
+        let parsed = unified_event_stream(decoded, self.parser, self.has_configured_parser);
         let structured = structured_chat_event_stream(parsed, self.max_tool_calls);
 
         Ok(structured.boxed())

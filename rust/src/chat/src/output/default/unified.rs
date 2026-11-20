@@ -238,7 +238,7 @@ fn push_piece_delta(
 pub(crate) async fn unified_event_stream(
     decoded_stream: impl DecodedTextEventStream,
     parser: Box<dyn UnifiedParser>,
-    has_parser: bool,
+    has_configured_parser: bool,
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
     pin_mut!(decoded_stream);
@@ -292,7 +292,7 @@ pub(crate) async fn unified_event_stream(
                             reasoning_tokens: state.reasoning_tokens,
                         },
                         timestamps: finished.timestamps,
-                        first_content_token_ts: if has_parser {
+                        first_content_token_ts: if has_configured_parser {
                             first_content_token_ts
                         } else {
                             Some(finished.timestamps.first_token_ts)
