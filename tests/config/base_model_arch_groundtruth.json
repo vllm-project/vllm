@@ -372,5 +372,22 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
+    },
+    "sarvamai/sarvam-105b": {
+        "architectures": [
+            "SarvamMLAForCausalLM"
+        ],
+        "model_type": "sarvam_mla",
+        "text_model_type": "sarvam_mla",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 32,
+        "total_num_attention_heads": 64,
+        "head_size": 576,
+        "vocab_size": 262144,
+        "total_num_kv_heads": 64,
+        "num_experts": 128,
+        "is_deepseek_mla": true,
+        "is_multimodal_model": false,
+        "dtype": "torch.float32"
     }
 }

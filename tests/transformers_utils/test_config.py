@@ -11,7 +11,6 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-import transformers
 from transformers import PreTrainedConfig
 
 from vllm.config.model import ModelConfig
@@ -69,43 +68,6 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
             for key, value in expected.items():
                 assert config.rope_parameters[layer_type][key] == value
         assert set(config.rope_parameters) == set(per_layer)
-
-
-def test_sarvam_mla_legacy_config(tmp_path):
-    """The released Sarvam config stores `head_dim` as vLLM's MLA head size and
-    uses `deepseek_yarn`; Transformers converts it, so vLLM derives the head size."""
-    if not hasattr(transformers, "SarvamMLAConfig"):
-        pytest.skip("Needs https://github.com/huggingface/transformers/pull/44569")
-    from vllm.transformers_utils.model_arch_config_convertor import (
-        ModelArchConfigConvertorBase,
-    )
-
-    (tmp_path / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "sarvam_mla",
-                "architectures": ["SarvamMLAForCausalLM"],
-                "auto_map": {"AutoConfig": "configuration_sarvam_moe.SarvamMLAConfig"},
-                "kv_lora_rank": 512,
-                "qk_rope_head_dim": 64,
-                "head_dim": 576,
-                "num_experts": 128,
-                "rope_theta": 10000.0,
-                "rope_scaling": {
-                    "type": "deepseek_yarn",
-                    "factor": 40,
-                    "original_max_position_embeddings": 4096,
-                },
-            }
-        )
-    )
-    _, config = config_module.HFConfigParser().parse(tmp_path, trust_remote_code=False)
-    assert isinstance(config, transformers.SarvamMLAConfig)
-    assert config.rope_parameters["rope_type"] == "yarn"
-    assert config.num_experts == config.n_routed_experts == 128
-    convertor = ModelArchConfigConvertorBase(config, config)
-    assert convertor.is_deepseek_mla()
-    assert convertor.get_head_size() == 512 + 64
 
 
 def test_patch_legacy_rope_type_preserves_nope_layers():
