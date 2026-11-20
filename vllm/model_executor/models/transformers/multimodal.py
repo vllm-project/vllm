@@ -1579,31 +1579,37 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
     ) -> torch.Tensor:
         if self.per_layer_inputs is not None:
             self._set_per_layer_inputs(input_ids, is_multimodal)
-
-        has_deepstack = self.deepstack_input_embeds is not None
-        has_mm = multimodal_embeddings is not None and len(multimodal_embeddings) > 0
-        deepstack_flat = None
-        if has_deepstack and has_mm:
-            multimodal_embeddings, deepstack_flat = self._split_deepstack_embeds(
-                multimodal_embeddings
+        if self.deepstack_input_embeds is not None:
+            multimodal_embeddings = self._set_deepstack_input_embeds(
+                multimodal_embeddings, is_multimodal
             )
-        inputs_embeds = super().embed_input_ids(
+        return super().embed_input_ids(
             input_ids, multimodal_embeddings, is_multimodal=is_multimodal
         )
-        if not has_deepstack:
-            return inputs_embeds
+
+    def _set_deepstack_input_embeds(
+        self,
+        multimodal_embeddings: MultiModalEmbeddings | None,
+        is_multimodal: torch.Tensor | None,
+    ) -> MultiModalEmbeddings | None:
+        """Write the DeepStack features to their buffer, returning the embeddings
+        without them."""
         # Cleared here rather than after `forward`, which full CUDA graphs skip
         if self.deepstack_num_tokens:
             self.deepstack_input_embeds[:, 0, : self.deepstack_num_tokens].zero_()
             self.deepstack_num_tokens = 0
-        if deepstack_flat is not None:
-            is_multimodal = _require_is_multimodal(is_multimodal)
-            num_tokens = is_multimodal.numel()
-            buffer = self.deepstack_input_embeds[:, 0, :num_tokens]
-            # If is_multimodal is on CPU this avoids a D2H sync
-            buffer[:, is_multimodal] = deepstack_flat.to(buffer.dtype)
-            self.deepstack_num_tokens = num_tokens
-        return inputs_embeds
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return multimodal_embeddings
+        multimodal_embeddings, deepstack_flat = self._split_deepstack_embeds(
+            multimodal_embeddings
+        )
+        is_multimodal = _require_is_multimodal(is_multimodal)
+        num_tokens = is_multimodal.numel()
+        buffer = self.deepstack_input_embeds[:, 0, :num_tokens]
+        # If is_multimodal is on CPU this avoids a D2H sync
+        buffer[:, is_multimodal] = deepstack_flat.to(buffer.dtype)
+        self.deepstack_num_tokens = num_tokens
+        return multimodal_embeddings
 
     def get_mrope_input_positions(
         self,
