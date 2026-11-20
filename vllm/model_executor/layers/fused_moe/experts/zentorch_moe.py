@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static,
     kInt4Static32,
     kInt8Static,
+    kMxfp4Static,
 )
 
 # apply() routes internally, so these must be right even when a quant method
@@ -38,14 +39,10 @@ _ROUTING_SCORING: dict[RoutingMethodType, tuple[str, bool]] = {
 }
 
 
-class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
-    """Group-quantized W4A16/W8A16 monolithic MoE experts. The op dynamically
-    quantizes the bf16 activation to s8, so a weight-only checkpoint executes as
-    DA8W4 or DA8W8, chosen from the weight layout the oracle prepared."""
-
-    # swiglu_oai_mul reads gate/up interleaved, not in the half-split order the
-    # weight loader leaves behind.
-    requires_interleaved_w13 = True
+class ZentorchExpertsBase(mk.FusedMoEExpertsMonolithic):
+    """Shared body for zentorch's monolithic MoE experts: the routing config
+    apply() cannot be handed, the kernel call, and the gates every zentorch
+    weight format shares. A leaf adds its format's quant scheme and layout."""
 
     def __init__(
         self,
@@ -75,7 +72,7 @@ class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return has_zentorch_op(["zentorch_fused_moe", "zentorch_woq_repack_weight"])
+        return has_zentorch_op(["zentorch_fused_moe"])
 
     @staticmethod
     def is_supported_config(
@@ -113,20 +110,6 @@ class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
         # apply() passes select_experts' global ids straight to the kernel, so
         # every expert has to be resident on the rank.
         return not moe_parallel_config.use_ep
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        # The bf16 activation is quantized at runtime, hence no activation key.
-        # Both widths share the op, which picks DA8W4 or DA8W8 from the weight
-        # layout the oracle prepared.
-        return (weight_key, activation_key) in [
-            (kInt4Static, None),
-            (kInt4Static32, None),
-            (kInt8Static, None),
-        ]
 
     @staticmethod
     def _supports_routing_method(
@@ -169,10 +152,10 @@ class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        name = type(self).__name__
         if apply_router_weight_on_input:
             raise NotImplementedError(
-                "ZentorchExpertsWNA16 does not support "
-                "apply_router_weight_on_input=True."
+                f"{name} does not support apply_router_weight_on_input=True."
             )
 
         if (
@@ -180,7 +163,7 @@ class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
             and self.custom_routing_function is None
         ):
             raise RuntimeError(
-                "ZentorchExpertsWNA16 needs the model's custom_routing_function "
+                f"{name} needs the model's custom_routing_function "
                 "for RoutingMethodType.Custom."
             )
 
@@ -218,4 +201,53 @@ class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
         return output
 
 
-__all__ = ["ZentorchExpertsWNA16"]
+class ZentorchExpertsWNA16(ZentorchExpertsBase):
+    """Group-quantized W4A16/W8A16 monolithic MoE experts. The op dynamically
+    quantizes the bf16 activation to s8, so a weight-only checkpoint executes as
+    DA8W4 or DA8W8, chosen from the weight layout the oracle prepared."""
+
+    # swiglu_oai_mul reads gate/up interleaved, not in the half-split order the
+    # weight loader leaves behind.
+    requires_interleaved_w13 = True
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return has_zentorch_op(["zentorch_fused_moe", "zentorch_woq_repack_weight"])
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # The bf16 activation is quantized at runtime, hence no activation key.
+        # Both widths share the op, which picks DA8W4 or DA8W8 from the weight
+        # layout the oracle prepared.
+        return (weight_key, activation_key) in [
+            (kInt4Static, None),
+            (kInt4Static32, None),
+            (kInt8Static, None),
+        ]
+
+
+class ZentorchExpertsMxfp4(ZentorchExpertsBase):
+    """MXFP4 monolithic MoE experts, served through the same W4A8 kernel.
+
+    The kernel takes the E2M1 codes with their E8M0 scales as the checkpoint
+    stores them, so the weights stay four-bit and are never requantized. w13
+    is passed through as gpt-oss ships it, gate and up already interleaved,
+    which is what the kernel's swiglu_oai expects.
+    """
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, None)
+
+
+__all__ = [
+    "ZentorchExpertsBase",
+    "ZentorchExpertsMxfp4",
+    "ZentorchExpertsWNA16",
+]
