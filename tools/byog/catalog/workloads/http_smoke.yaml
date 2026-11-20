@@ -1,0 +1,19 @@
+schema_version: 1
+name: http_smoke
+kind: benchmark
+description: Minimal HTTP serving benchmark exercising /v1/completions with warmup.
+execution_mode: server
+lifecycle: reset_cache
+allow_lifecycle_fallback: false
+evidence_source: harness
+platforms:
+  - nvidia
+  - rocm
+entrypoint: tools.byog.executor.benchmarks.http_smoke.plugin:HttpSmokeBenchmark
+protocol_version: "1.0"
+defaults:
+  concurrency: [1]
+  num_requests: 8
+  warmup_requests: 2
+  max_tokens: 32
+  prompt: "Write a short sentence about vLLM:"
