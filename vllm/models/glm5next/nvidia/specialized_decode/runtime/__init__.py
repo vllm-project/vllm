@@ -126,8 +126,9 @@ def unsupported(vllm_config) -> list[str]:
     graphs = compilation.cudagraph_mode
     checks = (
         (
-            not (boundary_only or current_platform.is_device_capability_family(100)),
-            "this GPU (requires SM90 or SM100/103)",
+            not current_platform.is_cuda()
+            or not (boundary_only or current_platform.is_device_capability_family(100)),
+            "this GPU (requires NVIDIA SM90 or SM100/103)",
         ),
         (
             boundary_only

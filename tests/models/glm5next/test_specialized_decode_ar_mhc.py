@@ -183,7 +183,8 @@ def _boundary(rank, device):
 
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
-    not (
+    not current_platform.is_cuda()
+    or not (
         current_platform.is_device_capability_family(90)
         or current_platform.is_device_capability_family(100)
     ),
@@ -237,7 +238,9 @@ def hopper_model_config(tmp_path):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(90), reason="Hopper defaults"
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90),
+    reason="Hopper defaults",
 )
 @pytest.mark.parametrize("mode", ["auto", "stock", "eager", "unsupported_policy"])
 def test_hopper_default_uses_only_boundaries_with_stock_kv(hopper_model_config, mode):
@@ -257,6 +260,7 @@ def test_hopper_default_uses_only_boundaries_with_stock_kv(hopper_model_config, 
         model=hopper_model_config,
         skip_tokenizer_init=True,
         tensor_parallel_size=4,
+        distributed_executor_backend="mp",
         dtype="bfloat16",
         max_model_len=128,
         max_num_seqs=4,
@@ -283,7 +287,8 @@ def _specialized_decode_enabled(model):
 
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(90)
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90)
     or torch.accelerator.device_count() < TP,
     reason="Requires four Hopper GPUs with NVLink multicast",
 )
