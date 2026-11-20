@@ -993,8 +993,7 @@ class ResponsesRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         input_data = data.get("input")
-        tools = data.get("tools")
-        if not isinstance(input_data, list) or not isinstance(tools, list | None):
+        if not isinstance(input_data, list):
             return data
 
         remaining_input = []
@@ -1014,7 +1013,12 @@ class ResponsesRequest(OpenAIBaseModel):
         if len(remaining_input) == len(input_data):
             return data
         data["input"] = remaining_input
-        data["tools"] = _merge_additional_tools(tools or [], additional_tools)
+        tools = data.get("tools")
+        # A non-list `tools` is left to field validation, which rejects it. The
+        # items still leave `input`, so an openai SDK without the
+        # `additional_tools` input type adds no errors of its own to that one.
+        if isinstance(tools, list | None):
+            data["tools"] = _merge_additional_tools(tools or [], additional_tools)
         return data
 
 
