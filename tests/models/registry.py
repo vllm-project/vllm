@@ -752,6 +752,11 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "vllm-project/sentiment-polish-gpt2-small"
     ),
+    "GteForSequenceClassification": _HfExamplesInfo(
+        "alibaba-nlp-community/gte-multilingual-reranker-base",
+        min_transformers_version="5.18",
+        hf_overrides={"architectures": ["GteForSequenceClassification"]},
+    ),
     "GteNewForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
         trust_remote_code=True,
