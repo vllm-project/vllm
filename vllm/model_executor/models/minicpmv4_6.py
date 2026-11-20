@@ -42,7 +42,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .idefics2_vision_model import Idefics2VisionTransformer
+from .idefics2_vision_model import Idefics2VarlenMetadata, Idefics2VisionTransformer
 from .interfaces import (
     HasInnerState,
     IsHybrid,
@@ -1012,7 +1012,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         hidden_states: torch.Tensor,
         tgt_sizes: torch.Tensor,
         attention_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         B, _L, D = hidden_states.shape
         device = hidden_states.device
         dtype = hidden_states.dtype
@@ -1051,6 +1051,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
 
         # Build new attention mask after spatial downsampling
         new_attention_mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None
         if attention_mask is not None:
             mask = torch.zeros(
                 B,
@@ -1064,7 +1065,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
             new_attention_mask = (~mask).to(dtype=dtype) * min_val
             new_attention_mask = new_attention_mask[:, None, None, :]
 
-        return new_hidden, new_tgt_sizes, new_attention_mask
+        return new_hidden, new_tgt_sizes, new_attention_mask, mask
 
 
 class MiniCPMV4_6DownsampleMLP(nn.Module):
@@ -1315,6 +1316,22 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     # ----- Vision forward -----
 
+    def _run_vpm_layers(
+        self,
+        layers: list[nn.Module],
+        hidden_states: torch.Tensor,
+        varlen: Idefics2VarlenMetadata | None,
+    ) -> torch.Tensor:
+        if varlen is not None:
+            hidden_states = varlen.pack(hidden_states)
+            for layer in layers:
+                hidden_states = layer(hidden_states, varlen=varlen)
+            hidden_states = varlen.unpack(hidden_states)
+        else:
+            for layer in layers:
+                hidden_states = layer(hidden_states)
+        return hidden_states
+
     def get_vision_hidden_states(
         self,
         data: MiniCPMVImagePixelInputs,
@@ -1365,24 +1382,34 @@ class MiniCPMV4_6ForConditionalGeneration(
         else:
             attention_mask = None
 
+        varlen = self.vpm.get_varlen_metadata(patch_attn_mask)
+
         # Encoder layers with mid-encoder merger injection
         insert_layer_id = getattr(self.config, "insert_layer_id", -1)
         if downsample_mode is None:
             downsample_mode = getattr(self.config, "downsample_mode", "16x")
         use_vit_merger = downsample_mode != "4x" and insert_layer_id >= 0
 
-        for layer in self.vpm.encoder.layers[: insert_layer_id + 1]:
-            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+        hidden_states = self._run_vpm_layers(
+            self.vpm.encoder.layers[: insert_layer_id + 1],
+            hidden_states,
+            varlen,
+        )
 
         if use_vit_merger:
-            hidden_states, tgt_sizes, attention_mask = self.vit_merger(
+            hidden_states, tgt_sizes, attention_mask, patch_attn_mask = self.vit_merger(
                 hidden_states,
                 tgt_sizes,
                 attention_mask,
             )
+            if patch_attn_mask is not None:
+                varlen = self.vpm.get_varlen_metadata(patch_attn_mask)
 
-        for layer in self.vpm.encoder.layers[insert_layer_id + 1 :]:
-            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+        hidden_states = self._run_vpm_layers(
+            self.vpm.encoder.layers[insert_layer_id + 1 :],
+            hidden_states,
+            varlen,
+        )
 
         # 4. Post layernorm
         hidden_states = self.vpm.post_layernorm(hidden_states)
