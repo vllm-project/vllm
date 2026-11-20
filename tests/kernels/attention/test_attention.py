@@ -279,7 +279,6 @@ def test_paged_attention(
             k_scale,
             v_scale,
             None,
-            "f16",
             use_interleaved_v_cache,
         ),
         cond=(head_size == 64 and block_size == BLOCK_SIZES[0]),
