@@ -540,7 +540,18 @@ def test_megamoe_trtllm_weight_layout_matches_native(
             buffer.topk_weights.zero_()
 
             def stage(x=x, weights=weights, ids=ids, tokens=tokens):
-                if not nvfp4:
+                if nvfp4:
+                    prepare_megamoe_nvfp4_inputs(
+                        x,
+                        weights,
+                        ids,
+                        buffer.x[:tokens],
+                        buffer.x_sf[:tokens].view(torch.uint8),
+                        buffer.topk_idx[:tokens],
+                        buffer.topk_weights[:tokens],
+                        None,
+                    )
+                else:
                     prepare_megamoe_bf16_inputs(
                         x,
                         weights,
@@ -549,17 +560,6 @@ def test_megamoe_trtllm_weight_layout_matches_native(
                         buffer.topk_idx[:tokens],
                         buffer.topk_weights[:tokens],
                     )
-                    return
-                prepare_megamoe_nvfp4_inputs(
-                    x,
-                    weights,
-                    ids,
-                    buffer.x[:tokens],
-                    buffer.x_sf[:tokens].view(torch.uint8),
-                    buffer.topk_idx[:tokens],
-                    buffer.topk_weights[:tokens],
-                    None,
-                )
 
             stage()
             expected = native.forward_prepared(x, buffer)
@@ -576,7 +576,7 @@ def test_megamoe_trtllm_weight_layout_matches_native(
                 graph.replay()
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-        gain = norm.weight.clone()
+        cold_gain = norm.weight.clone()
 
         def reload(state: dict[str, torch.Tensor], gain: torch.Tensor) -> torch.Tensor:
             norm.weight.copy_(gain)  # refilled into the captured gamma
@@ -594,9 +594,9 @@ def test_megamoe_trtllm_weight_layout_matches_native(
         # cold A bitwise.
         stage()
         cold = native.forward_prepared(x, buffer).clone()
-        assert not torch.equal(reload(checkpoint(seed=1), gain), cold)
-        assert not torch.equal(reload(ckpt, gain.flip(0)), cold)
-        torch.testing.assert_close(reload(ckpt, gain), cold, rtol=0, atol=0)
+        assert not torch.equal(reload(checkpoint(seed=1), cold_gain), cold)
+        assert not torch.equal(reload(ckpt, cold_gain.flip(0)), cold)
+        torch.testing.assert_close(reload(ckpt, cold_gain), cold, rtol=0, atol=0)
         # Graphs capture these addresses, also for the eager native layer.
         assert addresses() == cold_addresses
     finally:

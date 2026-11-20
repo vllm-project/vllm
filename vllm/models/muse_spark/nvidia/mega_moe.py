@@ -234,7 +234,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
         Reruns after every weight reload (so it is not idempotent); parameters
         keep their storage and derived tensors are refilled in place.
         """
-        _get_deep_gemm()  # fail early on an unsupported DeepGEMM build
+        deep_gemm = _get_deep_gemm()  # fail early on an unsupported build
         if not is_weights_pre_processed():  # else already in kernel layout
             if self.weight_layout == "trtllm" and self.is_nvfp4:
                 self._prepare_trtllm_weights()
@@ -243,7 +243,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
             elif self.is_nvfp4:
                 self._prepare_native_nvfp4_weights()
             else:
-                l1, l2 = _get_deep_gemm().transform_weights_for_mega_moe(
+                l1, l2 = deep_gemm.transform_weights_for_mega_moe(
                     self.w13_weight.data, self.w2_weight.data
                 )
                 replace_parameter(self, "w13_weight", l1)
@@ -312,7 +312,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
         replace_parameter(self, "w13_weight", w13)
         replace_parameter(self, "w2_weight", w2)
 
-    def kernel_weights(self):
+    def _kernel_weights(self):
         """The repacked parameters as the L1 and L2 operands DeepGEMM reads."""
         if not self.is_nvfp4:
             return self.w13_weight.data, self.w2_weight.data
@@ -430,7 +430,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
         deep_gemm = _get_deep_gemm()
 
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        l1, l2 = self.kernel_weights()
+        l1, l2 = self._kernel_weights()
         if not self.is_nvfp4:
             deep_gemm.bf16_mega_moe(
                 y,
