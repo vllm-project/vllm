@@ -187,9 +187,9 @@ def check_xpu_moe_w4a8_supported(
 
 class INCARKW4A8MoEMethod(INCARKWNA16MoEMethod):
     kernel_name = "W4A8"
-    log_message = "Selected ARK XPU W4A8 prefill/W4A16 decode MoE method."
-    prefill_kernel_log_message = "Using ARK XPU W4A8 MoE kernel for prefill."
-    decode_kernel_log_message = "Using ARK XPU W4A16 MoE kernel for decode."
+    log_message = "Selected ARK XPU mixed W4A8/W4A16 MoE method."
+    prefill_kernel_log_message = "Using ARK XPU W4A8 MoE kernel."
+    decode_kernel_log_message = "Using ARK XPU W4A16 MoE kernel."
     _eager_prepack_layer_count = 0
 
     def __init__(

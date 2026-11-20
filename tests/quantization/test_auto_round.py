@@ -1632,6 +1632,142 @@ def test_wna16_xpu_moe_w4a8_prepack_cache(
 
 
 @pytest.mark.parametrize(
+    "num_rows, decode_tokens, prefill_tokens, expected_segments",
+    [
+        (63, None, None, [("w4a16", 63)]),
+        (64, None, None, [("w4a16", 64)]),
+        (65, None, None, [("w4a8", 65)]),
+        (65, 65, 0, [("w4a16", 65)]),
+        (2, 0, 2, [("w4a8", 2)]),
+        (5, 2, 3, [("w4a16", 2), ("w4a8", 3)]),
+        (6, 2, 3, [("w4a16", 6)]),
+    ],
+    ids=[
+        "triton-below-threshold",
+        "triton-at-threshold",
+        "triton-above-threshold",
+        "decode-metadata-overrides-workload",
+        "prefill-metadata-overrides-workload",
+        "mixed-row-order",
+        "invalid-counts-fall-back",
+    ],
+)
+def test_wna16_xpu_moe_w4a8_dispatch(
+    monkeypatch,
+    ark_moe_backend,
+    ark_moe_weights,
+    num_rows,
+    decode_tokens,
+    prefill_tokens,
+    expected_segments,
+) -> None:
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+
+    monkeypatch.delenv("ARK_MOE_W4A8_EAGER_PREPACK", raising=False)
+    monkeypatch.delenv("ARK_MOE_AUTO_DECODE_MAX_TOKENS", raising=False)
+    method, layer = ark_moe_weights
+    method.process_weights_after_loading(layer)
+    kernel_calls = []
+
+    def run_kernel(inputs, weights, rows_per_expert, precision):
+        out_features = weights.shape[-2]
+        assert rows_per_expert.sum().item() == inputs.shape[0]
+        kernel_calls.append((precision, inputs.shape[0], out_features))
+        if out_features == 256:
+            return torch.cat((inputs, inputs), dim=-1)
+        return inputs + (256 if precision == "w4a8" else 0)
+
+    def prepack(qweight, scales, *, group_size):
+        return qweight.to(torch.int8), scales, group_size
+
+    def w4a8(inputs, weights, scales, rows_per_expert, *, rescale_block_size, phase):
+        assert weights.dtype == torch.int8
+        assert scales.dtype == torch.float16
+        assert rescale_block_size == layer.group_size
+        assert phase == "prefill"
+        return run_kernel(inputs, weights, rows_per_expert, "w4a8")
+
+    def w4a16(inputs, qweight, rows_per_expert, *, scales, weight_bits, group_size):
+        assert qweight.dtype == torch.uint8
+        assert scales.dtype == torch.float16
+        assert weight_bits == 4
+        assert group_size == layer.group_size
+        return run_kernel(inputs, qweight, rows_per_expert, "w4a16")
+
+    monkeypatch.setattr(ark_moe_backend, "moe_w4a8_prepack", prepack)
+    monkeypatch.setattr(ark_moe_backend, "moe_gemm_w4a8", w4a8)
+    monkeypatch.setattr(ark_moe_backend, "moe_gemm_decode", w4a16)
+    query_lengths = torch.tensor(
+        [1] * num_rows
+        if decode_tokens is None
+        else [1] * (num_rows - prefill_tokens)
+        + ([prefill_tokens] if prefill_tokens else []),
+        dtype=torch.int32,
+    )
+    metadata_kwargs: dict[str, Any] = {
+        "num_actual_tokens": num_rows,
+        "max_query_len": query_lengths.max().item(),
+        "query_start_loc": torch.cat(
+            (
+                torch.zeros(1, dtype=torch.int32),
+                query_lengths.cumsum(0, dtype=torch.int32),
+            )
+        ),
+        "max_seq_len": 128,
+        "seq_lens": query_lengths + 16,
+        "block_table": torch.zeros((len(query_lengths), 1), dtype=torch.int32),
+        "slot_mapping": torch.arange(num_rows),
+    }
+    metadata: FlashAttentionMetadata | TritonAttentionMetadata
+    if decode_tokens is None:
+        metadata = TritonAttentionMetadata(
+            **metadata_kwargs,
+            seq_threshold_3D=0,
+            num_par_softmax_segments=1,
+            softmax_segm_output=torch.empty(0),
+            softmax_segm_max=torch.empty(0),
+            softmax_segm_expsum=torch.empty(0),
+            causal=True,
+        )
+    else:
+        metadata = FlashAttentionMetadata(
+            **metadata_kwargs,
+            num_decode_tokens=decode_tokens,
+            num_prefill_tokens=prefill_tokens,
+        )
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata=cast(Any, {"attn": metadata}),
+        slot_mapping={},
+    )
+    hidden_states = torch.arange(1, num_rows + 1, dtype=torch.bfloat16)
+    hidden_states = hidden_states.unsqueeze(1).expand(-1, 128).contiguous()
+    row_ids = torch.arange(num_rows)
+    topk_ids = torch.stack((row_ids % 4, (row_ids + 1) % 4), dim=1)
+    topk_weights = torch.full((num_rows, 2), 0.5)
+
+    with override_forward_context(context):
+        output = method.apply(layer, hidden_states, topk_weights, topk_ids, None, None)
+
+    assert kernel_calls == [
+        (precision, segment_rows * 2, out_features)
+        for precision, segment_rows in expected_segments
+        for out_features in (256, 128)
+    ]
+    expected = torch.nn.functional.silu(hidden_states) * hidden_states
+    start = 0
+    for precision, segment_rows in expected_segments:
+        if precision == "w4a8":
+            expected[start : start + segment_rows] += 256
+        start += segment_rows
+    assert output.shape == hidden_states.shape
+    assert output.dtype == hidden_states.dtype
+    assert torch.equal(output, expected)
+
+
+@pytest.mark.parametrize(
     "value, world_size, expected", [("1", 1, False), ("force", 1, True), ("1", 2, True)]
 )
 def test_wna16_xpu_moe_w4a8_eager_prepack_tp1(
