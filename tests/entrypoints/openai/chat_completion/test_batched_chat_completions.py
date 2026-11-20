@@ -39,6 +39,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+MAX_BATCH_CONVERSATIONS = 2
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +61,10 @@ def default_server_args():
 
 @pytest.fixture(scope="module")
 def server(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+    env = {"VLLM_MAX_COMPLETION_PROMPTS": str(MAX_BATCH_CONVERSATIONS)}
+    with RemoteOpenAIServer(
+        MODEL_NAME, default_server_args, env_dict=env
+    ) as remote_server:
         yield remote_server
 
 
@@ -142,6 +146,29 @@ async def test_batched_chat_completions(
     # Each conversation should produce a non-empty text response.
     for choice in choices:
         assert choice["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_batched_chat_completions_rejects_too_many_conversations(
+    server: RemoteOpenAIServer,
+) -> None:
+    conversation = [{"role": "user", "content": "Hello"}]
+
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            server.url_for("v1/chat/completions/batch"),
+            json={
+                "model": MODEL_NAME,
+                "messages": [conversation] * (MAX_BATCH_CONVERSATIONS + 1),
+                "max_tokens": 1,
+            },
+            timeout=60,
+        )
+
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["param"] == "body.messages"
+    assert f"at most {MAX_BATCH_CONVERSATIONS} items" in error["message"]
 
 
 @pytest.mark.asyncio

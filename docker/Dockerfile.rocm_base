@@ -10,7 +10,7 @@ ARG TRITON_VERSION=3.8.0+git669b31ac
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG FA_BRANCH="4a948e9c"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.29"
+ARG AITER_BRANCH="v0.1.29.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.2.3.post1"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -60,6 +60,11 @@ ARG REFRESH
 RUN echo "$REFRESH" >/etc/vllm-rocm-refresh && mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
+
+# apt retries a transient failure (e.g. a deadsnakes PPA 503) only 3 times
+# by default, about 100 s in all; ride out longer outages.
+RUN printf 'Acquire::Retries "10";\nAcquire::Retries::Delay::Maximum "60";\n' \
+    > /etc/apt/apt.conf.d/80-retries
 
 # Install Python and other dependencies
 # pip runs with a cache mount, so its downloads (several GB of SDK
