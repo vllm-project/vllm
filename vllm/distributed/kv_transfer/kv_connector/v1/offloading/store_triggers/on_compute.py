@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
     StoreTriggerHandler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.candidates import (  # noqa: E501
+    final_swa_tail_start_chunk,
     select_store_candidates,
 )
 from vllm.logger import init_logger
@@ -83,7 +84,15 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         self, req_status: RequestOffloadState, config_group_idx: int
     ) -> int | None:
         next_idxs = self._next_stored_chunk_idxs.get(req_status.req.request_id)
-        return 0 if next_idxs is None else next_idxs[config_group_idx]
+        if next_idxs is None:
+            return 0
+        # The final SWA tail at finish can start below the stored progress.
+        tail_start = final_swa_tail_start_chunk(
+            self._config, req_status, config_group_idx
+        )
+        if tail_start is None:
+            return next_idxs[config_group_idx]
+        return min(next_idxs[config_group_idx], tail_start)
 
     def _next_idxs(self, req_status: RequestOffloadState) -> list[int]:
         """The next chunk to offer in each group, created at 0."""

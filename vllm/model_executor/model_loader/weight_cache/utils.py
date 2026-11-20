@@ -35,7 +35,7 @@ class ExternalWeightCharges:
     """Track a worker's external weight charges and those freed by disk fallback."""
 
     fallback_bytes: int = field(default=0, init=False)
-    _charges: dict[tuple[str, bool], int] = field(default_factory=dict, init=False)
+    _charges: dict[str, int] = field(default_factory=dict, init=False)
 
     @property
     def current_bytes(self) -> int:
@@ -56,16 +56,14 @@ _active_external_weight_charges: ContextVar[ExternalWeightCharges | None] = Cont
 )
 
 
-def record_external_weight_charge(
-    socket_path: str, is_draft: bool, memory_bytes: int
-) -> None:
+def record_external_weight_charge(socket_path: str, memory_bytes: int) -> None:
     if accounting := _active_external_weight_charges.get():
-        accounting._charges[socket_path, is_draft] = memory_bytes
+        accounting._charges[socket_path] = memory_bytes
 
 
-def record_external_weight_fallback(socket_path: str, is_draft: bool) -> None:
+def record_external_weight_fallback(socket_path: str) -> None:
     if accounting := _active_external_weight_charges.get():
-        accounting.fallback_bytes += accounting._charges.pop((socket_path, is_draft), 0)
+        accounting.fallback_bytes += accounting._charges.pop(socket_path, 0)
 
 
 DaemonRole = Literal["target", "draft"]

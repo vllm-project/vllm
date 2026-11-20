@@ -732,6 +732,8 @@ def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
 ):
     sched = _FakeScheduler(
         mode=MoRIIOMode.WRITE,
+        is_producer=False,
+        _write_recvs_in_flight={},
         _has_mamba=False,
         block_size=16,
         tp_size=1,

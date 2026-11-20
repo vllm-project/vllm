@@ -173,6 +173,7 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
+                retention_interval=kv_cache_config.prefix_cache_retention_interval,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -252,6 +253,13 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
+                if apply_admission_cap:
+                    reservation = manager.get_num_blocks_to_reserve(
+                        request_id, num_tokens
+                    )
+                    if reservation is not None:
+                        num_blocks_to_allocate += reservation
+                        continue
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
@@ -270,6 +278,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        num_tokens_main_model: int,
         skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> None:
         """Add the new computed blocks to the request. Optionally allocate new
@@ -281,6 +290,7 @@ class KVCacheCoordinator(ABC):
                 prefix cache.
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
+            num_tokens_main_model: The target-token end of this step.
             skip_zeroing_group_ids: Groups whose external-token blocks are
                 written by an async load and must not be zeroed.
 
@@ -312,6 +322,7 @@ class KVCacheCoordinator(ABC):
                     num_local_computed_tokens,
                     num_external_computed_tokens,
                     record_for_zeroing=i not in skip_zeroing_group_ids,
+                    num_tokens_main_model=num_tokens_main_model,
                 )
 
     def allocate_new_blocks(
@@ -389,11 +400,10 @@ class KVCacheCoordinator(ABC):
         for group_idx, group_blocks in enumerate(computed_blocks):
             if group_blocks:
                 manager = self.single_type_managers[group_idx]
-                group = self.kv_cache_config.kv_cache_groups[group_idx]
                 manager.block_pool.emit_cached_block_events(
                     request,
                     len(group_blocks),
-                    group.block_size,
+                    manager.block_size,
                     group_idx,
                 )
 
@@ -404,17 +414,18 @@ class KVCacheCoordinator(ABC):
         )
         return all([pool.reset_prefix_cache() for pool in pools])
 
-    def free(self, request_id: str) -> None:
+    def free(self, request: Request) -> None:
         """Free the blocks for the request.
 
         Args:
-            request_id: The request ID.
+            request: The request.
 
         """
         for manager in self.single_type_managers:
-            manager.free(request_id)
+            manager.cache_blocks_on_free(request)
+            manager.free(request.request_id)
 
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+    def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping from all single-type managers and
         return its blocks without returning them to the block pool. The
         caller must eventually pass the returned blocks to
@@ -422,7 +433,7 @@ class KVCacheCoordinator(ABC):
         tail blocks are evicted first).
 
         Args:
-            request_id: The request ID.
+            request: The request.
 
         Returns:
             The request's blocks in allocation order.
@@ -430,7 +441,8 @@ class KVCacheCoordinator(ABC):
         """
         blocks: list[KVCacheBlock] = []
         for manager in self.single_type_managers:
-            blocks.extend(manager.pop_blocks_for_free(request_id))
+            manager.cache_blocks_on_free(request)
+            blocks.extend(manager.pop_blocks_for_free(request.request_id))
         return blocks
 
     def remove_skipped_blocks(
@@ -468,10 +480,17 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
         `num_uncached_common_prefix_tokens` (a shared prefix that a
-        sparse-retention group has not cached yet; 0 unless hybrid)."""
+        sparse-retention group has not cached yet; 0 unless hybrid).
+
+        `num_request_tokens` is the request length in the coordinates of
+        `block_hashes`. `None` means `max_cache_hit_length + 1`, which is
+        at most the request length: an underestimate only asks for more blocks,
+        while an overestimate could skip blocks a draft reads.
+        """
         pass
 
     def new_step_starts(self) -> None:
@@ -523,6 +542,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -587,6 +607,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -599,6 +620,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
+            num_request_tokens=num_request_tokens,
         )
         # Single group: nothing "uncached common" -- no other group to lag it.
         return hit_blocks, hit_length, 0
@@ -783,6 +805,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -794,6 +817,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
+            num_request_tokens: The request length; see the base class.
 
         Returns:
             A tuple containing:
@@ -804,6 +828,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         """
         num_groups = len(self.kv_cache_config.kv_cache_groups)
+        if num_request_tokens is None:
+            num_request_tokens = max_cache_hit_length + 1
         hit_length = max_cache_hit_length
         longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
@@ -878,6 +904,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     pcp_world_size=self.single_type_managers[
                         first_group_id
                     ].pcp_world_size,
+                    num_request_tokens=num_request_tokens,
                 )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
@@ -925,6 +952,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.
 
@@ -932,6 +960,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             (blocks_per_group, hit_lengths_per_group)
 
         """
+        if num_request_tokens is None:
+            num_request_tokens = max_cache_hit_length + 1
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
@@ -962,6 +992,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=manager.dcp_world_size,
                 pcp_world_size=manager.pcp_world_size,
+                num_request_tokens=num_request_tokens,
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks

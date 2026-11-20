@@ -149,11 +149,7 @@ def create_vllm_config(
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype=dtype,
-        seed=42,
-        hf_overrides=hf_overrides or {},
+        model=model, dtype=dtype, seed=42, hf_overrides=hf_overrides or {}
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -646,6 +642,7 @@ def make_nixl_scheduler(
         sched._heartbeat_by_engine = {}
         sched._heartbeat_req_engine = {}
         sched._last_heartbeat_time = 0.0
+        sched._new_heartbeat_reqs = set()
         sched._kv_lease_duration = kv_lease_duration
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
@@ -735,6 +732,7 @@ def make_nixl_push_scheduler(
     sched._heartbeat_by_engine = {}
     sched._heartbeat_req_engine = {}
     sched._last_heartbeat_time = 0.0
+    sched._new_heartbeat_reqs = set()
     sched.blocks_per_sw = []
 
     return sched
