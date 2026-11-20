@@ -63,10 +63,11 @@ def _reserved_block_count(
         return cdiv(max_encoder_len, block_size)
     num_speculative_blocks = 0
     if isinstance(config.params, MambaManager.Params):
-        # MambaManager appends speculative running-state blocks in every cache
-        # mode; align mode sizes from the uncapped, lookahead-free token range.
+        # MambaManager appends speculative running-state blocks either way;
+        # with prefix caching it sizes from the uncapped, lookahead-free token
+        # range.
         num_speculative_blocks = config.params.num_speculative_blocks
-        if config.params.mamba_cache_mode == "align":
+        if config.params.enable_prefix_caching:
             return cdiv(num_tokens, block_size) + num_speculative_blocks
     if group.dcp_sharded:
         block_size *= dcp_world_size
