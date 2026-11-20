@@ -51,7 +51,7 @@ def build_app(
 
     init_exception_handler(app)
     init_entrypoints_middleware(args, app, supported_tasks)
-    if not getattr(args, "disable_sagemaker_routes", False):
+    if not getattr(args, "disable_sagemaker_integration", False):
         from vllm.entrypoints.serve.sagemaker.api_router import (
             sagemaker_standards_bootstrap,
         )

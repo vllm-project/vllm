@@ -37,7 +37,7 @@ def register_api_routers(
 
     register_decisions_api_router(app)
 
-    if not getattr(args, "disable_sagemaker_routes", False):
+    if not getattr(args, "disable_sagemaker_integration", False):
         from vllm.entrypoints.serve.sagemaker.api_router import (
             attach_router as register_sagemaker_api_router,
         )

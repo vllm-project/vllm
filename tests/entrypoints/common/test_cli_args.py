@@ -51,6 +51,12 @@ def test_cors_origins_require_explicit_opt_in(serve_parser):
     ).allowed_origins == ["http://trusted.example"]
 
 
+def test_disable_sagemaker_integration_cli(serve_parser):
+    assert serve_parser.parse_args([]).disable_sagemaker_integration is False
+    args = serve_parser.parse_args(["--disable-sagemaker-integration"])
+    assert args.disable_sagemaker_integration is True
+
+
 ### Test config parsing
 def test_config_arg_parsing(serve_parser, cli_config_file):
     args = serve_parser.parse_args([])
