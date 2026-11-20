@@ -43,7 +43,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
@@ -530,7 +530,6 @@ def dsv41_ampere_sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
-    dense_mha_metadata_layer_name: LayerNameType,
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
@@ -552,18 +551,6 @@ def dsv41_ampere_sparse_attn_indexer(
         return topk_indices_buffer
     metadata = attn_metadata[_resolve_layer_name(k_cache_prefix)]
     assert isinstance(metadata, DeepseekV32IndexerMetadata)
-    if forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
-        # As the stock op: a prefill-only step whose main MLA runs dense MHA
-        # reads no top-k, so leave the buffer untouched.
-        dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
-        if dense_mha_layer:
-            mla_metadata = attn_metadata.get(dense_mha_layer)
-            if (
-                getattr(getattr(mla_metadata, "prefill", None), "use_dense_mha", False)
-                and getattr(mla_metadata, "num_decode_tokens", -1) == 0
-                and not torch.cuda.is_current_stream_capturing()
-            ):
-                return topk_indices_buffer
     # Decode rows are written whole by the default backend's top-k.
     first_unwritten = metadata.num_decode_tokens if topk_backend == "auto" else 0
     topk_indices_buffer[first_unwritten : hidden_states.shape[0]] = -1
@@ -607,7 +594,6 @@ def _dsv41_ampere_sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
-    dense_mha_metadata_layer_name: LayerNameType,
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
@@ -665,7 +651,6 @@ class AmpereSparseAttnIndexer(SparseAttnIndexer):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
-            _encode_layer_name(self.dense_mha_metadata_layer_name),
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,

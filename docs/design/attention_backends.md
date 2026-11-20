@@ -224,7 +224,7 @@ MLA uses separate backends for prefill and decode phases.
 To explicitly select a prefill backend, use
 `-ac.mla_prefill_backend=<BACKEND>` (e.g., `FLASH_ATTN`, `FLASHINFER`).
 Otherwise, the prefill backend is selected automatically at runtime based on
-hardware and configuration.
+hardware and configuration for dense MLA.
 
 --8<-- "gen:table-mla-prefill"
 
@@ -233,6 +233,19 @@ hardware and configuration.
 > TokenSpeed MLA; for (qk_nope_head_dim=192, qk_rope_head_dim=64,
 > v_head_dim=256) TRT-LLM Ragged is tried before FlashAttention. On other
 > GPUs, only FlashAttention is considered.
+
+### Sparse MLA Prefill
+
+Sparse MLA prefills use masked MHA when the backend, hardware, KV cache dtype,
+batch shape, and workspace support it; otherwise they use sparse MQA. Short
+prefills whose sequence lengths fit within `index_topk` follow the same rule.
+There is no separate dense-MHA prefill route or indexer-scoring skip for them.
+This can increase short-prefill latency compared with the former dense route.
+
+`-ac.mla_prefill_backend` is ignored by sparse MLA layers and emits a warning
+when explicitly set. `-ac.sparse_mla_force_mqa=true` disables masked MHA as well.
+Masked MHA still uses a chunked-prefill workspace; removing dense prefill does
+not eliminate that allocation.
 
 ### Decode Backends
 

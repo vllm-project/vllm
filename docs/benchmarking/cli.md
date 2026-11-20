@@ -61,10 +61,10 @@ results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
 Sparse MLA benchmarks use the metadata builder's prefill route by default.
-The `mha_vs_mqa` comparison mode forces the selected `dense_mha`, `masked_mha`,
-and `mqa` variants. When calling the benchmark runner from Python, set
-`BenchmarkConfig.sparse_mla_route` to `SparseMLAPrefillRoute.DENSE_MHA`,
-`MASKED_MHA`, or `SPARSE_MQA` to force a route, or leave it as `None` to use the
+The `mha_vs_mqa` comparison mode forces the selected `masked_mha` and `mqa`
+variants. When calling the benchmark runner from Python, set
+`BenchmarkConfig.sparse_mla_route` to `SparseMLAPrefillRoute.MASKED_MHA`
+or `SPARSE_MQA` to force a route, or leave it as `None` to use the
 builder's decision. Import `SparseMLAPrefillRoute` from
 `vllm.v1.attention.backends.mla.sparse_utils`. This replaces
 the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
@@ -79,13 +79,11 @@ If automatic routing chooses MQA despite an explicit `prefill_backend`, the
 runner warns that the requested prefill backend was not executed. Set the route
 enum explicitly when measuring an MHA kernel.
 
-The YAML `prefill_backends` comparison explicitly measures MHA. For sparse MLA,
-it uses dense MHA when every sequence fits within the benchmark's top-k of 2048,
-and masked MHA otherwise. Masked MHA requires `fa4`.
-Unsupported prefill backends report an error instead
-of falling back to sparse MQA and labeling its timing as the requested backend.
-FP8 output comparisons also require an MHA prefill route; an automatic sparse
-MQA route reports an error instead of silently omitting output quantization.
+The YAML `prefill_backends` comparison applies only to dense MLA. For sparse
+MLA, use `mha_vs_mqa`; its masked-MHA variant requires `fa4`. Sparse MLA has no
+`dense_mha` variant or `sparse_mla_dense_mha_max_seq_len` setting. Unsupported
+prefill backends report an error instead of labeling another kernel's timing
+as the requested backend. FP8 output fusion benchmarks apply only to dense MLA.
 
 ## Dataset Overview
 

@@ -32,7 +32,6 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
-    SparseMLAPrefillRoute,
     align_blocks_to_rows,
     flat_kv_row_view,
     triton_filter_and_convert_dcp_index,
@@ -809,11 +808,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build=fast_build
         )
-        use_dense_prefill = (
-            metadata.prefill is not None
-            and metadata.prefill.route is SparseMLAPrefillRoute.DENSE_MHA
-        )
-        num_reqs = metadata.num_decodes if use_dense_prefill else metadata.num_reqs
+        num_reqs = metadata.num_reqs
         num_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs].item())
         num_decodes = metadata.num_decodes
         num_prefills = metadata.num_prefills
@@ -1074,11 +1069,6 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     "requires gfx950 (aiter Triton sparse_mla_fwd, "
                     "fp8_dsv32_mla layout)."
                 )
-        # Dense-MHA prefill gathers cache rows into a bf16 workspace and would
-        # misread packed mxfp4_mla rows.
-        self.supports_dense_mha_prefill = (  # type: ignore[misc]
-            sinks is None and kv_cache_dtype != "mxfp4_mla"
-        )
         self.masked_mha_available = False
 
         vllm_config = get_current_vllm_config()

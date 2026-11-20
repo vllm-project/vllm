@@ -387,7 +387,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
-        layer_prefill_backend = attention_layer.prefill_backend
         self._backend_name = attention_layer.get_attn_backend().get_name()
         # The workspace follows the global KV dtype; a layer group can differ
         # (e.g. an MTP draft with its own kv_cache_dtype).
@@ -399,14 +398,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         if self.dcp_world_size > 1:
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
             assert isinstance(self.dcp_manager, MLADCPManager)
-            if layer_prefill_backend is not None:
-                self.dcp_manager.init_kv_gather(
-                    self.chunked_prefill_workspace,
-                    self.chunked_prefill_workspace_size,
-                )
-        self._prefill_backend = (
-            layer_prefill_backend.clone() if layer_prefill_backend is not None else None
-        )
         layers = vllm_config.compilation_config.static_forward_context
         self.use_shardq = any(
             getattr(layers[name], "use_shardq", False) for name in layer_names
@@ -525,7 +516,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         prefill_max_seq_len = 0
         prefill: SparseMLAPrefillMetadata | None = None
-        if num_prefills > 0 and self._prefill_backend is not None:
+        if num_prefills > 0:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_max_seq_len = int(
@@ -559,7 +550,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 chunked_context=chunked_context,
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
-                prefill_backend=self._prefill_backend,
                 topk_mask_workspace=self.topk_mask_workspace,
                 host_staging_plan=staging_plan,
                 route=self._prefill_route(
@@ -570,7 +560,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     use_shardq=shardq_split is not None,
                 ),
             )
-            self._prefill_backend.prepare_metadata(prefill)
 
         metadata = self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
@@ -612,11 +601,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             or use_shardq
         ):
             return SparseMLAPrefillRoute.SPARSE_MQA
-        if prefill_max_seq_len <= self.topk_tokens:
-            # Dense MHA cannot be used under PCP+DCP.
-            if self.use_pcp and self.dcp_world_size > 1:
-                return SparseMLAPrefillRoute.SPARSE_MQA
-            return SparseMLAPrefillRoute.DENSE_MHA
         if (
             self._masked_mha_available
             and self.dcp_world_size <= 1
@@ -1386,18 +1370,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     ) -> None:
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
-        if prefill_metadata.route is SparseMLAPrefillRoute.DENSE_MHA:
-            return super().forward_mha(
-                q,
-                kv_c_normed,
-                k_pe,
-                kv_c_and_k_pe_cache,
-                attn_metadata,
-                k_scale,
-                output,
-                output_scale,
-            )
-
         assert prefill_metadata.route is SparseMLAPrefillRoute.MASKED_MHA
         assert output_scale is None
         assert self.masked_mha_available

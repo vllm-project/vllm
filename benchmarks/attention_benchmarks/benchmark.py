@@ -625,7 +625,7 @@ def main():
         "--sparse-mla-mha-variants",
         nargs="+",
         default=None,
-        choices=["dense_mha", "masked_mha", "mqa"],
+        choices=["masked_mha", "mqa"],
         help="Sparse MLA variants to run in mha_vs_mqa mode. Defaults to both.",
     )
 
@@ -749,9 +749,6 @@ def main():
             args.torch_profile_iters = yaml_config["torch_profile_iters"]
         args.sparse_mla_topk_pattern = yaml_config.get(
             "sparse_mla_topk_pattern", "random"
-        )
-        args.sparse_mla_dense_mha_max_seq_len = yaml_config.get(
-            "sparse_mla_dense_mha_max_seq_len", None
         )
         args.sparse_mla_mha_variants = yaml_config.get(
             "sparse_mla_mha_variants", args.sparse_mla_mha_variants
@@ -1128,12 +1125,10 @@ def main():
         console.print("[yellow]Mode: MHA vs MQA comparison for sparse MLA[/]")
 
         sparse_mla_topk_pattern = getattr(args, "sparse_mla_topk_pattern", "random")
-        dense_mha_max_seq_len = getattr(args, "sparse_mla_dense_mha_max_seq_len", None)
         prefill_backend = getattr(args, "prefill_backend", None)
         if prefill_backend:
             console.print(f"Prefill backend: {prefill_backend}")
         available_variants = [
-            ("dense_mha", SparseMLAPrefillRoute.DENSE_MHA),
             ("masked_mha", SparseMLAPrefillRoute.MASKED_MHA),
             ("mqa", SparseMLAPrefillRoute.SPARSE_MQA),
         ]
@@ -1178,10 +1173,6 @@ def main():
             q_len = max(request.q_len for request in parse_batch_spec(spec))
             for variant_label, _ in variants:
                 if (
-                    variant_label == "dense_mha"
-                    and dense_mha_max_seq_len is not None
-                    and q_len > dense_mha_max_seq_len
-                ) or (
                     variant_label == "masked_mha"
                     and masked_mha_max_seq_len is not None
                     and q_len > masked_mha_max_seq_len
@@ -1195,10 +1186,6 @@ def main():
                 for backend in backends:
                     for variant_label, route in variants:
                         if (
-                            variant_label == "dense_mha"
-                            and dense_mha_max_seq_len is not None
-                            and q_len > dense_mha_max_seq_len
-                        ) or (
                             variant_label == "masked_mha"
                             and masked_mha_max_seq_len is not None
                             and q_len > masked_mha_max_seq_len
@@ -1233,7 +1220,6 @@ def main():
                             qk_rope_head_dim=getattr(args, "qk_rope_head_dim", None),
                             v_head_dim=getattr(args, "v_head_dim", None),
                             sparse_mla_route=route,
-                            sparse_mla_dense_mha_max_seq_len=dense_mha_max_seq_len,
                             sparse_mla_topk_pattern=sparse_mla_topk_pattern,
                             prefill_backend=prefill_backend,
                             sparse_mla_masked_mha_max_seq_len=masked_mha_max_seq_len,
@@ -1391,6 +1377,11 @@ def main():
             # Use first decode backend for impl construction
             decode_backend = backends[0]
             is_sparse = AttentionBackendEnum[decode_backend].get_class().is_sparse()
+            if is_sparse:
+                raise ValueError(
+                    "Sparse MLA has no selectable prefill backend; use mha_vs_mqa "
+                    "mode to compare masked MHA and sparse MQA."
+                )
             index_topk = 2048
             total = len(prefill_backends) * len(args.batch_specs)
 
@@ -1401,15 +1392,6 @@ def main():
 
             with tqdm(total=total, desc="Prefill benchmarking") as pbar:
                 for spec in args.batch_specs:
-                    prefill_route = None
-                    if is_sparse:
-                        max_seq_len = max(r.kv_len for r in parse_batch_spec(spec))
-                        # Measure MHA explicitly instead of an automatic MQA fallback.
-                        prefill_route = (
-                            SparseMLAPrefillRoute.DENSE_MHA
-                            if max_seq_len <= index_topk
-                            else SparseMLAPrefillRoute.MASKED_MHA
-                        )
                     for pb in prefill_backends:
                         config = BenchmarkConfig(
                             backend=decode_backend,
@@ -1423,7 +1405,6 @@ def main():
                             profile_memory=args.profile_memory,
                             warmup_ms=args.warmup_ms,
                             prefill_backend=pb,
-                            sparse_mla_route=prefill_route,
                             kv_lora_rank=args.kv_lora_rank,
                             qk_nope_head_dim=args.qk_nope_head_dim,
                             qk_rope_head_dim=args.qk_rope_head_dim,

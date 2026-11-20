@@ -214,8 +214,6 @@ class KimiK3DSAIndexer(nn.Module):
         # (sparse_attn_indexer.py): enable the allgather-k path when prefill
         # context parallelism is configured.
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
-        # Set by KimiK3DSAAttention to skip scoring dense-MHA prefills.
-        self.dense_mha_metadata_layer_name = ""
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         # PCP gathers the unquantized key inside the op.
         self.use_fused_k_insert = (
@@ -403,7 +401,6 @@ class KimiK3DSAIndexer(nn.Module):
             self.use_fused_k_insert,  # skip_k_cache_insert
             self.use_pcp,
             self._parallel_config.pcp_shard_decode_requests,
-            _encode_layer_name(self.dense_mha_metadata_layer_name),
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,
@@ -670,11 +667,7 @@ class KimiK3DSAAttention(nn.Module):
             shardq_eligible=True,
         )
 
-        # Dense-MHA prefills never read the top-k indices (PCP excluded, as
-        # upstream).
         indexer = self.dsa_indexer
-        if not indexer.use_pcp:
-            indexer.dense_mha_metadata_layer_name = self.mla_attn.mla_attn.layer_name
         # ShardQ (sparse_mla_shard_q): the indexer is not an indexer_op, so
         # its cache follows the MLA layer's split here.
         if self.mla_attn.mla_attn.use_shardq:

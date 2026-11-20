@@ -678,7 +678,6 @@ def test_indexer_score_reads_its_cache_format(
         use_fused_k_insert=True,
         use_pcp=False,
         _parallel_config=SimpleNamespace(pcp_shard_decode_requests=False),
-        dense_mha_metadata_layer_name="",
         dcp_rank=0,
         dcp_world_size=1,
         cp_kv_cache_interleave_size=1,

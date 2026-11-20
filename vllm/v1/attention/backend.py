@@ -786,13 +786,8 @@ class AttentionImplBase(ABC, Generic[T]):
     """
 
     # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
-    # route between the dense-MHA prefill and sparse-MQA paths.
+    # route between the MHA prefill and sparse-MQA paths.
     is_sparse: ClassVar[bool] = False
-
-    # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
-    # impls without one run the top-k MQA path for all requests. Impls may
-    # override it per instance, depending on the kv-cache layout.
-    supports_dense_mha_prefill: bool = True
 
     # Required attributes that all impls should have
     num_heads: int

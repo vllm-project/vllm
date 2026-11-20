@@ -16,7 +16,6 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
-    CUDAGraphMode,
     get_current_vllm_config,
     get_current_vllm_config_or_none,
 )
@@ -82,7 +81,6 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
 )
-from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -561,25 +559,6 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
-def should_skip_indexer_scoring(
-    mla_metadata: object, cudagraph_runtime_mode: CUDAGraphMode
-) -> bool:
-    """Whether the indexer can skip scoring because the main MLA runs a pure
-    prefill on dense MHA, which does not read the top-k indices.
-
-    The indexer and main MLA may classify the same short extend differently
-    because they use independent decode thresholds, so this takes the main MLA
-    metadata. The indexer K cache must still be written.
-    """
-    prefill = getattr(mla_metadata, "prefill", None)
-    return (
-        cudagraph_runtime_mode != CUDAGraphMode.FULL
-        and getattr(prefill, "route", None) is SparseMLAPrefillRoute.DENSE_MHA
-        and getattr(mla_metadata, "num_decode_tokens", -1) == 0
-        and not torch.cuda.is_current_stream_capturing()
-    )
-
-
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -599,7 +578,6 @@ def sparse_attn_indexer(
     skip_k_cache_insert: bool,
     use_pcp: bool,
     pcp_shard_decode_requests: bool,
-    dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
@@ -731,7 +709,6 @@ def sparse_attn_indexer(
             skip_k_cache_insert,
             use_pcp,
             pcp_shard_decode_requests,
-            dense_mha_metadata_layer_name,
             use_fp4_cache,
             candidate_blocks=candidate_blocks,
             candidate_block_size=candidate_block_size,
@@ -786,14 +763,6 @@ def sparse_attn_indexer(
             quant_block_size,
             "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
         )
-    dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
-    if dense_mha_layer and should_skip_indexer_scoring(
-        attn_metadata.get(dense_mha_layer), forward_context.cudagraph_runtime_mode
-    ):
-        # Deliberately leave the buffer untouched; clearing it would be
-        # unnecessary work.
-        return topk_indices_buffer
-
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
     # nvidia path, _fused_norm_rope_kernel already cleared the same
@@ -1274,7 +1243,6 @@ def sparse_attn_indexer_fake(
     skip_k_cache_insert: bool,
     use_pcp: bool,
     pcp_shard_decode_requests: bool,
-    dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
@@ -1356,7 +1324,6 @@ class SparseAttnIndexer(CustomOp):
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
         self.candidate_write = candidate_write
-        self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
@@ -1472,7 +1439,6 @@ class SparseAttnIndexer(CustomOp):
             self.skip_k_cache_insert,
             self.use_pcp,
             self.pcp_shard_decode_requests,
-            _encode_layer_name(self.dense_mha_metadata_layer_name),
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,

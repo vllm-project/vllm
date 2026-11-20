@@ -476,7 +476,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.num_speculative_tokens = (
             spec_config.num_speculative_tokens if spec_config else 0
         )
-        # sparse_swa has no MQA-vs-dense-MHA routing, so multi-token queries take
+        # sparse_swa has no MQA-vs-MHA routing, so multi-token queries take
         # the prefill path and the decode/prefill split stays at the widest
         # decode.
         self.decode_threshold = max_decode_query_len(self.vllm_config)

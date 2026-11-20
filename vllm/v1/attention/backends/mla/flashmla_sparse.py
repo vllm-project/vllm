@@ -502,7 +502,7 @@ class FlashMLASparseMetadataBuilder(
         """Build FP8 metadata treating MQA tokens as one batch.
 
         The scheduler initializes lazily from the runtime query shape, which may
-        be the full batch or only decodes when prefills use dense MHA. This avoids
+        be the full batch or only decodes when prefills use MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
         """
         scheduler_metadata, _ = get_mla_metadata()
@@ -784,9 +784,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         self.q_head_size = head_size
         if kv_cache_dtype == "fp8_ds_mla" and self.qk_rope_head_dim == 0:
             self.q_head_size = self.kv_lora_rank + FP8_DS_MLA_ROPE_DIM
-            # Dense-MHA prefill would gather the cache into a
-            # kv_lora_rank-wide workspace, too narrow for the 576 rows.
-            self.supports_dense_mha_prefill = False
 
         # ShardQ runs on the mixed-batch fp8 kernel.
         self.use_shardq = (
@@ -869,7 +866,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             cache = None
         block_table = attn_metadata.block_table
         # req_id_per_token covers the whole batch; slice it to the MQA tokens
-        # (q may exclude prefill tokens routed to dense MHA).
+        # (q may exclude prefill tokens routed to MHA).
         req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
         decode_out: torch.Tensor | None = None
         if cache is not None:
@@ -1254,7 +1251,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         block_table = attn_metadata.block_table
         # req_id_per_token covers the whole batch; slice it to the MQA tokens
-        # (q may exclude prefill tokens routed to dense MHA).
+        # (q may exclude prefill tokens routed to MHA).
         req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
         kv_pages, block_stride_rows = _fp8_kv_pages(
             kv_c_and_k_pe_cache, attn_metadata.block_size

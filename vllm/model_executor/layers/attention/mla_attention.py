@@ -452,7 +452,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     3. Return the output tensor.
     """
 
-    supports_dense_mha_prefill: ClassVar[bool] = True
     # PCP+DCP is validated per model; subclasses opt in.
     supports_pcp_dcp: ClassVar[bool] = False
 
@@ -683,41 +682,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.prefill_backend: MLAPrefillBackend | None
-        if self.impl.is_sparse and not (
-            self.impl.supports_dense_mha_prefill and self.supports_dense_mha_prefill
-        ):
-            logger.warning_once(
-                "Sparse MLA layer has no dense-MHA prefill path; using the top-k "
-                "MQA path only."
-            )
-            self.prefill_backend = None
-        else:
-            try:
-                prefill_backend_cls = prefill_backend_cls or get_mla_prefill_backend(
-                    vllm_config
-                )
-            except ValueError:
-                if (
-                    not self.impl.is_sparse
-                    or vllm_config.attention_config.mla_prefill_backend is not None
-                ):
-                    raise
+        self.prefill_backend: MLAPrefillBackend | None = None
+        if self.impl.is_sparse:
+            if vllm_config.attention_config.mla_prefill_backend is not None:
                 logger.warning_once(
-                    "No MLA prefill backend supports this model; sparse MLA will "
-                    "use the top-k MQA path only (no dense-MHA prefill)."
+                    "mla_prefill_backend is ignored by sparse MLA layers, whose "
+                    "prefills run masked MHA or sparse MQA."
                 )
-                self.prefill_backend = None
-            else:
-                self.prefill_backend = prefill_backend_cls(
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    kv_lora_rank=self.kv_lora_rank,
-                    qk_nope_head_dim=self.qk_nope_head_dim,
-                    qk_rope_head_dim=self.qk_rope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                    vllm_config=vllm_config,
-                )
+        else:
+            prefill_backend_cls = prefill_backend_cls or get_mla_prefill_backend(
+                vllm_config
+            )
+            self.prefill_backend = prefill_backend_cls(
+                num_heads=self.num_heads,
+                scale=self.scale,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                vllm_config=vllm_config,
+            )
 
         self.kv_cache = torch.tensor([])
 
@@ -1156,11 +1140,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.prefill_backend.supports_quant_output(quant_key)
             and attn_metadata is not None
             and attn_metadata.prefill is not None
-            and (
-                not self.impl.is_sparse
-                or attn_metadata.prefill.route  # type: ignore[attr-defined]
-                is SparseMLAPrefillRoute.DENSE_MHA
-            )
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
         )
@@ -3086,9 +3065,9 @@ def accumulate_mla_context_chunk(
 
 
 class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
-    """Shared MLA base providing dense-MHA prefill (via the selected
-    MLAPrefillBackend) for both dense and sparse impls; subclasses add decode
-    (`forward_mqa`).
+    """Shared MLA base providing MHA prefill (via the selected
+    MLAPrefillBackend) for dense impls; sparse impls override `forward_mha`
+    with masked MHA. Subclasses add decode (`forward_mqa`).
     """
 
     _use_flashinfer_concat_mla_k: bool

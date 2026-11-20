@@ -666,20 +666,23 @@ def _create_backend_impl(
         attn_backend=backend_cfg["backend_class"],
     )
 
-    # Attach a prefill backend (MLAAttention does this in __init__; the metadata
-    # builder reads layer.prefill_backend from static_forward_context).
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+    # Attach a prefill backend as MLAAttention does in __init__ (sparse layers
+    # have none); the metadata builder reads layer.prefill_backend from
+    # static_forward_context.
+    layer.prefill_backend = None
+    if not backend_cfg.get("is_sparse", False):
+        from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
-    prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-    layer.prefill_backend = prefill_backend_cls(
-        num_heads=mla_dims["num_q_heads"],
-        scale=(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]) ** -0.5,
-        kv_lora_rank=mla_dims["kv_lora_rank"],
-        qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
-        qk_rope_head_dim=mla_dims["qk_rope_head_dim"],
-        v_head_dim=mla_dims["v_head_dim"],
-        vllm_config=vllm_config,
-    )
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        layer.prefill_backend = prefill_backend_cls(
+            num_heads=mla_dims["num_q_heads"],
+            scale=(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]) ** -0.5,
+            kv_lora_rank=mla_dims["kv_lora_rank"],
+            qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
+            qk_rope_head_dim=mla_dims["qk_rope_head_dim"],
+            v_head_dim=mla_dims["v_head_dim"],
+            vllm_config=vllm_config,
+        )
 
     # Create builder instance if needed
     builder_instance = None
@@ -1157,7 +1160,7 @@ def _run_mla_benchmark_batched(
         # Verify the actual prefill backend matches what was requested. The
         # selector + impl construction already raise on misuse; here we just
         # check the resolved class against the requested name as a sanity guard.
-        if prefill_backend is not None:
+        if prefill_backend is not None and not is_sparse:
             expected_class = {
                 "fa2": "FlashAttnPrefillBackend",
                 "fa3": "FlashAttnPrefillBackend",
@@ -1226,11 +1229,7 @@ def _run_mla_benchmark_batched(
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)
             original_threshold = None
             effective_threshold = threshold
-            force_mha = is_sparse and config.sparse_mla_route in (
-                SparseMLAPrefillRoute.DENSE_MHA,
-                SparseMLAPrefillRoute.MASKED_MHA,
-            )
-            if force_mha:
+            if force_masked_mha:
                 # Sparse MLA normally treats q_len <= 1 as decode. Use an
                 # impossible threshold so forced MHA benchmarks actually run
                 # the prefill/MHA path, including q_len=1 short extends.

@@ -647,15 +647,10 @@ class HYV4MLAAttention(nn.Module):
         """Keep every token on the sink-capable sparse MQA path.
 
         `_resolve_sink_backend` only binds the backend that serves decode.
-        `MLAAttention` additionally routes short prefills to a separate dense
-        MLA prefill backend, and none of those accept `attn_sink`, so prefill
-        would silently drop the sink while decode applies it. Such a partially
-        applied sink is not the trained architecture and corrupts the output, so
-        opt out of the dense split instead.
-
-        Prefills up to `index_topk` keep every token inside the sparse top-k,
-        making the sparse path numerically equivalent to the dense one apart from
-        also applying the sink.
+        `MLAAttention` may route prefills to masked MHA (`forward_mha`), which
+        does not accept `attn_sink`, so prefill would silently drop the sink
+        while decode applies it. Such a partially applied sink is not the trained
+        architecture and corrupts the output, so opt out of the MHA split instead.
         """
         attention_config = get_current_vllm_config().attention_config
         if attention_config.sparse_mla_force_mqa:
@@ -663,7 +658,7 @@ class HYV4MLAAttention(nn.Module):
         attention_config.sparse_mla_force_mqa = True
         logger.info_once(
             "HYV4 learnable sink enabled: forcing sparse MQA for prefill too, "
-            "as the dense MLA prefill backends cannot apply sinks."
+            "as masked MHA prefill cannot apply sinks."
         )
 
     def forward(
