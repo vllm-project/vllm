@@ -179,24 +179,25 @@ class OfflineInputsContext:
         params: PoolingParams,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
-    ):
-        content_format = (
+    ) -> ChatParams:
+        chat_template = self.chat_template or default_template
+        given_format = (
             self.chat_template_content_format
             if self.chat_template_content_format != "auto"
             else default_template_content_format
         )
+        chat_template_kwargs = self.build_chat_template_kwargs(params)
         return ChatParams(
-            chat_template=self.chat_template or default_template,
-            chat_template_content_format=content_format,
-            chat_template_kwargs=self.build_chat_template_kwargs(params),
+            chat_template=chat_template,
+            chat_template_content_format=given_format,
+            chat_template_kwargs=chat_template_kwargs,
             media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_chat_template_kwargs(self, params: PoolingParams) -> dict[str, Any]:
-        # Priority: explicit add_generation_prompt / continue_final_message
-        #         > params.extra_kwargs["chat_template_kwargs"]
-        #         > self.chat_template_kwargs
-
+        # Priority: explicit `add_generation_prompt` / `continue_final_message`
+        #         > `self.chat_template_kwargs`
+        #         > `params.extra_kwargs["chat_template_kwargs"]`
         extra_kwargs: dict[str, Any] = dict(params.extra_kwargs or {})
         merged = dict(
             merge_kwargs(
@@ -277,6 +278,7 @@ class RenderParams(TypedDict):
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
+    late_chunking: NotRequired[LateChunkingSlot]
 
     # mm_kwargs:
     skip_mm_cache: bool
@@ -284,13 +286,11 @@ class RenderParams(TypedDict):
 
 class EncodeCMPLRenderParams(RenderParams):
     prompts: DictPrompt
-    late_chunking: NotRequired[LateChunkingSlot]
 
 
 class EncodeChatRenderParams(RenderParams):
     conversations: list["ChatCompletionMessageParam"]
     chat_params: ChatParams
-    late_chunking: NotRequired[LateChunkingSlot]
 
 
 class ScoringRenderParams(RenderParams):

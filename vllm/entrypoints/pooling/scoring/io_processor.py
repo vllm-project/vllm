@@ -463,87 +463,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 suggested_template,
             )
 
-    def _get_saved_chat_template(self) -> tuple[str | None, dict[str, Any]]:
-        """Get the chat template and kwargs declared by the Sentence
-        Transformers config, if any."""
-        saved_kwargs = get_sentence_transformers_chat_template_kwargs(
-            self.model_config.model, self.model_config.revision
-        )
-        if saved_kwargs is None:
-            return None, {}
-
-        saved_kwargs = dict(saved_kwargs)
-        name = saved_kwargs.pop("chat_template", None)
-        if name == "default":
-            name = None
-        template = resolve_chat_template(
-            self.tokenizer,
-            chat_template=name,
-            tools=None,
-            model_config=self.model_config,
-        )
-        # Hugging Face returns an unknown template name unchanged.
-        if template is None or template == name:
-            raise ValueError(
-                "The Sentence Transformers config declares message inputs, but "
-                f"the checkpoint has no {name or 'default'!r} chat template."
-            )
-
-        if self.chat_template is None:
-            logger.info_once(
-                "Scoring with the %r chat template declared by the Sentence "
-                "Transformers config. Its suffix is not restored after "
-                "truncation; use max_tokens_per_doc to truncate documents.",
-                name or "default",
-            )
-        return template, saved_kwargs
-
-    def _default_chat_template(self) -> str | None:
-        """Template priority from processor side: CLI > Sentence Transformers.
-
-        The per-request template still overrides this at the context level.
-        """
-        return self.chat_template or self.saved_chat_template
-
-    def _prepare_chat_params(self, chat_params: ChatParams) -> ChatParams:
-        """Fold processor-level defaults into the request's `ChatParams`.
-
-        1. When we fall back to the Sentence Transformers declared template,
-           its declared kwargs must be merged in. Request-level kwargs win.
-        2. Resolve the `"auto"` content format against the actual template,
-           so downstream parsing gets a concrete `"string"` / `"openai"`.
-        """
-        # 1. Merge ST declared kwargs, but only when we actually fell back to
-        #    the ST template (no CLI/request template overrides it).
-        if (
-            self.chat_template is None
-            and self.saved_chat_template is not None
-            and chat_params.chat_template == self.saved_chat_template
-        ):
-            chat_params = chat_params.with_defaults(
-                default_chat_template_kwargs=self.saved_chat_template_kwargs,
-            )
-
-        # 2. Resolve "auto" only when a template is actually applied. If no
-        #    template is set, leave it as-is; the renderer falls back to
-        #    "string" content, matching the pre-refactor behavior.
-        if (
-            chat_params.chat_template is not None
-            and chat_params.chat_template_content_format == "auto"
-        ):
-            content_format = resolve_chat_template_content_format(
-                chat_params.chat_template,
-                tools=None,
-                given_format="auto",
-                tokenizer=self.tokenizer,
-                model_config=self.model_config,
-            )
-            chat_params = replace(
-                chat_params, chat_template_content_format=content_format
-            )
-
-        return chat_params
-
     #######################################
     # online APIs
 
@@ -699,6 +618,75 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     #######################################
     # helpers
+
+    def _get_saved_chat_template(self) -> tuple[str | None, dict[str, Any]]:
+        """Get the chat template and kwargs declared by the Sentence
+        Transformers config, if any."""
+        saved_kwargs = get_sentence_transformers_chat_template_kwargs(
+            self.model_config.model, self.model_config.revision
+        )
+        if saved_kwargs is None:
+            return None, {}
+
+        saved_kwargs = dict(saved_kwargs)
+        name = saved_kwargs.pop("chat_template", None)
+        if name == "default":
+            name = None
+        template = resolve_chat_template(
+            self.tokenizer,
+            chat_template=name,
+            tools=None,
+            model_config=self.model_config,
+        )
+        # Hugging Face returns an unknown template name unchanged.
+        if template is None or template == name:
+            raise ValueError(
+                "The Sentence Transformers config declares message inputs, but "
+                f"the checkpoint has no {name or 'default'!r} chat template."
+            )
+
+        if self.chat_template is None:
+            logger.info_once(
+                "Scoring with the %r chat template declared by the Sentence "
+                "Transformers config. Its suffix is not restored after "
+                "truncation; use max_tokens_per_doc to truncate documents.",
+                name or "default",
+            )
+        return template, saved_kwargs
+
+    def _default_chat_template(self) -> str | None:
+        """Template priority from processor side: CLI > Sentence Transformers.
+
+        The per-request template still overrides this at the context level.
+        """
+        return self.chat_template or self.saved_chat_template
+
+    def _prepare_chat_params(self, chat_params: ChatParams) -> ChatParams:
+        if (
+            self.chat_template is None
+            and self.saved_chat_template is not None
+            and chat_params.chat_template == self.saved_chat_template
+        ):
+            chat_params = chat_params.with_defaults(
+                default_chat_template_kwargs=self.saved_chat_template_kwargs,
+            )
+
+        if (
+            chat_params.chat_template is not None
+            and chat_params.chat_template_content_format == "auto"
+        ):
+            content_format = resolve_chat_template_content_format(
+                chat_params.chat_template,
+                tools=None,
+                given_format="auto",
+                tokenizer=self.tokenizer,
+                model_config=self.model_config,
+            )
+            chat_params = replace(
+                chat_params, chat_template_content_format=content_format
+            )
+
+        return chat_params
 
     @cached_property
     def num_post_process_tokens(self) -> int:
