@@ -199,8 +199,12 @@ def test_ski_rental_holds_then_releases_and_ignores_non_amortizable_b():
     assert hold.hold
 
     # Accumulate rent until Ski-Rental releases via "cost".
-    reasons = [hold.update(_one_rank_queued()) for _ in range(200)]
-    assert "cost" in reasons
+    reason = ""
+    for _ in range(200):
+        reason = hold.update(_one_rank_queued())
+        if reason != "wait":
+            break
+    assert reason == "cost"
     assert not hold.hold
 
     # High ttft_weight releases immediately.
