@@ -1157,7 +1157,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1, max_length=envs.VLLM_MAX_BATCH_CONVERSATIONS)
+        Field(..., min_length=1, max_length=envs.VLLM_MAX_COMPLETION_PROMPTS)
     )
     model: str | None = None
 

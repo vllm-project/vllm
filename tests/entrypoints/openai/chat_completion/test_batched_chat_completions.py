@@ -61,7 +61,7 @@ def default_server_args():
 
 @pytest.fixture(scope="module")
 def server(default_server_args):
-    env = {"VLLM_MAX_BATCH_CONVERSATIONS": str(MAX_BATCH_CONVERSATIONS)}
+    env = {"VLLM_MAX_COMPLETION_PROMPTS": str(MAX_BATCH_CONVERSATIONS)}
     with RemoteOpenAIServer(
         MODEL_NAME, default_server_args, env_dict=env
     ) as remote_server:
