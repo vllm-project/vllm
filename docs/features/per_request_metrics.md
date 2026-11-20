@@ -41,8 +41,8 @@ When per-request metrics are enabled, the response includes a `metrics` object:
     "time_to_first_content_token_ms": null,
     "generation_time_ms": 1240.5,
     "queue_time_ms": 12.3,
-    "mean_itl_ms": 9.77,
-    "tokens_per_second": 96.55
+    "mean_itl_ms": 9.1,
+    "tokens_per_second": 103.2
   }
 }
 ```
