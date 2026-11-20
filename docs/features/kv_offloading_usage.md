@@ -109,6 +109,14 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+## ROCm Host Memory Limit
+
+On ROCm, the amdgpu driver (amdkfd) charges every host memory registration against one node-wide limit of about `RAM - RAM/64 - 1.5 GiB`, once per registering process. With the replicated layout (MLA models under tensor parallelism), every worker registers the whole CPU tier, so the charge is the number of workers times `cpu_bytes_to_use`. Otherwise each worker registers only its own part, so the charge is about `cpu_bytes_to_use`.
+
+- `CPUOffloadingSpec` uses the shared host region, with one copy of replicated KV, when the charge of all DP engines fits after leaving 10 GiB per worker for its other host allocations, which share the same limit. Otherwise it allocates a private buffer per worker without deduplication and logs a warning with the largest `cpu_bytes_to_use` that fits. DP engines on other nodes are counted as if they shared this node.
+- `TieringOffloadingSpec` has no private-buffer fallback, so it fails at startup with that size when the charge of its own engine does not fit. Several DP engines on one node can still exceed the limit together, which then fails during registration.
+- Booting with `amdgpu.no_system_mem_limit=1` lifts the limit, for every process on the node.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
