@@ -18,12 +18,13 @@ if current_platform.is_rocm():
 
 pytestmark = pytest.mark.skip_global_cleanup
 
+has_rdna_device = current_platform.is_rocm() and torch.cuda.is_available() and on_rdna()
 requires_rdna = pytest.mark.skipif(
-    not (current_platform.is_rocm() and on_rdna()),
+    not has_rdna_device,
     reason="Segmented attention requires RDNA GPUs",
 )
 requires_gfx12 = pytest.mark.skipif(
-    not (current_platform.is_rocm() and on_rdna() and on_gfx12x()),
+    not (has_rdna_device and on_gfx12x()),
     reason="Segmented attention with FP8 KV requires gfx12",
 )
 
@@ -302,6 +303,7 @@ def test_segmented_fp8_long_extend_split_workspace_bound(dim):
         (1, 1024, 32768, 1),
         (1, 1024, 131072, 1),
         (1, 1024, 131072, 6),
+        (1, 4095, 32768, 8),
         (1, 4096, 131072, 1),
         (4, 1024, 131072, 6),
         (5, 257, 131072, 6),
@@ -319,9 +321,10 @@ def test_segmented_fp8_long_extend_split_workspace_bound(dim):
             )
             assert scratch <= MAX_LONG_EXTEND_WORKSPACE_BYTES * dim // 128
 
+    ratios = range(1, 17) if dim == 512 else (1, 6, 16)
     for batch in (1, 4, 16):
         for query_len in (257, 1025, 4095, 8192):
-            for ratio in (1, 6, 16):
+            for ratio in ratios:
                 for kv_heads in (1, 4):
                     for seq_len in (32768, 131072):
                         heads = ratio * kv_heads
@@ -1009,19 +1012,22 @@ def test_segmented_attention_ragged_unified_graph_replay(
 
 
 @requires_rdna
+@pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize(
-    "fp8,force_splits",
-    [(False, None), (True, None), (False, 4), (True, 4)],
+    "head_size,gqa_ratio,force_splits",
+    [(256, 6, None), (256, 6, 4), (512, 6, 4)]
+    + [(512, ratio, None) for ratio in range(1, 17)],
 )
-@pytest.mark.parametrize("head_size", [256, 512])
 @torch.inference_mode()
-def test_segmented_ragged_prefill_matches_dense_reference(fp8, force_splits, head_size):
+def test_segmented_ragged_prefill_matches_dense_reference(
+    fp8, force_splits, head_size, gqa_ratio
+):
     if fp8 and not on_gfx12x():
         pytest.skip("RDNA segmented prefill (FP8 requires gfx12)")
     case = _make_paged_attention_case(
         [1, 2, 7, 129],
         [31, 64, 97, 128],
-        num_heads=12,
+        num_heads=2 * gqa_ratio,
         num_kv_heads=2,
         head_size=head_size,
         block_size=32,
