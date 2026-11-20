@@ -85,8 +85,9 @@ class ModelArchConfigConvertorBase:
     def get_vocab_size(self) -> int:
         # Some configs (e.g. Inkling) give the padded embedding size as `vocab_size`
         text_config = self.hf_text_config
-        unpadded = getattr(text_config, "unpadded_vocab_size", None)
-        return unpadded or getattr(text_config, "vocab_size", 0)
+        if unpadded := getattr(text_config, "unpadded_vocab_size", None):
+            return unpadded
+        return getattr(text_config, "vocab_size", 0)
 
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
