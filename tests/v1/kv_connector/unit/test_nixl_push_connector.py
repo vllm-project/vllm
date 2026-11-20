@@ -625,6 +625,19 @@ def test_handed_off_request_is_reported_once_it_finishes():
     assert len(w.writes) == 1
 
 
+def test_job_that_raises_fails_only_its_request():
+    w = _chunk_worker()
+    w._pending_d_registrations["req-q"] = _registration_data(
+        "req-q", local_block_ids=((200,),)
+    )
+    # Raises KeyError for req-p's job.
+    w._chunk_path_supported = lambda job, reg_data: {"req-q": True}[job.request_id]
+    other = NixlPushChunkJob("req-q", [5], start_block=0, end_block=1, total_blocks=1)
+    _publish(w, _chunk_job(0, 2), other)
+    w._process_chunk_jobs()
+    assert w._chunk_states["req-p"].failed
+    assert w.writes == [(([5],), ([200],), True)]
+
 def _fail_writes(w: _StubWriterWorker) -> None:
     """Make in-flight WRITEs report failure when polled."""
     w._log_failure = MagicMock()
