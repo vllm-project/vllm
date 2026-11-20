@@ -2523,12 +2523,15 @@ def test_llm_engine_releases_the_final_output_of_a_request_aborted_before_it(
     sent = [EngineCoreOutputs(outputs=[_final_output("r")])]
     inputs = []
 
+    def deliver(call_id):
+        while sent:
+            client.outputs_queue.put_nowait(sent.pop(0))
+        client.utility_results.pop(call_id).set_result("v")
+
     def send_input(request_type, request):
         inputs.append(request_type)
         if request_type == EngineCoreRequestType.UTILITY:
-            while sent:
-                client.outputs_queue.put_nowait(sent.pop(0))
-            client.utility_results.pop(request[1]).set_result("v")
+            threading.Timer(0.2, deliver, (request[1],)).start()
 
     engine, client, released = _sync_client_and_llm_engine(send_input)
     if queued:

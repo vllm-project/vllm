@@ -3337,6 +3337,62 @@ def test_session_object_writer_drops_instead_of_waiting_once_it_drops(monkeypatc
     assert not client.objects and writer._dropped == 4
 
 
+def test_session_object_writer_drain_abandons_before_the_next_put_starts(
+    monkeypatch,
+):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def put(keys):
+        if keys[0] == "job/s/tail/0":
+            entered.set()
+            release.wait(30)
+
+    client, writer = _timed_writer(put, 600.0, 4)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+
+    def hung():
+        release.set()
+        time.sleep(0.3)
+        return True
+
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        assert entered.wait(10)
+        writer.add_tail("job/s/tail/1", rows, {})
+        monkeypatch.setattr(writer, "_hung", hung)
+        assert _run_within(writer.drain) is None
+    finally:
+        release.set()
+        assert _run_within(writer.close) is None
+    assert list(client.objects) == ["job/s/tail/0"]
+
+
+def test_session_object_writer_sends_deferred_removals_at_close():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def put(keys):
+        if keys[0] == "job/s/tail/1":
+            entered.set()
+            release.wait(30)
+
+    client, writer = _timed_writer(put, 0.5, 1)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        assert _run_within(writer.drain) is None
+        writer.add_tail("job/s/tail/1", rows, {})
+        assert entered.wait(10)
+        writer.add_tail("job/s/tail/2", rows, {})
+        assert _run_within(lambda: writer.remove(["job/s/tail/0"])) is None
+        release.set()
+    finally:
+        release.set()
+        assert _run_within(writer.close) is None
+    assert list(client.objects) == ["job/s/tail/1", "job/s/tail/2"]
+
+
 def test_session_object_writer_close_stops_retrying():
     attempts = []
     client, writer = _timed_writer(lambda keys: attempts.append(keys), 600.0, 1)
