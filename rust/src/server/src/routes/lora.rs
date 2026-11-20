@@ -73,9 +73,7 @@ fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
         UnloadLoraError::IntIdMismatch { .. } => {
             ApiError::invalid_request(message, Some("lora_int_id"))
         }
-        UnloadLoraError::Engine { .. } | UnloadLoraError::NotRemoved { .. } => {
-            ApiError::server_error(message)
-        }
+        UnloadLoraError::Engine { .. } => ApiError::server_error(message),
     }
 }
 

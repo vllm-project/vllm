@@ -2750,6 +2750,63 @@ async fn render_accepts_lora_adapter_model() {
     assert_eq!(lora_card["parent"], "render-model");
 }
 
+/// Like Python's `CompletionRequest` validator, a missing or null prompt
+/// without prompt embeddings is a 400 naming `prompt`, and an empty
+/// `prompt_embeds` list counts as absent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_reject_missing_prompt() {
+    let (mut app, engine_task) = test_app().await;
+
+    let mut results = Vec::new();
+    for body in [
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat"}),
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": null}),
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": null, "prompt_embeds": []}),
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt_embeds": ["AAAA"]}),
+    ] {
+        let (status, json) = post_json(&mut app, "/v1/completions", body.clone()).await;
+        results.push(format!("{body} -> {status} {json}"));
+    }
+    expect_test::expect![[r#"
+        {"model":"Qwen/Qwen1.5-0.5B-Chat"} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt":null} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt":null,"prompt_embeds":[]} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt_embeds":["AAAA"]} -> 400 Bad Request {"error":{"message":"prompt_embeds is not supported.","type":"BadRequestError","param":"prompt_embeds","code":400}}"#]].assert_eq(&results.join("\n"));
+    engine_task.abort_and_join().await;
+}
+
+/// The render route lowers the same request, so it rejects a missing prompt
+/// too and shows the tokens of the accepted ones. Unlike Python, which rejects
+/// `prompt: ""` before tokenizing, an empty text prompt is left to
+/// tokenization: it is accepted when the tokenizer adds a BOS token, and
+/// otherwise fails as an empty token prompt.
+#[tokio::test]
+async fn completions_render_checks_prompt_presence() {
+    let mut app = test_render_app();
+
+    let mut results = Vec::new();
+    for body in [
+        json!({"model": "render-model"}),
+        json!({"model": "render-model", "prompt": ""}),
+        json!({"model": "render-model", "prompt": "", "add_special_tokens": false}),
+        json!({"model": "render-model", "prompt": "hello", "prompt_embeds": []}),
+    ] {
+        let (status, json) = post_json(&mut app, "/v1/completions/render", body.clone()).await;
+        let summary = if status == StatusCode::OK {
+            json[0]["token_ids"].to_string()
+        } else {
+            json.to_string()
+        };
+        results.push(format!("{body} -> {status} {summary}"));
+    }
+    expect_test::expect![[r#"
+        {"model":"render-model"} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"render-model","prompt":""} -> 200 OK [256]
+        {"model":"render-model","prompt":"","add_special_tokens":false} -> 400 Bad Request {"error":{"message":"token_ids must contain at least one token ID.","type":"BadRequestError","param":"token_ids","code":400}}
+        {"model":"render-model","prompt":"hello","prompt_embeds":[]} -> 200 OK [256,104,101,108,108,111]"#]].assert_eq(&results.join("\n"));
+}
+
 /// Like Python's `TokenizeParams` check, a requested output budget above the
 /// context window is a 400, while one that fits the window is accepted.
 #[tokio::test]
@@ -3953,6 +4010,71 @@ async fn server_info_endpoint_returns_not_found_without_snapshot() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn unload_lora_adapter_succeeds_when_engine_already_evicted_it() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            for (method, result) in [("add_lora", true), ("remove_lora", false)] {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                let call_id = array[1].as_u64().expect("call id");
+                assert_eq!(array[2], Value::from(method));
+
+                // The engine answers `false` for an adapter its LRU cache already evicted.
+                send_outputs(push, utility_outputs(call_id, utility_result_value(result))).await;
+            }
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/load_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "adapter-a",
+                        "lora_path": "org/adapter-a"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/unload_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "lora_name": "adapter-a" }).to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"].as_array().expect("model data").len(), 1);
+
+    drop(app);
+    engine_task.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unload_lora_adapter_rejects_mismatched_lora_int_id() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
@@ -4453,6 +4575,23 @@ async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
     assert_eq!(status, StatusCode::OK, "{json}");
 
     engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_rejects_invalid_response_format() {
+    let (mut app, _engine_task) = test_app().await;
+    let (status, body) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {"type": "not-a-format"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], 400);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7463,7 +7602,11 @@ async fn stream_continuous_usage_stats_adds_usage_to_chat_chunks() {
 #[serial]
 async fn force_include_usage_streams_continuous_usage_regardless_of_stream_options() {
     let mut lines = Vec::new();
-    for uri in ["/v1/chat/completions", "/v1/completions"] {
+    for uri in [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/inference/v1/generate",
+    ] {
         for stream_options in [None, Some(json!({"include_usage": false}))] {
             let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
                 b"engine-openai-force-include-usage",
@@ -7471,21 +7614,32 @@ async fn force_include_usage_streams_continuous_usage_regardless_of_stream_optio
                 Arc::new(FakeChatBackend::new()),
             )
             .await;
-            let mut app = build_router(Arc::new(
-                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
-                    .with_api_server_options(ApiServerOptions {
-                        force_include_usage: true,
-                        ..Default::default()
-                    }),
-            ));
+            let mut app = build_router_with_gates(
+                Arc::new(
+                    AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                        .with_api_server_options(ApiServerOptions {
+                            force_include_usage: true,
+                            ..Default::default()
+                        }),
+                ),
+                RouteGates {
+                    scale_out: true,
+                    ..RouteGates::default()
+                },
+            );
             let mut body = json!({"stream": true});
             if let Some(stream_options) = &stream_options {
                 body["stream_options"] = stream_options.clone();
             }
-            if uri == "/v1/chat/completions" {
-                body["messages"] = json!([{"role": "user", "content": "hello"}]);
-            } else {
-                body["prompt"] = json!("hello");
+            match uri {
+                "/v1/chat/completions" => {
+                    body["messages"] = json!([{"role": "user", "content": "hello"}]);
+                }
+                "/v1/completions" => body["prompt"] = json!("hello"),
+                _ => {
+                    body["token_ids"] = json!([11, 22]);
+                    body["sampling_params"] = json!({});
+                }
             }
             let response = app
                 .call(
@@ -7530,7 +7684,9 @@ async fn force_include_usage_streams_continuous_usage_regardless_of_stream_optio
         /v1/chat/completions stream_options=absent: delta=0 delta=1 delta=2 finish=3 usage=3
         /v1/chat/completions stream_options={"include_usage":false}: delta=0 delta=1 delta=2 finish=3 usage=3
         /v1/completions stream_options=absent: delta=1 delta=2 delta=3 finish=3 usage=3
-        /v1/completions stream_options={"include_usage":false}: delta=1 delta=2 delta=3 finish=3 usage=3"#]].assert_eq(&lines.join("\n"));
+        /v1/completions stream_options={"include_usage":false}: delta=1 delta=2 delta=3 finish=3 usage=3
+        /inference/v1/generate stream_options=absent: delta=1 delta=2 finish=3 usage=3
+        /inference/v1/generate stream_options={"include_usage":false}: delta=1 delta=2 finish=3 usage=3"#]].assert_eq(&lines.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

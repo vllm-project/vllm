@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use serde_json::Value;
+
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
@@ -35,7 +37,11 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "suffix", "suffix is not supported.");
     }
 
-    if request.prompt_embeds.is_some() {
+    // Python's prompt-presence validator treats an empty `prompt_embeds` list
+    // like an absent one; lowering ignores it.
+    if (request.prompt_embeds.as_ref())
+        .is_some_and(|embeds| !matches!(embeds, Value::Array(embeds) if embeds.is_empty()))
+    {
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
     }
 
