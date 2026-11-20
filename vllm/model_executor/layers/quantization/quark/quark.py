@@ -189,6 +189,9 @@ class QuarkConfig(QuantizationConfig):
         activation must be multiplied by first.
         """
         algo_configs = self.quant_config.get("algo_config") or []
+        # Older Quark exports store a single algorithm as a dict, not a list.
+        if isinstance(algo_configs, dict):
+            algo_configs = [algo_configs]
         if not any(algo.get("name") == "rotation" for algo in algo_configs):
             return
         metadata = get_safetensors_params_metadata(model_name, revision=revision)

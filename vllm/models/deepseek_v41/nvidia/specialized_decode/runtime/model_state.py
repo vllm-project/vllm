@@ -4,9 +4,10 @@
 
 `DeepseekV41SpecializedDecodeModelState` is `DeepseekV41ModelState` plus:
 
-- the decode executor, built and warmed up once the weights are loaded (the
-  model runner creates the model state after loading the target and draft
-  models, and before memory profiling);
+- the decode executors of the target and of the DSpark draft model, built and
+  warmed up once the weights are loaded (the model runner creates the model
+  state after loading the target and draft models, and before memory
+  profiling);
 - CUDA graphs of the attention metadata builds of FULL decode steps
   (`metadata_graphs`), recorded with the inner CUDA graphs and replayed in
   place of the eager build. A step that replays one gathers its engram
@@ -32,6 +33,8 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 from ...model_state import DeepseekV41ModelState
+from .. import take_drafts
+from .draft import check_low_batch_graph
 from .metadata_graphs import AttnMetadataCudaGraphs, GraphKey
 from .warmup import warm_up
 
@@ -78,7 +81,14 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
             else model
         )
         self.decode = language_model.build_specialized_decode()
-        warm_up(self.decode, vllm_config)
+        # The DSpark draft model, loaded before the model state, runs on the
+        # target's executor.
+        drafts = [
+            draft.build_specialized_decode(self.decode) for draft in take_drafts()
+        ]
+        if drafts:
+            check_low_batch_graph(vllm_config)
+        warm_up(self.decode, vllm_config, drafts)
         self.graphs = AttnMetadataCudaGraphs(
             vllm_config,
             vllm_config.num_speculative_tokens + self.num_new_sampled_tokens_per_step,

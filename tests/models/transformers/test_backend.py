@@ -24,6 +24,7 @@ from transformers import (
     PreTrainedConfig,
 )
 
+from vllm.compilation.counter import compilation_counter
 from vllm.config import (
     ModelConfig,
     ParallelConfig,
@@ -31,11 +32,14 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.transformers import causal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import (
     probe_output_head,
+    stub_base_model,
     to_output_head,
 )
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
@@ -45,14 +49,18 @@ from vllm.model_executor.models.transformers.pooling import (
     ClassificationHead,
     probe_classification_head,
 )
-from vllm.model_executor.models.transformers.utils import replace_base_model
+from vllm.model_executor.models.transformers.utils import (
+    OpaqueBaseModel,
+    infer_dynamic_arg_dims,
+    replace_base_model,
+)
 from vllm.model_executor.models.utils import StageMissingLayer
 from vllm.transformers_utils import dynamic_module
 from vllm.transformers_utils.dynamic_module import get_transformers_model_class
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ...conftest import HfRunner, VllmRunner
-from ...utils import multi_gpu_test, prep_prompts
+from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
 from ..registry import HF_EXAMPLE_MODELS
 from ..utils import check_embeddings_close, check_logprobs_close
 
@@ -180,6 +188,125 @@ def test_output_head_transform(
         num_fused=(0, 1),  # `Wi` already holds the input and gate projections
         model_impl="transformers",
     )
+
+
+OUTPUT_HEAD_KWARGS = dict(
+    model_impl="transformers",
+    load_format="dummy",
+    hf_overrides={"num_hidden_layers": 1},
+    max_model_len=512,
+    gpu_memory_utilization=0.5,
+)
+
+
+@create_new_process_for_each_test("spawn")
+def test_output_head_moe(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept head is not replaced by `MoEMixin`."""
+    # Disable multiprocessing so that the patch applies to the engine
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(causal, "probe_output_head", lambda *args: None)
+    model = "ibm-granite/granite-3.0-1b-a400m-base"
+    with vllm_runner(model, **OUTPUT_HEAD_KWARGS) as model_test:
+        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        assert has_head == [True]
+        model_test.generate_greedy(["Hello"], max_tokens=4)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_output_head_lora(vllm_runner: type[VllmRunner]) -> None:
+    """The kept head projects `[1, n, h]` hidden states, which LoRA's `lm_head`
+    must see as `[n, h]` to reorder the TP-sharded vocab."""
+    kwargs = OUTPUT_HEAD_KWARGS | dict(enable_lora=True, tensor_parallel_size=2)
+    with vllm_runner("jhu-clsp/ettin-decoder-17m", **kwargs) as model_test:
+        model_test.generate_greedy(["Hello"], max_tokens=4)
+
+
+@create_new_process_for_each_test("spawn")
+def test_output_head_fallback(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A head that cannot run without its base model falls back to `lm_head`."""
+    # Disable multiprocessing so that the patch applies to the engine
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def forward(self, *args, **kwargs):
+        raise AttributeError("'OpaqueBaseModel' object has no attribute 'weight'")
+
+    monkeypatch.setattr(OpaqueBaseModel, "forward", forward)
+    with vllm_runner("jhu-clsp/ettin-decoder-17m", **OUTPUT_HEAD_KWARGS) as model_test:
+        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        assert has_head == [False]
+
+
+@create_new_process_for_each_test("spawn")
+def test_compile_mm_encoder(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Idefics3's encoder has an unannotated and a `torch.BoolTensor` input."""
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # One graph for the language model and one for the encoder
+    with (
+        compilation_counter.expect(num_models_seen=2),
+        vllm_runner(
+            "HuggingFaceTB/SmolVLM-256M-Instruct",
+            model_impl="transformers",
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 1},
+            gpu_memory_utilization=0.5,
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": True,
+            },
+        ),
+    ):
+        pass
+
+
+def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
+    """EAGLE-3 runs on a composite VLM whose decoder records the aux hidden states."""
+    model = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    draft_config = AutoConfig.from_pretrained(model).text_config
+    draft_config.architectures = ["LlamaForCausalLMEagle3"]
+    draft_config.num_hidden_layers = 1
+    draft_config.save_pretrained(tmp_path)
+
+    with vllm_runner(
+        model,
+        model_impl="transformers",
+        load_format="dummy",
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 1},
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "eagle3",
+            "model": str(tmp_path),
+            "num_speculative_tokens": 2,
+        },
+    ) as llm:
+        llm.generate_greedy(["Hello"], max_tokens=8)
+
+
+def test_infer_dynamic_arg_dims():
+    """Only unannotated and (legacy) tensor arguments are dynamic."""
+
+    class Encoder(nn.Module):
+        def forward(
+            self,
+            pixel_values,
+            position_ids: torch.Tensor,
+            mask: torch.BoolTensor | None = None,
+            grid: tuple[int, int] = (1, 1),
+            tiles: list[torch.Tensor] | None = None,
+            **kwargs,
+        ):
+            pass
+
+    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0}
+    assert infer_dynamic_arg_dims(Encoder) == expected
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
@@ -719,6 +846,16 @@ def test_marking_skipped_without_tokenizer():
     assert not isinstance(vision_tower, StageMissingLayer)
 
 
+def test_missing_encoders_are_skipped():
+    """Gemma 4 31B has no audio tower, so `get_encoder` returns `None` for audio."""
+
+    class Model(nn.Module):
+        def get_encoder(self, modality: str) -> nn.Module | None:
+            return nn.Identity() if modality == "image" else None
+
+    assert MarkingStub()._find_encoder_classes(Model()) == {"image": nn.Identity}
+
+
 NUM_LAYERS = 4
 
 
@@ -964,32 +1101,77 @@ def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
         expected = model(input_ids=torch.zeros(1, 3, dtype=torch.long)).logits
 
         embeddings = model.get_output_embeddings()
-        output_head = to_output_head(model, type(model.base_model), embeddings)
+        output_head = to_output_head(model, type(model.base_model))
         assert output_head is not None
-        assert output_head[0] is embeddings
-        assert output_head[1] == renames
+        lm_head_renames = {
+            k: v for k, v in output_head.renames.items() if v.startswith("lm_head.")
+        }
+        assert lm_head_renames == renames
         assert not any(p is embeddings.weight for p in model.parameters())
+        output_head.output_embeddings.project = embeddings
         logits = model(inputs_embeds=hidden_states).logits
 
     torch.testing.assert_close(logits, expected)
 
 
+LOGIT_TRANSFORMS = {
+    "LlamaForCausalLM": (1.0, None),
+    "Gemma2ForCausalLM": (1.0, 30.0),
+    "CohereForCausalLM": (0.0625, None),
+    "GraniteForCausalLM": (0.25, None),
+    "HyperCLOVAXForCausalLM": (0.125, None),
+}
+
+
 @pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
-def test_only_projection_is_detected(model_type, arch, overrides, renames):
-    """Only heads which apply nothing but their output embeddings are skipped."""
+def test_logit_transform_is_detected(model_type, arch, overrides, renames):
+    """Heads which only scale or soft cap the logits are left to `LogitsProcessor`,
+    so they keep its fused path and batch-sharded sampling."""
     model = build_causal_lm(model_type, arch, "meta", **overrides)
-    embeddings = model.get_output_embeddings()
-    assert to_output_head(model, type(model.base_model), embeddings) is not None
-    only_projection = probe_output_head(model, model.config.hidden_size)
-    assert only_projection is (arch == "LlamaForCausalLM")
+    assert (output_head := to_output_head(model, type(model.base_model)))
+    logit_transform = probe_output_head(output_head, model.config.hidden_size)
+    assert logit_transform == LOGIT_TRANSFORMS.get(arch)
 
 
 def test_output_head_calling_base_model_submodule():
-    """OPT calls its base model's decoder directly, which the stub also serves."""
-    model = build_causal_lm("opt", "OPTForCausalLM", "meta", ffn_dim=128)
-    embeddings = model.get_output_embeddings()
-    assert to_output_head(model, type(model.base_model), embeddings) is not None
-    assert probe_output_head(model, model.config.hidden_size)
+    """OPT calls its base model's decoder directly, and finds its input embeddings
+    there, which the stub also serves without building the base model."""
+    overrides = dict(ffn_dim=128, tie_word_embeddings=False)
+    model = build_causal_lm("opt", "OPTForCausalLM", "meta", **overrides)
+    with torch.device("meta"), stub_base_model(model.base_model):
+        model = type(model)._from_config(model.config)
+    assert [name for name, _ in model.named_parameters()] == ["lm_head.weight"]
+    assert (output_head := to_output_head(model))
+    assert probe_output_head(output_head, model.config.hidden_size) == (1.0, None)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "arch", "overrides", "module_renames"),
+    [
+        (
+            "modernbert-decoder",
+            "ModernBertDecoderForCausalLM",
+            {},
+            {"lm_head.dense": "output_head.lm_head.dense", "decoder": "lm_head"},
+        ),
+        (
+            "roberta",
+            "RobertaForCausalLM",
+            {"is_decoder": True},
+            {
+                "lm_head.dense": "output_head.lm_head.dense",
+                "lm_head.decoder": "lm_head",
+            },
+        ),
+    ],
+)
+def test_output_head_renames_modules(model_type, arch, overrides, module_renames):
+    """Quantization configs name the head's layers (e.g. to skip them) by their
+    checkpoint names, so the renames cover modules as well as parameters."""
+    model = build_causal_lm(model_type, arch, "meta", **overrides)
+    assert (output_head := to_output_head(model, type(model.base_model)))
+    mapper = output_head.weights_mapper()
+    assert mapper.apply_list(list(module_renames)) == list(module_renames.values())
 
 
 def test_transformers_model_class_honours_remote_code_config(monkeypatch):
@@ -1211,3 +1393,26 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
             )
+
+
+def test_init_parameters_keeps_declared_dtype_and_requires_grad():
+    """Meta parameters materialize in their own dtype, as with `from_pretrained`,
+    and an integer parameter, which cannot require grad, does not fail."""
+    with torch.device("meta"):
+        module = nn.Module()
+        module.fp32 = nn.Parameter(torch.empty(2))
+        module.fp8 = nn.Parameter(
+            torch.empty(2, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        module.int8 = nn.Parameter(
+            torch.empty(2, dtype=torch.int8), requires_grad=False
+        )
+    stub = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        device_config=SimpleNamespace(device=torch.device("cpu")),
+    )
+    Base.init_parameters(stub, module)
+
+    assert module.fp32.dtype == torch.float32 and module.fp32.requires_grad
+    assert module.fp8.dtype == torch.float8_e4m3fn and not module.fp8.requires_grad
+    assert module.int8.dtype == torch.int8 and not module.int8.requires_grad

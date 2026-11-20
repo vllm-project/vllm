@@ -16,12 +16,22 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
-from collections.abc import Callable, Iterable, Iterator
+import inspect
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
+from types import UnionType
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 import torch
 from torch import nn
@@ -42,6 +52,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
+    from vllm.compilation.decorators import DynamicArgDims
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.pooler import SequencePoolingType
     from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -380,35 +391,81 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     Defaults to `True` but is disabled in the following situations:
 
     - The model uses dynamic rope scaling that can still rescale within
-      `max_model_len` (otherwise `disable_noop_dynamic_rope` removes it).
+      `max_model_len` (otherwise `maybe_disable_dynamic_rope_update` removes it).
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     rope_types = {rp["rope_type"] for rp in iter_rope_parameters(text_config)}
-    if "dynamic" not in rope_types:
-        return True
-    # Layer types using longrope still sync, even once dynamic rope is disabled
-    return "longrope" not in rope_types and dynamic_rope_update_is_noop(vllm_config)
+    return "dynamic" not in rope_types or dynamic_rope_update_is_noop(vllm_config)
 
 
-def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> None:
-    """Skip `@dynamic_rope_update` in rotary modules where it can never rescale.
+def _is_tensor_type(annotation: object) -> bool:
+    """Match `torch.Tensor` and legacy types like `torch.BoolTensor`."""
+    return (
+        isinstance(annotation, type)
+        and annotation.__module__ == "torch"
+        and annotation.__name__.endswith("Tensor")
+    )
+
+
+def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
+    """Infer `dynamic_arg_dims` from the signature of `cls.forward`.
+
+    The 0-th dimension is dynamic for every argument which is either unannotated
+    or annotated with a tensor type, optionally in a union with other types.
+    String annotations are not resolved.
+    """
+    dims: DynamicArgDims = {}
+    for name, param in inspect.signature(cls.forward).parameters.items():
+        if name == "self" or param.kind in {param.VAR_POSITIONAL, param.VAR_KEYWORD}:
+            continue
+        annotation = param.annotation
+        is_union = get_origin(annotation) in {Union, UnionType}
+        members = get_args(annotation) if is_union else (annotation,)
+        if annotation is param.empty or any(map(_is_tensor_type, members)):
+            dims[name] = 0
+    return dims
+
+
+def maybe_disable_dynamic_rope_update(
+    model: nn.Module, vllm_config: "VllmConfig"
+) -> None:
+    """Skip `@dynamic_rope_update` in rotary modules where `inv_freq` can be fixed.
 
     The update syncs on `torch.max(position_ids)` every forward, which breaks
     torch.compile and CUDA graph capture. Relabelling the module's `rope_type` as
-    "default" skips it while keeping the `inv_freq` computed at init.
+    "default" skips it:
+
+    - dynamic: where it can never rescale, keeping the `inv_freq` from init
+    - longrope: always, picking the long factors iff `max_model_len` exceeds
+      `original_max_position_embeddings` like native vLLM, since switching per
+      forward would read KV cached under one set with the other
     """
-    if not dynamic_rope_update_is_noop(vllm_config):
-        return
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+    max_model_len = vllm_config.model_config.max_model_len
+    dynamic_is_noop = dynamic_rope_update_is_noop(vllm_config)
     for module in model.modules():
         rope_type = getattr(module, "rope_type", None)
         if not hasattr(module, "max_seq_len_cached") or rope_type is None:
             continue
-        if isinstance(rope_type, dict):
-            module.rope_type = {
-                k: "default" if v == "dynamic" else v for k, v in rope_type.items()
-            }
-        elif rope_type == "dynamic":
-            module.rope_type = "default"
+        per_layer = isinstance(rope_type, dict)
+        rope_types = dict(rope_type) if per_layer else {None: rope_type}
+        for layer_type, value in rope_types.items():
+            if value == "dynamic" and dynamic_is_noop:
+                rope_types[layer_type] = "default"
+            elif value == "longrope":
+                rope_parameters = module.config.rope_parameters
+                if per_layer:
+                    rope_parameters = rope_parameters[layer_type]
+                original = rope_parameters["original_max_position_embeddings"]
+                if max_model_len > original:
+                    inv_freq, _ = ROPE_INIT_FUNCTIONS["longrope"](
+                        module.config, None, seq_len=original + 1, layer_type=layer_type
+                    )
+                    prefix = f"{layer_type}_" if per_layer else ""
+                    getattr(module, f"{prefix}inv_freq").copy_(inv_freq)
+                rope_types[layer_type] = "default"
+        module.rope_type = rope_types if per_layer else rope_types[None]
 
 
 def has_bidirectional_attention(model: nn.Module) -> bool:
@@ -444,26 +501,49 @@ class _BaseModelOutput(BaseModelOutputWithPast):
 
 
 class OpaqueBaseModel(nn.Module):
-    """Stands in for the base model, and its children (e.g. OPT's `model.decoder`),
-    returning `inputs_embeds` as its output."""
+    """Stands in for `module`, the base model, and for its submodules (e.g. OPT's
+    `model.decoder`), returning `inputs_embeds` as its output."""
 
-    def __init__(self, children: Iterable[str]):
+    def __init__(self, module: nn.Module):
         super().__init__()
-        self.children_names = frozenset(children)
+        # Not registered, so the head doesn't own the base model's parameters
+        self.__dict__["module"] = module
 
     def forward(self, *args, inputs_embeds: torch.Tensor, **kwargs):
         return _BaseModelOutput(last_hidden_state=inputs_embeds)
 
     def __getattr__(self, name: str):
-        if name in self.__dict__.get("children_names", ()):
-            return self
+        module = self.__dict__.get("module")
+        if module is not None and name in module._modules:
+            return OpaqueBaseModel(module._modules[name])
         return super().__getattr__(name)
+
+
+@contextmanager
+def stub_base_model(base_model: nn.Module) -> Iterator[None]:
+    """Make the class of `base_model` build `OpaqueBaseModel(base_model)` instead,
+    so that a head can be built without building its base model again."""
+    cls = type(base_model)
+    original = cls.__dict__.get("__new__")
+
+    def new(c, *args, **kwargs):
+        return OpaqueBaseModel(base_model) if c is cls else object.__new__(c)
+
+    cls.__new__ = new  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        if original is None:
+            del cls.__new__
+        else:
+            cls.__new__ = original
 
 
 def replace_base_model(model: nn.Module, base_model_cls: type[nn.Module]) -> bool:
     """Replace the submodule of `model` of type `base_model_cls` with
-    `OpaqueBaseModel`, so that `model(inputs_embeds=h)` applies only what `model`
-    applies after its base model. Returns whether the base model was found."""
+    `OpaqueBaseModel` (unless it already is one), so that `model(inputs_embeds=h)`
+    applies only what `model` applies after its base model. Returns whether the
+    base model was found."""
     base_model_name = next(
         (n for n, m in model.named_modules() if n and isinstance(m, base_model_cls)),
         None,
@@ -472,8 +552,8 @@ def replace_base_model(model: nn.Module, base_model_cls: type[nn.Module]) -> boo
         return False
     parent_name, _, child_name = base_model_name.rpartition(".")
     parent = model.get_submodule(parent_name)
-    base_model = getattr(parent, child_name)
-    setattr(parent, child_name, OpaqueBaseModel(dict(base_model.named_children())))
+    if not isinstance(base_model := getattr(parent, child_name), OpaqueBaseModel):
+        setattr(parent, child_name, OpaqueBaseModel(base_model))
     return True
 
 

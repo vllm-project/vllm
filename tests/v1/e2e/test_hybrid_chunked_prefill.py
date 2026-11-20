@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.v1.core.utils import uniform_spec
 from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -122,9 +123,9 @@ def test_mtp_speculative_mixed_batch_short_prefill(
 def _get_mamba_block_size(llm) -> int:
     scheduler = llm.llm_engine.engine_core.engine_core.scheduler
     block_sizes = {
-        group.kv_cache_spec.block_size
+        group.block_size
         for group in scheduler.kv_cache_config.kv_cache_groups
-        if isinstance(group.kv_cache_spec, MambaSpec)
+        if isinstance(uniform_spec(group), MambaSpec)
     }
     assert len(block_sizes) == 1
     block_size = block_sizes.pop()

@@ -56,7 +56,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -185,7 +185,7 @@ def _gemma3_overrides(cfg) -> dict[str, Any]:
     }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArchCase:
     model: str
     overrides: Callable[[Any], dict[str, Any]]
@@ -262,7 +262,7 @@ def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
 # Serving
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Case:
     arch: str
     attention_backend: str
@@ -572,7 +572,7 @@ def _moriio_config(
 
 
 @contextlib.contextmanager
-def _proxy(ping_port: int) -> Iterator[str]:
+def _proxy(ping_port: int) -> Generator[str]:
     # Free ports for both sockets, so cases from parallel shards on one host
     # do not collide.
     port = _open_port()
@@ -615,7 +615,7 @@ def _pd_pair(
     prefill_overrides: dict[str, Any],
     decode_overrides: dict[str, Any],
     case: Case,
-) -> Iterator[tuple[str, RemoteOpenAIServer, RemoteOpenAIServer]]:
+) -> Generator[tuple[str, RemoteOpenAIServer, RemoteOpenAIServer]]:
     selector, devices = _visible_devices()
     prefill_devices = devices[: case.prefill_tp]
     decode_devices = devices[case.prefill_tp : case.prefill_tp + case.decode_tp]
@@ -785,7 +785,7 @@ def _external_hits(server: RemoteOpenAIServer) -> float:
     return sum(sample.value for sample in samples)
 
 
-@dataclass
+@dataclass(slots=True)
 class Reference:
     prompts: list[list[int]]
     logprobs: list[dict[str, float]]
@@ -919,8 +919,8 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
     changes the top tokens entirely, so log-probs only show the transfer did
     not hang and decode consumed the transferred KV. That every head and state
     slice lands at the right offset is pinned byte for byte by
-    tests/v1/kv_connector/unit/test_moriio_hetero_tp_write.py and
-    tests/v1/kv_connector/unit/test_moriio_read_tp.py.
+    tests/v1/kv_connector/unit/moriio/test_moriio_hetero_tp_write.py and
+    tests/v1/kv_connector/unit/moriio/test_moriio_read_tp.py.
     """
     _, devices = _visible_devices()
     if len(devices) < case.prefill_tp + case.decode_tp:

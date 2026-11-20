@@ -4,8 +4,11 @@ from typing import NamedTuple
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+
+logger = init_logger(__name__)
 
 
 class _MatmulMConfig(NamedTuple):
@@ -1224,6 +1227,46 @@ _TUNED_MATMUL_CONFIGS_FOR_DEVICE: dict[tuple[int, int], _MatmulShapeConfig] | No
 _TUNED_MATMUL_CONFIGS_RESOLVED = False
 
 
+class _MoEConfig(NamedTuple):
+    block_m: int
+    block_n: int
+    block_k: int
+    num_warps: int
+    num_stages: int
+
+
+# One fused MoE config per expert shape, used for every M under
+# VLLM_BATCH_INVARIANT=1. Key: (arch family, dtype, block_shape, E, N, K) with
+# N and K as seen by the kernel (per-rank w2 shape[2] and w1 shape[2]).
+_BATCH_INVARIANT_MOE_CONFIGS: dict[
+    tuple[str, str | None, tuple[int, ...] | None, int, int, int], _MoEConfig
+] = {
+    # Qwen3-235B-A22B-FP8, TP=4
+    ("blackwell", "fp8_w8a8", (128, 128), 128, 384, 4096): _MoEConfig(
+        64, 128, 128, 4, 4
+    ),
+    # DeepSeek-V3.1, TP=4
+    ("blackwell", "fp8_w8a8", (128, 128), 256, 512, 7168): _MoEConfig(
+        32, 128, 128, 4, 3
+    ),
+    # GLM-5.3, TP=4
+    ("blackwell", "fp8_w8a8", (128, 128), 256, 512, 6144): _MoEConfig(
+        32, 128, 128, 4, 3
+    ),
+    # Qwen3-30B-A3B (bf16), TP=1
+    ("blackwell", None, None, 128, 768, 2048): _MoEConfig(64, 128, 64, 4, 3),
+}
+
+# Shapes without a tuned entry keep this fixed config.
+_BATCH_INVARIANT_MOE_DEFAULT_CONFIG: dict[str, int] = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 64,
+    "BLOCK_SIZE_K": 32,
+    "GROUP_SIZE_M": 8,
+    "SPLIT_K": 1,
+}
+
+
 def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | None:
     if capability is None:
         return None
@@ -1341,3 +1384,32 @@ def _get_descriptor_matmul_config(
             "num_stages": 3,
             "num_warps": 8,
         }
+
+
+def get_batch_invariant_moe_config(
+    E: int,
+    N: int,
+    K: int,
+    dtype: str | None,
+    block_shape: list[int] | None = None,
+) -> dict[str, int]:
+    capability = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
+    family = _get_tuned_matmul_arch_family(capability)
+    if family is not None:
+        shape = tuple(block_shape) if block_shape is not None else None
+        key = (family, dtype, shape, E, N, K)
+        config = _BATCH_INVARIANT_MOE_CONFIGS.get(key)
+        if config is not None:
+            logger.info_once("Using tuned batch-invariant fused MoE config for %s", key)
+            return {
+                "BLOCK_SIZE_M": config.block_m,
+                "BLOCK_SIZE_N": config.block_n,
+                "BLOCK_SIZE_K": config.block_k,
+                "GROUP_SIZE_M": 8,
+                "SPLIT_K": 1,
+                "num_warps": config.num_warps,
+                "num_stages": config.num_stages,
+            }
+    return dict(_BATCH_INVARIANT_MOE_DEFAULT_CONFIG)

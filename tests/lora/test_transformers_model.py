@@ -114,3 +114,24 @@ def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
     output2 = do_sample(llm, ilama_lora_files, lora_id=2)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+
+
+@create_new_process_for_each_test("spawn")
+def test_lora_on_input_embeddings_not_named_embed_tokens(tmp_path):
+    """GPT-NeoX's input embedding is `embed_in`, not `embed_tokens`."""
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM
+
+    model_path = "EleutherAI/pythia-70m"
+    lora_config = LoraConfig(r=8, target_modules=["embed_in"], init_lora_weights=False)
+    device = current_platform.device_type
+    hf_model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device)
+    get_peft_model(hf_model, lora_config).save_pretrained(tmp_path)
+
+    llm = vllm.LLM(model_path, enable_lora=True, max_lora_rank=8, max_model_len=256)
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=16)
+    lora_request = LoRARequest("embed_in", 1, str(tmp_path))
+    prompt = "The capital of France is"
+    base = llm.generate(prompt, sampling_params)
+    lora = llm.generate(prompt, sampling_params, lora_request=lora_request)
+    assert base[0].outputs[0].token_ids != lora[0].outputs[0].token_ids

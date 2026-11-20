@@ -13,7 +13,7 @@ from ...utils import compute_acceptance_len
 from ..utils import run_acceptance_length_eval
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DFlashCorrectnessConfig:
     model: str
     draft_model: str
@@ -90,7 +90,6 @@ def test_dflash_reference_acceptance_lengths(vllm_runner):
             },
             "max_model_len": 32768,
             "max_num_seqs": 128,
-            "gpu_memory_utilization": 0.85,
             "enforce_eager": False,
             "disable_log_stats": False,
         },
@@ -135,7 +134,6 @@ def test_dflash_correctness(
         },
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
-        gpu_memory_utilization=0.85,
         enforce_eager=config.enforce_eager,
         disable_log_stats=False,
         enable_chunked_prefill=None,

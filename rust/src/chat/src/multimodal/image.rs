@@ -76,6 +76,7 @@ impl MultimodalModelInfo {
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
+            let images = images.iter().collect::<Vec<_>>();
             Ok(processor.preprocess_with_context(&images, &preprocessing_context)?)
         })
         .await

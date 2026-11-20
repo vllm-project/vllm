@@ -29,7 +29,11 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.engine import embeds_input
 from vllm.sampling_params import BeamSearchParams
-from vllm.tokenizers import deepseek_v4_encoding, deepseek_v32_encoding
+from vllm.tokenizers import (
+    deepseek_v4_encoding,
+    deepseek_v32_encoding,
+    deepseek_v41_encoding,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -471,8 +475,8 @@ def test_encode_messages_preserves_small_chat_prompt(encoding_module):
 
 @pytest.mark.parametrize(
     "encoding_module",
-    ENCODING_MODULES,
-    ids=["deepseek_v32", "deepseek_v4"],
+    [*ENCODING_MODULES, deepseek_v41_encoding],
+    ids=["deepseek_v32", "deepseek_v4", "deepseek_v41"],
 )
 def test_encode_messages_unknown_role_raises_value_error(encoding_module):
     # An invalid role (e.g. uppercase "SYSTEM") is a client error and must be

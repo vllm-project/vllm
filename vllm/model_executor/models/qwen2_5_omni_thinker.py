@@ -29,6 +29,8 @@ from typing import Annotated, Any, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import Version
 from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
@@ -51,6 +53,7 @@ from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
@@ -490,7 +493,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
         max_frames_per_video: int | None = None,
     ) -> int:
         video_processor = self.get_hf_processor().video_processor
@@ -503,7 +506,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
             image_processor=video_processor,
             mm_kwargs={},
         )
-        num_videos = max(mm_counts.get("video", 0), 1)
+        num_videos = max(num_videos, 1)
         num_steps = max(seq_len // num_videos // tokens_per_step, 1)
         num_frames = num_steps * temporal_patch_size
         if max_frames_per_video is not None:
@@ -621,7 +624,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
                 width=video_size.width,
                 height=video_size.height,
                 num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
+                    seq_len, mm_counts.get("video", 0)
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=video_overrides,
@@ -629,6 +632,12 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
         }
 
         return mm_data
+
+
+# Transformers 5.23 validates audio counts unless video audio slots are marked.
+_PASS_AUDIO_FROM_VIDEO_INDICES = Version(transformers.__version__) >= Version(
+    "5.23.0.dev0"
+)
 
 
 class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
@@ -654,6 +663,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 standalone_mm_counts = dict(mm_counts)
                 standalone_mm_counts["audio"] -= num_videos
                 hf_inputs.hf_data["text"] = self._get_hf_mm_text(standalone_mm_counts)
+                if _PASS_AUDIO_FROM_VIDEO_INDICES:
+                    num_standalone = standalone_mm_counts["audio"]
+                    hf_inputs.hf_data["audio_from_video_indices"] = [
+                        *range(num_videos),
+                        *[None] * num_standalone,
+                    ]
 
         hf_data = hf_inputs.hf_data
         normalized_kwargs = hf_inputs.hf_kwargs
@@ -991,8 +1006,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
         input_features = processed_data.pop("input_features", None)
@@ -1013,7 +1028,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if video_second_per_grid is not None:
             processed_data["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         processed_data["use_audio_in_video"] = torch.tensor(use_audio_in_video)
         processed_data.pop("input_ids", None)
 
@@ -1142,7 +1157,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
             with set_forward_context(None, self.vllm_config):
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         # Split concatenated embeddings for each image item.
@@ -1161,9 +1176,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype
-            )
+            pixel_values_videos = video_input["pixel_values_videos"]
             with set_forward_context(None, self.vllm_config):
                 video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
         # Split concatenated embeddings for each video item.
@@ -1186,6 +1199,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen2_5OmniConditionalGenerationMixin,
 ):
+    supports_mm_device_do_normalize = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -1256,6 +1271,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

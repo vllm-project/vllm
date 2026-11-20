@@ -37,6 +37,9 @@ from vllm.model_executor.models.transformers.pooling import (
     SequenceClassificationMixin,
     TokenClassificationMixin,
 )
+from vllm.model_executor.models.transformers.transcription import (
+    TranscriptionMixin,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 if TYPE_CHECKING:
@@ -148,6 +151,16 @@ class TransformersMoEForMTP(MoEMixin, MTPMixin): ...
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
 class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalForTranscription(
+    TranscriptionMixin, MultiModalMixin, CausalMixin
+): ...
 
 
 @MULTIMODAL_REGISTRY.register_processor(

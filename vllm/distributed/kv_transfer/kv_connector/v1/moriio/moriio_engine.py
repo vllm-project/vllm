@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         MoRIIOConnectorWorker,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+        MoRIIOWriteTPMapping,
         WriteTarget,
     )
 
@@ -383,10 +384,23 @@ class MoRIIOWriter:
 
         is_mamba = self.worker._is_mamba_layer(task.layer_name)
         transfer_statuses: list[Any] = []
+        layer_mapping = task.tp_mapping
+        if task.tp_mapping is not None and not is_mamba:
+            # Head slices follow this layer's KV-head count, which may be
+            # below the model-wide one the request's targets were sized for.
+            layer_mapping = self.worker._write_tp_mapping(
+                task.remote_tp_size, task.layer_name
+            )
         for target in self._write_targets(task):
-            if target is not None and not is_mamba and not target.num_heads:
-                # Another producer rank writes this attention copy.
-                continue
+            if target is not None and not is_mamba:
+                assert layer_mapping is not None
+                target = next(
+                    (t for t in layer_mapping.targets if t.tp_rank == target.tp_rank),
+                    None,
+                )
+                if target is None or not target.num_heads:
+                    # Another producer rank writes this attention copy.
+                    continue
             target_engine_id = self._target_engine_id(
                 task, request_info.decode_dp_rank, target
             )
@@ -396,7 +410,7 @@ class MoRIIOWriter:
             )
             if is_mamba:
                 plans = self._prepare_mamba_transfer_plans(
-                    task, request_info, target, remote_moriio_meta
+                    task, request_info, target, remote_moriio_meta, target_engine_id
                 )
             else:
                 plans = [
@@ -406,6 +420,7 @@ class MoRIIOWriter:
                         remote_moriio_meta,
                         remote_engine_id=target_engine_id,
                         target=target,
+                        tp_mapping=layer_mapping,
                     )
                 ]
             for plan in plans:
@@ -423,6 +438,7 @@ class MoRIIOWriter:
         remote_moriio_meta: MoRIIOAgentMetadata,
         remote_engine_id: str | None = None,
         target: "WriteTarget | None" = None,
+        tp_mapping: "MoRIIOWriteTPMapping | None" = None,
     ) -> LayerTransferPlan:
         """Prepare the transfer plan for a layer.
 
@@ -433,6 +449,8 @@ class MoRIIOWriter:
             remote_engine_id: Destination engine ID used to resolve remote offsets
             target: Consumer rank and head slice to write; None writes the
                 whole shard
+            tp_mapping: The layer's TP mapping, `target` included; defaults
+                to the request's
 
         Returns:
             The transfer plan
@@ -441,6 +459,7 @@ class MoRIIOWriter:
         layer_cache = self.worker.kv_caches[task.layer_name]
         if remote_engine_id is None:
             remote_engine_id = task.dst_engine_id
+        tp_mapping = tp_mapping or task.tp_mapping
         self.worker._check_peer_block_size(task.layer_name, remote_moriio_meta)
         target_rank = -1 if target is None else target.tp_rank
         key = (task.layer_name, *_get_write_geometry_key(layer_cache), target_rank)
@@ -448,16 +467,17 @@ class MoRIIOWriter:
         if offsets is None:
             group = self.worker.layer_to_group[task.layer_name]
             assert request_info.block_ids is not None
-            local_blocks = task.local_block_ids[group]
-            remote_blocks = request_info.block_ids[group]
+            skip = request_info.num_skip_blocks
+            local_blocks = task.local_block_ids[group][skip:]
+            remote_blocks = request_info.block_ids[group][skip:]
             if self.worker._has_mamba:
                 # D can reserve a tail block for the token recomputed locally.
                 remote_blocks = remote_blocks[: len(local_blocks)]
             if (
                 target is None
-                or task.tp_mapping is None
+                or tp_mapping is None
                 or (
-                    task.tp_mapping.copies_whole_block(target)
+                    tp_mapping.copies_whole_block(target)
                     and self.worker._block_copy_matches_peer(
                         task.layer_name, remote_moriio_meta
                     )
@@ -504,6 +524,7 @@ class MoRIIOWriter:
         request_info: RemoteAllocInfo,
         target: "WriteTarget | None" = None,
         remote_moriio_meta: MoRIIOAgentMetadata | None = None,
+        remote_engine_id: str | None = None,
     ) -> list[LayerTransferPlan]:
         """Plan both registered regions as one scheduled layer write."""
         assert request_info.block_ids is not None
@@ -537,21 +558,33 @@ class MoRIIOWriter:
                 target,
             )
         conv_session, ssm_session = self.worker._region_session_indices(task.layer_name)
-        return [
-            LayerTransferPlan(
-                request_id=task.request_id,
-                transfer_id=task.transfer_id,
-                layer_name=task.layer_name,
-                sess_idx=session,
-                transfer_local_offsets=local[region],
-                transfer_remote_offsets=remote[region],
-                transfer_sizes=sizes[region],
-            )
-            for session, region in (
+        plans = []
+        for region_index, (session, region) in enumerate(
+            (
                 (conv_session, slice(0, n_conv)),
                 (ssm_session, slice(n_conv, None)),
             )
-        ]
+        ):
+            local_offsets, remote_offsets = self.worker._mamba_region_mr_offsets(
+                task.layer_name,
+                region_index,
+                local[region],
+                remote[region],
+                remote_moriio_meta,
+                remote_engine_id,
+            )
+            plans.append(
+                LayerTransferPlan(
+                    request_id=task.request_id,
+                    transfer_id=task.transfer_id,
+                    layer_name=task.layer_name,
+                    sess_idx=session,
+                    transfer_local_offsets=local_offsets,
+                    transfer_remote_offsets=remote_offsets,
+                    transfer_sizes=sizes[region],
+                )
+            )
+        return plans
 
     def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> list[Any]:
         """Perform the actual layer write.
@@ -628,6 +661,7 @@ class MoRIIOWriter:
 
         # Send completion notification
         for (remote_ip, remote_port), num_writers in notify_targets.items():
+            num_writers *= self.worker.pp_size
             self.worker.moriio_wrapper.send_notify(
                 transfer_id,
                 remote_ip,
@@ -635,7 +669,12 @@ class MoRIIOWriter:
                 message_type="write_done",
                 # The consumer rank has its KV once every writer reported.
                 message_fields=(
-                    {"num_writers": num_writers} if num_writers != 1 else None
+                    {
+                        "num_writers": num_writers,
+                        "sender": [self.worker.pp_rank, self.worker.tp_rank],
+                    }
+                    if num_writers != 1
+                    else None
                 ),
             )
         # mark request as done, then we can free the blocks
@@ -746,13 +785,17 @@ class MoRIIOWrapper:
         self.transfer_status: list[Any] = []
         self.remote_engine_ip: str | None = None
         self.notify_port: int | None = None
+        # Notify ports of the same worker in the later pipeline stages; set on
+        # the first stage of a pipeline-parallel producer only.
+        self.stage_notify_ports: list[int] = []
+        self._stage_socks: dict[int, zmq.Socket] = {}
         self.lock = threading.Lock()
         self.done_req_ids: list[MoRIIOTransferAck] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.failed_write_cache_req_ids: list[str] = []
-        # write_done messages received per transfer whose writers are not all in.
-        self._write_done_counts: dict[TransferId, int] = {}
+        # Writers that sent write_done, per transfer whose writers are not all in.
+        self._write_done_senders: dict[TransferId, set[Any]] = {}
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
@@ -1010,6 +1053,7 @@ class MoRIIOWrapper:
                 while True:
                     try:
                         identity, msg = sock.recv_multipart()
+                        self._forward_to_stages(msg)
                         self._handle_message(msg)
                     except Exception as e:
                         logger.error("Error processing message: %s", e)
@@ -1019,6 +1063,25 @@ class MoRIIOWrapper:
             target=_async_wait, daemon=True, name="moriio-notify-listener"
         )
         self.notify_thread.start()
+
+    def _forward_to_stages(self, msg: bytes) -> None:
+        """Hand a message from the decode to the later pipeline stages.
+
+        Every stage holds its own blocks of the transfer, so each needs the
+        allocation and the release. Runs on the notify listener thread, which
+        owns these sockets.
+        """
+        for port in self.stage_notify_ports:
+            sock = self._stage_socks.get(port)
+            if sock is None:
+                sock = make_zmq_socket(
+                    ctx=zmq.Context.instance(),
+                    path=make_zmq_path("tcp", "127.0.0.1", port),
+                    socket_type=zmq.DEALER,
+                    bind=False,
+                )
+                self._stage_socks[port] = sock
+            sock.send(msg)
 
     def _handle_message(self, msg: bytes):
         """Handles incoming messages from remote nodes."""
@@ -1092,6 +1155,7 @@ class MoRIIOWrapper:
                     if isinstance(block_notify_list[0], int)
                     else block_notify_list
                 ),
+                num_skip_blocks=int(data.get("num_skip_blocks", 0)),
                 decode_dp_rank=decode_dp_rank,
             )
 
@@ -1101,19 +1165,28 @@ class MoRIIOWrapper:
         )
         transfer_id = data["transfer_id"]
         num_writers = int(data.get("num_writers", 1))
+        sender = data.get("sender")
         with self.lock:
-            received = self._write_done_counts.get(transfer_id, 0) + 1
-            if received < num_writers:
-                self._write_done_counts[transfer_id] = received
+            if self._is_transfer_terminal_locked(transfer_id):
                 return
-            self._write_done_counts.pop(transfer_id, None)
+            senders = self._write_done_senders.setdefault(transfer_id, set())
+            # Older peers do not name themselves; each of their messages counts.
+            senders.add(tuple(sender) if sender is not None else object())
+            if len(senders) < num_writers:
+                return
+            del self._write_done_senders[transfer_id]
+            self._mark_transfer_terminal_locked(transfer_id)
             self.done_write_cache_req_ids.append(transfer_id)
 
     def _handle_write_failed_message(self, data: dict):
         assert get_role() != ROLE.PRODUCER, "Only decode can get WRITE failure messages"
         transfer_id = data["transfer_id"]
         with self.lock:
-            self._write_done_counts.pop(transfer_id, None)
+            # The other stages still report after the first failure.
+            if self._is_transfer_terminal_locked(transfer_id):
+                return
+            self._write_done_senders.pop(transfer_id, None)
+            self._mark_transfer_terminal_locked(transfer_id)
             self.failed_write_cache_req_ids.append(transfer_id)
 
     def _handle_release_message(self, data: dict):
@@ -1240,3 +1313,6 @@ class MoRIIOWrapper:
             except Exception as e:
                 logger.warning("Error closing ZMQ socket for path %s: %s", path, e)
         self.paths.clear()
+        for sock in self._stage_socks.values():
+            sock.close(linger=0)
+        self._stage_socks.clear()

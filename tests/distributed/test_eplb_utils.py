@@ -1,15 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock
+from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
+import vllm.config.parallel as parallel_config_module
+import vllm.distributed.eplb.eplb_state as eplb_state_module
+from vllm.config import ParallelConfig
+from vllm.config.parallel import EPLBConfig
+from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbLayerResult,
+    TransferMetadata,
+)
+from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
+from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
+
+
+@pytest.mark.parametrize(
+    (
+        "method",
+        "model_type",
+        "is_rocm",
+        "has_moe",
+        "draft_enable_eplb",
+        "expected",
+    ),
+    [
+        ("dspark", "deepseek_v4", False, True, True, True),
+        ("dspark", "deepseek_v41", False, True, True, True),
+        ("dspark", "deepseek_v41", True, True, True, False),
+        ("dspark", "deepseek_v41", False, False, True, False),
+        ("dspark", "deepseek_v41", False, True, False, False),
+        ("eagle3", "deepseek_v41", False, True, False, False),
+    ],
+)
+def test_draft_model_supports_eplb(
+    monkeypatch, method, model_type, is_rocm, has_moe, draft_enable_eplb, expected
+):
+    speculative_config = SimpleNamespace(
+        method=method,
+        draft_enable_eplb=draft_enable_eplb,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=model_type)
+        ),
+    )
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+
+    assert (
+        draft_model_supports_eplb(
+            speculative_config,
+            object() if has_moe else None,
+        )
+        is expected
+    )
 
 
 def _make_model_state(
@@ -157,6 +216,332 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def _make_eplb_state() -> EplbState:
+    parallel_config = MagicMock()
+    parallel_config.enable_eplb = True
+    parallel_config.eplb_config = MagicMock(
+        use_async=False,
+        window_size=4,
+        step_interval=8,
+        num_redundant_experts=0,
+        policy="default",
+        communicator="torch_gloo",
+    )
+    parallel_config.enable_elastic_ep = False
+    parallel_config.num_ubatches = 1
+    return EplbState(parallel_config, torch.device("cpu"))
+
+
+class _EplbTestModel:
+    def __init__(self, num_experts: int, num_redundant: int):
+        self.num_routed_experts = num_experts
+        self.num_logical_experts = num_experts
+        self.num_redundant_experts = num_redundant
+        self.num_physical_experts = num_experts + num_redundant
+        self.num_local_physical_experts = self.num_physical_experts // 2
+        self.num_expert_groups = num_experts
+        self.num_moe_layers = 1
+        self.num_shared_experts = 0
+        self.moe_layers = ()
+        self.expert_weights = [[torch.zeros(self.num_local_physical_experts, 1)]]
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        pass
+
+
+class _EplbTestModelConfig:
+    def __init__(self, name: str):
+        self.model = name
+
+    def compile_factors(self) -> dict[str, object]:
+        return {"model": self.model}
+
+
+class _TopologyEncodingPolicy:
+    calls: list[tuple[int, int]] = []
+
+    @classmethod
+    def rebalance_experts(
+        cls,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        cls.calls.append((num_replicas, num_groups))
+        assert old_global_expert_indices is not None
+        return old_global_expert_indices
+
+
+class _EplbTestGroup:
+    def __init__(self):
+        self.device_group = self
+
+    def rank(self) -> int:
+        return 1
+
+    def size(self) -> int:
+        return 2
+
+
+class _EplbTestEvent:
+    def record(self, stream: torch.Stream | None = None) -> None:
+        pass
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async):
+    """Rearrangement keeps each model's physical expert and group counts."""
+    monkeypatch.setattr(
+        parallel_config_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        distributed_executor_backend="mp",
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(
+            window_size=4,
+            step_interval=8,
+            use_async=use_async,
+            communicator="torch_gloo",
+        ),
+    )
+    monkeypatch.setattr(eplb_state_module, "CpuGpuEvent", _EplbTestEvent)
+    state = EplbState(parallel_config, torch.device("cpu"))
+    group = _EplbTestGroup()
+    monkeypatch.setattr(eplb_state_module, "get_ep_group", lambda: group)
+    monkeypatch.setattr(eplb_state_module, "get_eplb_group", lambda: group)
+    monkeypatch.setattr(eplb_state_module, "get_node_count", lambda: 1)
+    monkeypatch.setattr(eplb_state_module, "all_reduce", lambda tensor, group: None)
+    monkeypatch.setattr(
+        eplb_state_module,
+        "create_eplb_communicator",
+        lambda **kwargs: SimpleNamespace(owned_expert_buffer=None),
+    )
+    monkeypatch.setattr(
+        eplb_state_module,
+        "rearrange_expert_weights_inplace",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(eplb_state_module, "PIN_MEMORY", False)
+    model_configs = (
+        _EplbTestModelConfig("target"),
+        _EplbTestModelConfig("draft"),
+    )
+    models = (
+        _EplbTestModel(num_experts=4, num_redundant=2),
+        _EplbTestModel(num_experts=6, num_redundant=2),
+    )
+    for model, model_config in zip(models, model_configs):
+        state.add_model(model, model_config)
+    _TopologyEncodingPolicy.calls.clear()
+    state.policy = _TopologyEncodingPolicy
+
+    state.rearrange()
+
+    target_state = state.model_states[hash_config_cached(model_configs[0])]
+    draft_state = state.model_states[hash_config_cached(model_configs[1])]
+    if use_async:
+        assert target_state.eplb_stats is not None
+        assert (
+            target_state.eplb_stats.num_replicas,
+            target_state.eplb_stats.num_groups,
+        ) == (6, 4)
+        assert draft_state.eplb_stats is not None
+        assert (
+            draft_state.eplb_stats.num_replicas,
+            draft_state.eplb_stats.num_groups,
+        ) == (8, 6)
+        assert target_state.rebalanced and draft_state.rebalanced
+    else:
+        assert _TopologyEncodingPolicy.calls == [(6, 4), (8, 6)]
+
+
+def test_allreduce_list_reduces_single_tensor_in_place(monkeypatch):
+    state = _make_eplb_state()
+    ep_group = SimpleNamespace(device_group=object())
+    all_reduce = MagicMock()
+    monkeypatch.setattr(eplb_state_module, "get_ep_group", lambda: ep_group)
+    monkeypatch.setattr(eplb_state_module, "all_reduce", all_reduce)
+    tensor = torch.ones(2, 4, dtype=torch.int32)
+
+    result = state._allreduce_list([tensor])
+
+    assert result[0] is tensor
+    all_reduce.assert_called_once_with(tensor, group=ep_group.device_group)
+
+
+def _allreduce_heterogeneous_loads_worker(rank: int, init_method: str) -> None:
+    world_size = 2
+    dist.init_process_group(
+        backend="gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        state = EplbState.__new__(EplbState)
+        ep_group = SimpleNamespace(device_group=dist.group.WORLD)
+        draft_local_load = torch.tensor(
+            [[1, 1, 1, 1] if rank == 0 else [0, 0, 0, 99]], dtype=torch.int32
+        )
+        target_local_load = torch.tensor(
+            [
+                [1, 1, 1, 1, 1, 1] if rank == 0 else [0, 0, 0, 0, 0, 99],
+                [99, 1, 1, 1, 1, 1] if rank == 0 else [1, 0, 0, 0, 0, 0],
+            ],
+            dtype=torch.int32,
+        )
+        with patch.object(eplb_state_module, "get_ep_group", return_value=ep_group):
+            draft_load, target_load = state._allreduce_list(
+                [draft_local_load, target_local_load]
+            )
+
+        expected_draft_load = torch.tensor([[1, 1, 1, 100]], dtype=torch.int32)
+        expected_target_load = torch.tensor(
+            [[1, 1, 1, 1, 1, 100], [100, 1, 1, 1, 1, 1]],
+            dtype=torch.int32,
+        )
+        assert torch.equal(draft_load, expected_draft_load)
+        assert torch.equal(target_load, expected_target_load)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="requires Gloo")
+def test_allreduce_heterogeneous_loads_across_two_ranks(tmp_path):
+    """Reduce draft/target load tensors with different expert topologies."""
+    init_method = f"file://{tmp_path / 'eplb_gloo_init'}"
+    mp.spawn(
+        _allreduce_heterogeneous_loads_worker,
+        args=(init_method,),
+        nprocs=2,
+        join=True,
+    )
+
+
+def test_async_rearrangement_interval_starts_after_last_layer_commit(dist_init):
+    """An async cycle longer than step_interval must not start the next
+    rearrangement in the step its last layer commits.
+    """
+    num_layers, num_experts, interval, steps_per_layer = 3, 4, 4, 2
+    device = torch.device(current_platform.device_type)
+    phy2log = torch.arange(num_experts).repeat(num_layers, 1)
+    model_state = _make_model_state(
+        phy2log=phy2log.to(device),
+        log2phy=phy2log.unsqueeze(-1).to(device),
+        logcnt=torch.ones(num_layers, num_experts, dtype=torch.long, device=device),
+    )
+    model_state.model.num_moe_layers = num_layers
+    model_state.model.num_logical_experts = num_experts
+    model_state.rebalanced = False
+    model_state.pending_result = None
+    model_state.expert_load_pass = torch.zeros(
+        num_layers, num_experts, dtype=torch.int32, device=device
+    )
+    model_state.expert_load_window = torch.zeros(
+        interval, num_layers, num_experts, dtype=torch.int32, device=device
+    )
+
+    state = EplbState(ParallelConfig(), device)
+    state.is_async = True
+    state.expert_load_window_size = interval
+    state.expert_rearrangement_step_interval = interval
+    state.expert_rearrangement_step = interval - 1
+    state.model_states = {"m": model_state}
+
+    unchanged = TransferMetadata(
+        is_unchanged=np.ones(num_experts, dtype=bool),
+        is_received_locally=np.zeros(num_experts, dtype=bool),
+        recv_primary_mask=np.zeros(num_experts, dtype=bool),
+        recv_count=0,
+        recv_expert_ids=np.full(num_experts, -1),
+        recv_dst_rows=np.full(num_experts, -1),
+    )
+    rearrange_steps = []
+    next_layer = 0
+    last_commit_step = num_layers * steps_per_layer
+    for step in range(last_commit_step + interval + 1):
+        # Play the async worker: publish one layer every steps_per_layer steps.
+        if model_state.rebalanced and step % steps_per_layer == 0:
+            if next_layer == 0:
+                state.rearrange_event.wait()
+            model_state.pending_result = AsyncEplbLayerResult(
+                layer_idx=next_layer,
+                new_physical_to_logical_map=phy2log[next_layer],
+                transfer_metadata=unchanged,
+                consumed_event=CpuGpuEvent(),
+            )
+            next_layer = (next_layer + 1) % num_layers
+        state.step()
+        if model_state.rebalanced and state.expert_rearrangement_step == 0:
+            rearrange_steps.append(step)
+
+    assert rearrange_steps == [0, last_commit_step + interval]
+
+
+def _overrun_warning_worker(rank: int, world_size: int, port: int):
+    dist.init_process_group(
+        "gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    ep_group = GroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=0,
+        torch_distributed_backend="gloo",
+        use_device_communicator=False,
+        group_name="eplb_overrun_warning_test",
+    )
+    # A rank that skips the collective fails the test instead of hanging it.
+    ep_group.cpu_timeout = timedelta(seconds=30)
+
+    interval = 4
+    model_state = MagicMock()
+    model_state.model_name = "m"
+    model_state.model.num_moe_layers = 3
+    model_state.rebalanced = True
+    model_state.pending_result = None
+    model_state.num_committed_layers = 1
+    # Rank 0 has published layer 1; rank 1 is still transferring it.
+    model_state.worker_progress = 3 - rank
+    state = EplbState(ParallelConfig(), torch.device("cpu"))
+    state.is_async = True
+    state.expert_rearrangement_step_interval = interval
+    state.expert_rearrangement_step = interval - 1
+    state.model_states = {"m": model_state}
+
+    with (
+        patch.object(eplb_state_module, "get_ep_group", return_value=ep_group),
+        patch.object(eplb_state_module.logger, "warning") as warning,
+    ):
+        state.step()
+
+    if rank == 0:
+        warning.assert_called_once()
+        message = warning.call_args.args[0] % warning.call_args.args[1:]
+        assert message.endswith("slowest EP ranks [1]: transferring layer 1")
+    else:
+        warning.assert_not_called()
+    dist.destroy_process_group()
+
+
+def test_async_rearrangement_overrun_warning_names_slowest_rank():
+    """When an async cycle overruns step_interval, every EP rank must enter
+    the progress all-reduce, and only rank 0 logs the rank that is behind.
+    """
+    mp.spawn(_overrun_warning_worker, args=(2, get_open_port()), nprocs=2, join=True)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

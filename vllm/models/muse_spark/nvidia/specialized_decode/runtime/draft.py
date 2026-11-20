@@ -45,6 +45,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.models.llama import LlamaMLP
+from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.common.layers import (
     MuseSparkNormPreservingResidualConnection,
     MuseSparkRMSNorm,
@@ -55,7 +56,7 @@ from ..cutedsl.common import policy
 from . import cute_ops, flashinfer_ops
 
 if TYPE_CHECKING:
-    from vllm.models.muse_spark.common.dspark import (
+    from vllm.models.muse_spark.nvidia.dspark import (
         MuseSparkDSparkDecoderLayer,
         MuseSparkDSparkModel,
     )
@@ -282,6 +283,56 @@ def _norm_params(norm: nn.Module) -> tuple:
     )
 
 
+def build_context_norms(model: "MuseSparkDSparkModel") -> "ContextNorms | None":
+    """Bind the context input norms independently of specialized decode."""
+    from ..cutedsl.draft.context import CONTEXT_HIDDEN_SIZE, ContextNorms
+
+    norms = model._context_pre_norms
+    hidden = model.hidden_norm
+    if (
+        model.config.hidden_size != CONTEXT_HIDDEN_SIZE
+        or model.default_dtype != torch.bfloat16
+        or not norms
+        or any(_norm_unsupported(n, CONTEXT_HIDDEN_SIZE) for n in (hidden, *norms))
+        or len({_norm_params(n) for n in norms}) != 1
+    ):
+        return None
+    if any(
+        n.has_weight
+        and (
+            n.weight.dtype not in (torch.bfloat16, torch.float32)
+            or n.weight.data_ptr() % (8 * n.weight.element_size()) != 0
+        )
+        for n in (hidden, *norms)
+    ):
+        return None
+    pre = norms[0]
+    # Preserve addresses across weight reloads for captured CUDA graphs.
+    weights = refill_derived(
+        model,
+        "_context_norm_weights",
+        torch.stack([n.weight for n in norms]) if pre.has_weight else None,
+    )
+    result = ContextNorms(
+        hidden.weight if hidden.has_weight else None,
+        weights,
+        len(norms),
+        hidden.variance_epsilon,
+        pre.variance_epsilon,
+        device=model._stacked_kv_weight.device,
+        hidden_gain_center=hidden.fused_gain_center,
+        pre_gain_center=pre.fused_gain_center,
+        hidden_input_scale=hidden.applies_weight_before_norm,
+        pre_input_scale=pre.applies_weight_before_norm,
+    )
+    logger.info_once(
+        "Using fused DSpark context input norms (%d layers).",
+        len(norms),
+        scope="process",
+    )
+    return result
+
+
 def _stock_rope(rotary_emb: nn.Module | None, head_dim: int) -> bool:
     """Whether the context keys' RoPE is the stock CUDA op on GPT-J pairs over
     the whole head, which the store kernel reproduces."""
@@ -337,10 +388,12 @@ class ContextKV:
         self.hidden_norm = model.hidden_norm
         self.pre_norm = pre
         # The layers' input-norm weights in one [L, D] table, read by layer.
-        self.pre_weights = (
+        self.pre_weights = refill_derived(
+            model,
+            "_context_norm_weights",
             torch.stack([norm.weight for norm in model._context_pre_norms])
             if pre.has_weight
-            else None
+            else None,
         )
         self.hidden_size = model.config.hidden_size
         self.num_layers = model._num_attn_layers
@@ -409,6 +462,7 @@ class ContextKV:
             and context_states.shape[0] > 0
             and context_states.shape[1] == self.hidden_size
             and context_states.is_contiguous()
+            and context_states.data_ptr() % 16 == 0
             and context_positions.dim() == 1
             and context_positions.dtype == torch.int64
             and context_positions.is_contiguous()
@@ -430,6 +484,11 @@ class ContextKV:
             # profiling run), but the profile must see the chain's buffers.
             self._project(context_states)
             return True
+        if (
+            isinstance(context_slot_mapping, (list, tuple))
+            and len(context_slot_mapping) != self.num_layers
+        ):
+            return False
         groups = _slot_groups(context_slot_mapping, self.num_layers)
         caches = []
         for attn in self.attn_layers:
@@ -458,7 +517,10 @@ class ContextKV:
             )
             or any(stride % 2 for stride in caches[0].stride()[:3])
             or any(
-                s.dim() != 1 or s.dtype != torch.int64 or not s.is_contiguous()
+                s.dim() != 1
+                or s.dtype != torch.int64
+                or not s.is_contiguous()
+                or s.shape[0] > context_states.shape[0]
                 for _, slots in groups
                 for s in slots
             )
@@ -1031,6 +1093,23 @@ class DraftDecode:
                 ffn_out, stream, 2 * i + 1, i + 1 < num_layers
             )
         return hidden_states
+
+
+def build_draft_norms(model: "MuseSparkDSparkModel") -> DraftDecode | None:
+    """Fuse the draft's norms and residual boundaries over its stock layers."""
+    plan, reason = plan_fused_boundaries(model)
+    if plan is None:
+        logger.debug("DSpark draft norms remain unfused: %s", reason)
+        return None
+    draft = DraftDecode(model, plan, fused_qkv=[False] * len(model.layers))
+    draft.prepare()
+    logger.info_once(
+        "Using fused DSpark draft norms (%d of %d residual boundaries).",
+        sum(c is not None for c in plan.constants),
+        len(plan.boundaries),
+        scope="process",
+    )
+    return draft
 
 
 def _own_context_rope(model: "MuseSparkDSparkModel", fused_qkv: list[bool]) -> None:

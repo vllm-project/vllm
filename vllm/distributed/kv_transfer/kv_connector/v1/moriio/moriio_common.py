@@ -5,7 +5,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.distributed.parallel_state import (
+    get_pipeline_model_parallel_rank,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -61,7 +62,7 @@ class MoRIIOTransferAck(NamedTuple):
     consumer_tp_size: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
@@ -83,7 +84,7 @@ class WriteTask:
     retried: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class LayerTransferPlan:
     """Plan for transferring a single layer."""
 
@@ -97,11 +98,13 @@ class LayerTransferPlan:
     use_batch: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
     block_ids: BlockIds | None
+    # Leading blocks the consumer already holds from its own prefix cache.
+    num_skip_blocks: int = 0
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -146,6 +149,9 @@ class MoRIIOAgentMetadata(
     # Tokens per block of each attention layer. Hybrid models size attention
     # blocks to the recurrent-state page, which depends on the TP size.
     attention_block_sizes: dict[str, int] = {}
+    # Layer name -> index of its first region in kv_caches_base_addr. Peers can
+    # register different layers (a pipeline stage holds a slice of them).
+    layer_base_addr_index: dict[str, int] = {}
 
 
 class RoleManager:
@@ -233,8 +239,18 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
         return MoRIIOMode.WRITE
 
 
-def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
-    return (dp_rank) * tp_size + tp_rank
+def get_port_offset(
+    dp_rank: int,
+    tp_rank: int,
+    tp_size: int = 1,
+    pp_rank: int = 0,
+    pp_stride: int = 0,
+) -> int:
+    return pp_rank * pp_stride + dp_rank * tp_size + tp_rank
+
+
+def get_pp_port_stride(tp_size: int, dp_size: int) -> int:
+    return tp_size * dp_size
 
 
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
@@ -254,6 +270,23 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
     `dp_size_local == 0` (external-DP sentinel) collapses to a single pod.
     """
     return global_dp_rank // dp_size_local if dp_size_local else 0
+
+
+def fill_remote_pod_from_config(
+    params: dict[str, Any], extra_config: dict, is_producer: bool
+) -> None:
+    """Use serve-config peer hosts when the router did not send them."""
+    hosts = extra_config.get("remote_hosts")
+    dp_local = int(extra_config.get("remote_dp_size_local") or 0)
+    if not hosts or not dp_local or params.get("remote_hosts"):
+        return
+    params["remote_hosts"] = hosts
+    params["remote_dp_size_local"] = dp_local
+    if not is_producer and (
+        "remote_dp_rank" in params
+        or min(int(params.get("remote_dp_size") or 1), dp_local) <= 1
+    ):
+        params.setdefault("is_request_leader", True)
 
 
 def resolve_host_ip(extra_config: dict) -> str:
@@ -288,7 +321,7 @@ def _warn_deprecated_env_vars() -> None:
             )
 
 
-@dataclass
+@dataclass(slots=True)
 class MoRIIOConfig:
     local_ip: str
     local_kv_port: int
@@ -305,11 +338,26 @@ class MoRIIOConfig:
     transfer_timeout: float
     defer_timeout: float
     recv_abort_timeout: float
+    pp_rank: int = 0
+    pp_size: int = 1
+    # Port distance between the same worker of consecutive pipeline stages.
+    pp_port_stride: int = 0
+    port_offset: int = 0
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
     num_workers: int = 1
     backend: str = "rdma"
+
+    def later_stage_notify_ports(self) -> list[int]:
+        """Notify ports of this worker's counterparts in the later pipeline
+        stages, to which the first stage forwards the decode's messages."""
+        if self.pp_rank != 0:
+            return []
+        return [
+            self.notify_port + stage * self.pp_port_stride
+            for stage in range(1, self.pp_size)
+        ]
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -354,7 +402,14 @@ class MoRIIOConfig:
         dp_rank = fold_local_rank(pc.data_parallel_rank, pc.data_parallel_size_local)
         base_notify_port = int(extra_config["notify_port"])
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        pp_size = pc.pipeline_parallel_size
+        pp_rank = get_pipeline_model_parallel_rank() if pp_size > 1 else 0
+        pp_port_stride = get_pp_port_stride(
+            tp_size, pc.data_parallel_size_local or pc.data_parallel_size
+        )
+        port_offset = get_port_offset(
+            dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_port_stride
+        )
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
             raise ValueError(
@@ -403,6 +458,10 @@ class MoRIIOConfig:
             # per-pod port folding, not for routing.
             dp_size=pc.data_parallel_size,
             tp_size=tp_size,
+            pp_rank=pp_rank,
+            pp_size=pp_size,
+            pp_port_stride=pp_port_stride,
+            port_offset=port_offset,
             read_mode=get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ,
             qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
@@ -508,7 +567,7 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
     return m.group(1)
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqMeta:
     """Metadata for a single request."""
 
@@ -658,7 +717,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Generator[zmq.Socket]:
     """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")

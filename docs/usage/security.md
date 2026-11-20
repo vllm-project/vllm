@@ -100,7 +100,7 @@ denial of service:
 | `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum compressed filesize in MB for a single audio file. Enforced on all audio inputs (multimodal chat URLs, speech-to-text uploads, data: URLs, and local file paths) before decoding begins. |
 | `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
 | `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
-| `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB. Checked before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
+| `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB, and a `torch.save` archive can deflate-compress its storages. The uncompressed archive size is checked before `torch.load` and the dense size before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
@@ -313,6 +313,10 @@ Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
 
+The Rust frontend's gRPC `GenerateRequest` accepts `media_io_kwargs` without
+this option, because the [gRPC interface](#grpc-interface) serves only trusted
+callers. It supports only `video.fps`, and the per-video frame cap still applies.
+
 ### P2P KV-Offload Peer Session Limits
 
 Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
@@ -395,7 +399,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides optional gRPC `Inference`, `Control`, and `Render` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
