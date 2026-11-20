@@ -44,6 +44,8 @@ from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import (
+    WeightsMapper,
+    WeightsTransformFn,
     extract_layer_index,
     get_fused_shared_expert_layers,
     maybe_fuse_shared_experts,
@@ -267,18 +269,6 @@ class MoEMixin(MixtureOfExperts, Base):
             moe_block.n_physical_experts = num_physical_experts
             moe_block.n_redundant_experts = self.num_redundant_experts
             moe_block.experts.update_expert_map()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        for (shared, experts), layers in self.fused_shared_experts.items():
-            weights = maybe_fuse_shared_experts(
-                weights,
-                n_routed_experts=self.num_logical_experts,
-                n_shared_experts=self.num_shared_experts,
-                fused_shared_expert_layers=frozenset(layers),
-                ckpt_prefix=shared,
-                experts_prefix=experts,
-            )
-        return super().load_weights(weights)
 
     def _fused_shared_expert_kwargs(
         self,
@@ -575,6 +565,18 @@ class MoEMixin(MixtureOfExperts, Base):
         # Validates and logs the per-layer shared expert fusion
         moe_classes = tuple({type(moe_block) for moe_block in self.mlp_layers})
         get_fused_shared_expert_layers(self.model, moe_classes, enable_eplb)
+        transforms: list[WeightsTransformFn] = [
+            partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=self.num_logical_experts,
+                n_shared_experts=self.num_shared_experts,
+                fused_shared_expert_layers=frozenset(layers),
+                ckpt_prefix=shared,
+                experts_prefix=experts,
+            )
+            for (shared, experts), layers in self.fused_shared_experts.items()
+        ]
+        self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=transforms)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
         # normally immediately reduces but we want FusedMoE to handle the reduction.
         for hf_shared, down_name in shared_down_projs:
