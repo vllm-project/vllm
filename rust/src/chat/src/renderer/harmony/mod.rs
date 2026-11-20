@@ -94,9 +94,9 @@ impl HarmonyChatRenderer {
             request.chat_options.generation_prompt_mode,
             GenerationPromptMode::ContinueFinalAssistant
         ) {
-            return Err(Error::ChatTemplate(
-                "Harmony renderer does not support continue_final_message".to_string(),
-            ));
+            return Err(Error::UnsupportedContinueFinalMessage {
+                renderer: "Harmony",
+            });
         }
 
         let messages =
