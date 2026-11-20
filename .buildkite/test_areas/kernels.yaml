@@ -748,10 +748,12 @@ steps:
   - tools/build_deepgemm_C.py
   - tools/setup_deepgemm_pythons.sh
   - tools/check_wheel_deepgemm.py
+  - vllm/config/kernel.py
   - vllm/utils/deep_gemm.py
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
   - vllm/model_executor/warmup/deep_gemm_warmup.py
+  - vllm/models/hy_v4_flash/
   - tests/kernels/quantization/test_block_fp8.py
   - tests/kernels/moe/test_deepgemm.py
   - tests/kernels/moe/test_batched_deepgemm.py
@@ -759,6 +761,7 @@ steps:
   - tests/quantization/test_cutlass_w4a16.py
   - tests/model_executor/test_deep_gemm_warmup.py
   - tests/kernels/moe/test_deep_gemm_mega_moe.py
+  - tests/models/hy_v4/test_flash_mega_moe.py
   commands:
     - python3 ../tools/check_wheel_deepgemm.py
     - pytest -v -s kernels/quantization/test_block_fp8.py
@@ -768,6 +771,7 @@ steps:
     - pytest -v -s quantization/test_cutlass_w4a16.py
     - pytest -v -s model_executor/test_deep_gemm_warmup.py
     - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py -k fp8_block_sm90_matches_reference
+    - pytest -v -s models/hy_v4/test_flash_mega_moe.py -k generation
   mirror:
     amd:
       automatic_shard: true
@@ -1184,15 +1188,21 @@ steps:
   device: h100
   num_devices: 2
   source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/models/hy_v4/test_flash_mega_moe.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/warmup/deep_gemm_warmup.py
+  - vllm/models/hy_v4_flash/
   - vllm/distributed/device_communicators/
   - vllm/config
+  - vllm/utils/deep_gemm.py
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
+    - pytest -v -s models/hy_v4/test_flash_mega_moe.py -k mega_moe_ep
   mirror:
     amd:
       label: ":amd: (MI355) FusedMoE Layer Kernels"

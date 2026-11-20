@@ -4,6 +4,7 @@
 input staging, and numerics against a dequantized reference for every routed
 format, activation and shared-expert fusion in the feature matrix."""
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -1353,28 +1354,26 @@ def _quantize(w: torch.Tensor, spec: MegaMoEWeightSpec):
 
 def _round_trip(x: torch.Tensor, quant, nvfp4_scale: float | None = None):
     """What the kernel computes on: x after `quant` (None keeps BF16)."""
-    from vllm.third_party.deep_gemm.utils.math import (
-        cast_back_from_fp8,
-        per_token_cast_to_fp8,
-    )
-    from vllm.third_party.deep_gemm.utils.nvfp4 import (
-        cast_back_from_nvfp4,
-        per_token_cast_to_nvfp4,
-    )
+    package = _import_deep_gemm().__name__
+    math = importlib.import_module(f"{package}.utils.math")
+    nvfp4 = importlib.import_module(f"{package}.utils.nvfp4")
 
     if quant is None:
         return x.bfloat16().float()
     if quant == kNvfp4DynamicToken:
         if nvfp4_scale is not None:
-            q = per_token_cast_to_nvfp4(x, nvfp4_scale)
-            return cast_back_from_nvfp4(*q, nvfp4_scale)
+            q = nvfp4.per_token_cast_to_nvfp4(x, nvfp4_scale)
+            return nvfp4.cast_back_from_nvfp4(*q, nvfp4_scale)
         x = x.bfloat16().float()
         scales = x.abs().amax(-1, keepdim=True).clamp_min(1e-12) / 2688
-        return cast_back_from_nvfp4(*per_token_cast_to_nvfp4(x / scales)) * scales
+        return (
+            nvfp4.cast_back_from_nvfp4(*nvfp4.per_token_cast_to_nvfp4(x / scales))
+            * scales
+        )
     group_k = quant.scale.group_shape.col
     use_ue8m0 = quant.scale.dtype != torch.float32
-    return cast_back_from_fp8(
-        *per_token_cast_to_fp8(x.bfloat16(), use_ue8m0=use_ue8m0, gran_k=group_k),
+    return math.cast_back_from_fp8(
+        *math.per_token_cast_to_fp8(x.bfloat16(), use_ue8m0=use_ue8m0, gran_k=group_k),
         gran_k=group_k,
     )
 
@@ -1597,9 +1596,11 @@ def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
 def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
     dist_init, act_name, fuse_shared
 ):
-    """A 128x128 block-FP8 checkpoint loaded through the GLM experts matches
+    """A 128x128 block-FP8 checkpoint loaded through the block-FP8 experts matches
     the dequantized reference."""
-    from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
+    from vllm.model_executor.layers.fused_moe.block_fp8_mega_moe import (
+        BlockFp8MegaMoEExperts,
+    )
 
     fmt, act = MEGA_MOE_FP8_BLOCK_SM90, ACTIVATIONS[act_name]
     torch.manual_seed(0)
@@ -1609,7 +1610,7 @@ def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     with torch.device(device):
-        experts = Glm5NextMegaMoEExperts(
+        experts = BlockFp8MegaMoEExperts(
             vllm_config,  # type: ignore[arg-type]
             weight_block_size=(128, 128),
             num_shared_experts=int(fuse_shared),
