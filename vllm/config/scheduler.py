@@ -236,7 +236,7 @@ class SchedulerConfig:
 
     prefill_hold_ttft_target: float | None = Field(default=None, gt=0)
     """Hold prefills across data parallel MoE ranks, with this TTFT target in
-    seconds (15 is a reasonable start). None (the default) disables it.
+    seconds (5 is a reasonable start). None (the default) disables it.
 
     With DP attention + EP all ranks step in lockstep, so a prefill on any rank
     slows the step for all of them. With this set, all ranks hold or release
