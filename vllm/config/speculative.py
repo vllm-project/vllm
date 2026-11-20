@@ -121,12 +121,6 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
-_QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
-    {
-        "Qwen3OmniMoeForConditionalGeneration",
-        "Qwen3OmniMoeThinkerForConditionalGeneration",
-    }
-)
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
@@ -199,20 +193,8 @@ def _get_minimax_m3_dspark_draft(
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
-    hf_config = model_config.hf_config
-    architectures = set(getattr(model_config, "architectures", ()) or ())
-    architectures.update(getattr(hf_config, "architectures", ()) or ())
-    return getattr(hf_config, "model_type", None) == "qwen3_omni_moe" or bool(
-        architectures & _QWEN3_OMNI_TARGET_ARCHITECTURES
-    )
-
-
-def _get_qwen3_omni_text_config(model_config: ModelConfig) -> Any:
-    thinker_config = getattr(model_config.hf_config, "thinker_config", None)
-    text_config = getattr(thinker_config, "text_config", None)
-    if text_config is None:
-        text_config = getattr(model_config, "hf_text_config", None)
-    return text_config
+    model_type = getattr(model_config.hf_config, "model_type", None)
+    return model_type == "qwen3_omni_moe_thinker"
 
 
 def _get_attention_head_dim(config: Any) -> int | None:
@@ -286,11 +268,7 @@ def _validate_qwen3_omni_dspark(
             f"trained block_size ({block_size}); got {num_speculative_tokens}."
         )
 
-    target_text_config = _get_qwen3_omni_text_config(target_model_config)
-    if target_text_config is None:
-        raise ValueError(
-            "Qwen3-Omni DSpark could not resolve the target thinker text_config."
-        )
+    target_text_config = target_model_config.hf_text_config
     target_hidden_size = getattr(
         target_text_config,
         "hidden_size",

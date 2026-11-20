@@ -617,21 +617,9 @@ _MULTIMODAL_MODELS = {
         "qwen2_audio",
         "Qwen2AudioForConditionalGeneration",
     ),
-    "Qwen2_5OmniModel": (
-        "qwen2_5_omni_thinker",
-        "Qwen2_5OmniThinkerForConditionalGeneration",
-    ),
-    "Qwen2_5OmniForConditionalGeneration": (
-        "qwen2_5_omni_thinker",
-        "Qwen2_5OmniThinkerForConditionalGeneration",
-    ),
     "Qwen2_5OmniThinkerForConditionalGeneration": (
         "qwen2_5_omni_thinker",
         "Qwen2_5OmniThinkerForConditionalGeneration",
-    ),
-    "Qwen3OmniMoeForConditionalGeneration": (
-        "qwen3_omni_moe_thinker",
-        "Qwen3OmniMoeThinkerForConditionalGeneration",
     ),
     "Qwen3OmniMoeThinkerForConditionalGeneration": (
         "qwen3_omni_moe_thinker",

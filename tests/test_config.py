@@ -5373,12 +5373,11 @@ def _make_qwen3_omni_dspark_configs():
     )
     target_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
-            model_type="qwen3_omni_moe",
-            architectures=["Qwen3OmniMoeForConditionalGeneration"],
-            thinker_config=SimpleNamespace(text_config=text_config),
+            model_type="qwen3_omni_moe_thinker",
+            architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         ),
         hf_text_config=text_config,
-        architectures=["Qwen3OmniMoeForConditionalGeneration"],
+        architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         get_hidden_size=lambda: 2048,
         get_total_num_hidden_layers=lambda: 48,
         get_vocab_size=lambda: 152064,
