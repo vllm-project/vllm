@@ -667,8 +667,10 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 
 !!! note "HY4 Flash"
 
-    HY4 Flash currently supports NVIDIA CUDA only; AMD ROCm, LoRA, and pipeline
-    parallelism are not supported. Published checkpoints use
+    HY4 Flash supports NVIDIA CUDA and, on AMD ROCm, MI355X (gfx950) only.
+    ROCm requires BF16 KV storage (`--kv-cache-dtype auto` or `bfloat16`) and
+    OCP FP8. LoRA and pipeline parallelism are not supported. Published
+    checkpoints use
     `HYV4FlashForConditionalGeneration`, which vLLM maps to
     `HYV4FlashVLForConditionalGeneration`.
 

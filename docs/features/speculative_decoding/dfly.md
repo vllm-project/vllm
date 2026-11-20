@@ -22,7 +22,8 @@ vllm serve tencent/Hy4-flash-FP8 \
 
 ## Supported configurations
 
-- NVIDIA GPUs and the GPU Model Runner V2.
+- NVIDIA GPUs, or AMD MI355X (gfx950) GPUs for HY4 Flash targets, and the
+  GPU Model Runner V2.
 - HY4 Flash checkpoints with compatible DFly configuration and draft weights.
 - BF16 computation with unquantized weights, online MoE-only block FP8
   quantization, or compressed-tensors W8A8 FP8 checkpoints using 128×128
@@ -30,6 +31,7 @@ vllm serve tencent/Hy4-flash-FP8 \
   use weight-only MXFP4 (group-32) weights; draft layers must be BF16 or FP8.
 - Matching target and draft KV cache dtype: BF16 (`auto` or `bfloat16`)
   or `fp8_ds_mla`. Omit the draft KV override to inherit the target dtype.
+  `fp8_ds_mla` is CUDA-only; ROCm requires BF16.
 - Matching target and draft tensor parallelism. Pipeline, prefill context,
   and decode context parallel sizes must be one. HY4 Flash supports data
   parallelism, with each DP replica running a TP-local draft.
@@ -40,7 +42,19 @@ vllm serve tencent/Hy4-flash-FP8 \
 
 DFly currently rejects LoRA, microbatching, disaggregated prefill/decode,
 heterogeneous vocabularies, adaptive verification, and a separate draft
-attention backend. DFly support on ROCm has not been validated.
+attention backend.
+
+On ROCm, DFly is validated with HY4 Flash FP8 on eight MI355X GPUs:
+
+```bash
+VLLM_ROCM_USE_AITER=1 \
+vllm serve tencent/Hy4-flash-FP8 \
+    --tensor-parallel-size 8 \
+    --dtype bfloat16 \
+    --speculative_config '{"num_speculative_tokens":5,"method":"dfly"}'
+```
+
+DFly with HY4 (non-Flash) targets is not supported on ROCm.
 
 Measure acceptance and latency on your own workload using the
 [acceptance metrics](acceptance_metrics.md) and
