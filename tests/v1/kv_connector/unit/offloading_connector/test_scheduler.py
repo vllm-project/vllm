@@ -1253,6 +1253,38 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert req_status.partial_tail_boundary is None
 
 
+def test_partial_tail_hit_still_offers_the_containing_chunk():
+    """Only a tail checkpoint of the hit chunk is in the CPU tier, so the rest
+    of that chunk must still be offered for storing."""
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
+    assert scheduler._lookup(req_status) == 28
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=28,
+    )
+
+    on_compute = _on_compute(scheduler)
+    for group_idx, group_config in enumerate(scheduler.config.kv_group_configs):
+        tokens_per_chunk = group_config.tokens_per_chunk
+        assert 28 % tokens_per_chunk != 0
+        assert (
+            on_compute.first_live_chunk_idx(req_status, group_idx)
+            == 28 // tokens_per_chunk
+        )
+
+
 def test_partial_tail_lookup_delays_duplicate_inflight_load():
     """A second request must wait for an in-flight partial-tail load."""
     manager = CPUOffloadingManager(num_chunks=8)
