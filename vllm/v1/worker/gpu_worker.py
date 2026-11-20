@@ -1650,9 +1650,6 @@ class Worker(WorkerBase):
 
     @time_dummy_batch  # returns the iteration records that have completed
     def execute_dummy_batch(self) -> None:
-        self._run_dummy_batch()
-
-    def _run_dummy_batch(self) -> None:
         self.model_runner._dummy_run(
             self.model_runner.decode_query_len,
             uniform_decode=True,
@@ -1662,9 +1659,13 @@ class Worker(WorkerBase):
 
     def probe_forward(self) -> str | None:
         try:
-            # Untimed: the iteration records go out with the engine's own
-            # dummy batches, and the probe would drop them.
-            self._run_dummy_batch()
+            # Not execute_dummy_batch: its timer drains the iteration records,
+            # which only the engine's own dummy batches report.
+            self.model_runner._dummy_run(
+                self.model_runner.decode_query_len,
+                uniform_decode=True,
+                num_active_loras=0,
+            )
             self.synchronize_device()
         except Exception as e:
             logger.exception("Forward probe failed")

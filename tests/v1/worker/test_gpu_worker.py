@@ -1147,7 +1147,6 @@ def test_probe_forward_leaves_serving_state(fails):
     worker.model_runner = SimpleNamespace(
         decode_query_len=1, kv_connector=connector, _dummy_run=dummy_run
     )
-    worker.parallel_config = SimpleNamespace(data_parallel_size=1)
     worker.iteration_timer = Mock()
 
     error = worker.probe_forward()

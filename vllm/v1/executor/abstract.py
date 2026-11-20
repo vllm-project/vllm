@@ -336,7 +336,7 @@ class Executor(ABC):
     def probe_forward(self) -> None:
         # Unlike execute_dummy_batch, wait for every rank: PP stages other
         # than the output rank fail independently.
-        errors = self.collective_rpc(
+        errors: list[str | None] = self.collective_rpc(
             "probe_forward", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
         )
         for rank, error in enumerate(errors):
