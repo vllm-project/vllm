@@ -27,6 +27,7 @@ steps:
   - '!vllm/distributed/kv_transfer/'
   - vllm/inputs/
   - vllm/model_executor/
+  - vllm/models/hy_v4/nvidia/dfly_inputs.py
   - vllm/models/qwen4_exp/
   - vllm/platforms/
   - vllm/sampling_params.py
@@ -281,7 +282,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix'
   key: spec-decode-ngram-suffix
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 35
   optional: true
   working_dir: "."
   no_plugin: true
@@ -297,7 +298,9 @@ steps:
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
   source_file_dependencies:
+  - vllm/sampling_params.py
   - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/sample/
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/
   commands:
@@ -446,7 +449,7 @@ steps:
     mem: 16+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2 and not dspine"
   - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
   source_file_dependencies:
   - vllm/v1/spec_decode/
@@ -462,7 +465,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k not dflash2 || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k not dflash2 and not dspine || true &&
     pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/test_distribution_shift.py || true'
 - label: ':nvidia: (B200) [Nightly] Spec Decode AL DFlash2'
   key: spec-decode-dflash2-nightly-b200
@@ -481,12 +484,16 @@ steps:
     mem: 24+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2 or dspine"
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/qwen3_dflash2.py
+  - vllm/model_executor/models/qwen3_dspine.py
+  - vllm/model_executor/models/registry.py
+  - vllm/config/speculative.py
+  - vllm/transformers_utils/configs/
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
@@ -495,7 +502,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k dflash2 || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k dflash2 or dspine || true'
 - label: ':nvidia: (H100) [Nightly] Spec Decode AL XPress'
   key: spec-decode-xpress-nightly
   device: intel_gpu

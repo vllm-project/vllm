@@ -191,6 +191,40 @@ steps:
     bash /vllm-workspace/.buildkite/scripts/install-kv-offload.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_offload || true &&
     pytest --continue-on-collection-errors -v -s v1/simple_kv_offload || true'
+- label: ':nvidia: (H200) EC Filesystem Tiering'
+  key: ec-filesystem-tiering
+  device: intel_gpu
+  timeout_in_minutes: 45
+  num_devices: 1
+  optional: true
+  working_dir: "."
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s v1/ec_connector/integration/test_filesystem_tiering.py
+  source_file_dependencies:
+  - .buildkite/test_areas/misc.yaml
+  - vllm/config/
+  - vllm/distributed/ec_transfer/
+  - vllm/inputs/
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/v1/
+  - tests/utils.py
+  - tests/v1/ec_connector/integration/test_filesystem_tiering.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s v1/ec_connector/integration/test_filesystem_tiering.py || true'
 - label: ':nvidia: (H200 MIG 35GB) V1 KV Connectors'
   key: v1-kv-connectors
   device: intel_gpu
@@ -408,8 +442,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     bash standalone_tests/python_only_compile.sh || true'
-- label: ':nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke'
-  key: python-314-smoke-nightly
+- label: ':nvidia: (H200 MIG 18GB) [Nightly] Python 3.12 Smoke'
+  key: python-312-smoke-nightly
   device: intel_gpu
   timeout_in_minutes: 85
   optional: true
@@ -425,14 +459,14 @@ steps:
     gpu: 1+
     mem: 16+
   _raw_old_commands:
-  - PYTHON_ONLY_COMPILE_PYTHON=3.14 bash standalone_tests/python_only_compile.sh
+  - PYTHON_ONLY_COMPILE_PYTHON=3.12 bash standalone_tests/python_only_compile.sh
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    PYTHON_ONLY_COMPILE_PYTHON=3.14 bash standalone_tests/python_only_compile.sh || true'
+    PYTHON_ONLY_COMPILE_PYTHON=3.12 bash standalone_tests/python_only_compile.sh || true'
 - label: ':nvidia: (H200 MIG 35GB) Async Engine, Inputs, Utils, Worker'
   key: async-engine-inputs-utils-worker-xpu
   device: intel_gpu

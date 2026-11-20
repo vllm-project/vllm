@@ -22,18 +22,23 @@ steps:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_migration_scheduler.py
   - pytest -v -s distributed/test_eplb_utils.py
+  - pytest -v -s distributed/test_eplb_extension_hooks.py
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
   - tests/distributed/test_eplb_migration_scheduler.py
   - tests/distributed/test_eplb_utils.py
+  - tests/distributed/test_eplb_extension_hooks.py
+  - vllm/config/parallel.py
+  - vllm/platforms/interface.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s distributed/test_eplb_algo.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_eplb_migration_scheduler.py || true &&
-    pytest --continue-on-collection-errors -v -s distributed/test_eplb_utils.py || true'
+    pytest --continue-on-collection-errors -v -s distributed/test_eplb_utils.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_eplb_extension_hooks.py || true'
 - label: ':nvidia: (L4) [Nightly] EPLB Execution'
   key: eplb-execution
   device: intel_gpu
@@ -122,5 +127,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_elastic_ep.py || true'
