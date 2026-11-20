@@ -1635,6 +1635,8 @@ class Scheduler(SchedulerInterface):
                     raise RuntimeError(f"Invalid request status: {request.status}")
                 scheduled_new_reqs.append(request)
                 self.prompt_embeds_budget.reserve(request, num_computed_tokens)
+                # Only the admission right after a failed load skips external KV.
+                request.kv_load_failed = False
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
@@ -1909,9 +1911,10 @@ class Scheduler(SchedulerInterface):
 
         Preempting them sends them to the workers again, rows included, when
         they resume, and they recompute the lost KV instead of loading it
-        again. The blocks past the rollback hold invalid KV, so they are
-        evicted from the prefix cache first; running requests sharing them
-        recompute them.
+        again. The blocks from the first invalid one on are evicted from the
+        prefix cache first, as the fail policy evicts downstream blocks: some
+        hold invalid KV or KV computed from it, and the request recomputes them
+        all. Running requests sharing them recompute them.
 
         Returns:
             The re-sent request IDs and the number of computed tokens they lost.

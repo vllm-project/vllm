@@ -248,8 +248,8 @@ class Request:
         self.update_block_hashes()
 
         self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
-        # Set when a failed KV load re-sends the request: it then recomputes
-        # the lost KV instead of loading it again.
+        # Set when a failed KV load re-sends the request, until it is admitted
+        # again: that admission recomputes the lost KV instead of loading it.
         self.kv_load_failed = False
 
         # Used for streaming

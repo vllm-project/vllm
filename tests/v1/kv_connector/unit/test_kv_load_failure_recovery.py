@@ -252,7 +252,7 @@ def test_sync_load_failure_resends_prompt_embeds_request(
     rows. The workers hold none once its prompt is done, and none below the
     loaded blocks before. Its resume recomputes the invalid blocks: they left
     the prefix cache, and it skips the connector even though the connector
-    still reports the hit, so it cannot fail the same load again."""
+    still reports the hit, so it cannot fail the same load again in a loop."""
     block_size = scheduler.block_size
     if not prompt_done:
         scheduler.max_num_scheduled_tokens = block_size // 2
@@ -283,6 +283,8 @@ def test_sync_load_failure_resends_prompt_embeds_request(
     assert resent.num_computed_tokens == 0
     assert resent.prompt_embeds is not None
     assert len(resent.prompt_embeds) == 3 * block_size
+    # Only that admission skips the connector; a later preemption loads again.
+    assert not request.skip_reading_external_kv
 
 
 def test_sync_load_failure_resends_prompt_embeds_requests_sharing_a_block(
