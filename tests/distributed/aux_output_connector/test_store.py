@@ -3142,6 +3142,39 @@ def test_session_object_writer_drain_abandons_before_the_next_put_starts(
     assert list(client.objects) == ["job/s/tail/0"]
 
 
+def test_session_object_writer_drain_abandons_a_retry_that_starts_while_it_decides(
+    monkeypatch,
+):
+    failed = threading.Event()
+    attempts: list[str] = []
+
+    def put(keys):
+        attempts.append(keys[0])
+        if len(attempts) == 1:
+            failed.set()
+            return -900
+        return 0
+
+    client, writer = _timed_writer(put, 600.0, 4)
+    rows = np.zeros((1, 1), dtype=np.uint8)
+
+    def hung():
+        start = time.monotonic()
+        while len(attempts) < 2 and time.monotonic() - start < 0.5:
+            time.sleep(0.01)
+        return True
+
+    try:
+        writer.add_tail("job/s/tail/0", rows, {})
+        writer.add_tail("job/s/tail/1", rows, {})
+        assert failed.wait(10)
+        monkeypatch.setattr(writer, "_hung", hung)
+        assert _run_within(writer.drain) is None
+    finally:
+        assert _run_within(writer.close) is None
+    assert attempts == ["job/s/tail/0"] and not client.objects
+
+
 def test_session_object_writer_close_stops_retrying():
     attempts = []
     client, writer = _timed_writer(lambda keys: attempts.append(keys), 600.0, 1)

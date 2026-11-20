@@ -187,6 +187,7 @@ class SessionObjectWriter:
         self._enqueued = 0
         self._taken = 0
         self._abandon_upto = 0
+        self._abandon_lock = threading.Lock()
         self._closed = threading.Event()
         self._queue: queue.Queue[tuple[list[str], list[bytes]] | None] = queue.Queue(
             maxsize=max_pending_batches
@@ -238,10 +239,11 @@ class SessionObjectWriter:
 
     def _write(self, batch: tuple[list[str], list[bytes]]) -> None:
         while True:
-            if self._taken <= self._abandon_upto:
-                self._drop(batch[0], "a put hung while they were queued")
-                return
-            self._busy_since = time.monotonic()
+            with self._abandon_lock:
+                if self._taken <= self._abandon_upto:
+                    self._drop(batch[0], "a put hung while they were queued")
+                    return
+                self._busy_since = time.monotonic()
             try:
                 self._store.put_batch(*batch)
             except BlockObjectStoreError as error:
@@ -294,9 +296,10 @@ class SessionObjectWriter:
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         with self._queue.all_tasks_done:
             while self._queue.unfinished_tasks and self._error is None:
-                if self._hung():
-                    self._abandon_upto = self._enqueued
-                    break
+                with self._abandon_lock:
+                    if self._hung():
+                        self._abandon_upto = self._enqueued
+                        break
                 if deadline is not None and time.monotonic() >= deadline:
                     raise BlockObjectStoreError(
                         "auxiliary output objects were not written in time"
