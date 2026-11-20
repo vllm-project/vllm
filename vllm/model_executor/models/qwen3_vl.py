@@ -1452,7 +1452,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 video_mm_kwargs["videos_kwargs"] = video_scoped_kwargs
 
                 sampled_fps = video_scoped_kwargs.get("fps")
-                if is_list_of(sampled_fps, float):
+                if is_list_of(sampled_fps, (int, float)):
                     video_scoped_kwargs["fps"] = sampled_fps[item_idx]
                 sampled_num_frames = video_scoped_kwargs.get("num_frames")
                 if is_list_of(sampled_num_frames, int):
@@ -1575,10 +1575,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
-
-            sampled_fps = hf_processor_mm_kwargs.get("fps")
-            if is_list_of(sampled_fps, float):
-                sampled_fps = sampled_fps[item_idx]
 
             timestamps = out_item["timestamps"].data
             assert isinstance(timestamps, (list, torch.Tensor))

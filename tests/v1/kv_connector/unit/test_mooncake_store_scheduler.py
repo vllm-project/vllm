@@ -116,7 +116,7 @@ def _make_bare_scheduler(
                     block_size=max(16, hash_block_size),
                     shapes=((1,),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                 ),
             ),
         ],
@@ -339,7 +339,7 @@ def _make_qsa_hybrid_cache_config():
         block_size=800,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     return KVCacheConfig(
         num_blocks=4,
@@ -1479,7 +1479,7 @@ def test_partial_tail_follows_lookahead_checkpoint(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
@@ -1544,7 +1544,7 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
