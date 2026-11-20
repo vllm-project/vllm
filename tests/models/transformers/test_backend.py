@@ -200,7 +200,8 @@ def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
 
 
 def test_infer_dynamic_arg_dims():
-    """Only unannotated and (legacy) tensor arguments are dynamic."""
+    """Tensor arguments are dynamic, and so are unannotated ones unless their
+    default makes them a flag."""
 
     class Encoder(nn.Module):
         def forward(
@@ -210,11 +211,13 @@ def test_infer_dynamic_arg_dims():
             mask: torch.BoolTensor | None = None,
             grid: tuple[int, int] = (1, 1),
             tiles: list[torch.Tensor] | None = None,
+            use_cache=False,
+            logits_to_keep: int | torch.Tensor = 0,
             **kwargs,
         ):
             pass
 
-    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0}
+    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0, "logits_to_keep": 0}
     assert infer_dynamic_arg_dims(Encoder) == expected
 
 
