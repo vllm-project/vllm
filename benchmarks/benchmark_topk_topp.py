@@ -32,7 +32,7 @@ from vllm.v1.sample.ops.topk_topp_triton import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkConfig:
     """Configuration for a benchmark run."""
 

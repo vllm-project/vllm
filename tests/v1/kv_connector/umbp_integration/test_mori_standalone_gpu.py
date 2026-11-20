@@ -5,10 +5,8 @@
 import multiprocessing as mp
 import os
 import signal
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import pytest
 import torch
@@ -23,7 +21,10 @@ from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
     _prompt,
     _reset_gpu_prefix_cache,
 )
-from tests.v1.kv_connector.umbp_test_utils import run_in_new_process
+from tests.v1.kv_connector.umbp_test_utils import (
+    run_in_new_process,
+    standalone_server,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVRange,
@@ -44,42 +45,10 @@ _LAYER_BYTES = 1 << 20
 _KEYS = ("standalone-block-0", "standalone-block-1")
 
 
-class _Server:
-    def __init__(self, address: str, process: subprocess.Popen):
-        self.address = address
-        self.process = process
-
-    def kill(self) -> None:
-        self.process.kill()
-        self.process.wait(10)
-
-
 @pytest.fixture
 def server(tmp_path, socket_dir):
-    import mori
-
-    binary = Path(mori.__file__).with_name("umbp_standalone_server")
-    assert binary.is_file(), f"MORI was built without UMBP: no {binary}"
-    address = f"unix://{socket_dir}/umbp.grpc.sock"
-    env = dict(
-        os.environ,
-        UMBP_STANDALONE_ADDRESS=address,
-        UMBP_DRAM_CAPACITY=str(256 * 1024 * 1024),
-    )
-    with open(tmp_path / "server.log", "w") as log:
-        process = subprocess.Popen(
-            [binary], env=env, stdout=log, stderr=subprocess.STDOUT
-        )
-        try:
-            yield _Server(address, process)
-        finally:
-            process.send_signal(signal.SIGCONT)
-            process.terminate()
-            try:
-                process.wait(10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(10)
+    with standalone_server(tmp_path, socket_dir, 256 * 1024 * 1024) as server:
+        yield server
 
 
 def _runtime(address: str, **options) -> StandaloneRuntime:
@@ -201,8 +170,8 @@ def _close_while_server_stopped(address: str, server_pid: int, scenario: str):
         assert worker.poll(job) is None
     elif scenario == "lookup":
         started = time.monotonic()
-        assert list(scheduler.lookup(["stuck"])) == [False]
-        assert list(scheduler.lookup(["stuck"])) == [False]
+        assert list(scheduler.lookup(["stuck"])) == [None]
+        assert list(scheduler.lookup(["stuck"])) == [None]
         assert time.monotonic() - started < 5
     scheduler.close()
     worker.close()
