@@ -112,6 +112,7 @@ EagleModelTypes = Literal[
 SpeculativeMethod = Literal[
     "ngram",
     "draft_model",
+    "dfly",
     "suffix",
     EagleModelTypes,
     NgramGPUTypes,
@@ -1252,7 +1253,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
-        if hf_config.model_type == "hy_v4":
+        if hf_config.model_type in ("hy_v4", "hy_v4_vl"):
             hf_config.model_type = "hy_v4_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
@@ -1277,6 +1278,11 @@ class SpeculativeConfig:
                     "architectures": ["InklingMTPModel"],
                 }
             )
+
+        if hf_config.model_type == "inkling2":
+            from vllm.models.inkling2.configs import Inkling2DSparkConfig
+
+            hf_config = Inkling2DSparkConfig.from_target(hf_config)
 
         if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
             hf_config.model_type = "gemma4_mtp"
@@ -1499,10 +1505,12 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         config_cls = get_method_config_class(self)
-        # DSpark drafts carry their own width (block size), so the default
-        # draft is resolved even without num_speculative_tokens.
+        # These drafts carry their own width, so resolve their default model
+        # even without num_speculative_tokens.
         if self.model is None and (
-            self.num_speculative_tokens is not None or self.use_dspark()
+            self.num_speculative_tokens is not None
+            or self.use_dspark()
+            or self.method == "dfly"
         ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
@@ -1735,6 +1743,9 @@ class SpeculativeConfig:
             pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
             enable_expert_parallel=enable_ep,
+            # The EP communicator is shared with the target, so the draft must
+            # not re-resolve "auto" against its own (default) deployment.
+            all2all_backend=target_parallel_config.all2all_backend,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,
@@ -2128,9 +2139,12 @@ class SpeculativeConfig:
 
         EAGLE-style drafters build a position's draft KV from its hidden state
         and the next token. DFlash/DSpark build it from the target hidden state
-        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
+        alone, and the Gemma-4 MTP drafter writes no KV (it reads the target's),
+        so only the remaining EAGLE/EAGLE3/MTP drafters require the drop.
         """
-        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
+        return self.use_eagle() and not (
+            self.use_dflash() or self.use_dspark() or self.use_gemma4_mtp()
+        )
 
     def use_eagle_block_drop(self) -> bool:
         """Whether the volatile trailing prefix-cache block should be dropped."""

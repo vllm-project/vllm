@@ -25,6 +25,31 @@ fn default_completion_max_tokens() -> Option<u32> {
     Some(16)
 }
 
+/// The `prompt` of a completions request: one prompt, or a batch of prompts
+/// that each get `n` choices.
+///
+/// Like Python and OpenAI, a batch holds either texts or token-ID lists, not
+/// a mix of both. An empty array is a single empty token-ID prompt, so there
+/// is always at least one prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CompletionPrompt {
+    Single(Prompt),
+    Texts(Vec<String>),
+    TokenIds(Vec<Vec<u32>>),
+}
+
+impl CompletionPrompt {
+    /// The prompts to generate completions for, in choice order.
+    pub fn into_prompts(self) -> Vec<Prompt> {
+        match self {
+            Self::Single(prompt) => vec![prompt],
+            Self::Texts(texts) => texts.into_iter().map(Prompt::Text).collect(),
+            Self::TokenIds(token_ids) => token_ids.into_iter().map(Prompt::TokenIds).collect(),
+        }
+    }
+}
+
 /// vLLM-compatible request type for the Completions API.
 ///
 /// Mirrors the Python vLLM `CompletionRequest` class. The local copy keeps the
@@ -40,9 +65,7 @@ pub struct CompletionRequest {
     pub model: Option<String>,
 
     /// The prompt(s) to generate completions for.
-    ///
-    /// We use [`vllm_text::Prompt`] here to support token-id input.
-    pub prompt: Prompt,
+    pub prompt: CompletionPrompt,
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]
@@ -147,9 +170,9 @@ pub struct CompletionRequest {
     /// Minimum number of tokens to generate
     pub min_tokens: Option<u32>,
 
-    /// Skip special tokens during detokenization
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    /// Skip special tokens during detokenization; unset takes the model's
+    /// generation-config default
+    pub skip_special_tokens: Option<bool>,
 
     /// Add spaces between special tokens during detokenization. Accepted as a
     /// no-op: the detokenizers of the served tokenizers already emit adjacent
@@ -322,6 +345,8 @@ pub(super) struct CompletionStreamChoice {
     pub index: u32,
     pub text: String,
     pub logprobs: Option<LogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
@@ -343,7 +368,33 @@ pub(super) enum CompletionSseChunk {
 mod tests {
     use serde_json::{Value, json};
 
+    use vllm_text::Prompt;
+
     use super::CompletionRequest;
+
+    #[test]
+    fn prompt_accepts_one_prompt_or_a_batch_of_one_kind() {
+        let prompts = |prompt: Value| {
+            serde_json::from_value::<CompletionRequest>(json!({ "prompt": prompt }))
+                .map(|request| request.prompt.into_prompts())
+        };
+        assert_eq!(prompts(json!("a")).unwrap(), [Prompt::Text("a".into())]);
+        assert_eq!(
+            prompts(json!([1, 2])).unwrap(),
+            [Prompt::TokenIds(vec![1, 2])]
+        );
+        assert_eq!(prompts(json!([])).unwrap(), [Prompt::TokenIds(vec![])]);
+        assert_eq!(
+            prompts(json!(["a", "b"])).unwrap(),
+            [Prompt::Text("a".into()), Prompt::Text("b".into())]
+        );
+        assert_eq!(
+            prompts(json!([[1], [2, 3]])).unwrap(),
+            [Prompt::TokenIds(vec![1]), Prompt::TokenIds(vec![2, 3])]
+        );
+        // Like Python, a batch does not mix texts and token IDs.
+        assert!(prompts(json!(["a", [1]])).is_err());
+    }
 
     /// Python declares these fields `bool | None`, so an explicit `null` means
     /// the same as omitting the field.

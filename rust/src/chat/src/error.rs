@@ -52,6 +52,14 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    #[error(
+        "failed to prepare media after the last preprocessed feature range, ending at offset {offset}"
+    )]
+    MediaAfterPreprocessed {
+        offset: usize,
+        #[source]
+        source: Box<Error>,
+    },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error(transparent)]
@@ -141,12 +149,18 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::AllToolsDeferred
+            | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
+            Self::OutputGrammar { error } => matches!(
+                error.downcast_ref(),
+                Some(vllm_parser::output_grammar::OutputGrammarError::UnsupportedRequest(_))
+            ),
+            Self::MediaAfterPreprocessed { source, .. } => source.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedContentPart(_)

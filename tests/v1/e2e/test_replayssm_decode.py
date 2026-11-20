@@ -101,7 +101,6 @@ def _check_replayssm_parity(
     # common-mode and only ReplaySSM varies.
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
@@ -188,7 +187,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
         speculative_config["prompt_lookup_max"] = 3
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         mamba_backend="flashinfer",
@@ -277,7 +275,6 @@ def _check_replayssm_prefix_caching(
 ):
     common = dict(
         max_model_len=8192,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         mamba_cache_mode="align",
         mamba_backend=mamba_backend,
@@ -524,7 +521,6 @@ def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(vllm_runner):
     for use_replayssm in (True, False):
         with vllm_runner(
             MAMBA2_MTP_MODEL,
-            trust_remote_code=True,
             max_model_len=32_768,
             max_num_seqs=4,
             max_num_batched_tokens=2048,

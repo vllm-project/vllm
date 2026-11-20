@@ -23,6 +23,13 @@ from types import ModuleType
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
+if current_platform.is_xpu():
+    pytest.skip(
+        "GLM-5.3-Flash does not currently support XPU.", allow_module_level=True
+    )
+
 # Bootstrap the glm5next package before importing kpool_compress directly: its
 # import runs glm5next/__init__, which pulls model -> attention -> the indexer
 # dispatcher (sparse_indexer) -> back into the nvidia/amd sparse_indexer
@@ -41,7 +48,6 @@ from vllm.models.glm5next.common.sparse_indexer import (
     _fill_short_decode_causal_indices,
     _scatter_decode_tokens_by_request,
 )
-from vllm.platforms import current_platform
 
 indexer_mod: ModuleType
 if current_platform.is_rocm():
