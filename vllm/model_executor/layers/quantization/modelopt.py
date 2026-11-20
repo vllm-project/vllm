@@ -20,6 +20,9 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+    MarlinLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
 )
@@ -87,6 +90,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_make_empty,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
@@ -3277,6 +3283,11 @@ class ModelOptLinearMethod(LinearMethodBase):
                 and self.kernel is not None
                 and self.kernel.supports_pre_processed_weights
             )
+            or (
+                w == kInt8Static
+                and isinstance(self.kernel, MarlinLinearKernel)
+                and self.kernel.config.act_type in (torch.float16, torch.bfloat16)
+            )
         )
 
     def create_weights(
@@ -3309,6 +3320,13 @@ class ModelOptLinearMethod(LinearMethodBase):
             weight_shape=self.fmt.kernel_weight_shape(layer),
             ctx=self.ctx,
         )
+        if self.spec.weight == kInt8Static and isinstance(
+            self.kernel, MarlinLinearKernel
+        ):
+            # Marlin reads an empty zero-point parameter for symmetric INT8.
+            # Register it before processed tensors are attached so the daemon's
+            # runtime handle has a destination in the meta model as well.
+            layer.register_parameter("w_zp", marlin_make_empty(layer.weight.device))
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
@@ -3329,6 +3347,12 @@ class ModelOptLinearMethod(LinearMethodBase):
                 logical_out = layer.output_size_per_partition
                 if logical_out % 128:
                     layer._pbwo_logical_out = logical_out
+            elif self.spec.weight == kInt8Static:
+                # Marlin requires an empty zero-point parameter for symmetric
+                # weight-only quantization. The daemon already exported the
+                # repacked weight and scale, so only select this handle.
+                assert isinstance(self.kernel, MarlinLinearKernel)
+                self.kernel.w_zp_name = "w_zp"
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
