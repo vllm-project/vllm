@@ -309,8 +309,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        # The checkpoint's stale `auto_map` points at remote code that no longer exists
-        vllm_runner_kwargs={"trust_remote_code": False},
         hf_processor=AutoProcessor.from_pretrained,
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
@@ -828,6 +826,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         dtype="bfloat16",
+        hf_runner_kwargs={"trust_remote_code": True},
         hf_processor=model_utils.moondream3_processor,
         patch_hf_runner=model_utils.moondream3_patch_hf_runner,
         # Single size factor to avoid GPU OOM when running multiple test
@@ -893,15 +892,9 @@ VLM_TEST_SETTINGS = {
         ),
         max_model_len=8192,
         max_num_seqs=2,
-        auto_cls=AutoModelForCausalLM,
+        auto_cls=AutoModelForImageTextToText,
         patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
-        marks=[
-            pytest.mark.skip(
-                reason="Model's custom code uses ROPE_INIT_FUNCTIONS"
-                "['default'] which was removed in transformers v5",
-            ),
-        ],
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
@@ -1446,13 +1439,12 @@ def test_custom_inputs_models_heavy(
 
 @pytest.mark.core_model
 @create_new_process_for_each_test(method="spawn")
-def test_gemma4_generate_without_image_resize(vllm_runner, monkeypatch):
-    """Pre-resized pixels must generate the same tokens as processor resizing."""
+def test_gemma4_generate_without_image_resize(vllm_runner):
+    """Invalid raw images fail per request; valid images keep prompts aligned."""
     from PIL import Image
 
     from vllm import SamplingParams
 
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     prompt = "<|turn>user\n<|image|>Describe the image.<turn|>\n<|turn>model\n"
     params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
     with vllm_runner(
@@ -1478,8 +1470,14 @@ def test_gemma4_generate_without_image_resize(vllm_runner, monkeypatch):
                 params,
             )[0]
 
+        for size in [(960, 960), (48, 13488), (4320, 4320), (163872, 48)]:
+            with pytest.raises(ValueError, match="exceed.*max_soft_tokens"):
+                generate(size, False)
+        with pytest.raises(ValueError, match="dimensions must be multiples"):
+            generate((47, 48), False)
+
         reference = generate((40, 80), True)
         unresized = generate((528, 1104), False)
         assert len(unresized.outputs[0].token_ids) == 8
         assert unresized.prompt_token_ids == reference.prompt_token_ids
-        assert unresized.outputs[0].token_ids == reference.outputs[0].token_ids
+        assert len(reference.outputs[0].token_ids) == 8

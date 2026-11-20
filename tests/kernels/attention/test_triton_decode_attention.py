@@ -245,7 +245,11 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
     ],
 )
 @pytest.mark.parametrize("PAGE_SIZE", [16])
-def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SIZE):
+# 36: a DSpark draft layer's window (rows attend to their last 36 keys).
+@pytest.mark.parametrize("sliding_window", [None, 36])
+def test_decode_attention_cross_layer_view(
+    H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SIZE, sliding_window
+):
     """The kernel must honor the cache's page-dim stride, not assume pages are
     packed back-to-back. A per-layer view into a cross-layer (block-major)
     cache has stride(0) inflated by num_layers; outputs must match a
@@ -317,6 +321,7 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
             sm_scale,
             PAGE_SIZE,
             is_mla=is_mla,
+            sliding_window=sliding_window,
         )
         return o, lse
 

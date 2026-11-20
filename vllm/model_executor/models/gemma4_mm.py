@@ -34,9 +34,6 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
     Gemma4TextConfig,
 )
-from transformers.models.gemma4.image_processing_gemma4 import (
-    get_aspect_ratio_preserving_size,
-)
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
@@ -357,6 +354,10 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
         unit = patch_size * pooling_kernel_size
         if do_resize:
+            from transformers.models.gemma4.image_processing_gemma4 import (
+                get_aspect_ratio_preserving_size,
+            )
+
             image_height, image_width = get_aspect_ratio_preserving_size(
                 height=image_height,
                 width=image_width,
@@ -370,7 +371,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
                 f"of patch_size * pooling_kernel_size ({unit}), "
                 f"got {image_width}x{image_height}."
             )
-        return (image_height // unit) * (image_width // unit)
+        num_soft_tokens = (image_height // unit) * (image_width // unit)
+        if not do_resize and num_soft_tokens > max_soft_tokens:
+            raise ValueError(
+                f"With do_resize=False, image dimensions "
+                f"{image_width}x{image_height} require {num_soft_tokens} soft tokens, "
+                f"exceeding max_soft_tokens={max_soft_tokens}."
+            )
+        return num_soft_tokens
 
     def get_image_repl(
         self,
@@ -712,6 +720,21 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
             )
 
+        if "images" in hf_data:
+            image_processor = self.info.get_hf_processor(**hf_kwargs).image_processor
+            if not _get_do_resize(merged_kwargs, image_processor.do_resize):
+                images = mm_items.get_items("image", ImageProcessorItems)
+                for item_idx in range(images.get_count()):
+                    if images.get(item_idx) is None:
+                        continue
+                    image_size = images.get_image_size(item_idx)
+                    self.info._compute_num_soft_tokens(
+                        image_size.width,
+                        image_size.height,
+                        max_soft_tokens=val if isinstance(val, int) else None,
+                        do_resize=False,
+                    )
+
         # ---- VIDEO HANDLING ----
         # Gemma4 decomposes video into timestamped image frames.
         # Each frame is processed with max_soft_tokens=70 through the
@@ -726,8 +749,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             video_num_soft_tokens_per_video: list[list[int]] = []
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
-
-            video_replacements: list[str] = []
 
             for item in videos:
                 video_array, metadata = item
@@ -760,6 +781,18 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     self.info.ctx.get_merged_mm_kwargs(video_mm_kwargs),
                     video_processor.image_processor.do_resize,
                 )
+                # Compute soft tokens per frame
+                num_soft_per_frame = []
+                for img in frames:
+                    w, h = img.size
+                    n = self.info._compute_num_soft_tokens(
+                        w,
+                        h,
+                        max_soft_tokens=_VIDEO_MAX_SOFT_TOKENS,
+                        do_resize=video_do_resize,
+                    )
+                    num_soft_per_frame.append(n)
+
                 frame_outputs = self.info.ctx.call_hf_processor(
                     video_processor,
                     dict(text=dummy_prompt, **{"images": frames}),
@@ -775,47 +808,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 all_video_pixel_values.append(frame_outputs["pixel_values"])
                 all_video_position_ids.append(frame_outputs["pixel_position_ids"])
 
-                # Compute soft tokens per frame
-                num_soft_per_frame = []
-                for img in frames:
-                    w, h = img.size
-                    n = self.info._compute_num_soft_tokens(
-                        w,
-                        h,
-                        max_soft_tokens=_VIDEO_MAX_SOFT_TOKENS,
-                        do_resize=video_do_resize,
-                    )
-                    num_soft_per_frame.append(n)
-
                 video_num_soft_tokens_per_video.append(num_soft_per_frame)
                 video_timestamps_per_video.append(timestamps)
                 video_frame_counts.append(len(frames))
 
-                # Build expanded replacement text for this video.
-                ts_strs = [f"{int(s // 60):02d}:{int(s % 60):02d}" for s in timestamps]
-                replacement = " ".join(
-                    f"{t} {processor.boi_token}"
-                    f"{processor.video_token * n}"
-                    f"{processor.eoi_token}"
-                    for t, n in zip(ts_strs, num_soft_per_frame)
-                )
-                video_replacements.append(replacement)
-
-            # Replace all <|video|> placeholders at once. We split on
-            # video_token to get N+1 parts, then interleave with the
-            # N replacement strings. This avoids the iterative
-            # split-replace bug where replacement text (which itself
-            # contains <|video|> tokens) collides with later splits.
-            vt = processor.video_token
-            parts = prompt_text.split(vt, len(video_replacements))
-
-            # NOTE: len(parts) <= len(video_replacements) + 1
-            parts_with_repl: list[str] = []
-            for part, repl in zip(parts, video_replacements):
-                parts_with_repl.extend([part, repl])
-            parts_with_repl.extend(parts[len(video_replacements) :])
-
-            prompt_text = "".join(parts_with_repl)
+            # Videos were processed above, so drop their placeholders from the text.
+            mm_counts = {**mm_items.get_all_counts(), "video": 0}
+            prompt_text = self._get_hf_mm_text(mm_counts)
 
             video_outputs = {
                 "pixel_values_videos": torch.cat(all_video_pixel_values, dim=0),
@@ -859,11 +858,14 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**patched_mm_kwargs),
-            dict(text=prompt_text, **hf_data),
-            patched_mm_kwargs,
-        )
+        if hf_data:
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**patched_mm_kwargs),
+                dict(text=prompt_text, **hf_data),
+                patched_mm_kwargs,
+            )
+        else:
+            processed_data = BatchFeature()
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.
         # Remap here to keep a single translation point.
@@ -2311,13 +2313,13 @@ class Gemma4ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
         **kwargs: Any,
     ) -> torch.Tensor:
-        pixel_values = inputs["pixel_values"]
-        pixel_position_ids = inputs["pixel_position_ids"]
-        gather_indices = inputs["gather_indices"]
+        pixel_values = values["pixel_values"]
+        pixel_position_ids = values["pixel_position_ids"]
+        gather_indices = values["gather_indices"]
 
         pad_tensor = (pixel_position_ids == -1).all(dim=-1)
 
@@ -2375,6 +2377,15 @@ class Gemma4ForConditionalGeneration(
 
         return torch.cat(embeddings, dim=0)
 
+    def _per_layer_embeddings_on(self, device: torch.device) -> torch.Tensor:
+        # A plain attribute, not a buffer, so the IPC weight cache never shares
+        # this per-step scratch; reallocate if the model was moved after init.
+        if self.per_layer_embeddings.device != device:
+            self.per_layer_embeddings = torch.zeros_like(
+                self.per_layer_embeddings, device=device
+            )
+        return self.per_layer_embeddings
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -2407,9 +2418,9 @@ class Gemma4ForConditionalGeneration(
                     self.config.text_config.num_hidden_layers,
                     self.config.text_config.hidden_size_per_layer_input,
                 )
-                self.per_layer_embeddings[: per_layer_inputs.shape[0]].copy_(
-                    per_layer_inputs
-                )
+                self._per_layer_embeddings_on(per_layer_inputs.device)[
+                    : per_layer_inputs.shape[0]
+                ].copy_(per_layer_inputs)
 
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
@@ -2438,7 +2449,9 @@ class Gemma4ForConditionalGeneration(
         # Select the pre-cached PLEs for this batch (None when PLE
         # is disabled for variants without PLE).
         per_layer_inputs = (
-            self.per_layer_embeddings[: inputs_embeds.shape[0]]
+            self._per_layer_embeddings_on(inputs_embeds.device)[
+                : inputs_embeds.shape[0]
+            ]
             if self.per_layer_embeddings is not None and inputs_embeds is not None
             else None
         )

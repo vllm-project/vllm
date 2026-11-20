@@ -61,6 +61,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
+    async_tensor_h2d,
     canonicalize_singleton_dim_strides,
     get_dtype_size,
     is_strictly_contiguous,
@@ -101,7 +102,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     is_quantized_kv_cache,
-    iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -242,16 +242,16 @@ def _make_xqa_draft_block_mask(
 
 
 def _make_xqa_ragged_draft_block_mask(
-    q_lens: list[int], max_q_len: int, causal: bool, device: torch.device
+    q_lens: torch.Tensor, max_q_len: int, causal: bool, device: torch.device
 ) -> torch.Tensor:
-    """Build a packed XQA draft mask for a ragged batch."""
+    """Build a packed XQA draft mask for a ragged batch from host `q_lens`."""
     num_packed = (max_q_len + 31) // 32
     padded = num_packed * 32
-    q_lens_t = torch.tensor(q_lens, device=device)
-    row_lens = torch.repeat_interleave(q_lens_t, q_lens_t)
-    request_starts = torch.cumsum(q_lens_t, dim=0) - q_lens_t
-    row_starts = torch.repeat_interleave(request_starts, q_lens_t)
-    q_idx = torch.arange(sum(q_lens), device=device) - row_starts
+    q_lens = q_lens.long()
+    row_lens = q_lens.repeat_interleave(q_lens)
+    row_starts = (q_lens.cumsum(0) - q_lens).repeat_interleave(q_lens)
+    q_idx = torch.arange(row_lens.numel()) - row_starts
+    row_lens, q_idx = async_tensor_h2d(torch.stack([row_lens, q_idx]), device)
     kv_idx = torch.arange(padded, device=device).unsqueeze(0)
     bool_mask = kv_idx < row_lens.unsqueeze(1)
     if causal:
@@ -593,6 +593,26 @@ class BatchDCPPrefillWrapper:
         return out
 
 
+def _kernel_block_sizes(
+    vllm_config: VllmConfig | None, num_qo_heads: int | None, num_kv_heads: int
+) -> list[int | MultipleOf]:
+    # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
+    # on Blackwell); advertise them only when usable so selection never
+    # picks a large kernel block we cannot serve.
+    use_large_pages = (
+        num_qo_heads is not None
+        and num_kv_heads > 0
+        and num_qo_heads // num_kv_heads > 1
+        and current_platform.is_device_capability_family(100)
+        and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
+        # The fa2 mm-prefix wrapper cannot read these pages.
+        and not _native_mm_prefix(vllm_config)
+    )
+    if not use_large_pages:
+        return [16, 32, 64]
+    return [16, 32, 64, 128, 256, 512, 1024]
+
+
 class FlashInferBackend(AttentionBackend):
     supports_kv_cache_update_bypass: bool = True
 
@@ -625,27 +645,32 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
-        # on Blackwell); advertise them only when usable so selection never
-        # picks a large kernel block we cannot serve.
-        use_large_pages = False
         vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is not None and vllm_config.model_config is not None:
-            pc = vllm_config.parallel_config
-            mc = vllm_config.model_config
-            num_qo_heads = mc.get_num_attention_heads(pc)
-            num_kv_heads = mc.get_num_kv_heads(pc)
-            use_large_pages = (
-                num_kv_heads > 0
-                and num_qo_heads // num_kv_heads > 1
-                and current_platform.is_device_capability_family(100)
-                and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
-                # The fa2 mm-prefix wrapper cannot read these pages.
-                and not _native_mm_prefix(vllm_config)
-            )
-        if not use_large_pages:
-            return [16, 32, 64]
-        return [16, 32, 64, 128, 256, 512, 1024]
+        if vllm_config is None or vllm_config.model_config is None:
+            return _kernel_block_sizes(vllm_config, None, 0)
+        pc = vllm_config.parallel_config
+        mc = vllm_config.model_config
+        return _kernel_block_sizes(
+            vllm_config, mc.get_num_attention_heads(pc), mc.get_num_kv_heads(pc)
+        )
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_layers(
+        cls, kv_cache_spec, layer_names: list[str]
+    ) -> list[int | MultipleOf]:
+        # A draft head can have other head counts than the target model, so
+        # take them from its own layers and spec.
+        vllm_config = get_current_vllm_config_or_none()
+        num_qo_heads = (
+            get_num_attention_heads_from_layers(vllm_config, layer_names)
+            if vllm_config is not None
+            else None
+        )
+        if num_qo_heads is None or not isinstance(kv_cache_spec, AttentionSpec):
+            return cls.get_supported_kernel_block_sizes(kv_cache_spec)
+        return _kernel_block_sizes(
+            vllm_config, num_qo_heads, kv_cache_spec.num_kv_heads
+        )
 
     @staticmethod
     def get_name() -> str:
@@ -792,14 +817,14 @@ class FlashInferBackend(AttentionBackend):
     forward_includes_kv_cache_update: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
 
 
-@dataclass
+@dataclass(slots=True)
 class FIDecode:
     """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
 
@@ -817,7 +842,7 @@ def _is_xqa_head_dim_supported(head_dim: int) -> bool:
     return 16 <= head_dim <= 256 and head_dim % 16 == 0
 
 
-@dataclass
+@dataclass(slots=True)
 class TRTLLMPrefill:
     """Metadata for the TRTLLM prefill pathway."""
 
@@ -845,7 +870,7 @@ class TRTLLMPrefill:
     """The maximum sequence length for KV Cache."""
 
 
-@dataclass
+@dataclass(slots=True)
 class FlashInferTrtllmAPIDecode:
     """Metadata for XQA and trtllm-gen decode."""
 
@@ -1292,43 +1317,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-        kv_specs = iter_layer_specs(kv_cache_spec)
+        use_non_causal = vllm_config.attention_config.use_non_causal
         if _use_fa2_native_decode():
             # fa2 decodes uniform causal spec queries.
-            if kv_specs and not vllm_config.attention_config.use_non_causal:
+            if not use_non_causal:
                 return AttentionCGSupport.UNIFORM_BATCH
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
         is_xqa_arch = current_platform.is_device_capability(
             90
         ) or current_platform.is_device_capability_family(120)
-        has_uniform_batch_support: bool = len(kv_specs) > 0
-        for spec in kv_specs:
-            if not isinstance(spec, AttentionSpec):
-                # FlashInfer only applies to attention, so we don't consider other types
-                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
-                continue
-            if not can_use_trtllm_attention(
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=spec.num_kv_heads,
-                is_prefill=False,
-            ) or (
+        # No head-count check: each attention layer asserts that its query heads
+        # divide by its KV heads, and the model config holds the target's heads,
+        # not a draft layer's.
+        # FlashInfer only applies to attention; this is for type checking.
+        assert isinstance(kv_cache_spec, AttentionSpec)
+        has_uniform_batch_support = (
+            force_use_trtllm_attention() is not False
+            and supports_trtllm_attention(is_prefill=False)
+            and not (
                 is_xqa_arch
                 and (
                     (
-                        spec.kv_quant_mode.is_nvfp4
+                        kv_cache_spec.kv_quant_mode.is_nvfp4
                         and not current_platform.is_device_capability_family(120)
                     )
-                    or not _is_xqa_head_dim_supported(spec.head_size)
+                    or not _is_xqa_head_dim_supported(kv_cache_spec.head_size)
                 )
-            ):
-                has_uniform_batch_support = False
-                break
+            )
+        )
 
-        use_non_causal = vllm_config.attention_config.use_non_causal
         if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
             return AttentionCGSupport.UNIFORM_BATCH
         else:
@@ -1422,7 +1440,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         qo_indptr_cpu: torch.Tensor,
         num_decodes: int,
         num_decode_tokens: int,
-    ) -> tuple[int, torch.Tensor | None, list[int] | None]:
+    ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
         """Return the query width, ragged offsets, and effective query lengths."""
         if num_decodes == 0 or num_decode_tokens == 0:
             return 1, None, None
@@ -1455,17 +1473,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if q_len_per_req <= 1:
             return 1, None, None
 
-        q_lens = decode_q_lens.tolist()
-        return (
-            q_len_per_req,
-            qo_indptr[: num_decodes + 1],
-            q_lens,
-        )
+        return q_len_per_req, qo_indptr[: num_decodes + 1], decode_q_lens
 
     def _get_decode_mask(
         self,
         q_len_per_req: int,
-        ragged_q_lens: list[int] | None,
+        ragged_q_lens: torch.Tensor | None,
         num_decodes: int,
         causal: bool,
     ) -> torch.Tensor | None:
