@@ -253,7 +253,8 @@ class HYV4Model(nn.Module):
     """HY V4 backbone."""
 
     decoder_layer_cls: type[HYV4DecoderLayer] = HYV4DecoderLayer
-    supports_ihc_sequence_parallel = True
+    # iHC sequence parallelism has not been validated on ROCm.
+    supports_ihc_sequence_parallel = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

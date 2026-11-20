@@ -204,6 +204,20 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
 
     @classmethod
     def verify_target_parallel_config(cls, spec: "SpeculativeConfig") -> None:
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                raise NotImplementedError("HYV4 DFly on ROCm requires gfx950")
+            # The text-only ROCm HYV4ForCausalLM uses the NVIDIA attention
+            # layers, which the AMD DFly target reuse cannot share.
+            if (
+                "HYV4VLForConditionalGeneration"
+                not in spec.target_model_config.architectures
+            ):
+                raise NotImplementedError(
+                    "HYV4 DFly on ROCm requires a HYV4 VL or HYV4 Flash target"
+                )
         for field in (
             "pipeline_parallel_size",
             "prefill_context_parallel_size",
@@ -317,6 +331,8 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
         if spec.kv_cache_dtype not in (None, "auto", "bfloat16", "fp8_ds_mla"):
             raise ValueError("DFly requires BF16 or fp8_ds_mla draft MLA KV cache")
+        if current_platform.is_rocm() and spec.kv_cache_dtype == "fp8_ds_mla":
+            raise ValueError("DFly on ROCm requires a BF16 draft MLA KV cache")
         if spec.attention_backend is not None:
             raise ValueError("DFly does not support a draft attention backend override")
         super().apply_options(spec)
