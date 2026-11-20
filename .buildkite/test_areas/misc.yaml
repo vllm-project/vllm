@@ -236,6 +236,9 @@ steps:
   - image-build-amd
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/known_prefix.py
+  - vllm/v1/simple_kv_offload/manager.py
+  - tests/v1/simple_kv_offload/test_scheduler.py
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
   - vllm/v1/core/block_pool.py
   - vllm/v1/core/kv_cache_utils.py

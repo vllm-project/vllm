@@ -309,6 +309,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.scheduler_manager is not None:
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
 
+    def get_known_num_matched_tokens(self, request: "Request") -> int | None:
+        if self.scheduler_manager is None:
+            return None
+        return self.scheduler_manager.get_known_num_matched_tokens(request)
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",

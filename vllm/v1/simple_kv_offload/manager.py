@@ -17,6 +17,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
+from vllm.distributed.kv_transfer.kv_connector.v1.known_prefix import KnownPrefixHits
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -251,6 +252,7 @@ class SimpleCPUOffloadScheduler:
         # Eager mode: local prefix length from get_num_new_matched_tokens(),
         # whose CPU copy update_state_after_alloc() refreshes.
         self._pending_local_hits: dict[str, int] = {}
+        self._known_prefix_hits = KnownPrefixHits()
 
         # Store metadata
         self._lazy_mode = lazy_offload
@@ -369,6 +371,19 @@ class SimpleCPUOffloadScheduler:
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
+        self._known_prefix_hits.discard(request.request_id)
+        result = self._get_num_new_matched_tokens(request, num_computed_tokens)
+        if result[0] is not None:
+            self._known_prefix_hits.record(request, num_computed_tokens + result[0])
+        return result
+
+    def get_known_num_matched_tokens(self, request: "Request") -> int | None:
+        """Read the previous lookup result without touching the CPU block pool."""
+        return self._known_prefix_hits.get(request)
+
+    def _get_num_new_matched_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
         """Return (num_new_tokens, is_async) from consecutive CPU cache hits."""
         # Pins found CPU blocks so they survive LRU eviction until
         # update_state_after_alloc() consumes them. Any pin from an earlier
@@ -445,6 +460,7 @@ class SimpleCPUOffloadScheduler:
         num_external_tokens: int,
     ) -> None:
         req_id = request.request_id
+        self._known_prefix_hits.discard(req_id)
         block_ids_by_group = blocks.get_block_ids()
         num_groups = len(block_ids_by_group)
 
@@ -1265,6 +1281,7 @@ class SimpleCPUOffloadScheduler:
         """Always returns (False, None). GPU blocks are protected by ref_cnt,
         so the scheduler can free blocks immediately."""
         req_id = request.request_id
+        self._known_prefix_hits.discard(req_id)
 
         # Release any temp CPU hit pin from get_num_new_matched_tokens()
         # if request is canceled or preempted before update_state_after_alloc()
@@ -1479,6 +1496,7 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
+        self._known_prefix_hits.clear()
         for pending in self._pending_cpu_hits.values():
             self._free_pending_cpu_hit(pending)
         self._pending_cpu_hits.clear()

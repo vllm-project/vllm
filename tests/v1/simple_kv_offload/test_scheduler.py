@@ -709,15 +709,23 @@ def test_eager_store_and_load_roundtrip() -> None:
         mm_features=None,
         block_hasher=req._block_hasher,
     )
+    assert sched.get_known_num_matched_tokens(req2) is None
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
     # make_request pads num_tokens by +1 beyond the last full block, so the
     # manager's max_hit_len = num_tokens - 1 cap leaves all full blocks intact.
     assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
+    refs = [block.ref_cnt for block in sched.cpu_block_pool.blocks]
+    free_blocks = sched.cpu_block_pool.get_num_free_blocks()
+    assert sched.get_known_num_matched_tokens(req2) == hit_tokens
+    assert sched.get_known_num_matched_tokens(req2) == hit_tokens
+    assert [block.ref_cnt for block in sched.cpu_block_pool.blocks] == refs
+    assert sched.cpu_block_pool.get_num_free_blocks() == free_blocks
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+    assert sched.get_known_num_matched_tokens(req2) is None
 
     block_ids2 = kv_blocks2.get_block_ids()
     sched_out2 = make_scheduler_output(

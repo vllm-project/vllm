@@ -250,6 +250,11 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
         self._bind_scheduler_namespace(UMBPNamespace(namespaces.pop()))
 
+    def get_known_num_matched_tokens(self, request: Request) -> int | None:
+        if self.connector_scheduler is None:
+            return None
+        return self.connector_scheduler.get_known_num_matched_tokens(request)
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:

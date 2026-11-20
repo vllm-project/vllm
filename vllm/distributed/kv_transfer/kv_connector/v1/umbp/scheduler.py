@@ -16,6 +16,7 @@ from typing import Any, cast
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.known_prefix import KnownPrefixHits
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -374,6 +375,7 @@ class UMBPStoreConnectorScheduler:
             for group_id in kv_cache_config.prefix_cacheable_group_ids
         }
         self._pending_lookups: dict[str, _PendingLookup] = {}
+        self._known_prefix_hits = KnownPrefixHits()
         self._lookup_executor = ThreadPoolExecutor(
             max_workers=int(extra.get("lookup_workers", 2)),
             thread_name_prefix="umbp-lookup",
@@ -473,9 +475,14 @@ class UMBPStoreConnectorScheduler:
         self.runtime = runtime
         self.codec = codec
 
+    def get_known_num_matched_tokens(self, request: Request) -> int | None:
+        """Read a reduced normal-lookup result without consuming pending work."""
+        return self._known_prefix_hits.get(request)
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
+        self._known_prefix_hits.discard(request.request_id)
         if not self.enable_lookup:
             return 0, False
         if self.runtime is None:
@@ -603,6 +610,7 @@ class UMBPStoreConnectorScheduler:
                 need_to_load,
             )
         matched_tokens = num_computed_tokens + need_to_load
+        self._known_prefix_hits.record(request, matched_tokens)
         if need_to_load <= 0:
             return 0, False
         self._load_specs[request.request_id] = LoadSpec(
@@ -708,6 +716,7 @@ class UMBPStoreConnectorScheduler:
         blocks: KVCacheBlocks,
         num_external_tokens: int,
     ) -> None:
+        self._known_prefix_hits.discard(request.request_id)
         self._requests[request.request_id] = request
         block_groups = blocks.get_block_ids(
             group_ids=self.kv_cache_config.prefix_cacheable_group_ids
@@ -747,6 +756,7 @@ class UMBPStoreConnectorScheduler:
             key for event in self._store_events.values() for key in event.iter_keys()
         }
         for request_id in scheduler_output.finished_req_ids:
+            self._known_prefix_hits.discard(request_id)
             self._pending_loads.pop(request_id, None)
             self._load_specs.pop(request_id, None)
             self._request_trackers.pop(request_id, None)
@@ -1584,6 +1594,7 @@ class UMBPStoreConnectorScheduler:
     def request_finished(
         self, request: Request, block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
+        self._known_prefix_hits.discard(request.request_id)
         self._register_finished_lookahead_save(request, block_ids)
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
@@ -2001,6 +2012,7 @@ class UMBPStoreConnectorScheduler:
         )
 
     def reset_store(self) -> bool:
+        self._known_prefix_hits.clear()
         if self._store_events or self._pending_finished_stores:
             return False
         for pending in self._pending_lookups.values():
@@ -2027,6 +2039,7 @@ class UMBPStoreConnectorScheduler:
         return cleared
 
     def close(self) -> None:
+        self._known_prefix_hits.clear()
         self._lookup_executor.shutdown(wait=True, cancel_futures=True)
         self._pending_lookups.clear()
         if self.runtime is not None:

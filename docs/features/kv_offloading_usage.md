@@ -564,6 +564,16 @@ end at an attention-chunk boundary for every chunked-local cache group. Otherwis
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
 
+## SimpleCPU scheduling hints
+
+`SimpleCPUOffloadConnector.get_known_num_matched_tokens` lets cache-aware
+schedulers read the usable prefix length found by the previous normal lookup.
+It does not walk or touch the CPU cache, change eviction order, pin blocks, or
+submit transfers. Before lookup it returns `None`; a known miss returns the
+local prefix length, including zero. The normal lookup still runs before
+allocation. Hints are cleared after allocation, request completion, or reset,
+and rejected when the request object or token/hash context changes.
+
 ## Core dumps
 
 On Linux, `SimpleCPUOffloadConnector` and `OffloadingConnector` leave their CPU
