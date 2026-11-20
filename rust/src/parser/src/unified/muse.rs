@@ -32,14 +32,16 @@
 //! with `<|eom|>`, e.g. writing `to=FUNCTION<|message|>` straight after its
 //! reasoning when calling a tool with empty arguments. Since `<|start|>` and
 //! `<|message|>` never occur inside a body, either one also ends the current
-//! segment and starts the next.
+//! segment and starts the next. It sometimes omits the last
+//! `</atem:parameter>` too, so a parameter value can also end where its invoke
+//! closes.
 
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, peek, preceded, seq};
+use winnow::combinator::{alt, delimited, eof, opt, peek, preceded, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::stream::Partial;
@@ -50,7 +52,8 @@ use crate::schema::{JsonType, OptionSource, SchemaRoot};
 use crate::tool::{JsonStyle, OpenToolCall, Tool};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    MarkerScanState, parse_buffered_event, safe_text_len, safe_text_len_mul, take_until_marker,
+    MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker,
+    take_until_marker_mul,
 };
 
 const START: &str = "<|start|>";
@@ -70,6 +73,10 @@ const PARAMETER_CLOSE: &str = "</atem:parameter>";
 /// Markers that end a segment body run: the boundary markers, or the possible
 /// start of the next segment's header when `<|eom|>` is missing.
 const BODY_MARKERS: &[&str] = &[EOM, EOT, START, MESSAGE, RECIPIENT_PREFIX];
+
+/// Markers that end a parameter value: its close tag, or the invoke close that
+/// ends a last value missing it, after one separating newline the value drops.
+const VALUE_END_MARKERS: &[&str] = &[PARAMETER_CLOSE, "\n</atem:invoke>", INVOKE_CLOSE];
 
 /// Recipient whose segments are dropped: `developer` is a prompt role, not a
 /// valid assistant recipient.
@@ -106,11 +113,14 @@ enum MuseEvent {
     ParameterText,
     /// `</atem:parameter>` after a string parameter value.
     ParameterClose,
-    /// The complete raw value of a buffered parameter, through its close tag.
+    /// The complete raw value of a buffered parameter, through its close tag;
+    /// `closes_invoke` when `</atem:invoke>` ended it instead.
     BufferedValue {
         value: String,
+        closes_invoke: bool,
     },
-    /// `</atem:invoke>`.
+    /// `</atem:invoke>`, which also ends a string parameter value missing its
+    /// close tag.
     InvokeClose,
     /// `</atem:function_calls>`: the ATEM block closes.
     BlockClose,
@@ -280,7 +290,10 @@ impl MuseUnifiedParser {
                 call.arguments.close();
                 *body = InvokeBody::Parameters;
             }
-            MuseEvent::BufferedValue { value } => {
+            MuseEvent::BufferedValue {
+                value,
+                closes_invoke,
+            } => {
                 let (call, body) = self.mode.invoke_mut()?;
                 let InvokeBody::BufferedParameter { key, .. } =
                     std::mem::replace(body, InvokeBody::Parameters)
@@ -290,15 +303,11 @@ impl MuseUnifiedParser {
                 let parameters = self.parameters.get(&call.name).unwrap_or(&Value::Null);
                 let value = convert_parameter_value(parameters, &key, value);
                 call.arguments.write_value(&key, &value);
+                if closes_invoke {
+                    self.close_invoke(output)?;
+                }
             }
-            MuseEvent::InvokeClose => {
-                let block =
-                    std::mem::replace(self.mode.block_mut()?, AtemBlock::Invokes { any: true });
-                let AtemBlock::Invoke { call, .. } = block else {
-                    return Err(parsing_failed!("Muse invoke close outside an invoke"));
-                };
-                output.push_call(call.finish());
-            }
+            MuseEvent::InvokeClose => self.close_invoke(output)?,
             MuseEvent::BlockClose => self.mode = MuseMode::Skip,
         }
         if let MuseMode::Tool {
@@ -308,6 +317,20 @@ impl MuseUnifiedParser {
         {
             output.push_call(delta);
         }
+        Ok(())
+    }
+
+    /// Close the open invoke and emit the rest of its call.
+    fn close_invoke(&mut self, output: &mut UnifiedParserOutput) -> Result<()> {
+        let block = std::mem::replace(self.mode.block_mut()?, AtemBlock::Invokes { any: true });
+        let AtemBlock::Invoke { mut call, body } = block else {
+            return Err(parsing_failed!("Muse invoke close outside an invoke"));
+        };
+        // A string value missing its `</atem:parameter>` ends here.
+        if let InvokeBody::Parameter = body {
+            call.arguments.close();
+        }
+        output.push_call(call.finish());
         Ok(())
     }
 }
@@ -493,19 +516,24 @@ fn parse_atem_event(input: &mut MuseInput<'_>, block: &mut AtemBlock) -> ModalRe
             .parse_next(input),
             InvokeBody::Parameter => alt((
                 literal(PARAMETER_CLOSE).value(MuseEvent::ParameterClose),
+                unclosed_value_invoke_close.value(MuseEvent::InvokeClose),
                 |input: &mut MuseInput<'_>| {
-                    safe_text_len(input, PARAMETER_CLOSE).map(|_| MuseEvent::ParameterText)
+                    safe_text_len_mul(input, VALUE_END_MARKERS).map(|_| MuseEvent::ParameterText)
                 },
             ))
             .parse_next(input),
             InvokeBody::BufferedParameter { value_end_scan, .. } => {
-                let (value,) = seq!(
-                    take_until_marker(PARAMETER_CLOSE, value_end_scan),
-                    _: literal(PARAMETER_CLOSE),
+                let (value, closes_invoke) = seq!(
+                    take_until_marker_mul(VALUE_END_MARKERS, value_end_scan),
+                    alt((
+                        literal(PARAMETER_CLOSE).value(false),
+                        unclosed_value_invoke_close.value(true),
+                    )),
                 )
                 .parse_next(input)?;
                 Ok(MuseEvent::BufferedValue {
                     value: value.to_string(),
+                    closes_invoke,
                 })
             }
         },
@@ -523,6 +551,12 @@ fn atem_structure<'i>(
             error => error,
         })
     }
+}
+
+/// Parse the `</atem:invoke>` that ends a last parameter value missing its
+/// `</atem:parameter>`, with the one newline before it that the value drops.
+fn unclosed_value_invoke_close(input: &mut MuseInput<'_>) -> ModalResult<()> {
+    (opt(literal("\n")), literal(INVOKE_CLOSE)).void().parse_next(input)
 }
 
 /// Parse an `<atem:invoke>` open tag into its tool name.
@@ -1104,9 +1138,9 @@ mod tests {
 
     #[test]
     fn muse_string_parameter_keeps_atem_tags_in_its_value() {
-        // Only `</atem:parameter>` ends a value, so a string value may spell the
-        // other ATEM tags, including the block close.
-        let value = "<atem:invoke name=\"x\"></atem:invoke></atem:function_calls>";
+        // Only `</atem:parameter>` and `</atem:invoke>` end a value, so a string
+        // value may spell the other ATEM tags, including the block close.
+        let value = "<atem:invoke name=\"x\"><atem:parameter></atem:function_calls>";
         let text = format!(
             " to=shell{MESSAGE}{}{EOT}",
             atem(&[("shell", &[("command", value)][..])])
@@ -1121,6 +1155,111 @@ mod tests {
             serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
             json!({ "command": value })
         );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_ends_at_invoke_close() {
+        let text = format!(
+            " to=cite{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"cite\">\n\
+             <atem:parameter name=\"chunk_ids\">[\"07657059-389d-4601\"]</atem:invoke>\n\
+             </atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        let calls = output.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({ "chunk_ids": ["07657059-389d-4601"] })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_after_closed_one() {
+        let text = format!(
+            " to=search{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket</atem:parameter>\n\
+             <atem:parameter name=\"limit\">10\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "query": "foosball bracket", "limit": 10 })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_stays_inside_its_invoke() {
+        let text = format!(
+            " to=cite{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"cite\">\n\
+             <atem:parameter name=\"chunk_ids\">[\"07657059-389d-4601\"]</atem:invoke>\n\
+             <atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket</atem:parameter>\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        let calls = output.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({ "chunk_ids": ["07657059-389d-4601"] })
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[1].arguments).unwrap(),
+            json!({ "query": "foosball bracket" })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_string_parameter_drops_separator_newline() {
+        let text = format!(
+            " to=search{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "query": "foosball bracket" })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_streams_and_keeps_later_segments() {
+        // The streamed string value holds back its trailing newline until the
+        // invoke close shows it is the separator, and the turn goes on after
+        // the block.
+        let text = format!(
+            " to=shell{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"shell\">\n\
+             <atem:parameter name=\"command\">ls\n\
+             </atem:invoke>\n<atem:invoke name=\"shell\">\n\
+             <atem:parameter name=\"timeout\">5</atem:invoke>\n\
+             </atem:function_calls>{EOM}{START}assistant to=user{MESSAGE}Final answer.{EOT}"
+        );
+        let parser = || MuseUnifiedParser::new(&[shell_tool()], Arc::new(tokenizer())).unwrap();
+        let batch = parser().parse_complete(&text).unwrap();
+
+        let calls = batch.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, r#"{"command": "ls"}"#);
+        assert_eq!(calls[1].arguments, r#"{"timeout": 5}"#);
+        assert_eq!(batch.normal_text(), "Final answer.");
+        for (first, second) in two_way_splits(&text) {
+            let output = collect_stream(&mut parser(), &[&first, &second]);
+            assert_eq!(
+                output.merged_events(),
+                batch.merged_events(),
+                "split: {first:?} + {second:?}"
+            );
+        }
     }
 
     #[test]
