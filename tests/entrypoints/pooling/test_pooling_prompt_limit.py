@@ -125,24 +125,13 @@ class TestPoolingPromptLimit:
         assert req.input == "hello world"
 
 
-class TestIOProcessorPromptLimit:
-    """IOProcessorRequest rejects oversized data lists."""
+def test_prompt_limit_preserves_plugin_defined_payload(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_COMPLETION_PROMPTS", 5)
+    payload = ["x"] * 10
 
-    def test_data_list_rejected(self, monkeypatch):
-        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
-        _clear_envs_cache()
+    request = IOProcessorRequest[list[str]](model="m", data=payload)
 
-        with pytest.raises(VLLMValidationError, match="data list length"):
-            IOProcessorRequest(model="m", data=["x"] * 10)
-
-    def test_data_list_within_limit(self, monkeypatch):
-        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
-        _clear_envs_cache()
-
-        req: IOProcessorRequest[list[str]] = IOProcessorRequest(
-            model="m", data=["x"] * 5
-        )
-        assert len(req.data) == 5
+    assert request.data == payload
 
 
 class TestClassifyPromptLimit:
