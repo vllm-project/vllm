@@ -19,7 +19,6 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
-    ROCMAiterMLASparseImpl,
     ROCMAiterMLASparseMetadataBuilder,
 )
 
@@ -140,81 +139,6 @@ class FlashSWABackend(FlashSparseBackend):
     @classmethod
     def supports_sliding_window(cls):
         return True
-
-
-@triton.jit
-def _pack_live_indices_kernel(
-    indices_ptr,
-    counts_ptr,
-    row_stride,
-    WIDTH: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0)
-    columns = tl.arange(0, BLOCK)
-    in_row = columns < WIDTH
-    base = indices_ptr + row.to(tl.int64) * row_stride
-    values = tl.load(base + columns, mask=in_row, other=-1)
-    live = values >= 0
-    destination = tl.cumsum(live.to(tl.int32), axis=0) - 1
-    count = tl.sum(live.to(tl.int32), axis=0)
-    # Every lane must read its entry before any lane overwrites the row.
-    tl.debug_barrier()
-    tl.store(base + destination, values, mask=in_row & live)
-    tl.store(base + columns, -1, mask=in_row & (columns >= count))
-    tl.store(counts_ptr + row, count)
-
-
-def pack_live_indices_(indices: torch.Tensor) -> torch.Tensor:
-    """Stably move each row's live indices to its front, in place.
-
-    Returns the number of live indices per row.
-    """
-    rows, width = indices.shape
-    counts = torch.empty(rows, dtype=torch.int32, device=indices.device)
-    if rows:
-        _pack_live_indices_kernel[(rows,)](
-            indices,
-            counts,
-            indices.stride(0),
-            WIDTH=width,
-            BLOCK=triton.next_power_of_2(width),
-        )
-    return counts
-
-
-class FlashPackedSparseImpl(ROCMAiterMLASparseImpl):
-    """Sparse MLA for top-k rows whose live entries need not be packed.
-
-    The DFly draft composes each row from the target's history, padding, and
-    the draft's causal block, so its live entries are not at the front of the
-    row and the count depends on the target's history. Pack the row and count
-    it before every layer reads it.
-    """
-
-    def forward_mqa(self, q, kv_c_and_k_pe_cache, attn_metadata, layer):
-        assert self.topk_indices_buffer is not None
-        num_tokens = (q[0] if isinstance(q, tuple) else q).shape[0]
-        counts = pack_live_indices_(self.topk_indices_buffer[:num_tokens])
-        indptr = attn_metadata.paged_kv_indptr
-        torch.cumsum(counts, dim=0, out=indptr[1 : num_tokens + 1])
-        tail = indptr[num_tokens + 1 :]
-        tail.copy_(indptr[num_tokens].expand_as(tail))
-        return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
-
-
-class FlashPackedSparseBackend(ROCMAiterMLASparseBackend):
-    @staticmethod
-    def get_impl_cls():
-        return FlashPackedSparseImpl
-
-    @classmethod
-    def supports_pcp(cls):
-        return False
-
-    @classmethod
-    def supports_dcp(cls):
-        return False
 
 
 def window_indices(positions: torch.Tensor, window: int, width: int) -> torch.Tensor:

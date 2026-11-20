@@ -63,6 +63,7 @@ steps:
       - tests/models/registry.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - vllm/models/hy_v4/
       - vllm/models/hy_v4_flash/
 
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
@@ -148,6 +149,7 @@ steps:
       - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
       - tests/models/hy_v4/test_dfly_config.py
+      - tests/models/hy_v4/test_rocm_aiter_mla_sparse.py
       - vllm/models/hy_v4_flash/
       - tests/models/hy_v4_flash/
       - vllm/models/muse_spark/
@@ -188,6 +190,7 @@ steps:
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/hy_v4/test_dfly_config.py
+      - pytest -v -s models/hy_v4/test_rocm_aiter_mla_sparse.py
       - pytest -v -s models/hy_v4_flash/test_rocm_sparse_indices.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
