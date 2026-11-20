@@ -795,7 +795,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             state_len=self.conv_size - 1
         )
         self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
-        if vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.enable_prefix_caching:
             self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
                 vllm_config,
                 self.local_num_heads,

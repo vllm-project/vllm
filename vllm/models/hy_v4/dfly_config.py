@@ -204,7 +204,6 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
         if current_platform.is_rocm():
             raise NotImplementedError("HYV4 DFly on ROCm requires a hy_v4_flash target")
         for field in (
-            "data_parallel_size",
             "pipeline_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
