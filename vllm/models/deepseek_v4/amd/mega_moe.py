@@ -27,19 +27,22 @@ from vllm.utils.math_utils import next_power_of_2, prev_power_of_2
 
 logger = init_logger(__name__)
 
-# DP-group max tokens per rank up to which FusedEPMoE is faster than MegaMoEV2
-# (8x MI355X, DeepSeek-V4.1-Flash EP8): than its staged route up to 768, than
-# its large-input route (`large_m_available`) only up to 512.
+# DP-group max tokens per rank up to which FusedEPMoE is faster than
+# MegaMoEV2's staged route (measured on 8x MI355X, DeepSeek-V4.1-Flash EP8).
 _FUSED_EP_MOE_MAX_TOKENS = 768
-_FUSED_EP_MOE_MAX_TOKENS_WITH_LARGE_M = 512
 
 
 @functools.cache
 def _fused_ep_moe_module() -> Any:
-    """`aiter.ops.flydsl.fused_ep_moe`, or None if this AITER does not have it."""
+    """`aiter.ops.flydsl.fused_ep_moe`, or None if it cannot be imported."""
     try:
         from aiter.ops.flydsl import fused_ep_moe
-    except ImportError:
+    except Exception as e:
+        # A mismatched AITER / FlyDSL can fail with more than ImportError.
+        # Every rank shares the environment, so all of them fall back.
+        logger.warning_once(
+            "Cannot import aiter.ops.flydsl.fused_ep_moe (%r); using MegaMoEV2.", e
+        )
         return None
     return fused_ep_moe
 
@@ -134,7 +137,6 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         self._runtimes: list[tuple[int, Any]] = []
         self._fused_ep_moe: Any = None
         self._fused_ep_moe_weights: Any = None
-        self._fused_ep_moe_max_tokens = 0
 
     def weight_loader(
         self,
@@ -210,10 +212,6 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
             return
         fused_ep_moe = _fused_ep_moe_module()
         if fused_ep_moe is None:
-            logger.warning_once(
-                "VLLM_ROCM_USE_AITER_FUSED_EP_MOE needs an AITER with "
-                "aiter.ops.flydsl.fused_ep_moe; using MegaMoEV2."
-            )
             return
         shape = dict(
             world_size=self.ep_size,
@@ -251,15 +249,6 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
             self._fused_ep_moe_cache[key] = moe
         self._fused_ep_moe = moe
         self._fused_ep_moe_weights = weights
-        has_large_m = any(
-            getattr(runtime, "large_m_available", False)
-            for _, runtime in self._runtimes
-        )
-        self._fused_ep_moe_max_tokens = (
-            _FUSED_EP_MOE_MAX_TOKENS_WITH_LARGE_M
-            if has_large_m
-            else _FUSED_EP_MOE_MAX_TOKENS
-        )
 
     def _uses_fixed_slot(self, max_tok_per_rank: int) -> bool:
         from aiter.ops.flydsl.kernels.mega_moe.mega_moe_config import (
@@ -308,27 +297,32 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         return runtime
 
     @staticmethod
-    def _max_tokens_across_dp(num_tokens: int) -> int:
-        # Dispatch is collective, so every EP rank must take the same path.
+    def max_tokens_across_dp(num_tokens: int) -> int:
+        """The most tokens any DP rank has in this step (at least
+        `num_tokens`). Dispatch is collective, so every EP rank must take the
+        path this picks."""
         if is_forward_context_available():
             dp_metadata = get_forward_context().dp_metadata
             if dp_metadata is not None:
                 return max(num_tokens, int(dp_metadata.num_tokens_across_dp_cpu.max()))
         return num_tokens
 
-    def uses_fused_ep_moe(self, num_tokens: int) -> bool:
+    def uses_fused_ep_moe(self, max_tokens_across_dp: int) -> bool:
         return (
             self._fused_ep_moe is not None
-            and self._max_tokens_across_dp(num_tokens) <= self._fused_ep_moe_max_tokens
+            and max_tokens_across_dp <= _FUSED_EP_MOE_MAX_TOKENS
         )
 
     def select_runtime(self, num_tokens: int) -> Any:
-        num_tokens = self._max_tokens_across_dp(num_tokens)
+        return self._runtime_for(self.max_tokens_across_dp(num_tokens))
+
+    def _runtime_for(self, max_tokens_across_dp: int) -> Any:
         for max_tok_per_rank, runtime in self._runtimes:
-            if num_tokens <= max_tok_per_rank:
+            if max_tokens_across_dp <= max_tok_per_rank:
                 return runtime
         raise ValueError(
-            f"{num_tokens} tokens exceeds MegaMoE capacity {self.max_num_tokens}"
+            f"{max_tokens_across_dp} tokens exceeds MegaMoE capacity "
+            f"{self.max_num_tokens}"
         )
 
     def append_shared_expert(
@@ -363,17 +357,25 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        max_tokens_across_dp: int | None = None,
     ) -> torch.Tensor:
+        """`max_tokens_across_dp`: `max_tokens_across_dp(num_tokens)`, if the
+        caller already has it."""
         assert self._runtimes
-        if self.uses_fused_ep_moe(hidden_states.shape[0]):
+        if max_tokens_across_dp is None:
+            max_tokens_across_dp = self.max_tokens_across_dp(hidden_states.shape[0])
+        if self.uses_fused_ep_moe(max_tokens_across_dp):
+            # Size the tiles for the busiest DP rank, as a CUDA graph padded
+            # to that size would.
             return self._fused_ep_moe(
                 hidden_states.contiguous(),
                 None,
                 self._fused_ep_moe_weights,
                 topk_weights,
                 topk_ids,
+                rows_hint=max_tokens_across_dp,
             )
-        runtime = self.select_runtime(hidden_states.shape[0])
+        runtime = self._runtime_for(max_tokens_across_dp)
         if self.fuse_shared_expert:
             topk_weights, topk_ids = self.append_shared_expert(topk_weights, topk_ids)
         # MegaMoEV2 reads these per launch; rebind to this layer's experts.

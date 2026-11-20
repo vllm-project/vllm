@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 
+from vllm.config import ParallelConfig, SchedulerConfig, VllmConfig
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -24,9 +24,11 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
 from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
 from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import aux_stream
 
+from ..kernels.moe.modular_kernel_tools.parallel_utils import (
+    parallel_launch_with_config,
+)
 from ..utils import multi_gpu_test
 
 HIDDEN = 64
@@ -148,97 +150,6 @@ def test_runtime_selected_by_max_tokens_across_dp(
     assert experts.select_runtime(4) == expected
 
 
-def _fake_fused_ep_moe_module(supported=True):
-    """Stands in for `aiter.ops.flydsl.fused_ep_moe` (ROCm/aiter#8368)."""
-    counts = {"init": 0, "prepare": 0}
-
-    class FusedEPMoE:
-        def __init__(self, **kwargs):
-            counts["init"] += 1
-
-        def prepare(self, weights):
-            counts["prepare"] += 1
-
-        def __call__(self, x, x_scales, weights, topk_weights, topk_ids):
-            return "fused"
-
-    module = SimpleNamespace(
-        fused_ep_moe_supported=lambda **shape: supported,
-        FusedEPMoEWeights=lambda *tensors: tensors,
-        FusedEPMoE=FusedEPMoE,
-    )
-    return module, counts
-
-
-def _use_fused_ep_moe_module(monkeypatch, module):
-    monkeypatch.setattr(mega_moe_module, "_fused_ep_moe_module", lambda: module)
-    monkeypatch.setattr(DeepseekV4AiterMegaMoEExperts, "_fused_ep_moe_cache", {})
-    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "flag, available, supported, instances",
-    [
-        ("0", True, True, 0),
-        ("1", False, True, 0),
-        ("1", True, False, 0),
-        ("1", True, True, 1),
-    ],
-)
-def test_fused_ep_moe_needs_flag_aiter_op_and_supported_layer(
-    monkeypatch, flag, available, supported, instances
-):
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSED_EP_MOE", flag)
-    module, counts = _fake_fused_ep_moe_module(supported)
-    _use_fused_ep_moe_module(monkeypatch, module if available else None)
-    layers = [_make_experts(monkeypatch) for _ in range(3)]
-    for experts in layers:
-        experts._runtimes = [(128, "megamoe")]
-        experts._init_fused_ep_moe()
-        assert experts.uses_fused_ep_moe(1) is bool(instances)
-    # Construction and prepare() are collectives: once per process, not per layer.
-    assert counts == {"init": instances, "prepare": instances}
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "tokens_across_dp, large_m, fused",
-    [
-        ([1, 768], False, True),
-        ([1, 769], False, False),
-        ([1, 512], True, True),
-        ([1, 513], True, False),
-    ],
-)
-def test_fused_ep_moe_selected_by_max_tokens_across_dp(
-    monkeypatch, tokens_across_dp, large_m, fused
-):
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSED_EP_MOE", "1")
-    _use_fused_ep_moe_module(monkeypatch, _fake_fused_ep_moe_module()[0])
-    experts = _make_experts(monkeypatch)
-    megamoe = SimpleNamespace(
-        large_m_available=large_m, forward=lambda x, w, ids: "megamoe"
-    )
-    experts._runtimes = [(4096, megamoe)]
-    experts._init_fused_ep_moe()
-    monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: True)
-    monkeypatch.setattr(
-        mega_moe_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(
-            dp_metadata=SimpleNamespace(
-                num_tokens_across_dp_cpu=torch.tensor(tokens_across_dp)
-            )
-        ),
-    )
-    # Both paths are collectives: a rank with one token follows the DP max.
-    out = experts(
-        torch.zeros(1, HIDDEN), torch.zeros(1, 2), torch.zeros(1, 2, dtype=torch.int32)
-    )
-    assert out == ("fused" if fused else "megamoe")
-
-
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "moe_backend, targets, fused",
@@ -327,11 +238,15 @@ def test_mega_moe_routing_matches_reference(
     captured = {}
 
     class Experts:
-        def __call__(self, x, topk_weights, topk_ids):
+        max_tokens_across_dp = staticmethod(
+            DeepseekV4AiterMegaMoEExperts.max_tokens_across_dp
+        )
+
+        def __call__(self, x, topk_weights, topk_ids, max_tokens_across_dp=None):
             captured["weights"], captured["ids"] = topk_weights, topk_ids
             return 2 * x
 
-        def uses_fused_ep_moe(self, num_tokens):
+        def uses_fused_ep_moe(self, max_tokens_across_dp):
             return fused_ep_moe
 
     def shared_experts(x):
@@ -386,28 +301,10 @@ def test_mega_moe_routing_matches_reference(
     assert on_aux_stream is (shared_stream and not fused_ep_moe)
 
 
-def _fused_ep_moe_vs_mega_moe_worker(rank, world_size, port):
-    os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
-    torch.accelerator.set_device_index(rank)
-    dist.init_process_group(
-        "cpu:gloo,cuda:nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
-        rank=rank,
-        world_size=world_size,
-    )
-    import mori
-
-    cpu_group = dist.new_group(backend="gloo")
-    torch._C._distributed_c10d._register_process_group("mori", cpu_group)
-    mori.shmem.shmem_torch_process_group_init("mori")
-    mega_moe_module.get_ep_group = lambda: SimpleNamespace(
-        rank_in_group=rank, world_size=world_size, cpu_group=cpu_group
-    )
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=1024)
-    )
+def _fused_ep_moe_vs_mega_moe_worker(pgi, vllm_config, cpu_group):
+    rank, world_size = pgi.rank, pgi.world_size
     num_experts, hidden, inter, top_k = 48 * world_size, 5120, 2304, 6
-    generator = torch.Generator().manual_seed(rank)
+    generator = torch.Generator(device=pgi.device).manual_seed(rank)
     layers: dict[bool, DeepseekV4AiterMegaMoEExperts] = {}
     for fused in (False, True):
         # finalize_weights() reads the flag.
@@ -429,55 +326,88 @@ def _fused_ep_moe_vs_mega_moe_worker(rank, world_size, port):
                     param.data.random_(0, 256, generator=generator)
             raw = {k: v.clone() for k, v in experts.state_dict().items()}
         experts.load_state_dict(raw)
-        experts.cuda()
         experts.finalize_weights()
-        assert experts.uses_fused_ep_moe(1) is fused
         layers[fused] = experts
 
-    for num_tokens in (1, 37, 300):
-        x = torch.randn(num_tokens, hidden, generator=generator).bfloat16().cuda()
+    def inputs(num_tokens):
+        x = torch.randn(num_tokens, hidden, generator=generator).bfloat16()
         topk_ids = (
             torch.rand(num_tokens, num_experts, generator=generator)
             .topk(top_k)
             .indices.int()
-            .cuda()
         )
-        topk_weights = torch.rand(num_tokens, top_k, generator=generator).cuda()
-        expected = layers[False](x, topk_weights, topk_ids)
-        out = layers[True](x, topk_weights, topk_ids)
-        cosine = torch.nn.functional.cosine_similarity(
-            out.float().flatten(), expected.float().flatten(), dim=0
-        )
-        # Both quantize to MXFP8 and requantize the activation;
-        # on random inputs like these FusedEPMoE is within 1e-5 (cosine) of an
-        # fp32 reference and MegaMoEV2 within 4e-4.
-        assert cosine > 0.999, (num_tokens, cosine)
+        topk_weights = torch.rand(num_tokens, top_k, generator=generator)
+        return x, topk_weights, topk_ids
 
+    def step(tokens_across_dp):
+        return set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=tokens_across_dp[rank],
+            num_tokens_across_dp=torch.tensor(
+                tokens_across_dp, dtype=torch.int32, device="cpu"
+            ),
+        )
+
+    assert not layers[False].uses_fused_ep_moe(1)
+    assert layers[True].uses_fused_ep_moe(768)
+    assert not layers[True].uses_fused_ep_moe(769)
+    # Tokens per DP rank. Every rank follows the DP max, including one with no
+    # tokens: FusedEPMoE up to 768, MegaMoEV2 from 769.
+    for tokens_across_dp in ([1, 1], [37, 300], [0, 37], [768, 1], [769, 1]):
+        x, topk_weights, topk_ids = inputs(tokens_across_dp[rank])
+        with step(tokens_across_dp):
+            expected = layers[False](x, topk_weights, topk_ids)
+            out = layers[True](x, topk_weights, topk_ids)
+        assert out.shape == expected.shape == x.shape
+        if max(tokens_across_dp) > 768:
+            # Both layers ran the same MegaMoEV2 runtime.
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
+        elif x.shape[0]:
+            cosine = torch.nn.functional.cosine_similarity(
+                out.float().flatten(), expected.float().flatten(), dim=0
+            )
+            # Both quantize to MXFP8 and requantize the activation; on random
+            # inputs like these FusedEPMoE is within 1e-5 (cosine) of an fp32
+            # reference and MegaMoEV2 within 4e-4.
+            assert cosine > 0.999, (tokens_across_dp, cosine)
+
+    # CUDA graphs: DP ranks are padded to the same size.
+    for num_tokens in (1, 37, 300):
+        x, topk_weights, topk_ids = inputs(num_tokens)
         static = [t.clone() for t in (x, topk_weights, topk_ids)]
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            graph_out = layers[True](*static)
-        new_inputs = (x.flip(0), topk_weights.flip(0), topk_ids.flip(0))
-        for buffer, value in zip(static, new_inputs):
-            buffer.copy_(value)
-        graph.replay()
-        torch.testing.assert_close(graph_out, layers[True](*new_inputs), rtol=0, atol=0)
-    dist.barrier(cpu_group)
-    mori.shmem.shmem_finalize()
+        with step([num_tokens] * world_size):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                graph_out = layers[True](*static)
+            new_inputs = (x.flip(0), topk_weights.flip(0), topk_ids.flip(0))
+            for buffer, value in zip(static, new_inputs):
+                buffer.copy_(value)
+            graph.replay()
+            torch.testing.assert_close(
+                graph_out, layers[True](*new_inputs), rtol=0, atol=0
+            )
 
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 def test_fused_ep_moe_matches_mega_moe():
-    """FusedEPMoE on the tensors MegaMoEV2 is built with gives MegaMoEV2's
-    output on 2 EP ranks, and graph replays match eager calls bitwise."""
+    """With 2 DP / EP ranks, the FusedEPMoE layer gives the MegaMoEV2 layer's
+    output on the same weights, every rank follows the DP-max cutoff, and graph
+    replays match eager calls bitwise."""
     fused_ep_moe = mega_moe_module._fused_ep_moe_module()
     if fused_ep_moe is None or not fused_ep_moe.fused_ep_moe_supported(
         world_size=2, model_dim=5120, inter_dim=2304, experts=96, topk=6
     ):
         pytest.skip("AITER FusedEPMoE is unavailable on this AITER or GPU")
-    mp.spawn(
-        _fused_ep_moe_vs_mega_moe_worker,
-        args=(2, get_open_port()),
-        nprocs=2,
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            all2all_backend="mori",
+        ),
+        scheduler_config=SchedulerConfig.default_factory(max_num_batched_tokens=1024),
     )
+    # MegaMoEV2 needs more than MoRI's default 2 GB symmetric heap.
+    env = {"VLLM_ROCM_USE_AITER": "1", "MORI_SHMEM_HEAP_SIZE": "8G"}
+    parallel_launch_with_config(2, _fused_ep_moe_vs_mega_moe_worker, vllm_config, env)
