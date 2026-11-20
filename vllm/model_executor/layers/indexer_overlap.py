@@ -7,9 +7,10 @@ batch is captured: an eager segment of a breakable (piecewise) graph cannot
 wait on an event recorded inside a captured segment. The moved kernels and
 their inputs are unchanged, so the outputs are bit-identical.
 
-Deferred top-k (Kimi K3.1): the indexer op runs its scan and top-k on another
-stream and returns without joining; the index group's conversion, the first
-reader of the kept tokens, waits for them.
+Deferred top-k (Kimi K3.1): the indexer op runs its scan and top-k on other
+streams (the stock indexer on one high-priority stream, the die-local indexer
+on the locality domains' streams) and returns without joining; the index
+group's conversion, the first reader of the kept tokens, waits for them.
 
 Deferred candidates (DeepSeek-V4.1): the candidate source layer selects its
 candidate blocks, and expands them into its first consumer's sparse block ids,

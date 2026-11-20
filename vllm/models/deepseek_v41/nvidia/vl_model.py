@@ -137,6 +137,8 @@ class DeepseekV41ForCausalLM(
 
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
+    # Opts in to the die-local sparse indexer (VLLM_INDEXER_LOCALIZE).
+    supports_localized_indexer = True
 
     packed_modules_mapping = {
         "gate_up_proj": ["w1", "w3"],

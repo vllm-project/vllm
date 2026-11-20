@@ -376,6 +376,24 @@ def _cache_config(num_blocks: int, page_bytes: int, layers: int) -> KVCacheConfi
     return KVCacheConfig(num_blocks, [tensor], [])
 
 
+@pytest.mark.parametrize(
+    "arch,opted_in",
+    [
+        ("KimiK31ForConditionalGeneration", True),
+        ("DeepseekV41ForCausalLM", True),
+        ("DeepseekV32ForCausalLM", False),
+    ],
+)
+def test_models_opt_in_to_die_local_indexer(arch, opted_in):
+    """The die-local indexer applies to models whose class (as the registry
+    resolves the architecture) opts in; no GPU needed."""
+    from vllm.model_executor.models import ModelRegistry
+
+    model_cls = ModelRegistry._try_load_model_cls(arch)
+    assert model_cls is not None
+    assert getattr(model_cls, "supports_localized_indexer", False) is opted_in
+
+
 @pytest.mark.parametrize("extensible", [False, True])
 def test_kv_cache_granules_live_in_their_planned_domain(domains, extensible):
     """Every committed granule of the KV cache is in the locality domain of
@@ -650,3 +668,143 @@ def test_localized_decode_matches_single_launch(domains, fp4, page_rows, topk):
         kept.fill_(-7)
         graph.replay()
         _assert_same_kept_scores(kept, *stock_topk())
+
+
+@pytest.fixture
+def candidate_stream(monkeypatch):
+    """The overlap's candidate stream for one test; the overlap's module state
+    is restored afterwards, also when the test fails."""
+    monkeypatch.setenv("VLLM_INDEXER_OVERLAP", "1")
+    monkeypatch.setattr(indexer_overlap, "_candidates", None)
+    monkeypatch.setattr(indexer_overlap, "_expanded", None)
+    indexer_overlap.init_candidate_stream(allowed=True)
+
+
+def test_candidate_source_matches_stock(domains, candidate_stream):
+    """The candidate source layer's per-domain top-k with deferred candidates
+    (FULL CUDA graph decode) writes the stock path's candidate blocks and
+    sparse block ids bit for bit, and keeps the stock top-k's scores."""
+    from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+        select_candidate_blocks,
+    )
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        candidate_blocks_to_sparse_indices,
+    )
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        _localized_candidate_source_topk,
+    )
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepSeekV32IndexerDecodeMetadata,
+    )
+    from vllm.v1.attention.backends.mla.sparse_indexer import (
+        DeepseekV41SparseIndexerMetadata,
+        SparseMQARowsMetadata,
+    )
+
+    topk, block_size, topk_blocks, sparse_block_kv = 512, 8, 2048, 8
+    case = _DecodeCase(True, 128, rows=4, context=96 * 1024)
+    rows = case.seq_lens.shape[0]
+    device = case.seq_lens.device
+    loc = case.localizer.build(case.block_table, case.seq_lens, case.indices, rows)
+    assert loc is not None
+
+    def int32(*shape: int) -> torch.Tensor:
+        return torch.full(shape, -3, dtype=torch.int32, device=device)
+
+    row_ke = case.seq_lens.view(-1)
+    zeros = torch.zeros(rows, dtype=torch.int32, device=device)
+    candidates = int32(rows, topk_blocks)
+    sparse = SparseMQARowsMetadata(
+        row_ks=zeros,
+        row_ke=row_ke,
+        sparse_indices=int32(rows, topk_blocks),
+        end=int32(rows),
+        col_indices=int32(rows, topk),
+        block_table=case.block_table,
+        row_indices=case.indices,
+    )
+    metadata = DeepseekV41SparseIndexerMetadata(
+        seq_lens=row_ke,
+        max_seq_len=int(row_ke.max()),
+        slot_mapping=zeros,
+        num_decodes=rows,
+        num_decode_tokens=rows,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        prefill=None,
+        decode=DeepSeekV32IndexerDecodeMetadata(
+            block_table=case.block_table,
+            seq_lens=case.seq_lens,
+            decode_lens=torch.ones(rows, dtype=torch.int32, device=device),
+            requires_padding=False,
+            schedule_metadata=int32(1, 2),
+            indices=case.indices,
+            localized=loc,
+        ),
+        block_table=case.block_table,
+        sparse_block_kv=sparse_block_kv,
+        sparse_decode=sparse,
+    )
+    kept = int32(rows, topk)
+
+    def localized() -> bool:
+        return _localized_candidate_source_topk(
+            metadata,
+            case.q,
+            case.kv,
+            case.weights,
+            case.seq_lens,
+            case.max_model_len,
+            case.logits_dtype,
+            "auto",
+            topk,
+            kept,
+            candidates,
+            block_size,
+        )
+
+    # Outside a FULL CUDA graph capture the stock path runs.
+    assert not localized()
+    assert bool((kept == -3).all())
+    # The stock path, eagerly, as in the warmup step before each capture.
+    scores = case.stock()
+    joined = scan.localized_paged_mqa_logits(
+        loc,
+        case.q,
+        case.kv,
+        case.weights,
+        case.seq_lens,
+        case.max_model_len,
+        case.logits_dtype,
+        case.indices,
+        lambda t: False,
+    )
+    assert joined is not None
+    ref_candidates = int32(rows, topk_blocks)
+    select_candidate_blocks(
+        joined,
+        None,
+        row_ke,
+        topk_blocks,
+        block_size,
+        ref_candidates,
+        1,
+        score_dtype=torch.float32,
+    )
+    ref_sparse, ref_end = candidate_blocks_to_sparse_indices(
+        ref_candidates, zeros, row_ke, block_size, sparse_block_kv
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        assert localized()
+        indexer_overlap.join_candidates()
+    graph.replay()
+    assert torch.equal(candidates, ref_candidates)
+    assert torch.equal(sparse.sparse_indices, ref_sparse)
+    assert torch.equal(sparse.end, ref_end)
+    ref_kept = torch.full_like(kept, -1)
+    get_indexer_topk("auto")(
+        scores, case.seq_lens, 1, ref_kept, topk, int(row_ke.max())
+    )
+    _assert_same_kept_scores(kept, ref_kept, scores)

@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MQA_TOPK: bool = True
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB: int = 2048
+    VLLM_INDEXER_LOCALIZE: bool = False
     VLLM_INDEXER_OVERLAP: bool = False
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
@@ -1150,9 +1151,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB", "2048")
     ),
+    # Die-local sparse-attention indexer decode on GPUs with two memory
+    # locality domains (Rubin): the KV cache alternates between the domains in
+    # 32 MiB runs and each domain's SMs score, select and merge the indexer
+    # pages in its own memory. Kimi K3.1 and DeepSeek-V4.1 only; falls back to
+    # the stock indexer, with a warning, where unsupported. Default: off.
+    # See docs/features/sparse_indexer_locality.md.
+    "VLLM_INDEXER_LOCALIZE": lambda: bool(int(os.getenv("VLLM_INDEXER_LOCALIZE", "0"))),
     # Overlap the sparse-attention indexer's decode top-k with independent work
     # of the same layer in FULL CUDA graph decode steps (Kimi K3.1 and
-    # DeepSeek-V4.1). See docs/features/sparse_indexer_locality.md.
+    # DeepSeek-V4.1), with or without VLLM_INDEXER_LOCALIZE.
+    # See docs/features/sparse_indexer_locality.md.
     "VLLM_INDEXER_OVERLAP": lambda: bool(int(os.getenv("VLLM_INDEXER_OVERLAP", "0"))),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.

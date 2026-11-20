@@ -6,7 +6,7 @@
 
 ## Sparse Attention
 
-- [Sparse Indexer Overlap](sparse_indexer_locality.md)
+- [Die-Local Sparse Indexer and Indexer Overlap](sparse_indexer_locality.md)
 
 ## Compatibility Matrix
 
