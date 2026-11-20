@@ -681,8 +681,12 @@ def has_humming() -> bool:
 
 
 def has_quark():
-    """Whether the optional `quark` package is available."""
-    return _has_module("quark")
+    """Whether the optional `amd-quark` package is available.
+
+    Checks `quark.torch.kernel`, which vLLM's MX kernels import: the top-level
+    `quark` package also imports when `quark.torch` does not.
+    """
+    return _has_module_spec("quark") and _has_module("quark.torch.kernel")
 
 
 def has_torchcodec_image_decoding() -> bool:

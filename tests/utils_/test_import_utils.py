@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.machinery
 import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
+from vllm.utils.import_utils import (
+    PlaceholderModule,
+    _has_module,
+    _has_module_spec,
+    has_quark,
+    import_plugin,
+)
 
 
 def _raises_module_not_found():
@@ -102,6 +110,26 @@ class TestHasModule:
             result = _has_module("json")  # should hit cache
             mock_spec.assert_not_called()
             assert result is True
+
+
+def test_has_quark_is_false_when_quark_torch_fails_to_import(monkeypatch):
+    """An `amd-quark` whose `quark.torch` does not import, e.g. one built for
+    another torch, is not available: the MX emulation kernels that check it
+    would otherwise be selected and fail in the first forward, after the
+    weights are loaded."""
+    for name in [m for m in sys.modules if m.split(".")[0] == "quark"]:
+        monkeypatch.delitem(sys.modules, name)
+    quark = types.ModuleType("quark")
+    quark.__spec__ = importlib.machinery.ModuleSpec("quark", None, is_package=True)
+    monkeypatch.setitem(sys.modules, "quark", quark)
+    monkeypatch.setitem(sys.modules, "quark.torch", None)
+    _has_module_spec.cache_clear()
+    _has_module.cache_clear()
+    try:
+        assert not has_quark()
+    finally:
+        _has_module_spec.cache_clear()
+        _has_module.cache_clear()
 
 
 class TestImportPlugin:
