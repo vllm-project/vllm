@@ -15,7 +15,20 @@ branch).
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils import deep_gemm
+
+pytestmark = pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and deep_gemm.has_deep_gemm()
+        and (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(100)
+        )
+    ),
+    reason="needs DeepGEMM on SM90 or SM100",
+)
 
 
 def _metadata(context_lens: torch.Tensor, next_n: int):
@@ -33,10 +46,6 @@ def _metadata(context_lens: torch.Tensor, next_n: int):
     )
 
 
-@pytest.mark.skipif(
-    not (torch.cuda.is_available() and deep_gemm.has_deep_gemm()),
-    reason="needs CUDA and DeepGEMM",
-)
 @pytest.mark.parametrize("next_n", [1, 4])
 @pytest.mark.parametrize("batch", [1, 300])
 def test_all_zero_context_lens_schedule_no_work(batch, next_n):
@@ -51,10 +60,6 @@ def test_all_zero_context_lens_schedule_no_work(batch, next_n):
     assert meta[0, 1] == 0
 
 
-@pytest.mark.skipif(
-    not (torch.cuda.is_available() and deep_gemm.has_deep_gemm()),
-    reason="needs CUDA and DeepGEMM",
-)
 def test_mixed_zero_context_lens_schedule_work():
     lens = torch.zeros((8, 1), dtype=torch.int32, device="cuda")
     lens[5] = 4096

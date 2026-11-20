@@ -950,12 +950,14 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         valid_counts: torch.Tensor,
         layer: AttentionLayer,
         block_size: int,
-        return_lse: bool,
+        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sparse MLA of every row of `q` [T, H, 576] (E4M3, quantized by the
         layer with `q_scale`) over its `valid_counts` leading physical rows
         of `topk_indices` (-1 entries are masked)."""
         assert q.dtype == torch.float8_e4m3fn, q.dtype
+        if return_lse is None:
+            return_lse = self.need_to_return_lse_for_decode
         num_tokens, heads, _ = q.shape
         # Storage rows; the backend aligns block strides to whole rows.
         is_fp8 = self.prims_ts_format == "native"
