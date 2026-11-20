@@ -15,9 +15,10 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
-# Up to this many single-row decode requests, scoring row by row beats the
-# tiled kernel on gfx942. Measured against the tiled kernel on MI325X.
-_QSA_ROWS_KERNEL_MAX_ROWS = 32
+# CDNA version -> (max rows, BLOCK_N, warps) for scoring single-row decode
+# row by row. Up to max rows this beats the tiled kernel; measured with the
+# 168-page decode table on MI300X and MI325X (CDNA3) and MI355X (CDNA4).
+_ROWS_KERNEL_PROFILES = {3: (32, 32, 4), 4: (128, 128, 2)}
 
 
 @triton.jit
@@ -745,7 +746,7 @@ def qsa_mqa_paged(
     """Compute QSA scores directly from a paged compressed-key cache.
 
     `single_row_decode` marks a batch of decode requests with one query row
-    each and no prefill. Small ones are scored row by row on gfx942.
+    each and no prefill. Small ones are scored row by row on CDNA3 and CDNA4.
 
     Returns:
         `logits` `[rows, columns]` fp32 and `visible_blocks` `[rows]` int32.
@@ -786,14 +787,13 @@ def qsa_mqa_paged(
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
         return logits, visible_blocks
-    if (
-        single_row_decode
-        and q.shape[0] <= _QSA_ROWS_KERNEL_MAX_ROWS
-        and get_cdna_version() == 3
-    ):
+    rows_profile = (
+        _ROWS_KERNEL_PROFILES.get(get_cdna_version()) if single_row_decode else None
+    )
+    if rows_profile is not None and q.shape[0] <= rows_profile[0]:
         # Rows from different requests share no keys, so a 16-row tl.dot tile is
         # mostly padding.
-        block_n = 32
+        _, block_n, rows_warps = rows_profile
         _qsa_mqa_paged_rows_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
             q,
             k_cache,
@@ -823,7 +823,7 @@ def qsa_mqa_paged(
             BLOCK_N=block_n,
             BLOCK_D=triton.next_power_of_2(q.shape[2]),
             COMPRESS_RATIO=compress_ratio,
-            num_warps=4,
+            num_warps=rows_warps,
         )
         return logits, visible_blocks
     block_m, block_n = 16, 64
