@@ -190,12 +190,12 @@ freed after the replicas exit, until reboot
 ([ROCm/rocm-systems#13573](https://github.com/ROCm/rocm-systems/issues/13573)).
 Any HIP VMM failure falls back to `/dev/shm` on every replica.
 
-## Splitting GPU tables across engines (DeepSeek V4.1)
+## Splitting tables across engines (DeepSeek V4.1)
 
-Engines in one NVLink domain, such as the prefill engines of a disaggregated
-deployment, can split each GPU table's rows over all of their GPUs instead of
-keeping a host copy per engine. Each GPU holds 1/`peer_group_size` of every
-table and reads the other rows from their owner's HBM:
+Engines that can reach each other's GPUs, such as the prefill and decode
+engines of a disaggregated deployment, can split each table's rows over all of
+their GPUs instead of keeping a copy per engine. Each GPU holds
+1/`peer_group_size` of every table and reads the other rows from their owner:
 
 ```bash
 # Every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
@@ -207,8 +207,45 @@ table and reads the other rows from their owner's HBM:
 `peer_group_size` is the sum of the engines' GPU counts. `peer_group_store` is
 a file the engines meet through once at startup: give every engine the same
 path, reachable by all of them (a shared filesystem across nodes) and fresh per
-launch. Requires CUDA FABRIC handles (an IMEX channel, as on NVL72), TP=1, PP=1
-and `cpu_offload` disabled. Weights cannot be reloaded, and restarting one
+launch. `peer_group_transport` picks how rows move:
+
+- `nvlink` (default): GPUs load rows straight from their owner's HBM. Requires
+  CUDA FABRIC handles (an IMEX channel, as on NVL72) and `cpu_offload`
+  disabled.
+- `rdma`: the owner's NIC gathers rows from its HBM, or from its host memory
+  with `cpu_offload` enabled, into RDMA WRITEs (RoCE v2 or InfiniBand, through
+  libibverbs) that the fetching GPU builds and hands to the owner itself (it
+  rings the NIC's doorbell); no SM moves rows. Each GPU uses the active mlx5
+  RDMA device closest to it (behind its PCIe switch, else on its NUMA node)
+  and starts a proxy process that posts the WRs it is handed.
+  Peers exchange memory keys at startup, so the network must be trusted.
+
+`peer_group_fetch` picks where the fetch kernels run: `sync` (default) on the
+compute stream, started before the decoder layers with each Engram layer
+waiting for its own rows; `async` on a side stream. Full CUDA graphs capture
+both; piecewise ones break at the start and at each Engram layer's wait.
+
+Prefill and decode engines can share one group (each GPU holds less of every
+table) or form one group each (each group holds a full copy, and neither slows
+the other). With `rdma`, engines that step independently in one group, such as
+prefill and decode engines or several aggregated engines, share the owners'
+NICs: `peer_group_rdma_inflight` (default 8, 0 for no limit) bounds the
+prefill-sized gathers each NIC keeps in flight, so one engine's prefill delays
+another's decode fetches only slightly while prefill fetches keep their rate.
+The DP ranks of one engine step together, so it does not matter within one
+engine.
+
+With `cpu_offload`, each GPU's NIC reads the host shards of its own node
+itself, so the engines of a node must run as one user in one PID namespace
+(they open each other's shards through `/proc`), and no traffic goes from one
+NIC of a node to another. That is required on rail-optimized fabrics, whose
+NICs of one node cannot reach each other. Point `peer_group_thp_dir` at a tmpfs
+mounted with `huge=always` to put host shards on huge pages: NICs gather rows
+at random and miss their address-translation cache on nearly every 4 KB page.
+Mount it with `mount -t tmpfs -o huge=always,size=<size> none <dir>`, or
+inside `unshare -Urm` without root.
+
+Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.
 
 ## Limitations
