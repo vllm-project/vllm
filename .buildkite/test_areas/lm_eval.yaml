@@ -261,6 +261,7 @@ steps:
   - vllm/v1/worker/gpu/model_runner.py
   - vllm/v1/worker/gpu/pcp_manager.py
   - vllm/v1/worker/gpu/mm/
+  - vllm/v1/worker/gpu/model_states/default.py
   - vllm/models/deepseek_v41/
   autorun_on_main: true
   commands:
