@@ -876,11 +876,18 @@ def test_flashinfer_kv_write_view_cache_lifecycle(
                 written_views.append((ref(args[2]), ref(args[3])))
             return func(*args, **(kwargs or {}))
 
-    for replacement in ("initial", "same_storage", "new_storage"):
+    for replacement in (
+        "initial",
+        "same_storage",
+        "new_storage",
+        "same_tensor_new_storage",
+    ):
         if replacement == "same_storage":
             cache = cache.view_as(cache)
         elif replacement == "new_storage":
             cache = torch.zeros_like(cache)
+        elif replacement == "same_tensor_new_storage":
+            cache.set_(torch.zeros_like(cache))
         layer.bind_kv_cache(cache)
         cache_refs.append(ref(cache))
         cache.zero_()

@@ -2263,7 +2263,6 @@ class FlashInferImpl(AttentionImpl):
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
-        self._kv_view_cache: tuple[torch.Tensor, _KVPair] | None = None
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
@@ -3085,6 +3084,17 @@ class FlashInferImpl(AttentionImpl):
                     output[:num_decode_tokens].copy_(out)
         return output_padded
 
+    def _build_kv_write_views(self, kv_cache: torch.Tensor) -> _KVPair:
+        if self.is_kvcache_nvfp4:
+            # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
+            #                            (B, N, H, full_dim));
+            # K heads first, then V heads.
+            k_cache, v_cache = kv_cache.transpose(1, 2).split(self.num_kv_heads, dim=-2)
+        else:
+            # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+            k_cache, v_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        return k_cache, v_cache
+
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -3114,21 +3124,9 @@ class FlashInferImpl(AttentionImpl):
                     kv_layout=kv_layout,
                 )
                 return
-            if self._kv_view_cache is None or self._kv_view_cache[0] is not kv_cache:
-                if self.is_kvcache_nvfp4:
-                    # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
-                    #                            (B, N, H, full_dim));
-                    # K heads first, then V heads.
-                    k_cache, v_cache = kv_cache.transpose(1, 2).split(
-                        self.num_kv_heads, dim=-2
-                    )
-                else:
-                    # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-                    k_cache, v_cache = kv_cache.transpose(1, 2).split(
-                        self.head_size, dim=-1
-                    )
-                self._kv_view_cache = (kv_cache, (k_cache, v_cache))
-            k_cache, v_cache = self._kv_view_cache[1]
+            k_cache, v_cache = self._cached_kv_views(
+                kv_cache, self._build_kv_write_views
+            )
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
