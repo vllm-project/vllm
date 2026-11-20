@@ -14,14 +14,55 @@ import torch
 from vllm.models.deepseek_v41.amd.mono.stages.dims import MOE_INTER
 from vllm.models.deepseek_v41.amd.mono_decode import MAX_ROWS_GFX942
 
-from . import moe_host as H
 from .moe_down import build_moe_down
-from .moe_host import EXPERTS, TOPK
 from .moe_small import build_combine, build_quant_h
 from .moe_sort import MAX_ROWS, build_moe_sort
 from .moe_ug import build_moe_ug
 from .moe_xq import build_quant_x
+from .shapes import EXPERTS, GROUP, HIDDEN, TOPK
 from .shared import build_shared_down, build_shared_gate_up
+
+
+class _Scratch:
+    """Scratch of one block call for the largest step (MAX_ROWS rows),
+    allocated once so that a captured graph keeps its addresses. All layers of
+    a rank share one set (`_scratch`): the layers run one after another on one
+    stream, and a call's result is a new tensor, so no layer reads another
+    layer's scratch. One set is about 27 MB at TP4 and 25 MB at TP8 (the y
+    rows dominate), where one set a layer would be about 1.1 GB a rank."""
+
+    def __init__(self, tp: int, device: torch.device):
+        m, p, i = MAX_ROWS, MAX_ROWS * TOPK, MOE_INTER // tp
+        groups = EXPERTS + p // GROUP + 1
+
+        def z(*shape, dtype):
+            return torch.zeros(*shape, dtype=dtype, device=device)
+
+        self.table = z(groups, 4 + GROUP, dtype=torch.int32)
+        self.count = z(1, dtype=torch.int32)
+        self.h = z(p, i, dtype=torch.bfloat16)
+        self.hq = z(p, i, dtype=torch.uint8)
+        self.hqs = z(p, i // 32, dtype=torch.uint8)
+        self.y = z(p, HIDDEN, dtype=torch.bfloat16)
+        self.routed = z(m, HIDDEN, dtype=torch.bfloat16)
+        self.sh = z(m, i, dtype=torch.bfloat16)
+        self.shq = z(m, i, dtype=torch.uint8)
+        self.shqs = z(m, i // 32, dtype=torch.uint8)
+        self.shared = z(m, HIDDEN, dtype=torch.bfloat16)
+        self.xb = z(m, HIDDEN, dtype=torch.uint8)
+        self.xs = z(m, HIDDEN // 32, dtype=torch.uint8)
+        self.xbn = z(m, HIDDEN, dtype=torch.uint8)
+        self.xsn = z(m, HIDDEN // 32, dtype=torch.uint8)
+
+
+_SCRATCH: dict[tuple[int, torch.device], _Scratch] = {}
+
+
+def _scratch(tp: int, device: torch.device) -> _Scratch:
+    key = (tp, torch.device(device))
+    if key not in _SCRATCH:
+        _SCRATCH[key] = _Scratch(tp, device)
+    return _SCRATCH[key]
 
 
 class LargeStepMoE:
@@ -40,29 +81,7 @@ class LargeStepMoE:
         self.qx = build_quant_x()
         self.sgu_k = build_shared_gate_up(tp)
         self.sdown_k = build_shared_down(tp)
-        # Scratch for the largest step, allocated once so that a captured
-        # graph keeps its addresses.
-        m, p, i = MAX_ROWS, MAX_ROWS * TOPK, self.inter
-        groups = EXPERTS + p // H.GROUP + 1
-
-        def z(*shape, dtype):
-            return torch.zeros(*shape, dtype=dtype, device=device)
-
-        self.table = z(groups, 4 + H.GROUP, dtype=torch.int32)
-        self.count = z(1, dtype=torch.int32)
-        self.h = z(p, i, dtype=torch.bfloat16)
-        self.hq = z(p, i, dtype=torch.uint8)
-        self.hqs = z(p, i // 32, dtype=torch.uint8)
-        self.y = z(p, H.HIDDEN, dtype=torch.bfloat16)
-        self.routed = z(m, H.HIDDEN, dtype=torch.bfloat16)
-        self.sh = z(m, i, dtype=torch.bfloat16)
-        self.shq = z(m, i, dtype=torch.uint8)
-        self.shqs = z(m, i // 32, dtype=torch.uint8)
-        self.shared = z(m, H.HIDDEN, dtype=torch.bfloat16)
-        self.xb = z(m, H.HIDDEN, dtype=torch.uint8)
-        self.xs = z(m, H.HIDDEN // 32, dtype=torch.uint8)
-        self.xbn = z(m, H.HIDDEN, dtype=torch.uint8)
-        self.xsn = z(m, H.HIDDEN // 32, dtype=torch.uint8)
+        self.scratch = _scratch(tp, device)
 
     def __call__(
         self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor
@@ -74,9 +93,10 @@ class LargeStepMoE:
         st = torch.cuda.current_stream()
         ids = topk_ids.to(torch.int32).contiguous()
         wts = topk_weights.float().reshape(-1).contiguous()
-        tab, cnt = self.table.data_ptr(), self.count.data_ptr()
+        b = self.scratch
+        tab, cnt = b.table.data_ptr(), b.count.data_ptr()
         self.sort(ids.data_ptr(), p, tab, cnt, st)
-        xb, xs, xbn, xsn = self.xb, self.xs, self.xbn, self.xsn
+        xb, xs, xbn, xsn = b.xb, b.xs, b.xbn, b.xsn
         x = x.contiguous()
         self.qx(
             x.data_ptr(), xb.data_ptr(), xs.data_ptr(), xbn.data_ptr(),
@@ -84,30 +104,30 @@ class LargeStepMoE:
         )  # fmt: skip
         self.ug(
             self.w13.data_ptr(), self.w13_s.data_ptr(), xb.data_ptr(),
-            xs.data_ptr(), tab, cnt, self.h.data_ptr(), st,
+            xs.data_ptr(), tab, cnt, b.h.data_ptr(), st,
         )  # fmt: skip
         self.qh(
-            self.h.data_ptr(), self.hq.data_ptr(), self.hqs.data_ptr(),
+            b.h.data_ptr(), b.hq.data_ptr(), b.hqs.data_ptr(),
             p * (self.inter // 32), st,
         )  # fmt: skip
         self.down(
-            self.w2.data_ptr(), self.w2_s.data_ptr(), self.hq.data_ptr(),
-            self.hqs.data_ptr(), wts.data_ptr(), tab, cnt, self.y.data_ptr(), st,
+            self.w2.data_ptr(), self.w2_s.data_ptr(), b.hq.data_ptr(),
+            b.hqs.data_ptr(), wts.data_ptr(), tab, cnt, b.y.data_ptr(), st,
         )  # fmt: skip
-        self.combine(self.y.data_ptr(), self.routed.data_ptr(), s, st)
+        self.combine(b.y.data_ptr(), b.routed.data_ptr(), s, st)
         self.sgu_k(
             self.sgu.data_ptr(), self.sgu_s.data_ptr(), xbn.data_ptr(),
-            xsn.data_ptr(), s, self.sh.data_ptr(), st,
+            xsn.data_ptr(), s, b.sh.data_ptr(), st,
         )  # fmt: skip
         self.qh_nat(
-            self.sh.data_ptr(), self.shq.data_ptr(), self.shqs.data_ptr(),
+            b.sh.data_ptr(), b.shq.data_ptr(), b.shqs.data_ptr(),
             s * (self.inter // 32), st,
         )  # fmt: skip
         self.sdown_k(
-            self.sw2.data_ptr(), self.sw2_s.data_ptr(), self.shq.data_ptr(),
-            self.shqs.data_ptr(), s, self.shared.data_ptr(), st,
+            self.sw2.data_ptr(), self.sw2_s.data_ptr(), b.shq.data_ptr(),
+            b.shqs.data_ptr(), s, b.shared.data_ptr(), st,
         )  # fmt: skip
-        return (self.routed[:s].float() + self.shared[:s].float()).to(torch.bfloat16)
+        return (b.routed[:s].float() + b.shared[:s].float()).to(torch.bfloat16)
 
 
 # Smaller steps run the mono decode layer.

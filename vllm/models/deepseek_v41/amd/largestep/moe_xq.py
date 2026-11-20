@@ -19,7 +19,7 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     rsrc,
 )
 
-from .moe_host import HIDDEN
+from .shapes import HIDDEN
 
 THREADS = 256
 _STREAM = fx.Stream(None)

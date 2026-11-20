@@ -3,9 +3,10 @@
 """When a DeepSeek-V4.1 decoder layer gets the gfx942 large-step MoE block
 (`largestep.moe.LargeStepHook`): the layer has a mono decode layer (so
 `--monokernel` is on and the gfx942 weight copies `mono942` exist), the GPU
-is gfx942, TP is 4 or 8, and the layer is a target-model layer (384 experts,
-top 6). The block then takes the decode steps the mono decode layer is too
-small for (`largestep.moe.MIN_ROWS` to `MAX_ROWS` rows)."""
+is gfx942, TP is 4 or 8, and the layer has the shapes the kernels are built
+for (`largestep.shapes`: 384 experts, top 6, hidden 5120). The block then
+takes the decode steps the mono decode layer is too small for
+(`largestep.moe.MIN_ROWS` to `MAX_ROWS` rows)."""
 
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -23,8 +24,15 @@ def build(layer):
     if tp not in (4, 8) or ffn is None or ffn.shared_experts is None:
         return None
     from vllm.models.deepseek_v41.amd.largestep import moe as lsmoe
+    from vllm.models.deepseek_v41.amd.largestep import shapes
 
-    if getattr(ffn, "n_routed_experts", 0) != lsmoe.EXPERTS:
+    # The kernels are built for these shapes only. Another model with 384
+    # experts but another top-k or hidden width must not take the path.
+    if (
+        getattr(ffn, "n_routed_experts", 0) != shapes.EXPERTS
+        or getattr(ffn, "n_activated_experts", 0) != shapes.TOPK
+        or getattr(ffn, "hidden_size", 0) != shapes.HIDDEN
+    ):
         return None
     experts = ffn.experts.routed_experts
     if getattr(experts, "mono942", None) is None:

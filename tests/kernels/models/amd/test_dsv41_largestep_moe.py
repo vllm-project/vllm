@@ -4,7 +4,7 @@
 steps (`vllm/models/deepseek_v41/amd/largestep`): stage 1, the h
 quantization, stage 2 and the combine, on one GPU, for one TP rank's share,
 against the torch reference with the same rounding points
-(`moe_host.ref_routed`).
+(`dsv41_largestep_ref.ref_routed`).
 
 The share is the intermediate width: 288 at TP 8 (MI300X), 576 at TP 4
 (MI325X). Steps of 16, 48, 96 and 144 rows (tokens), random routing of 6 of
@@ -58,7 +58,7 @@ def _plain_weights(inter, dev, g):
 @pytest.mark.parametrize("rows", [16, 48, 96, 144])
 def test_routed_moe_matches_reference(tp: int, rows: int):
     pytest.importorskip("flydsl")
-    from vllm.models.deepseek_v41.amd.largestep import moe_host as H
+    from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_down import build_moe_down
     from vllm.models.deepseek_v41.amd.largestep.moe_small import (
         build_combine,
@@ -113,10 +113,10 @@ def test_routed_moe_matches_reference(tp: int, rows: int):
 @pytest.mark.parametrize("rows", [1, 16, 96, 256])
 def test_pick_sort_matches_host(rows: int):
     """The GPU pick sort (`moe_sort.py`) writes the table and group count of
-    `moe_host.pick_groups` exactly, including a step where many tokens pick
+    `dsv41_largestep_ref.pick_groups` exactly, including a step where many tokens pick
     the same expert (more than one group for it)."""
     pytest.importorskip("flydsl")
-    from vllm.models.deepseek_v41.amd.largestep import moe_host as H
+    from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_sort import build_moe_sort
 
     dev = torch.device("cuda:0")
@@ -146,14 +146,46 @@ def test_pick_sort_matches_host(rows: int):
 
 
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
+@pytest.mark.parametrize(("rows", "pad"), [(43, 5), (78, 18), (250, 6)])
+def test_pick_sort_skips_padding_rows(rows: int, pad: int):
+    """CUDA graph padding rows at the end of a captured step come from the
+    router with expert -1 in every pick (VLLM_MOE_SKIP_PADDING). The sort
+    leaves them out: the table and the count equal those of the real rows
+    alone, and no word past the table's groups is written."""
+    pytest.importorskip("flydsl")
+    from tests.kernels.models.amd import dsv41_largestep_ref as H
+    from vllm.models.deepseek_v41.amd.largestep.moe_sort import build_moe_sort
+
+    dev = torch.device("cuda:0")
+    g = torch.Generator(device=dev).manual_seed(rows)
+    real = torch.stack(
+        [torch.randperm(E, generator=g, device=dev)[:TOPK] for _ in range(rows)]
+    ).to(torch.int32)
+    topk = torch.cat(
+        [real, torch.full((pad, TOPK), -1, dtype=torch.int32, device=dev)]
+    ).contiguous()
+    want, ng = H.pick_groups(real, E)
+    groups = E + (rows + pad) * TOPK // 16 + 1
+    table = torch.full((groups, 4 + 16), -7, dtype=torch.int32, device=dev)
+    count = torch.zeros(1, dtype=torch.int32, device=dev)
+    build_moe_sort()(
+        topk.data_ptr(), (rows + pad) * TOPK, table.data_ptr(), count.data_ptr()
+    )
+    torch.accelerator.synchronize()
+    assert int(count) == ng
+    assert torch.equal(table[:ng], want.to(torch.int32))
+    assert bool((table[ng:] == -7).all())
+
+
+@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
 @pytest.mark.parametrize("tp", [8, 4])
 @pytest.mark.parametrize("rows", [16, 96, 144])
 def test_shared_expert_matches_reference(tp: int, rows: int):
     """The shared expert's two launches (`shared.py`) with the h quantization
-    between them, against `moe_host.ref_shared`, on random MXFP8 weights made
+    between them, against `dsv41_largestep_ref.ref_shared`, on random MXFP8 weights made
     into the gfx942 copies by `weights942.linear_copy` as at model load."""
     pytest.importorskip("flydsl")
-    from vllm.models.deepseek_v41.amd.largestep import moe_host as H
+    from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_small import build_quant_h
     from vllm.models.deepseek_v41.amd.largestep.shared import (
         build_shared_down,
@@ -206,9 +238,9 @@ def test_shared_expert_matches_reference(tp: int, rows: int):
 @pytest.mark.parametrize("rows", [1, 48, 256])
 def test_quant_x_matches_host(rows: int):
     """`moe_xq.build_quant_x` writes the bytes and codes of
-    `moe_host.quant_rows` and `quant_rows_natural` exactly."""
+    `dsv41_largestep_ref.quant_rows` and `quant_rows_natural` exactly."""
     pytest.importorskip("flydsl")
-    from vllm.models.deepseek_v41.amd.largestep import moe_host as H
+    from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_xq import build_quant_x
 
     dev = torch.device("cuda:0")

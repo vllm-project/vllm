@@ -24,7 +24,7 @@ from vllm.models.deepseek_v41.amd.mono.common.gfx942 import (
 from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT, bf16_pair, fresh, rsrc
 from vllm.models.deepseek_v41.amd.mono.stages.dims import MOE_INTER
 
-from .moe_host import EXPERTS, GROUP, HIDDEN
+from .shapes import EXPERTS, GROUP, HIDDEN
 
 # The default stream of a launch: the current one (`mono/layer.py`).
 _STREAM = fx.Stream(None)

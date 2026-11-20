@@ -3,8 +3,8 @@
 """The small launches around the gfx942 large-step stages.
 
 `build_quant_h`: bf16 rows to MXFP8 FNUZ per 32 columns, the rule of
-`moe_host.quant_rows`. `build_combine`: each token's 6 weighted rows summed
-in f32 in top-k order, to bf16.
+`quant_rows` in the tests' `dsv41_largestep_ref`. `build_combine`: each
+token's 6 weighted rows summed in f32 in top-k order, to bf16.
 """
 
 import flydsl.compiler as flyc
@@ -22,7 +22,7 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     rsrc,
 )
 
-from .moe_host import HIDDEN, TOPK
+from .shapes import HIDDEN, TOPK
 
 # The default stream of a launch: the current one (`mono/layer.py`).
 _STREAM = fx.Stream(None)
