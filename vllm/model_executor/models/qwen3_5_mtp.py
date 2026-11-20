@@ -10,7 +10,7 @@ from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import in_single_pp_stage, tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -82,10 +82,16 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 1)
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        # The proposer replaces this with the target's embedding after loading,
+        # so a draft copy would only add a full-vocabulary table to peak memory.
+        # Under a PP>1 target the draft runs on the last rank, which has no
+        # target embedding, so the draft loads its own.
+        self.embed_tokens: VocabParallelEmbedding | None = None
+        if in_single_pp_stage():
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
@@ -131,6 +137,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None, (
+            "embed_tokens must be shared from the target model before inference"
+        )
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -214,14 +223,9 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        # The proposer always installs the target's lm_head (or its quantized
+        # copy): the draft runs on the last PP rank, which holds it.
+        self.lm_head: ParallelLMHead | None = None
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -279,6 +283,9 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
+        assert self.lm_head is not None, (
+            "lm_head must be shared from the target model before inference"
+        )
         return self.logits_processor(self.lm_head, hidden_states)
 
     def get_top_tokens(
@@ -290,9 +297,11 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         return super().get_top_tokens(hidden_states)
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
-        return not name.startswith("mtp.") and not any(
-            key in name for key in ["embed_tokens", "lm_head"]
-        )
+        # The embedding and lm_head are shared from the target, except for the
+        # embedding under a PP>1 target (see Qwen3_5MultiTokenPredictor).
+        if name.startswith("mtp."):
+            return False
+        return not ("embed_tokens" in name and in_single_pp_stage())
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
