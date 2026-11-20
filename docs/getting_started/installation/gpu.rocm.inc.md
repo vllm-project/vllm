@@ -242,13 +242,12 @@ You can find more information about vLLM's wheels in
     ```bash
     # Your GPU's architecture, e.g. gfx942 for MI300 or gfx950 for MI350
     export GPU_ARCH=$(uvx --from rocm-bootstrap rocm-bootstrap-detect --unique)
-    # ROCm 10.2 is only published as nightlies
-    export ROCM_INDEX=https://nightly.repo.amd.com/rocm/whl-next/
+    export ROCM_INDEX=https://stable.repo.amd.com/rocm/whl-next/
 
     pip install --index-url ${ROCM_INDEX} \
-        "rocm[libraries,devel,device-${GPU_ARCH}]==10.2.0a20261022" \
-        "torch[device-${GPU_ARCH}]==2.13.0+rocm10.2.0a20261022" \
-        "torchvision[device-${GPU_ARCH}]==0.28.0+rocm10.2.0a20261022"
+        "rocm[libraries,devel,device-${GPU_ARCH}]==10.2.0" \
+        "torch[device-${GPU_ARCH}]==2.13.0+rocm10.2.0" \
+        "torchvision[device-${GPU_ARCH}]==0.28.0+rocm10.2.0"
     rocm-sdk init
 
     # Point builds at the pip-installed ROCm SDK

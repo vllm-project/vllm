@@ -5,16 +5,13 @@
 
 external-links: list the TheRock wheels the index links to instead of hosting
     (ROCm SDK, device kernels, torchvision/torchaudio, rocm-bootstrap), with
-    versions, GPU arches and indexes read from docker/Dockerfile.rocm_base. Each
-    is taken from the release index, or else from the nightly index (ROCm
-    nightlies such as 10.2.0a20261022 are only published there). torch's
+    versions and GPU arches read from docker/Dockerfile.rocm_base. torch's
     device-<arch> extras can also pull in a GPU-family wheel (e.g.
     amd-torch-device-gfx110x), so those are read from the torch wheel itself.
 """
 
 import argparse
 import sys
-import urllib.error
 import urllib.request
 import zipfile
 from html.parser import HTMLParser
@@ -25,11 +22,9 @@ import regex as re
 
 
 def dockerfile_args(dockerfile: Path) -> dict[str, str]:
-    args: dict[str, str] = {}
+    args = {}
     for m in re.finditer(r'^ARG (\w+)="?([^"\s]*)"?', dockerfile.read_text(), re.M):
-        # Expand ${NAME} references to earlier ARGs (TORCH_VERSION's ROCM_SDK_VERSION).
-        value = re.sub(r"\$\{(\w+)\}", lambda r: args.get(r[1], r[0]), m.group(2))
-        args.setdefault(m.group(1), value)
+        args.setdefault(m.group(1), m.group(2))
     return args
 
 
@@ -45,14 +40,9 @@ class _Links(HTMLParser):
 
 def _project_files(index_url: str, project: str) -> list[str]:
     page = urljoin(index_url, f"{project}/")
-    try:
-        with urllib.request.urlopen(page, timeout=60) as resp:
-            parser = _Links()
-            parser.feed(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:  # not on this index
-            return []
-        raise
+    with urllib.request.urlopen(page, timeout=60) as resp:
+        parser = _Links()
+        parser.feed(resp.read().decode())
     return [urljoin(page, href.split("#")[0]) for href in parser.hrefs]
 
 
@@ -96,9 +86,7 @@ def torch_device_requirements(
 
 def external_links(dockerfile: Path, torch_wheel: Path) -> list[str]:
     args = dockerfile_args(dockerfile)
-    indexes = [args["ROCM_RELEASE_WHEELS_MULTIARCH_URL"]]
-    if "ROCM_NIGHTLY_WHEELS_MULTIARCH_URL" in args:
-        indexes.append(args["ROCM_NIGHTLY_WHEELS_MULTIARCH_URL"])
+    index = args["ROCM_RELEASE_WHEELS_MULTIARCH_URL"]
     sdk = args["ROCM_SDK_VERSION"]
     vision_v, audio_v = args["TORCHVISION_VERSION"], args["TORCHAUDIO_VERSION"]
     arches = [a for a in args["PYTORCH_ROCM_ARCH"].split(";") if a]
@@ -118,12 +106,9 @@ def external_links(dockerfile: Path, torch_wheel: Path) -> list[str]:
     wanted += torch_device_requirements(torch_wheel, arches)
     urls = []
     for project, version in wanted:
-        for index in indexes:
-            found = [u for u in _project_files(index, project) if _usable(u, version)]
-            if found:
-                break
-        else:
-            raise SystemExit(f"no usable {project}=={version} files on {indexes}")
+        found = [u for u in _project_files(index, project) if _usable(u, version)]
+        if not found:
+            raise SystemExit(f"no usable {project}=={version} files on {index}")
         urls += found
     return urls
 

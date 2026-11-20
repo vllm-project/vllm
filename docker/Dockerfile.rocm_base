@@ -2,13 +2,11 @@ ARG BASE_IMAGE=ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035b
 # Bump to rebuild the stack (changes its key and busts every layer); upstream drift alone never does.
 ARG REFRESH=2026-10-12
 ARG PYTHON_VERSION=3.12
-# ROCm 10.2 is only published as nightlies; every version below is from the same nightly.
-ARG ROCM_SDK_VERSION=10.2.0a20261022
-ARG TORCH_VERSION=2.13.0+rocm${ROCM_SDK_VERSION}
-ARG TORCHVISION_VERSION=0.28.0+rocm${ROCM_SDK_VERSION}
-ARG TORCHAUDIO_VERSION=2.11.0.3+rocm${ROCM_SDK_VERSION}
-ARG TRITON_BRANCH="66b3f9ff" # release/internal/3.8.x as of 10/05/2026, the triton the 10.2 nightly torch pins
-ARG TRITON_VERSION=3.8.0+git66b3f9ff.rocm${ROCM_SDK_VERSION}
+ARG TORCH_VERSION=2.13.0+rocm10.2.0
+ARG TORCHVISION_VERSION=0.28.0+rocm10.2.0
+ARG TORCHAUDIO_VERSION=2.11.0.3+rocm10.2.0
+ARG TRITON_BRANCH="0a6e13e6" # release/internal/3.9.x as of 10/22/2026
+ARG TRITON_VERSION=3.9.0+git0a6e13e6.rocm10.2.0
 ARG FA_BRANCH="4a948e9c"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.29"
@@ -16,12 +14,12 @@ ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.2.5"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG ROCM_RUNTIME_COMMIT="a198337ec683d594d618ec6798afd028b186fefb" # users/rasmith/10.2/hsa_gpu_edge_signal: the 10.2.0a20261022 nightly's rocm-systems commit plus the hsa_gpu_edge_signal series
+ARG ROCM_RUNTIME_COMMIT="d90ce21d395045d973cd566f33130ea2eb97c60b" # users/rasmith/10.2/completion_signal_backport: the 10.2.0 release base plus the completion signal work from develop
 
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL="https://stable.repo.amd.com/rocm/whl-next/" # For pre-built GPU images, packages, etc.
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL="https://nightly.repo.amd.com/rocm/whl-next/" # ROCm 10.2 SDK, torch and triton
+ARG ROCM_SDK_VERSION=10.2.0
 
 # Build configuration
 ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
@@ -85,11 +83,9 @@ RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all s
 
 # Install ROCm SDK via TheRock
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 ARG ROCM_SDK_VERSION
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
@@ -101,7 +97,6 @@ ARG TRITON_VERSION
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
@@ -122,7 +117,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-            --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
             "torch[device-${arch}]==${TORCH_VER}" \
             "torchvision[device-${arch}]==${TORCHVISION_VERSION}" \
             "rocm[device-${arch}]==${ROCM_SDK_VERSION}"; \
@@ -303,11 +297,9 @@ RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
 ARG TORCH_VERSION
 ARG TRITON_VERSION
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip download --no-deps --dest /app/debs \
         --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-        --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
         "torch==${TORCH_VERSION}" "triton==${TRITON_VERSION}" \
     && ls -l /app/debs
 
@@ -321,7 +313,6 @@ LABEL ai.vllm.rocm.variant=rocm102
 # torch 2.13 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
 # teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
 ENV ROCPROFILER_QUEUE_INTERPOSITION=0
-ENV DEBUG_CLR_DEVICE_ORDERING_EDGE=2
 
 COPY --from=build_rocm_runtime /staging/lib/ ${SDK_DEV}/lib/
 # Hard link the patched library onto every stock file name, in both SDK trees, so that the
