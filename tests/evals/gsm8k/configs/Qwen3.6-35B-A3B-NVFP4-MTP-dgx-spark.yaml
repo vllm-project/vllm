@@ -1,6 +1,7 @@
-# Qwen3.6-35B-A3B-NVFP4-dgx-spark.yaml plus the recipe's 3-token MTP draft.
-# The mtp.* layers are BF16 (quantization_config.ignore), so the draft MoE is
-# pinned to Triton; --moe-backend marlin only applies to the NVFP4 target.
+# Kernel flags and the 3-token MTP draft follow the dgx_spark_gb10 override of
+# the nvfp4 variant in recipes/models/Qwen/Qwen3.6-35B-A3B.yaml. The mtp.*
+# layers are BF16 (quantization_config.ignore), so the draft MoE is pinned to
+# Triton; --moe-backend marlin only applies to the NVFP4 target.
 model_name: "nvidia/Qwen3.6-35B-A3B-NVFP4"
 accuracy_threshold: 0.918
 tolerance: 0.03
@@ -11,7 +12,6 @@ request_timeout_seconds: 1800
 min_acceptance_length: 3.3
 gen_prefix: " <think>\n\n</think>\n"
 server_args: >-
-  --enforce-eager
   --language-model-only
   --max-model-len 8192
   --gpu-memory-utilization 0.6

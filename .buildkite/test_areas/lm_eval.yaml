@@ -1423,7 +1423,7 @@ steps:
 - label: ":nvidia: (DGX Spark) [Nightly] GSM8K Eval (NVFP4 Models)"
   key: gsm8k-eval-nvfp4-dgx-spark
   automatic_shard: true
-  timeout_in_minutes: 90
+  timeout_in_minutes: 60
   device: dgx-spark
   optional: true
   num_devices: 1
@@ -1437,7 +1437,6 @@ steps:
   - vllm/model_executor/models/gemma4.py
   - vllm/model_executor/models/gemma4_mm.py
   - vllm/model_executor/models/nemotron_h.py
-  - vllm/models/qwen3_5/
   - tests/evals/gsm8k/
   commands:
     # Each config sets --gpu-memory-utilization: GB10 memory is shared with the
