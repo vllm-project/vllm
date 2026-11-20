@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for DataTransport ABC, NixlDataTransport and MoRIIODataTransport."""
 
+import gc
+import os
 import time
+import uuid
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -317,6 +321,8 @@ class _FakeMori:
 def fake_mori(monkeypatch) -> _FakeMori:
     """Stand in for the `mori.io` module, so the tests run without MoRI."""
     fake = _FakeMori()
+    # Unsettled transports live for the whole process; keep them per test.
+    monkeypatch.setattr(moriio_mod, "_UNSETTLED", [])
     monkeypatch.setattr(
         moriio_mod,
         "mori_io",
@@ -469,6 +475,8 @@ def test_deregister_waits_for_parked_read_before_releasing_memory(fake_mori):
 
         assert consumer._engine.key not in fake_mori.tensors
         assert consumer._parked == []
+        assert not consumer.region_in_use()
+        assert moriio_mod._UNSETTLED == []
     finally:
         producer.deregister()
 
@@ -489,6 +497,16 @@ def test_deregister_keeps_region_registered_while_read_is_in_flight(fake_mori):
         # The DMA may still target the region: registration and handle stay.
         assert consumer._engine.key in fake_mori.tensors
         assert consumer._parked == [handle]
+        assert consumer.region_in_use()
+
+        # ...and outlive every reference the caller holds.
+        alive = weakref.ref(consumer)
+        status = weakref.ref(handle.status)
+        del consumer, handle
+        gc.collect()
+        assert alive() is not None and status() is not None
+        (kept,) = moriio_mod._UNSETTLED
+        assert kept is alive()
     finally:
         producer.deregister()
 
@@ -534,3 +552,103 @@ def test_scheduler_builds_moriio_transport_from_extra_config(fake_mori, monkeypa
     finally:
         s.shutdown()
 
+
+def _moriio_scheduler(monkeypatch, region):
+    import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+    from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+    from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import (
+        ECCPUScheduler,
+    )
+
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
+    monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_HOST", "127.0.0.1")
+    cfg = create_ec_vllm_config(ec_role="ec_consumer")
+    cfg.model_config.hf_config = None
+    cfg.model_config.get_inputs_embeds_size.return_value = 8
+    cfg.model_config.model = "test-model"
+    cfg.ec_transfer_config.ec_connector_extra_config.update(
+        ec_enable_nixl=True, ec_transport="moriio"
+    )
+    return ECCPUScheduler(cfg)
+
+
+def _region():
+    from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+        ECSharedRegion,
+    )
+
+    return ECSharedRegion(
+        engine_id="eng-" + str(uuid.uuid4()), num_blocks=_N, block_size_bytes=_BS
+    )
+
+
+def test_scheduler_shutdown_unmaps_region_once_reads_settle(fake_mori, monkeypatch):
+    region = _region()
+    s = _moriio_scheduler(monkeypatch, region)
+    s.shutdown()
+    assert region._mmap_obj is None
+    assert moriio_mod._UNSETTLED == []
+
+
+def test_scheduler_shutdown_keeps_unsettled_read_target_alive(fake_mori, monkeypatch):
+    """A READ still in flight at shutdown must not lose its transport, status
+    or destination memory when the scheduler lets go of them."""
+    from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
+        XferAck,
+        XferStatus,
+    )
+    from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
+        ConsumerSession,
+    )
+
+    fake_mori.pending = True
+    producer = _transport("enc", 7)
+    region = _region()
+    s = _moriio_scheduler(monkeypatch, region)
+    try:
+        # A consumer session with one READ in flight, as admission leaves it.
+        session = ConsumerSession(
+            addr=("127.0.0.1", 1),
+            zmq_conn=MagicMock(),
+            transport=MagicMock(),
+            data=s._data,
+            compat_hash=s._compat_hash,
+        )
+        s._sessions[session.addr] = session
+        session.start_xfer("h1", [2], deadline=time.monotonic() + 60)
+        session._dispatch_ack(
+            XferAck(
+                mm_hash="h1",
+                status=XferStatus.OK,
+                session_id=session._session_id,
+                src_block_indices=[0],
+                agent_metadata=producer.get_agent_metadata(),
+                mem_descriptor=producer.get_mem_descriptor(),
+            )
+        )
+        (xfer,) = session._xfers.values()
+        transport = weakref.ref(s._data)
+        status = weakref.ref(xfer.transfer_handle.status)
+        path = region._mmap_path
+        del session, xfer
+
+        s.shutdown()
+        del s
+        gc.collect()
+
+        # The transport, the READ's status and its target memory all survive.
+        assert transport() is not None and status() is not None
+        (kept,) = moriio_mod._UNSETTLED
+        assert kept is transport()
+        assert region._mmap_obj is not None and not region._mmap_obj.closed
+        assert region.blocks[2].eq(7).all()  # still readable, not unmapped
+        # Only the file name is gone.
+        assert not os.path.exists(path)
+    finally:
+        # Let the test process release what a real one would keep until exit.
+        moriio_mod._UNSETTLED.clear()
+        fake_mori.sessions.clear()  # the fake's sessions hold views of the region
+        fake_mori.tensors.clear()
+        gc.collect()
+        region.cleanup()
+        producer.deregister()
