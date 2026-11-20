@@ -23,6 +23,10 @@ from vllm.multimodal.utils import encode_image_url
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
 from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
+from vllm.transformers_utils.processors.unlimited_ocr import (
+    UnlimitedOCR2Processor,
+    UnlimitedOCRProcessor,
+)
 
 from ...utils import build_model_context
 
@@ -74,13 +78,15 @@ def test_image_preprocessing_budget(
         )
         inputs = {"prompt": prompt, "images": images}
 
-    tensor_bytes = view_count * 3 * 16 * 16 * 4
+    view_bytes = 3 * 16 * 16 * 4
+    required_bytes = 2 * view_count if architecture == "vl2" else view_count + 2
+    required_bytes *= view_bytes
     limit = "VLLM_MAX_MEDIA_PREPROCESSING_BYTES"
-    monkeypatch.setattr(envs, limit, 2 * tensor_bytes - 1)
+    monkeypatch.setattr(envs, limit, required_bytes - 1)
     with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
         processor(**inputs)
 
-    monkeypatch.setattr(envs, limit, 2 * tensor_bytes)
+    monkeypatch.setattr(envs, limit, required_bytes)
     at_limit = processor(**inputs)
     monkeypatch.setattr(envs, limit, 0)
     unlimited = processor(**inputs)
@@ -91,34 +97,82 @@ def test_image_preprocessing_budget(
 
 
 @pytest.mark.skip_global_cleanup
-def test_http_rejects_image_preprocessing_over_budget(tmp_path):
+@pytest.mark.parametrize(
+    ("processor_cls", "kwargs", "page_size", "page_count", "tiles_per_page"),
+    [
+        (DeepseekOCRProcessor, {}, (2480, 3508), 9, 6),
+        (UnlimitedOCRProcessor, {}, (2550, 3300), 29, 0),
+        (
+            UnlimitedOCR2Processor,
+            {"strategy": "v2", "max_crops": 16},
+            (2550, 3300),
+            6,
+            12,
+        ),
+    ],
+)
+def test_default_ocr_budget_accepts_multipage_scans(
+    monkeypatch, processor_cls, kwargs, page_size, page_count, tiles_per_page
+):
+    monkeypatch.delenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", raising=False)
+    processor = processor_cls(tokenizer=_make_tokenizer(), **kwargs)
+    page = Image.new("RGB", page_size, "white")
+    result = processor(prompt="<image>" * page_count, images=[page] * page_count)
+    assert result["pixel_values"].shape == (page_count, 3, 1024, 1024)
+    assert result["images_crop"].shape == (page_count * tiles_per_page, 3, 640, 640)
+    assert (result["pixel_values"][:, :, 512, 512] == 1).all()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("ocr", [False, True], ids=["vl2", "ocr"])
+def test_http_rejects_image_preprocessing_over_budget(tmp_path, ocr):
     config = DeepseekVLV2Config(
-        tile_tag="2D", candidate_resolutions=((16, 16),)
+        architectures=["DeepseekOCRForCausalLM" if ocr else "DeepseekVLV2ForCausalLM"],
+        tile_tag="2D",
+        candidate_resolutions=((16, 16),),
     ).to_dict()
     config["language_config"] = config.pop("text_config")
     (tmp_path / "config.json").write_text(json.dumps(config))
-    DeepseekVLV2Processor(
-        tokenizer=_make_tokenizer(),
-        candidate_resolutions=((16, 16),),
-        patch_size=4,
-        downsample_ratio=2,
-    ).save_pretrained(tmp_path)
+    if ocr:
+        DeepseekOCRProcessor(tokenizer=_make_tokenizer()).save_pretrained(tmp_path)
+        # Three global views and one view's scratch fit; four global views do not.
+        limit, accepted_count, max_model_len = 64 * (1 << 20), 3, "2048"
+    else:
+        DeepseekVLV2Processor(
+            tokenizer=_make_tokenizer(),
+            candidate_resolutions=((16, 16),),
+            patch_size=4,
+            downsample_ratio=2,
+        ).save_pretrained(tmp_path)
+        limit, accepted_count, max_model_len = 27000, 1, "128"
 
     content = [
         {
             "type": "image_url",
             "image_url": {"url": encode_image_url(Image.new("RGB", (8, 8), color))},
         }
-        for color in ("red", "green", "blue")
+        for color in ("red", "green", "blue", "white")[: 4 if ocr else 3]
     ]
     model = str(tmp_path)
     with RemoteLaunchRenderServer(
         model,
-        ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
-        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "27000"},
+        [
+            "--host",
+            "127.0.0.1",
+            "--dtype",
+            "float32",
+            "--max-model-len",
+            max_model_len,
+            "--mm-processor-cache-gb",
+            "0",
+        ],
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(limit)},
     ) as server:
         for route in ("v1/chat/completions/render", "tokenize"):
-            for images, expected_status in ((content, 400), (content[:1], 200)):
+            for images, expected_status in (
+                (content, 400),
+                (content[:accepted_count], 200),
+            ):
                 response = httpx.post(
                     server.url_for(route),
                     json={

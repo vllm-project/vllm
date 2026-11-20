@@ -22,9 +22,17 @@ def get_image_width_height(image: HfImageItem) -> tuple[int, int]:
 
 
 def validate_image_tensor_budget(
-    images: Sequence[HfImageItem], view_pixels: Iterable[int]
+    images: Sequence[HfImageItem],
+    view_pixels: Iterable[int],
+    *,
+    scratch_view_pixels: int | None = None,
 ) -> None:
-    """Bound the tensors and their stacked copies before processing images."""
+    """Bound image output tensors and temporary tensors before processing.
+
+    Stack-based processors retain a second copy of the output. Processors
+    that write directly to the output pass the largest temporary view's size
+    in pixels to account for its conversion and normalization buffers.
+    """
     limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
     if limit <= 0:
         return
@@ -32,11 +40,19 @@ def validate_image_tensor_budget(
     # ToTensor uses the default floating dtype for byte images. Count at least
     # four bytes per value for other supported PIL pixel types.
     bytes_per_value = max(4, torch.get_default_dtype().itemsize)
-    required_bytes = 0
+    output_bytes = 0
+    scratch_bytes = 0
     for image, pixels in zip(images, view_pixels, strict=True):
         channels = len(image.getbands()) if isinstance(image, Image.Image) else 3
-        required_bytes += 2 * pixels * channels * bytes_per_value
-        if required_bytes > limit:
+        bytes_per_pixel = channels * bytes_per_value
+        output_bytes += pixels * bytes_per_pixel
+        if scratch_view_pixels is None:
+            scratch_bytes = output_bytes
+        else:
+            scratch_bytes = max(
+                scratch_bytes, 2 * scratch_view_pixels * bytes_per_pixel
+            )
+        if output_bytes + scratch_bytes > limit:
             raise VLLMValidationError(
                 "Image preprocessing exceeds "
                 f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
