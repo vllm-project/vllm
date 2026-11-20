@@ -21,6 +21,7 @@ from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -140,7 +141,10 @@ class KittyAttentionBackend(AttentionBackend):
 class KittyMetadata(AttentionMetadata):
     # number of tokens to process in this step across all requests
     num_actual_tokens: int
-    # The batch is ordered [decodes | continuation prefills | fresh prefills].
+    # The batch is split [decodes | continuations | fresh prefills]: decodes are
+    # the leading query_len = 1 run, fresh prefills the trailing run with no
+    # cache. The runner sorts non-decodes by query length, so continuations may
+    # also contain fresh requests (old_len = 0), which that path handles.
     num_decodes: int  # number of decode requests, i.e requests with query_len = 1
     num_continuations: int  # number of prefill continuation requests
     # number of fresh prefill requests (i.e without any existing cache)
@@ -164,6 +168,8 @@ class KittyMetadata(AttentionMetadata):
     # prefills, starting at 0
     fresh_cu_seqlens: torch.Tensor
     fresh_max_query_len: int  # maximum query lengths for a fresh prefill request
+    # [num_continuations, 2, 2] int32: (cu_seqlens_q, cu_seqlens_k) per request
+    continuation_cu_seqlens: torch.Tensor
 
 
 class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
@@ -235,6 +241,11 @@ class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
         # cumulative query offsets for fresh prefills
         fresh_qsl = qsl_cpu[fresh_start:].numpy()
         fresh_cu = fresh_qsl - fresh_qsl[0]  # rebase fresh offsets so they start at 0
+        # [num_continuations, 2, 2]: ([0, q_len], [0, seq_len]) per continuation
+        cont = slice(num_decodes, num_decodes + num_continuations)
+        cont_cu = np.zeros((num_continuations, 2, 2), dtype=np.int64)
+        cont_cu[:, 0, 1] = np.diff(qsl_cpu.numpy())[cont]
+        cont_cu[:, 1, 1] = seq_lens_cpu.numpy()[cont]
         parts = [
             plan.old_lens,
             num_chunks,
@@ -243,14 +254,25 @@ class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
             plan.k_writes.ravel(),
             plan.v_writes.ravel(),
             fresh_cu,
+            cont_cu.ravel(),
         ]
         # pack the attention metadata together to avoid multiple CPU -> GPU
         # transfers, then unpack as needed
-        packed = torch.from_numpy(np.concatenate(parts).astype(np.int64))
-        packed = packed.to(self.device, non_blocking=True)
-        old_lens, num_chunks_t, k_jobs, v_jobs, k_writes, v_writes, fresh_cu_t = (
-            packed.split([p.size for p in parts])
+        packed = torch.empty(
+            sum(p.size for p in parts), dtype=torch.int64, pin_memory=PIN_MEMORY
         )
+        np.concatenate(parts, out=packed.numpy())
+        packed = packed.to(self.device, non_blocking=True)
+        (
+            old_lens,
+            num_chunks_t,
+            k_jobs,
+            v_jobs,
+            k_writes,
+            v_writes,
+            fresh_cu_t,
+            cont_cu_t,
+        ) = packed.split([p.size for p in parts])
         return KittyMetadata(
             num_actual_tokens=cam.num_actual_tokens,
             num_decodes=num_decodes,
@@ -271,6 +293,7 @@ class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
             num_chunks=num_chunks_t,
             fresh_cu_seqlens=fresh_cu_t.int(),
             fresh_max_query_len=int(np.diff(fresh_qsl).max()) if num_fresh else 0,
+            continuation_cu_seqlens=cont_cu_t.int().view(-1, 2, 2),
         )
 
 
@@ -285,14 +308,15 @@ def kitty_continuation_attention(
     block_table: torch.Tensor,
     req: int,
     old_len: int,
+    cu_seqlens: torch.Tensor,
     sm_scale: float,
     d_boost: int,
     fa_version: int | None,
 ) -> None:
-    """Causal attention of request `req`'s chunk (query/output [q_len, H_Q, D],
-    key/value [q_len, H_KV, D]) over its dequantized cache [0, old_len)
-    followed by the chunk's own K/V. Currently, only works for a single
-    continuation request."""
+    """Causal attention of request `req`'s chunk (query/output `[q_len, H_Q, D]`,
+    key/value `[q_len, H_KV, D]`) over its dequantized cache `[0, old_len)`
+    followed by the chunk's own K/V. `cu_seqlens` is `[2, 2]` int32 on the
+    device: `[[0, q_len], [0, old_len + q_len]]`."""
     q_len = query.shape[0]
     seq_len = old_len + q_len
     shape = (seq_len, *key.shape[1:])
@@ -310,14 +334,19 @@ def kitty_continuation_attention(
         v_full,
         d_boost,
     )
-    k_full[old_len:] = key  # these are the current input keys
-    v_full[old_len:] = value  # current values
-    # variable length flash attention needs sequence offsets; for a single
-    # request, these are just [0, length]
-    cu_q = torch.tensor([0, q_len], dtype=torch.int32, device=query.device)
-    cu_k = torch.tensor([0, seq_len], dtype=torch.int32, device=query.device)
+    k_full[old_len:] = key
+    v_full[old_len:] = value
     _flash_attn(
-        query, k_full, v_full, output, cu_q, cu_k, q_len, seq_len, sm_scale, fa_version
+        query,
+        k_full,
+        v_full,
+        output,
+        cu_seqlens[0],
+        cu_seqlens[1],
+        q_len,
+        seq_len,
+        sm_scale,
+        fa_version,
     )
 
 
@@ -442,6 +471,7 @@ class KittyAttentionImpl(AttentionImpl[KittyMetadata]):
                 md.block_table,
                 req,
                 int(md.old_lens_cpu[req]),
+                md.continuation_cu_seqlens[req - nd],
                 self.scale,
                 self.d_boost,
                 self.fa_version,
