@@ -12,7 +12,6 @@ import torch
 from vllm.model_executor.models.diffusion_gemma import (
     _MASKED_LOGIT,
     DiffusionGemmaRequestStates,
-    _concat_logprob_stashes,
     _denoise_temperature,
     _mask_rows_to_allowed,
     _store_self_conditioning,
@@ -27,6 +26,7 @@ from vllm.model_executor.models.diffusion_gemma_sampler import (
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.worker.gpu.sample.logprob import concat_logprob_stashes
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
@@ -502,7 +502,7 @@ def test_stashes_of_different_widths_join():
     # logprobs converged in different steps, so their stashes differ in width.
     wide, narrow = _stash(2, 11, 100), _stash(3, 3, 0)
 
-    out = _concat_logprob_stashes([narrow, wide], [0, 3])
+    out = concat_logprob_stashes([narrow, wide], [0, 3])
 
     assert out.logprob_token_ids.shape == (5, 11)
     assert out.logprobs.shape == (5, 11)
