@@ -7,3 +7,5 @@ class DSpineSpeculatorConfig(DFlash2SpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspine.speculator.DSpineSpeculator"
     )
+    # Draft-side watermarking isn't validated for DSpine drafting yet.
+    supports_watermarking = False

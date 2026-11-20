@@ -145,7 +145,7 @@ Watermarking requires speculative decoding to use probabilistic draft sampling,
 standard rejection sampling, and a model-based method (`dflash`, `dspark`,
 `eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dflash`
 (including DFlash2 drafters with a candidate head, `DFlash2DraftModel`) and
-`dspark`. LiLiCorr drafters (`LiLiCorrDraftModel`) are not supported.
+`dspark`. LiLiCorr (`LiLiCorrDraftModel`) and DSpine (`DSpineDraftModel`) drafters are not supported.
 
 A watermarking algorithm without native speculative-decoding support is
 rejected before model loading. Set

@@ -1459,7 +1459,7 @@ class VllmConfig:
                 raise ValueError(
                     "Watermarking supports only dflash (including DFlash2), dspark, "
                     "eagle, eagle3 and mtp speculative decoding, and not LiLiCorr "
-                    "drafters yet."
+                    "or DSpine drafters yet."
                 )
             if (
                 not watermark_config.allow_target_only_watermarking

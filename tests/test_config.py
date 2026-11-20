@@ -5454,6 +5454,29 @@ def test_dual_key_gumbel_accepts_dflash2_drafts():
     config._check_supports_watermarking()
 
 
+@pytest.mark.parametrize(
+    ("speculator_config_cls", "architecture"),
+    [
+        (LiLiCorrSpeculatorConfig, "LiLiCorrDraftModel"),
+        (DSpineSpeculatorConfig, "DSpineDraftModel"),
+    ],
+)
+def test_dual_key_gumbel_rejects_unvalidated_candidate_drafts(
+    speculator_config_cls, architecture
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = fake_speculative_config(
+        speculator_config_cls,
+        method="dflash",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        draft_model_config=SimpleNamespace(architectures=[architecture]),
+    )
+    with pytest.raises(ValueError, match="not LiLiCorr or DSpine drafters"):
+        config._check_supports_watermarking()
+
+
 def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
