@@ -750,7 +750,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(!request.decode_options.skip_special_tokens);
+        assert_eq!(request.decode_options.skip_special_tokens, Some(false));
     }
 
     #[test]
