@@ -399,7 +399,8 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
-        # Whether the last release stopped for lack of KV blocks or preempted.
+        # Whether the last release stopped for lack of KV blocks or running
+        # slots, or preempted.
         self.prefill_kv_stopped = False
         if self.scheduler_config.prefill_hold_ttft_target is not None:
             from vllm.v1.core.sched import dp_prefill_hold
@@ -1674,6 +1675,12 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+                # A full running set stops admission as a lack of KV blocks does.
+                num_running = len(self.running) + self.num_waiting_for_streaming_input
+                stopped_on_kv |= (
+                    self.prefill_capacity_bound
+                    and num_running >= self.max_num_active_reqs
+                )
         if not defer_prefills:
             self.prefill_kv_stopped = stopped_on_kv
 

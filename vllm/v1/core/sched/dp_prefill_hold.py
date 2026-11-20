@@ -16,8 +16,8 @@ engine core's state sync, and every rank runs the same deterministic
   ahead of it may be held `(T - a - (k - 1) * e) / k - t_mix` more, where `e`
   is the time held so far, `t_mix` is the mixed step time and `T` is the TTFT
   target. A request older than `T` releases every step. After a release stops
-  for lack of KV blocks, only the queue ahead of the first request that does
-  not fit counts, and its ages start at that release.
+  for lack of KV blocks or running slots, only the queue ahead of the first
+  request that does not fit counts, and its ages start at that release.
 - Step costs come from an online least-squares fit of measured step times,
   with no latency model. Until the fit is pinned down, it releases.
 """
@@ -183,7 +183,8 @@ class PrefillQueueState(NamedTuple):
     num_loaded: int
     max_active_reqs: int
     num_cached_tokens: Callable[["Request"], int]
-    # Free KV blocks if the last release stopped for lack of them, else None.
+    # Free KV blocks if the last release stopped for lack of them or of
+    # running slots, else None.
     kv_free_blocks: int | None
     num_blocks_needed: Callable[["Request"], int]
 
@@ -438,10 +439,12 @@ class PrefillHold:
         cached_tokens = self._cached_tokens
         probe = state.num_cached_tokens
         free = state.kv_free_blocks
+        slots = state.max_active_reqs - len(state.running)
         for req in state.waiting():
             if free is not None:
                 free -= state.num_blocks_needed(req)
-                if free < 0:  # admission stops here too
+                slots -= 1
+                if free < 0 or slots < 0:  # admission stops here too
                     return
             # A request holding KV blocks, such as a finished async KV load,
             # resumes from them.

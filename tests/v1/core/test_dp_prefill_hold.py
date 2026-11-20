@@ -411,6 +411,25 @@ def test_queue_scan_stops_where_kv_runs_out():
     assert row[dph._X] == 316 and row[dph._QUEUED] == 2
 
 
+def test_queue_scan_stops_where_running_slots_run_out():
+    """A release that stops on a full running set counts as one that stopped
+    for lack of KV blocks: the rank then offers only as many queued requests
+    as it has free slots."""
+    scheduler, hold = _hold_scheduler(max_num_seqs=2)
+    reqs = create_requests(num_requests=4, num_tokens=8)
+    scheduler.add_request(reqs[0])
+    _finish_step(scheduler, scheduler.schedule())
+    for req in reqs[1:]:
+        scheduler.add_request(req)
+    assert hold.local_row()[dph._QUEUED] == 3
+
+    _finish_step(scheduler, scheduler.schedule())
+    assert scheduler.prefill_kv_stopped
+    scheduler.finish_requests(reqs[0].request_id, RequestStatus.FINISHED_ABORTED)
+    row = hold.local_row()
+    assert row[dph._X] == 8 and row[dph._QUEUED] == 1
+
+
 def test_waits_count_from_a_release_that_stopped_on_kv(monkeypatch):
     """A request waiting behind a release that stopped for lack of KV blocks
     could not start before it, so its age does not force a release: the hold
