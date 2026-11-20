@@ -14,6 +14,6 @@ def manager_lock() -> threading.Lock:
     Rule: a test that composes a TieringOffloadingManager builds its tiers
     and the manager on this lock (ParentContext.lock is the manager's lock).
     A test that exercises a tier standalone, with no manager, is free to
-    give the tier its own throwaway lock (see _parent_ctx's fallback).
+    give the tier its own throwaway lock.
     """
     return threading.Lock()

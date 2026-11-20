@@ -532,11 +532,11 @@ def test_kvcr_tier_serves_primary_pin_request(
 
         def create_store_job(self, requested_keys, req_context):
             return TieringTransferJob(
-                11,
-                req_context,
-                list(requested_keys if job_keys is None else job_keys),
-                is_promotion=False,
+                job_id=11,
+                keys=requested_keys if job_keys is None else job_keys,
                 chunk_ids=np.array(chunk_ids, dtype=np.int32),
+                is_promotion=False,
+                req_context=req_context,
             )
 
         def on_request_finished(self, req_context):

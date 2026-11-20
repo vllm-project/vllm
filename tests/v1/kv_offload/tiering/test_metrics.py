@@ -158,21 +158,13 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
         job.transfer_job.materialize()
 
     tracker.on_job_finished(
-        jobs[0],
-        JobResult(job_id=0, success=True, transfer_time=0.5),
+        jobs[0], JobResult(job_id=0, success=True, transfer_time=0.5)
     )
     tracker.on_job_finished(
-        jobs[1],
-        JobResult(job_id=1, success=True, transfer_time=0.25),
+        jobs[1], JobResult(job_id=1, success=True, transfer_time=0.25)
     )
-    tracker.on_job_finished(
-        jobs[2],
-        JobResult(job_id=2, success=False),
-    )
-    tracker.on_job_finished(
-        jobs[3],
-        JobResult(job_id=3, success=False),
-    )
+    tracker.on_job_finished(jobs[2], JobResult(job_id=2, success=False))
+    tracker.on_job_finished(jobs[3], JobResult(job_id=3, success=False))
 
     stats = tracker.take_stats()
     assert stats is not None
@@ -305,14 +297,11 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
         1,
     )
     promotion_job.transfer_job.submit_time = clock
-    tracker.on_job_registered(
-        promotion_job,
-    )
+    tracker.on_job_registered(promotion_job)
     promotion_job.transfer_job.materialize()
     clock += 1.5
     tracker.on_job_finished(
-        promotion_job,
-        JobResult(job_id=0, success=True, transfer_time=0.42),
+        promotion_job, JobResult(job_id=0, success=True, transfer_time=0.42)
     )
 
     stats = tracker.take_stats()
@@ -324,8 +313,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     tracker.on_job_registered(cascade_job)
     clock += 0.1
     tracker.on_job_finished(
-        cascade_job,
-        JobResult(job_id=1, success=True, transfer_time=0.10),
+        cascade_job, JobResult(job_id=1, success=True, transfer_time=0.10)
     )
 
     stats = tracker.take_stats()
@@ -337,9 +325,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
         create_promotion_job(2, to_keys([3]), [3], tracker=tracker, tier_idx=0), 0
     )
     failed_promotion_job.transfer_job.submit_time = clock
-    tracker.on_job_registered(
-        failed_promotion_job,
-    )
+    tracker.on_job_registered(failed_promotion_job)
     failed_promotion_job.transfer_job.materialize()
     clock += 0.2
     tracker.on_job_finished(
@@ -366,14 +352,9 @@ def test_tiering_metrics_tracker_records_promotion_latency_without_transfer_time
     promotion_job = JobMetadata(
         create_promotion_job(0, to_keys([0]), [0], tracker=tracker, tier_idx=0), 0
     )
-    tracker.on_job_registered(
-        promotion_job,
-    )
+    tracker.on_job_registered(promotion_job)
     promotion_job.transfer_job.materialize()
-    tracker.on_job_finished(
-        promotion_job,
-        JobResult(job_id=0, success=True),
-    )
+    tracker.on_job_finished(promotion_job, JobResult(job_id=0, success=True))
     tracker.assert_idle()
 
     stats = tracker.take_stats()

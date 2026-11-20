@@ -106,16 +106,21 @@ class _QuietTier(_FakeTier):
     tolerates_off_thread_polling: ClassVar[bool] = False
 
 
-def _parent_ctx(view, lock=None):
-    return ParentContext(lock or threading.Lock(), view)
+def _parent_ctx(view, lock: threading.Lock):
+    return ParentContext(lock, view)
 
 
-def _make_manager(tier_cls=_FakeTier, num_chunks: int = 8, lock=None, **kwargs):
+def _make_manager(
+    manager_lock: threading.Lock,
+    tier_cls=_FakeTier,
+    num_chunks: int = 8,
+    **kwargs,
+):
     primary = CPUPrimaryTierOffloadingManager(
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
-    parent_ctx = _parent_ctx(primary.get_kv_memoryview(), lock)
+    parent_ctx = _parent_ctx(primary.get_kv_memoryview(), manager_lock)
     tier = tier_cls(
         offloading_spec=MagicMock(),
         parent_ctx=parent_ctx,
@@ -133,7 +138,7 @@ def _make_manager(tier_cls=_FakeTier, num_chunks: int = 8, lock=None, **kwargs):
 @pytest.fixture
 def manager_and_tier(request, manager_lock):
     kwargs = getattr(request, "param", {})
-    manager, tier = _make_manager(lock=manager_lock, **kwargs)
+    manager, tier = _make_manager(manager_lock, **kwargs)
     try:
         yield manager, tier
     finally:
@@ -229,7 +234,7 @@ def test_zero_interval_disables_the_thread(manager_and_tier):
 
 def test_no_thread_when_no_tier_asks_for_one(manager_lock):
     """A tier that does not opt in must not cost a thread."""
-    manager, tier = _make_manager(tier_cls=_QuietTier, lock=manager_lock)
+    manager, tier = _make_manager(manager_lock, tier_cls=_QuietTier)
     try:
         assert not _live_control_threads()
     finally:
@@ -385,7 +390,7 @@ class _PromotingTier(_FakeTier):
 
     def _promote(self, parent: ParentManager) -> None:
         # Mirror the p2p server role: open per-request bookkeeping before the
-        # first lookup (server.py's _resolve_lookup does the same).
+        # first lookup (server.py's _process_inbound_lookup does the same).
         ctx = ReqContext(req_id="peer")
         parent.on_new_request(ctx)
         parent.lookup(OffloadKey(b"\x07" * 8), ctx)
@@ -590,7 +595,7 @@ def test_sustained_failure_backs_off_but_keeps_serving(monkeypatch, manager_lock
     interval once a round succeeds."""
     monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACK_OFF_AFTER_S", 0.2)
     monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACKOFF_S", 0.05)
-    manager, tier = _make_manager(lock=manager_lock)
+    manager, tier = _make_manager(manager_lock)
     try:
         assert tier.served.wait(_SETTLE_S)
 
@@ -655,7 +660,7 @@ def test_backoff_waits_at_least_the_configured_interval(monkeypatch, manager_loc
     The wait is max(tier_poll_interval_s, 1 s), so a user who set a slow
     interval does not get a faster loop after a fault.
     """
-    manager, _ = _make_manager(lock=manager_lock, tier_poll_interval_s=3.0)
+    manager, _ = _make_manager(manager_lock, tier_poll_interval_s=3.0)
     try:
         waits = _run_failing_rounds(
             manager, 4, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
@@ -667,7 +672,7 @@ def test_backoff_waits_at_least_the_configured_interval(monkeypatch, manager_loc
 
 def test_backoff_floors_at_one_second_for_a_fast_interval(monkeypatch, manager_lock):
     """A sub-second interval still backs off to the 1 s floor."""
-    manager, _ = _make_manager(lock=manager_lock, tier_poll_interval_s=0.001)
+    manager, _ = _make_manager(manager_lock, tier_poll_interval_s=0.001)
     try:
         waits = _run_failing_rounds(
             manager, 3, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
@@ -683,7 +688,7 @@ def test_sustained_failure_logs_one_traceback_then_summaries(monkeypatch, manage
     The first failure of a run logs a traceback; later ones are one-line
     summaries, so an idle rank with a broken peer cannot flood the log.
     """
-    manager, _ = _make_manager(lock=manager_lock)
+    manager, _ = _make_manager(manager_lock)
     fake_logger = MagicMock()
     monkeypatch.setattr(tiering_manager, "logger", fake_logger)
     try:
@@ -707,7 +712,7 @@ def test_alternating_failure_logs_at_most_one_traceback(monkeypatch, manager_loc
     The failure run restarts on every success, so keying the traceback off the
     run's first round would emit one per failing round at the default interval.
     """
-    manager, tier = _make_manager(lock=manager_lock)
+    manager, tier = _make_manager(manager_lock)
     fake_logger = MagicMock()
     monkeypatch.setattr(tiering_manager, "logger", fake_logger)
     manager._stop_tier_poll_thread()

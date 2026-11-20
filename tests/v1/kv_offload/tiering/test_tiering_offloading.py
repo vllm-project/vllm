@@ -875,9 +875,7 @@ class TestTieringOffloadingManager:
             self.secondary_tier1.chunks[chunk] = True
 
         def submit_partial(job_metadata: TransferJob) -> None:
-            # The real submit_load redeems the deferred allocation; do the
-            # same so the job is materialized.
-            job_metadata.materialize()
+            assert job_metadata.materialize()
             successful_keys = (
                 None
                 if successful_indices is None

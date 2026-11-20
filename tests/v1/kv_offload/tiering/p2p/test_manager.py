@@ -818,9 +818,9 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch, manager_lock):
     prepared = primary.prepare_write([key], ctx)
     assert prepared is not None
     assert isinstance(prepared.store_spec, CPULoadStoreSpec)
-    chunk_ids = prepared.store_spec.chunk_ids
 
     def alloc_fn(keys, _ctx):
+        chunk_ids = prepared.store_spec.chunk_ids  # type: ignore[attr-defined]
         tiering._metrics.on_promotion_allocated(0, len(chunk_ids))
         return (list(keys), chunk_ids)
 
