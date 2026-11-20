@@ -571,17 +571,6 @@ class SpeculativeConfig:
     If `None`, use the value from the draft model's Hugging Face config."""
 
     # Advanced control
-    disable_eagle_block_drop: bool = False
-    """Disable dropping the trailing prefix-cache block for EAGLE-like
-    speculative methods. This is an experimental option for measuring the
-    acceptance-rate impact of reusing that block. It does not disable the
-    speculative drafter itself."""
-    disable_lookahead_block_hashes: bool = False
-    """Disable lookahead block hashes for EAGLE-like speculative methods and
-    fall back to dropping the trailing prefix-cache block. Lookahead hashes
-    also cover the tokens the drafter reads after each block, so engines
-    sharing a KV store and external consumers of KV cache events must use the
-    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
     and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
@@ -786,8 +775,6 @@ class SpeculativeConfig:
             "revision",
             "code_revision",
             "index_share_for_mtp_iteration",
-            "disable_eagle_block_drop",
-            "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
@@ -2062,14 +2049,6 @@ class SpeculativeConfig:
         than adding rows to the target batch.
         """
         return self.speculator_config.max_num_new_slots_for_drafting
-
-    def needs_eagle_block_drop(self) -> bool:
-        """Whether draft KV at a position depends on the next token."""
-        return self.speculator_config.draft_kv_depends_on_next_token
-
-    def use_eagle_block_drop(self) -> bool:
-        """Whether the volatile trailing prefix-cache block should be dropped."""
-        return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"

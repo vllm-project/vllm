@@ -45,6 +45,8 @@ class SpeculatorConfig:
 
     # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
+    # The drafter's own KV at a position depends on the tokens it reads ahead.
+    draft_kv_depends_on_lookahead: ClassVar[bool] = False
     # Drafts in its own workspace lane.
     uses_separate_workspace_lane: ClassVar[bool] = False
     # For performance, prefers requests' full token history on the GPU instead of
@@ -57,9 +59,6 @@ class SpeculatorConfig:
     parallel_drafting: ClassVar[bool] = False
     # The draft model has its own vocabulary, which must match the target's.
     draft_has_own_vocab: ClassVar[bool] = False
-    # Draft KV at position i is built from token i + 1, which a prefix-cache hit
-    # ending at i may not match, so its last block is recomputed (EAGLE block drop).
-    draft_kv_depends_on_next_token: ClassVar[bool] = False
     # Runs the draft steps after the first as one-token decodes, with FULL graphs.
     one_token_draft_decodes: ClassVar[bool] = False
 
@@ -154,6 +153,15 @@ class SpeculatorConfig:
         """See `VllmConfig.num_prefill_lookahead_tokens`."""
         # Hidden-state drafters read only the immediate next token.
         return 1 if self.uses_target_hidden_states else 0
+
+    @property
+    @final
+    def num_hash_lookahead_tokens(self) -> int:
+        """Next tokens the drafter's own KV at a position depends on, which
+        prefix-cache block hashes must cover."""
+        if self.draft_kv_depends_on_lookahead:
+            return self.num_prefill_lookahead_tokens
+        return 0
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
