@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
@@ -577,8 +577,13 @@ class AiterFlashAttentionMetadataBuilder(
             )
         )
 
-        # When every layer prefills with an FP8 query over the paged cache, the
-        # chunked-context metadata and workspace of the BF16 path are unused.
+        # When every layer of this KV-cache group prefills with an FP8 query
+        # over the paged cache, the chunked-context metadata and workspace of
+        # the BF16 path are unused. This is a conservative default: if the group
+        # also holds layers that keep the BF16 path (e.g. sliding-window layers
+        # sharing the group), the whole group keeps the BF16 prefill metadata
+        # and workspace, while its eligible layers' extends still take the FP8
+        # call.
         self.fp8_extend_query = bool(fp8_query) and all(fp8_query)
         self.extend_workspace = (
             None
@@ -1113,7 +1118,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and alibi_slopes is None
             and sinks is None
             and not logits_soft_cap
-            and on_gfx950()
+            and get_cdna_version() == 4
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
         if self.use_fp8_extend_query:
