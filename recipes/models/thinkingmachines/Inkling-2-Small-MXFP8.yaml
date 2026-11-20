@@ -88,10 +88,12 @@ strategy_overrides:
           - "1048576"
           - "--max-num-seqs"
           - "256"
+      # 8x H200: 62 GiB KV per GPU fits 1M (1.66M-token cache), but requests
+      # past ~800K tokens looped in tests (777K and below answered correctly).
       hopper:
         extra_args:
           - "--max-model-len"
-          - "131072"
+          - "524288"
           - "--max-num-seqs"
           - "256"
   # --no-numa-bind works around a headless-node startup crash with vLLM's
@@ -131,8 +133,8 @@ guide: |
   The checkpoint needs about 750 GB, so it runs at TP8 (TP8 attention with EP8 experts): one
   8-GPU H200, B200 or B300 node, or two GB200 or GB300 trays.
 
-  - **H200, TP8:** GSM8K 0.974-0.976 (0-shot, chat) and 2,634 output tok/s at concurrency 64
-    (1K in / 256 out). The builder caps the context at 131,072 tokens.
+  - **H200, TP8:** contexts up to 524,288 tokens. With the command above (DSpark and the
+    reasoning parser), GSM8K is 0.972-0.974 (0-shot, chat) with a DSpark acceptance length of 4.5.
   - **Blackwell, TP8:** the full 1,048,576-token context.
 
   On Hopper, the experts run as W8A16 GEMMs with BF16 activations.

@@ -90,7 +90,8 @@ strategy_overrides:
           - "262144"
           - "--max-num-seqs"
           - "256"
-      # 4x H200 leaves ~40 GiB less per GPU for KV cache than a GB200 tray.
+      # 4x H200: 43.5 GiB KV per GPU. 262144 fits (297K-token cache), but a
+      # 255K-token request looped in one of two runs, so cap at 131072.
       hopper:
         extra_args:
           - "--max-model-len"
@@ -155,7 +156,8 @@ guide: |
 
   On Hopper, run TP4 on H200 with contexts up to 131,072 tokens. Hopper has no FP4/FP8
   block-scaled tensor cores, so the experts run as W4A16 (NVFP4) and W8A16 (MXFP8) GEMMs
-  with BF16 activations. GSM8K is 0.976 at TP4, the same as the reference.
+  with BF16 activations. With the command above (DSpark and the reasoning parser), GSM8K is
+  0.977 (0-shot, chat) with a DSpark acceptance length of 4.5.
 
   An MXFP8 checkpoint is also available; see the
   [Inkling 2 Small MXFP8 recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Small-MXFP8).
