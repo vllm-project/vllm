@@ -703,9 +703,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     f"{g.manager_cls.__name__}."
                 )
         # Fine-grained hash hits require Mamba "align" and compatible cache
-        # managers in every group. TP needs hashing finer than the Mamba block;
-        # DCP accepts equality because it scales the effective full-attention
-        # block instead.
+        # managers in every group (see `partial_hash_hits_enabled`).
         self.enable_partial_hash_hits = (
             allow_partial_hash_hits
             and partial_hash_hits_enabled(

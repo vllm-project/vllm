@@ -759,12 +759,22 @@ def partial_hash_hits_enabled(
 
     If `manager_classes` (one per group) is given, also require every other
     prefix-cacheable group to support fine-grained lookups.
+
+    A Mamba block equal to the hash unit still needs them when another group's
+    block is coarser (DCP-scaled, or sized for a drafter's larger KV page):
+    block-aligned hits would need a Mamba state on that coarser block, and the
+    prefill split checkpoints Mamba state on its own block.
     """
+    has_coarser_group = any(
+        group.prefix_cacheable
+        and resolve_dcp_kv_block_size(group, dcp_world_size) > hash_block_size
+        for group in kv_cache_groups
+    )
     if not any(
         is_mamba_align_group(group)
         and (
-            (dcp_world_size == 1 and group.block_size > hash_block_size)
-            or (dcp_world_size > 1 and group.block_size >= hash_block_size)
+            group.block_size > hash_block_size
+            or (group.block_size == hash_block_size and has_coarser_group)
         )
         for group in kv_cache_groups
     ):

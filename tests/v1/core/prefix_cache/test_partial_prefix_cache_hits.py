@@ -238,6 +238,65 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
     assert cached_states == ({expected} if expected else set())
 
 
+@pytest.mark.parametrize(
+    "full_block_size,mamba_block_size,prompt_tokens",
+    [(20, 4, 53), (960, 192, 2648), (960, 192, 1637)],
+)
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_resend_hits_when_attention_block_is_coarser_than_mamba(
+    full_block_size, mamba_block_size, prompt_tokens, use_eagle
+):
+    """A drafter with more KV per token than the target sizes the shared page,
+    so the target's attention block is a multiple of the Mamba block, which is
+    also the hash unit. Mamba state is checkpointed on its own block, never on
+    the coarse one: a resend must hit on the hash unit, not miss entirely."""
+    hash_block_size = mamba_block_size
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=full_block_size,
+        mamba_block_size=mamba_block_size,
+        num_blocks=128,
+        use_eagle=use_eagle,
+        num_speculative_blocks=4 if use_eagle else 0,
+    )
+    # As `Scheduler.__init__` derives it.
+    mamba_partial_cache_hit = manager.coordinator.enable_partial_hash_hits
+    scheduler = SimpleNamespace(
+        block_size=full_block_size,
+        cache_config=SimpleNamespace(block_size=mamba_block_size),
+        hash_block_size=hash_block_size,
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle_block_drop=use_eagle,
+        num_hash_lookahead_tokens=0,
+        mamba_partial_cache_hit=mamba_partial_cache_hit,
+        mamba_shared_prefix_checkpoint=False,
+        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
+    )
+    tokens = list(range(prompt_tokens))
+    producer = make_request("producer", tokens, hash_block_size, sha256)
+    while producer.num_computed_tokens < prompt_tokens:
+        scheduled = Scheduler._mamba_block_aligned_split(
+            scheduler, producer, prompt_tokens - producer.num_computed_tokens
+        )
+        assert scheduled > 0
+        manager.new_step_starts()
+        assert manager.allocate_slots(producer, scheduled) is not None
+        producer.num_computed_tokens += scheduled
+    manager.free(producer)
+    manager.new_step_starts()
+
+    resend = make_request("resend", tokens, hash_block_size, sha256)
+    _, hit, _ = manager.get_computed_blocks(resend)
+    expected = get_mamba_prefill_checkpoint_position(
+        prompt_tokens, hash_block_size, drop_eagle_block=use_eagle
+    )
+    assert expected % full_block_size != 0
+    assert hit == expected
+
+
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
