@@ -378,7 +378,10 @@ def test_a_unit_waits_for_every_live_consumer(server):
     assert 0 not in s._resident, "nothing reads the unit after its packs"
     with pytest.raises(ValueError, match="twice"):
         s.bucket(1, 0, 0)
-    assert s.end_sync() == [0]
+    future = _call(s.end_sync)  # a worker may still read the served block
+    assert not future.done()
+    s.free()
+    assert future.result(timeout=5) == [0]
     with pytest.raises(ValueError, match="twice"):  # after the unit's release
         _call(s.bucket, 0, 0, 0).result(timeout=5)
     with pytest.raises(ValueError, match="not in sync"):

@@ -496,10 +496,16 @@ class _RDTProducerServer:
             return freed
 
     def end_sync(self) -> list[int]:
-        """Block until every published unit is released; return the rest."""
+        """Block until every published unit is released and Ray freed every
+        served block (workers may still read them); return the released."""
         with self._cond:
             self._wait_for(
                 self._cond, lambda: bool(self._resident), "every unit's release"
+            )
+            self._wait_for(
+                self._room,
+                lambda: any(b.out > 0 for b in self._holds.values()),
+                "Ray's frees of the served buckets",
             )
             freed, self._freed_pending = self._freed_pending, []
             self._base_cache.clear()
@@ -794,6 +800,7 @@ class _RDTProducerServer:
             if block is not None:
                 block.out -= 1
                 self._maybe_free(block)
+                self._room.notify_all()  # end_sync waits for every free
             self._last_progress = time.monotonic()
 
     def _release_if_done(self, unit: int) -> None:
