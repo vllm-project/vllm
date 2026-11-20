@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_HTTP_MAX_REQUEST_BODY_SIZE: int = 32 * 1024 * 1024  # bytes
+    VLLM_MAX_BATCH_CONVERSATIONS: int = 1024
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
@@ -1216,6 +1217,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # frontend has no limit.
     "VLLM_HTTP_MAX_REQUEST_BODY_SIZE": lambda: int(
         os.environ.get("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", str(32 * 1024 * 1024))
+    ),
+    # Maximum number of conversations in a single /v1/chat/completions/batch
+    # request. Larger batches are rejected before preprocessing. Default: 1024.
+    "VLLM_MAX_BATCH_CONVERSATIONS": lambda: int(
+        os.environ.get("VLLM_MAX_BATCH_CONVERSATIONS", "1024")
     ),
     # Maximum allowed value for the `n` sampling parameter (number of output
     # sequences per request). Limits resource consumption to prevent
@@ -2591,6 +2597,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_HOST_IP",
         "VLLM_RAY_BUNDLE_INDICES",
         "VLLM_CHAT_TEMPLATE_FUEL",
+        "VLLM_MAX_BATCH_CONVERSATIONS",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
