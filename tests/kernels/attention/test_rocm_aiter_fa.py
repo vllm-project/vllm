@@ -1288,7 +1288,8 @@ def test_asm_kv_scale_tables_shared_across_builders():
     )
 
 
-def test_aiter_fa_metadata_build_does_not_sync():
+@pytest.mark.parametrize("sliding_window", [None, 16])
+def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
     """Building the metadata for prefill and extend rows must not wait for
     queued GPU work: the builder runs while the previous step executes."""
     from tests.v1.attention.utils import (
@@ -1320,6 +1321,7 @@ def test_aiter_fa_metadata_build_does_not_sync():
             head_size**-0.5,
             num_kv_heads,
             cache_config=config.cache_config,
+            per_layer_sliding_window=sliding_window,
             prefix="layer",
             attn_backend=AiterFlashAttentionBackend,
         )
@@ -1334,6 +1336,8 @@ def test_aiter_fa_metadata_build_does_not_sync():
     common = create_common_attn_metadata(
         batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=32
     )
+    # Async speculative decoding overstates the CPU bound on decode rows.
+    common.seq_lens_cpu_upper_bound[0] += 100
 
     torch.cuda.set_sync_debug_mode("error")
     try:
@@ -1346,6 +1350,6 @@ def test_aiter_fa_metadata_build_does_not_sync():
         1,
         1,
     )
-    assert metadata.extend_metadata is not None
-    assert metadata.prefill_metadata is not None
+    # The overstated decode row did not leak into the other rows' lengths.
+    assert metadata.extend_metadata.max_seq_len == 80
     assert metadata.prefill_metadata.max_seq_len == 24

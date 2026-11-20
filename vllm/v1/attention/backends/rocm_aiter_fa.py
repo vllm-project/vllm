@@ -817,7 +817,7 @@ class AiterFlashAttentionMetadataBuilder(
             num_chunks = cdiv(computed_kv_lens.max().item(), max_context_chunk)
 
             chunk_starts = (
-                torch.arange(num_chunks, dtype=torch.int32)
+                torch.arange(num_chunks, dtype=torch.int32, device="cpu")
                 .unsqueeze(1)
                 .expand(-1, num_extends)
                 * max_context_chunk
@@ -828,7 +828,10 @@ class AiterFlashAttentionMetadataBuilder(
             chunk_seq_lens = chunk_ends - chunk_starts
             chunk_seq_lens.clamp_(min=0)  # [num_chunks, num_extends]
             cu_seq_lens_cpu = torch.zeros(
-                [num_chunks, num_extends + 1], dtype=torch.int32, pin_memory=True
+                [num_chunks, num_extends + 1],
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
             )
             torch.cumsum(
                 chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32
@@ -839,7 +842,9 @@ class AiterFlashAttentionMetadataBuilder(
                 cu_seq_lens_cpu[:, -1].max().item() if num_chunks > 0 else 0
             )
 
-            range_idx = torch.arange(max_cum_tokens, dtype=torch.int32)[None, None, :]
+            range_idx = torch.arange(max_cum_tokens, dtype=torch.int32, device="cpu")[
+                None, None, :
+            ]
             idx_to_batch_tensor = range_idx == cu_seq_lens_cpu[:, 1:][:, :, None]
             idx_to_batch_tensor = idx_to_batch_tensor.sum(
                 dim=1
@@ -860,13 +865,6 @@ class AiterFlashAttentionMetadataBuilder(
             query_start_loc_device = common_attn_metadata.query_start_loc[
                 num_decodes : num_decodes + num_extends + 1
             ]
-            seq_lens_device = common_attn_metadata.seq_lens[num_extends_slice]
-            cu_seq_lens = torch.zeros(
-                num_extends + 1, dtype=torch.int32, device=seq_lens_device.device
-            )
-            torch.cumsum(
-                seq_lens_device, dim=0, dtype=cu_seq_lens.dtype, out=cu_seq_lens[1:]
-            )
             extend_metadata = AiterFlashAttentionChunkPrefillMetadata(
                 max_query_len=query_lens_for_extend.max().item(),
                 max_seq_len=seq_lens[num_extends_slice].max().item(),
