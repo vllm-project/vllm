@@ -72,7 +72,7 @@ def _is_sm90() -> bool:
 
 @lru_cache(maxsize=1)
 def _is_sm100() -> bool:
-    """True on sm_100 (B200/GB200): selects the sm_100 small-batch overrides."""
+    """True on sm_100 (B200/GB200): selects the sm_100 tuning table."""
     return current_platform.get_device_capability() == (10, 0)
 
 
@@ -590,19 +590,29 @@ def _select_sm90_config(
 
 
 def _select_sm100_config(
-    base_programs: int, is_fp8: bool
-) -> tuple[int, int, int] | None:
-    """(block_n, target_splits, num_warps) tuned on sm_100 (B200) for small
-    batches, or None to keep the default entry. fp8 above 64 programs takes the
-    qsa_fp8 kernel.
+    base_programs: int, use_prefill_config: bool, is_fp8: bool
+) -> tuple[int, int, int]:
+    """(block_n, target_splits, num_warps) for sm_100 (B200/GB200). Tuned on B200
+    up to 64 programs; above that the entries are the GB300 table's values. fp8
+    above 64 programs takes the qsa_fp8 kernel.
     """
+    if base_programs > 2048:
+        return (32, 1, 1) if use_prefill_config else (64, 1, 2)
+    if is_fp8 and base_programs <= 4:
+        return 32, 64, 4
     if base_programs <= 24:
-        if is_fp8 and base_programs <= 4:
-            return None
         return 64, 64, 2
-    if not is_fp8 or base_programs > 64:
-        return None
-    return (32, 32, 1) if base_programs <= 32 else (32, 16, 1)
+    if base_programs <= 32:
+        return (32, 32, 1) if is_fp8 else (32, 16, 1)
+    if base_programs <= 64:
+        return (32, 16, 1) if is_fp8 else (32, 8, 1)
+    if base_programs <= 128:
+        return 32, 4, 1
+    if base_programs <= 256:
+        return 32, 8, 1
+    if base_programs <= 512:
+        return 64, 4, 2
+    return 64, 1, 2
 
 
 def _select_config(
@@ -618,11 +628,10 @@ def _select_config(
     on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
     the uniform decode/verify length). This default table was tuned on GB300;
     sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead,
-    sm_90 (Hopper) to _select_sm90_config, and sm_100 (B200/GB200) overrides
-    small batches with _select_sm100_config.
+    sm_90 (Hopper) to _select_sm90_config, and sm_100 (B200/GB200) to
+    _select_sm100_config.
     """
     base_programs = num_rows * num_kv_heads
-    sm100_config = _select_sm100_config(base_programs, is_fp8) if _is_sm100() else None
     if _is_sm120():
         BLOCK_N, target_splits, num_warps = _select_sm120_config(
             base_programs, use_prefill_config, is_fp8
@@ -631,8 +640,10 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = _select_sm90_config(
             base_programs, use_prefill_config, is_fp8
         )
-    elif sm100_config is not None:
-        BLOCK_N, target_splits, num_warps = sm100_config
+    elif _is_sm100():
+        BLOCK_N, target_splits, num_warps = _select_sm100_config(
+            base_programs, use_prefill_config, is_fp8
+        )
     elif base_programs > 2048:
         BLOCK_N, target_splits, num_warps = (
             (32, 1, 1) if use_prefill_config else (64, 1, 2)
