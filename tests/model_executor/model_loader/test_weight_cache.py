@@ -1875,6 +1875,10 @@ def test_ipc_cache_key_tracks_replicated_moe(
 
     from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+        WeightCacheState,
+    )
 
     def parallel_config(overrides):
         # Set after construction: validation needs ROCm and TP=2 for the flag.
@@ -1891,6 +1895,7 @@ def test_ipc_cache_key_tracks_replicated_moe(
         revision=None,
         hf_config=SimpleNamespace(architectures=["Qwen4ExpForCausalLM"]),
         hf_text_config=SimpleNamespace(),
+        multimodal_config=None,
         is_moe=True,
     )
     config = SimpleNamespace(
@@ -1901,21 +1906,28 @@ def test_ipc_cache_key_tracks_replicated_moe(
         kernel_config=KernelConfig(),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
-    for name in ("get_dp_group", "get_pp_group"):
-        monkeypatch.setattr(
-            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
-        )
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
-    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
-    monkeypatch.setattr(loader, "_state_for_key", lambda key, **kwargs: key)
-    engine_key = loader._fetch_entries(
-        model_config,
-        config.cache_config,
-        parallel_config(engine_parallel),
-        config.kernel_config,
+    config.parallel_config = parallel_config(engine_parallel)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
     )
-    assert server.cache_key.mismatched_fields(engine_key) == mismatched_fields
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    requested_keys: list[WeightCacheKey] = []
+
+    def request_state(key):
+        requested_keys.append(key)
+        return WeightCacheState(
+            storages=[],
+            manifest={"storages": [], "tensors": {}},
+            aliases={},
+            attrs={},
+        )
+
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(loader, "_request_state", request_state)
+    monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
+    loader.load_model(config, model_config)
+    assert len(requested_keys) == 1
+    assert server.cache_key.mismatched_fields(requested_keys[0]) == mismatched_fields
 
 
 def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:
