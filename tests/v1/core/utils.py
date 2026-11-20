@@ -98,6 +98,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    encoder_cache_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -140,6 +141,7 @@ def create_scheduler(
         long_prefill_token_threshold=long_prefill_token_threshold,
         long_prefill_token_threshold_adaptive=(long_prefill_token_threshold_adaptive),
         disable_chunked_mm_input=disable_chunked_mm_input,
+        encoder_cache_size=encoder_cache_size,
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,

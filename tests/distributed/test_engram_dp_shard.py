@@ -298,7 +298,7 @@ def _check_pool_tables(store_dir: str):
     """GPUs of independent engines split one table in an Engram pool and read
     each other's rows, over every transport this machine has."""
     modes = [("nvlink", False, 4)] if imex_channel_available() else []
-    if verbs.active_devices():
+    if current_platform.is_cuda() and verbs.active_devices():
         # GPUs of a node map each other's host shards; nodes of one use RDMA.
         modes += [("rdma", False, 4), ("rdma", True, 4), ("rdma", True, 1)]
     weight, scale = _full_table(sum(HEAD_SIZES))
