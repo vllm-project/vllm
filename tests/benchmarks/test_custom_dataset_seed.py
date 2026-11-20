@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,8 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import AutoTokenizer, PreTrainedTokenizerBase, TokenizersBackend
 
-from vllm.benchmarks.datasets import CustomDataset, get_samples
+from vllm.benchmarks.datasets import CustomDataset, add_dataset_parser, get_samples
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 @pytest.fixture(scope="session")
@@ -77,6 +79,52 @@ def test_custom_dataset_same_seed_is_deterministic(
     prompts_b = [s.prompt for s in samples_b]
 
     assert prompts_a == prompts_b
+
+
+def _write_spec_bench(tmp_path: Path, n_rows: int) -> str:
+    path = tmp_path / "question.jsonl"
+    with path.open("w") as f:
+        for i in range(n_rows):
+            row = {"category": "writing", "turns": [f"row {i}: unique prompt."]}
+            f.write(json.dumps(row) + "\n")
+    return str(path)
+
+
+def _write_speed_bench(tmp_path: Path, n_rows: int) -> str:
+    with (tmp_path / "qualitative.jsonl").open("w") as f:
+        for i in range(n_rows):
+            message = {"role": "user", "content": f"row {i}: unique prompt."}
+            f.write(json.dumps({"category": "writing", "messages": [message]}) + "\n")
+    return str(tmp_path)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    ("dataset_name", "write_dataset"),
+    [("spec_bench", _write_spec_bench), ("speed_bench", _write_speed_bench)],
+)
+def test_bench_dataset_seed_propagates(
+    hf_tokenizer: PreTrainedTokenizerBase,
+    tmp_path: Path,
+    dataset_name: str,
+    write_dataset: Callable[[Path, int], str],
+) -> None:
+    """--seed must control the load-time shuffle of spec_bench and speed_bench."""
+    dataset_path = write_dataset(tmp_path, 60)
+    parser = FlexibleArgumentParser()
+    add_dataset_parser(parser)
+
+    def args_with_seed(seed: int) -> argparse.Namespace:
+        return parser.parse_args(
+            ["--dataset-name", dataset_name, "--dataset-path", dataset_path]
+            + ["--num-prompts", "30", "--seed", str(seed), "--skip-chat-template"]
+        )
+
+    prompts_a = {s.prompt for s in get_samples(args_with_seed(0), hf_tokenizer)}
+    prompts_b = {s.prompt for s in get_samples(args_with_seed(42), hf_tokenizer)}
+
+    assert len(prompts_a) == len(prompts_b) == 30
+    assert prompts_a != prompts_b
 
 
 @pytest.mark.benchmark
