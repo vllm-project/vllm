@@ -22,10 +22,15 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
+from tests.v1.core.utils import (
+    get_kv_cache_configs,
+    new_kv_cache_layer,
+    new_sliding_window_layer,
+)
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group_from_specs,
 )
-from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
+from vllm.config import CacheConfig, KVTransferConfig, ModelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
@@ -37,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
 from vllm.v1.core.kv_cache_planning import (
     can_share_block_table,
     get_kv_cache_config_from_groups,
+    get_pipeline_stages,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
@@ -46,7 +52,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
     KVCacheSpec,
-    KVCacheStage,
     KVCacheTensor,
     MLAAttentionSpec,
 )
@@ -553,35 +558,45 @@ def test_register_separate_kv_head_groups(monkeypatch):
     }
 
 
-def test_cpu_blocks_follow_the_largest_pipeline_stage(monkeypatch):
-    """A worker sizes the pool by the stage whose blocks are largest, so every
-    stage allocates the same number of CPU blocks."""
-    num_blocks = 4
-    raw = torch.zeros(num_blocks * BLOCK_BYTES, dtype=torch.int8, device="cuda")
-    config = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=raw.nbytes,
-                layers=["layer.0"],
-                layer_stride=num_blocks * BLOCK_BYTES,
-                block_stride=BLOCK_BYTES,
-            )
-        ],
-        kv_cache_groups=[],
-        pipeline_stages=(
-            KVCacheStage((), BLOCK_BYTES),
-            KVCacheStage((), 3 * BLOCK_BYTES),
-        ),
-    )
-    worker = _make_worker(config, 8 * BLOCK_BYTES)
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+def test_cpu_blocks_follow_the_planned_pipeline_stages(monkeypatch, layout):
+    """Each stage's worker registers blocks of the bytes the planner reports
+    for its stage, overlaid cache groups included, and every worker sizes the
+    pool by the stage with the largest blocks."""
+    swa = new_sliding_window_layer(sliding_window=32)
+    full = new_kv_cache_layer()
+    # Two sliding-window layers per full attention layer, split 2 / 4. The
+    # groups overlay, so stage 0's two layers share one page per block.
+    layers = {f"layer{i}": full if i % 3 == 2 else swa for i in range(6)}
+    names = list(layers)
+    layer_configs = [
+        {name: layers[name] for name in names[:2]},
+        {name: layers[name] for name in names[2:]},
+    ]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**22] * 2)
+    stages = get_pipeline_stages(kv_cache_configs, 2)
+    page = full.spec.page_size_bytes
+    assert [stage.bytes_per_block for stage in stages] == [page, 2 * page]
+
     monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
-    try:
-        worker.register_kv_caches({"layer.0": raw.view(num_blocks, BLOCK_BYTES)})
-        assert worker.num_cpu_blocks == 2
-    finally:
-        if worker._backend is not None:
-            worker._backend.shutdown()
+    for kv_cache_config, stage in zip(kv_cache_configs, stages):
+        kv_cache_config.pipeline_stages = stages
+        kv_caches = allocate_kv_cache(kv_cache_config, torch.device("cuda"), layout)
+        worker = _make_worker(kv_cache_config, 4 * 2 * page)
+        try:
+            worker.register_kv_caches(kv_caches)
+            assert worker.gpu_kv_caches is not None
+            registered = sum(
+                cache.stride(0) * cache.element_size()
+                for cache in worker.gpu_kv_caches.values()
+            )
+            assert registered == stage.bytes_per_block
+            assert worker.num_cpu_blocks == 4
+        finally:
+            if worker._backend is not None:
+                worker._backend.shutdown()
 
 
 def _dsa_specs(num_layers: int, block_size: int) -> dict[str, KVCacheSpec]:
