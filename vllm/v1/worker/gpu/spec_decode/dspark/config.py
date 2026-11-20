@@ -167,10 +167,13 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         return super().num_lookahead_tokens
 
     def hash_factors(self) -> list[Any]:
-        # Adaptive verification and draft TP both change the draft graph.
+        # Adaptive verification, draft TP and the draft's quantization (its
+        # linears and its own lm_head / Markov head) all change the draft graph.
         return [
             self.spec_config.enable_adaptive_verification,
             self.spec_config.draft_tensor_parallel_size,
+            self.spec_config.quantization,
+            self.spec_config.draft_lm_head_quantization,
         ]
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:

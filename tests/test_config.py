@@ -3416,8 +3416,27 @@ def test_dspark_compile_factors_hash_graph_settings_once():
 
     factors = config.compile_factors()
 
-    assert factors["speculator"] == (True, 4)
+    assert factors["speculator"] == (True, 4, None, None)
     assert "dspark" not in factors
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("quantization", "fp8_per_channel"),
+        ("draft_lm_head_quantization", "fp8"),
+    ],
+)
+def test_dspark_compile_factors_hash_draft_quantization(field_name, value):
+    """A BF16 and a quantized draft must not share a compile-cache entry."""
+    config = SpeculativeConfig(model="ngram", num_speculative_tokens=2)
+    config.method = "dspark"
+    before = config.compile_factors()
+    setattr(config, field_name, value)
+    after = config.compile_factors()
+
+    assert before["speculator"] != after["speculator"]
+    assert value in after["speculator"]
 
 
 @dataclass(slots=True)
