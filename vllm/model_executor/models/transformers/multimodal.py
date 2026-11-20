@@ -187,6 +187,20 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _fuses_audio_into_video(self) -> bool:
         return bool(_get_load_audio_from_video(self.ctx.get_merged_mm_kwargs({})))
 
+    def _get_placeholder_ids(self, modality: str) -> list[int]:
+        token = getattr(self.get_hf_processor(), f"{modality}_token")
+        if isinstance(token, str):
+            tokenizer = self.get_tokenizer()
+            return cached_encode(tokenizer, token, add_special_tokens=False)
+        if isinstance(token, int):
+            return [token]
+        return list(token)
+
+    def _get_placeholder_id(self, modality: str) -> int | None:
+        """The placeholder token id, if the placeholder is a single token."""
+        ids = self._get_placeholder_ids(modality)
+        return ids[0] if len(ids) == 1 else None
+
     def _get_audio_sampling_rate(self) -> float:
         sub = self._get_audio_processor()
         if sub is not None and hasattr(sub, "sampling_rate"):
@@ -815,21 +829,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         """Replace each modality's placeholder token with the token ids that item's
         replacement text encodes to, marking which of them hold embeddings."""
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-
-        def get_target_token_ids(token: str | int | Sequence[int]) -> list[int]:
-            if isinstance(token, str):
-                return cached_encode(tokenizer, token, add_special_tokens=False)
-            if isinstance(token, int):
-                return [token]
-            return list(token)
-
         updates = []
         for modality, items in out_mm_kwargs.items():
-            token = getattr(hf_processor, f"{modality}_token")
-            target = get_target_token_ids(token)
-            placeholder_id = target[0] if len(target) == 1 else None
+            target = self.info._get_placeholder_ids(modality)
+            placeholder_id = self.info._get_placeholder_id(modality)
             # Popped so they are neither cached nor sent to the model; the updates
             # they produce are cached alongside the item instead
             replacements = []
@@ -855,12 +858,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
         """The placeholders for audios folded into videos, which share their span."""
-        hf_processor = self.info.get_hf_processor()
-        tokenizer = self.info.get_tokenizer()
-        audio_token_id = cached_encode(
-            tokenizer, hf_processor.audio_token, add_special_tokens=False
-        )[0]
-
+        audio_token_id = self.info._get_placeholder_id("audio")
         audio_placeholders = []
         for item_idx, video in enumerate(placeholders["video"]):
             audio_placeholders.append(
@@ -1064,11 +1062,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 cached_encode(tokenizer, entry["replacement"], add_special_tokens=False)
             )
 
-        audio_token_id = None
+        audio_token_id = self.info._get_placeholder_id("audio")
         if load_audio_from_video:
-            audio_token_id = cached_encode(
-                tokenizer, hf_processor.audio_token, add_special_tokens=False
-            )[0]
             replacements["audio"] = [
                 seq for seq in replacements["video"] if audio_token_id in seq
             ]
@@ -1095,11 +1090,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     if grid is not None
                     else torch.ones(len(seqs), dtype=torch.long)
                 )
-                target = cached_encode(
-                    tokenizer, hf_processor.video_token, add_special_tokens=False
-                )
                 hf_inputs["num_video_tokens"] = _count_embed_tokens(
-                    seqs, target[0] if len(target) == 1 else None
+                    seqs, self.info._get_placeholder_id("video")
                 )
 
         hf_inputs.pop("input_ids")
