@@ -187,7 +187,6 @@ class SessionObjectWriter:
         self._enqueued = 0
         self._taken = 0
         self._abandon_upto = 0
-        self._abandon_lock = threading.Lock()
         self._closed = threading.Event()
         self._queue: queue.Queue[tuple[list[str], list[bytes]] | None] = queue.Queue(
             maxsize=max_pending_batches
@@ -239,11 +238,10 @@ class SessionObjectWriter:
 
     def _write(self, batch: tuple[list[str], list[bytes]]) -> None:
         while True:
-            with self._abandon_lock:
-                if self._taken <= self._abandon_upto:
-                    self._drop(batch[0], "a put hung while they were queued")
-                    return
-                self._busy_since = time.monotonic()
+            if self._taken <= self._abandon_upto:
+                self._drop(batch[0], "a put hung while they were queued")
+                return
+            self._busy_since = time.monotonic()
             try:
                 self._store.put_batch(*batch)
             except BlockObjectStoreError as error:
@@ -278,7 +276,7 @@ class SessionObjectWriter:
         if not self._queue.unfinished_tasks:
             self._last_progress = time.monotonic()
         while True:
-            wait = not (self._dropped or self._stalled() or self._hung())
+            wait = not (self._dropped or self._stalled())
             try:
                 self._queue.put(batch, wait, _PUT_RETRY_INTERVAL_S)
                 self._enqueued += 1
@@ -296,10 +294,9 @@ class SessionObjectWriter:
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         with self._queue.all_tasks_done:
             while self._queue.unfinished_tasks and self._error is None:
-                with self._abandon_lock:
-                    if self._hung():
-                        self._abandon_upto = self._enqueued
-                        break
+                if self._hung():
+                    self._abandon_upto = self._enqueued
+                    break
                 if deadline is not None and time.monotonic() >= deadline:
                     raise BlockObjectStoreError(
                         "auxiliary output objects were not written in time"
