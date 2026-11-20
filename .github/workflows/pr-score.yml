@@ -1,0 +1,41 @@
+name: PR scores
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+concurrency:
+  group: pr-score-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: read
+  checks: read
+  statuses: read
+  pull-requests: write
+
+jobs:
+  score:
+    if: vars.PR_SCORE_API_URL != '' && vars.PR_SCORE_MODEL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Only the workflow revision supplies executable code and the rubric.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/workflows/scripts
+            .agents/skills/score-pr
+            .agents/skills/pr-checklist
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_SCORE_API_URL: ${{ vars.PR_SCORE_API_URL }}
+          PR_SCORE_MODEL: ${{ vars.PR_SCORE_MODEL }}
+          PR_SCORE_API_KEY: ${{ secrets.PR_SCORE_API_KEY }}
+        with:
+          script: |
+            const score = require('./.github/workflows/scripts/score_pr.cjs');
+            await score(github, context, core);
