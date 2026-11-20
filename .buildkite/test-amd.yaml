@@ -1320,6 +1320,21 @@ steps:
     kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
+- label: ":amd: (MI300) mHC Kernels"
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - tests/kernels/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/mhc
+
 - label: ":amd: (MI300) MiniMax Reduce RMS Kernels" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]

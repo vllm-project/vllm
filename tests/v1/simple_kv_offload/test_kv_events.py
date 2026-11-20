@@ -132,7 +132,7 @@ def _make_mixed_kv_cache_config(
                 m_layers,
                 m_spec,
                 MambaManager,
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             )
         )
         m_bytes = _BYTES_PER_BLOCK * num_blocks
