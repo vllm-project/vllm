@@ -532,7 +532,7 @@ def _kpool_decode_update_batched_kernel(
     ape_ptr,
     ape_stride_0,
     slot_mapping_ptr,  # [B, NEXT_N] int32
-    positions_ptr,  # [B, NEXT_N] int32
+    positions_ptr,  # [B, NEXT_N] int32 or int64
     NEXT_N,  # runtime token count per request (no .item() needed)
     PAGE_SIZE: tl.constexpr,
     BUF_NUMEL_PER_PAGE: tl.constexpr,
@@ -552,8 +552,9 @@ def _kpool_decode_update_batched_kernel(
     Replaces the caller's per-token sequential launch loop. The intra-request
     iteration MUST stay in position order: a pool-completion at token t* reads
     the tail-ring slots that tokens t < t* (same request) just stashed in this
-    same invocation. `tl.range` iterates sequentially within the program, so
-    those stashes are visible to the later completion read. Cross-request
+    same invocation. The waves hold replicated copies of the BLOCK_D vector and
+    only one copy stores the stash, so every iteration ends with a barrier that
+    makes it visible to the other waves' later completion reads. Cross-request
     programs are independent (distinct tail blocks). RING >= POOL_SIZE.
     """
     req = tl.program_id(0)
@@ -687,6 +688,7 @@ def _kpool_decode_update_batched_kernel(
             score_current,
             mask=update_mask,
         )
+        tl.debug_barrier()
 
 
 def kpool_decode_update_and_maybe_write_cache_batched(
@@ -721,7 +723,8 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         slot_score: `[num_requests, next_n, head_dim]` bf16.
         ape: `[pool_size, head_dim]` fp32.
         slot_mapping: `[num_requests, next_n]` int32.
-        positions: `[num_requests, next_n]` int32.
+        positions: `[num_requests, next_n]` int32 or int64 (pass the
+            model's int64 positions directly; no narrowing copy needed).
         pool_size: Number of tokens compressed into one cache entry.
         head_dim: Indexer head dimension.
         round_scale: Round each fp8 scale down to a power of two.
@@ -877,7 +880,7 @@ def append_tail_to_topk(
     tail_count = seq_len - tail_start  # in [0, pool_size)
 
     cols = torch.arange(out_cols, device=topk_result.device)[None, :]
-    history_len = n_cols
+    history_len = tail_start.clamp(max=n_cols)[:, None]
     is_history = cols < history_len
     tail_off = cols - history_len
     is_tail = (tail_off >= 0) & (tail_off < tail_count[:, None])
@@ -911,12 +914,13 @@ def append_tail_to_topk(
 @triton.jit
 def _expand_pools_and_append_tail_kernel(
     pool_ids_ptr,  # [rows, n_groups], int (any int dtype)
-    seq_lens_ptr,  # [rows], int32 (token-granular seq_len)
-    out_ptr,  # [rows, out_cols], int32
+    seq_lens_ptr,  # [rows], int32 or int64 (seq_len - SEQ_LEN_OFFSET)
+    out_ptr,  # [rows, >= out_cols], int32
     topk,  # n_groups * pool_size
-    out_cols,  # topk + pool_size - 1
+    out_cols,  # columns to write: >= topk + pool_size - 1; extra cols get -1
     POOL_SIZE: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
+    SEQ_LEN_OFFSET: tl.constexpr,
     pid_s0,
     out_s0,
 ):
@@ -927,21 +931,24 @@ def _expand_pools_and_append_tail_kernel(
     cols = tile * BLOCK_COLS + tl.arange(0, BLOCK_COLS)
     mask = cols < out_cols
 
-    seq_len = tl.load(seq_lens_ptr + row)
+    # SEQ_LEN_OFFSET=1: callers pass positions, seq_len = pos + 1.
+    seq_len = tl.load(seq_lens_ptr + row).to(tl.int32) + SEQ_LEN_OFFSET
     pool_len = seq_len // POOL_SIZE
     tail_start = pool_len * POOL_SIZE
     tail_count = seq_len - tail_start  # in [0, POOL_SIZE)
+    # The tail follows the selected pools: valid entries must form a prefix.
+    history_len = tl.minimum(tail_start, topk)
 
-    # History region [0, topk): expand selected pool g = cols // POOL_SIZE.
-    is_history = cols < topk
+    # History region: expand selected pool g = cols // POOL_SIZE.
+    is_history = cols < history_len
     g = cols // POOL_SIZE
     o = cols % POOL_SIZE
     pid = tl.load(pool_ids_ptr + row * pid_s0 + g, mask=mask & is_history, other=-1)
     hist_val = (pid * POOL_SIZE + o).to(tl.int32)
     hist_out = tl.where(pid >= 0, hist_val, -1)
 
-    # Tail region [topk, out_cols): the request's trailing incomplete pool.
-    tail_off = cols - topk
+    # Tail region: the request's trailing incomplete pool.
+    tail_off = cols - history_len
     is_tail = (tail_off >= 0) & (tail_off < tail_count)
     tail_val = (tail_start + tail_off).to(tl.int32)
     tail_out = tl.where(is_tail, tail_val, -1)
@@ -954,6 +961,9 @@ def expand_pools_and_append_tail(
     pool_ids: torch.Tensor,
     seq_lens: torch.Tensor,
     pool_size: int,
+    *,
+    seq_len_offset: int = 0,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fuse `expand_pools_to_tokens` + `append_tail_to_topk` (identity path).
 
@@ -963,11 +973,27 @@ def expand_pools_and_append_tail(
     The kernel derives `pool_len = seq_len // pool_size` internally, so the
     caller no longer needs to precompute it. Replaces ~25 elementwise kernels
     with one Triton launch.
+
+    `pool_ids` and `seq_lens` may be int32 or int64 (no cast needed). The
+    kernel reads `seq_lens[row] + seq_len_offset`, so callers can pass
+    `positions` with `seq_len_offset=1`.
+
+    `out` (optional, int32 `[rows, W]`, unit column stride, e.g. a row slice
+    of `topk_indices_buffer`) is filled in place, with -1 past column
+    `topk + pool_size - 1`, so the caller skips its own -1 fill and copy.
     """
     rows, n_groups = pool_ids.shape
     topk = n_groups * pool_size
-    out_cols = topk + pool_size - 1
-    out = torch.empty((rows, out_cols), dtype=torch.int32, device=pool_ids.device)
+    min_cols = topk + pool_size - 1
+    if out is None:
+        out = torch.empty((rows, min_cols), dtype=torch.int32, device=pool_ids.device)
+    else:
+        assert out.dtype == torch.int32
+        assert out.ndim == 2 and out.shape[0] == rows
+        assert out.shape[1] >= min_cols, (out.shape, min_cols)
+        assert out.stride(1) == 1
+    assert seq_lens.shape[0] >= rows and seq_lens.stride(0) == 1
+    out_cols = out.shape[1]
     BLOCK_COLS = 128
     n_tiles = triton.cdiv(out_cols, BLOCK_COLS)
     _expand_pools_and_append_tail_kernel[(rows, n_tiles)](
@@ -978,6 +1004,7 @@ def expand_pools_and_append_tail(
         out_cols,
         POOL_SIZE=pool_size,
         BLOCK_COLS=BLOCK_COLS,
+        SEQ_LEN_OFFSET=seq_len_offset,
         pid_s0=pool_ids.stride(0),
         out_s0=out.stride(0),
     )

@@ -180,7 +180,9 @@ def replace_parameter(
 
     Custom attributes set on `new_tensor` (e.g. kernel dispatch flags such as
     `is_shuffled`) are carried over to the parameter, except `weight_loader`,
-    which is always taken from the existing parameter.
+    which is always taken from the existing parameter, and the direct-reload
+    attributes `_ckpt` and `fill_on_reload`, which belong to the parameter they
+    were set on.
 
     Under direct reload, a `new_tensor` larger than the parameter at cold start
     may be written into the parameter's existing storage on a reload, so do not
@@ -214,7 +216,9 @@ def replace_parameter(
     new_tensor_attrs.pop("_weight_loader", None)
     # A checkpoint record belongs to the parameter it was recorded on (direct
     # reload); one on new_tensor (another checkpoint parameter) must not overwrite it.
+    # Likewise the reload zero-fill flag: it is declared per parameter.
     new_tensor_attrs.pop("_ckpt", None)
+    new_tensor_attrs.pop("fill_on_reload", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
@@ -236,12 +240,9 @@ def replace_parameter(
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
-            from vllm.model_executor.model_loader.reload.direct import (
-                direct_reload_enabled,
-            )
-
+            # a recorded checkpoint layout must keep its storage across reloads
             old_param.data = _in_own_storage(
-                old_param, new_tensor, whole_storage=direct_reload_enabled()
+                old_param, new_tensor, whole_storage=hasattr(old_param, "_ckpt")
             )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
