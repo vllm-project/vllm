@@ -41,9 +41,10 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     assert ctx.model_config.supports_multimodal_inputs is expected
 
 
-def test_mm_encoder_attn_backend_str_conversion():
-    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")
-    assert config.mm_encoder_attn_backend == AttentionBackendEnum.FLASH_ATTN
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "TORCH_SDPA"])
+def test_mm_encoder_attn_backend_str_conversion(backend):
+    config = MultiModalConfig(mm_encoder_attn_backend=backend)
+    assert config.mm_encoder_attn_backend == AttentionBackendEnum[backend]
 
 
 def test_mm_encoder_attn_backend_invalid():
@@ -670,6 +671,17 @@ def test_consumer_resolves_mm_embedding_inputs(
 
     assert mm_config.allow_missing_mm_embeddings is expected
     assert mm_config.enable_mm_embeds is expected
+
+
+def test_mm_embeds_disabled_per_modality():
+    mm_config = MultiModalConfig(
+        enable_mm_embeds=True,
+        limit_per_prompt={"image": 0, "video": {"count": 0, "allow_embeds": False}},
+    )
+
+    assert mm_config.is_mm_embeds_enabled("image")
+    assert mm_config.is_mm_embeds_enabled("audio")
+    assert not mm_config.is_mm_embeds_enabled("video")
 
 
 def test_vllm_config_runs_the_mm_processor_device_check():

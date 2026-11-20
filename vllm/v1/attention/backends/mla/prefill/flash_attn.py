@@ -62,7 +62,7 @@ FA4_MLA_PREFILL_CAUSAL_OPTIONS = (False, True)
 FA4_MLA_PREFILL_LSE_OPTIONS = (False, True)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FA4MLALayerConfig:
     """One distinct MLA prefill attention config a layer launches on FA4."""
 
@@ -75,7 +75,7 @@ class FA4MLALayerConfig:
 class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
     """FA4 MLA prefill compile-key wrapper used by generic JIT warmup."""
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         """High-level FA4 compile-only key used by vLLM warmup.
 
@@ -111,7 +111,7 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         assert kernel is not None
         return kernel(*args, **kwargs)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         batch_size: int,
@@ -346,7 +346,7 @@ class FA4SplitKVCombineKernel(VllmJitKernel["FA4SplitKVCombineKernel.CompileKey"
     owner has no vLLM runtime entry; `kernel` is its compile-only entry.
     """
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         head_dim: int
@@ -395,7 +395,7 @@ class FA4SplitKVCombineKernel(VllmJitKernel["FA4SplitKVCombineKernel.CompileKey"
                 ),
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

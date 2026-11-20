@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dis
+import inspect
 import itertools
 import os
 import sys
 from abc import abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
-from types import CodeType
+from types import CodeType, FrameType
 from typing import Any, ParamSpec, TypeVar
 
 import torch
@@ -29,6 +30,18 @@ logger = init_logger(__name__)
 
 R = TypeVar("R")
 P = ParamSpec("P")
+
+
+def _bound_instance(frame: FrameType) -> Any:
+    """The instance a method frame is bound to. Also handles frames of wrappers
+    that take `(*args, **kwargs)`, such as Transformers' `deprecate_kwarg`."""
+    code = frame.f_code
+    if code.co_argcount:
+        return frame.f_locals[code.co_varnames[0]]
+    if code.co_flags & inspect.CO_VARARGS:
+        args = frame.f_locals[code.co_varnames[code.co_kwonlyargcount]]
+        return args[0] if args else None
+    return None
 
 
 @contextmanager
@@ -177,9 +190,14 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            self._bytecode_hook_handle = (
-                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
-            )
+            # A model whose base class is also @support_torch_compile runs this
+            # twice; a second hook would outlive cleanup() and pin the model.
+            if getattr(self, "_bytecode_hook_handle", None) is None:
+                self._bytecode_hook_handle = (
+                    torch._dynamo.convert_frame.register_bytecode_hook(
+                        self.bytecode_hook
+                    )
+                )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -245,7 +263,7 @@ class TorchCompileWithNoGuardsWrapper:
         frame = frame.f_locals["frame"]
         assert frame.f_code == old_code
 
-        if frame.f_locals["self"] is not self:
+        if _bound_instance(frame) is not self:
             return
 
         self._compiled_bytecode = new_code
@@ -293,6 +311,7 @@ class TorchCompileWithNoGuardsWrapper:
         handle = getattr(self, "_bytecode_hook_handle", None)
         if handle is not None:
             handle.remove()
+            self._bytecode_hook_handle = None
 
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
@@ -366,3 +385,11 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
         compile_prefix=model._compile_prefix,
         is_encoder=model._is_encoder,
     )
+
+
+def remove_bytecode_hooks(model: torch.nn.Module) -> None:
+    """Remove the global bytecode hooks of model's compiled modules, which
+    otherwise keep them, and the weights they hold, alive."""
+    for module in model.modules():
+        if isinstance(module, TorchCompileWithNoGuardsWrapper):
+            module.cleanup()
