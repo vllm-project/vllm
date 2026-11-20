@@ -20,17 +20,16 @@ With prefix caching enabled, Mamba state is stored only on the Mamba block grid,
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled
-- `--prefix-match-unit` smaller than the Mamba block size
+- fine-grained prefix-cache hits enabled
 
 ```bash
 vllm serve <hybrid-model> \
-    --prefix-match-unit 64 \
     --enable-mamba-shared-prefix-checkpoint
 ```
 
-`--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. For hybrid Mamba models that is the block size itself, so no sub-block boundary exists and the flag has no effect.
+`--prefix-match-unit` sets the granularity at which prefix-cache keys are computed. When unset, vLLM chooses the smallest value of at least 64 tokens that keeps fine-grained hits enabled, and logs the resolved value. If no such value exists, it uses the greatest common divisor of the prefix-cacheable KV cache group block sizes.
 
-Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
+An explicit value must divide every prefix-cacheable group's block size. It must also keep fine-grained hits enabled, which requires matching per-state compression and equality with the block size of groups that only support block-aligned lookups, such as sliding-window attention. vLLM fails at startup if an explicit value would disable fine-grained hits.
 
 ### FlashInfer ReplaySSM
 
