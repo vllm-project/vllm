@@ -21,7 +21,6 @@ from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, TextContent
 
-from vllm import envs
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -319,6 +318,7 @@ class ParsableContext(ConversationContext):
         chat_template_content_format: ChatTemplateContentFormatOption,
         response_parser: Parser | None = None,
         enable_auto_tools: bool = False,
+        enable_tool_json_retry: bool = False,
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -332,6 +332,7 @@ class ParsableContext(ConversationContext):
         self.num_init_messages = len(response_messages)
         self.finish_reason: str | None = None
         self.enable_auto_tools = enable_auto_tools
+        self.enable_tool_json_retry = enable_tool_json_retry
 
         self.response_parser = response_parser or (
             parser_cls(tokenizer, request.tools) if parser_cls is not None else None
@@ -485,7 +486,7 @@ class ParsableContext(ConversationContext):
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+        if self.enable_tool_json_retry:
             try:
                 args = json.loads(last_msg.arguments)
             except json.JSONDecodeError as e:
@@ -529,7 +530,7 @@ class ParsableContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
         # tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+        if self.enable_tool_json_retry:
             try:
                 args = json.loads(last_msg.arguments)
             except json.JSONDecodeError as e:
@@ -644,6 +645,7 @@ class HarmonyContext(ConversationContext):
         function_tool_names: frozenset[str],
         response_parser: Parser | None = None,
         request: ResponsesRequest | None = None,
+        enable_tool_json_retry: bool = False,
     ):
         from vllm.parser.harmony import HarmonyParser, Segment
 
@@ -651,6 +653,7 @@ class HarmonyContext(ConversationContext):
 
         self._messages = messages
         self.request = request
+        self.enable_tool_json_retry = enable_tool_json_retry
         self.response_parser: HarmonyParser = response_parser
         self.finish_reason: str | None = None
         self.available_tools = available_tools
@@ -905,7 +908,7 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1]
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+        if self.enable_tool_json_retry:
             try:
                 args = json.loads(last_msg.content[0].text)
             except json.JSONDecodeError as e:
@@ -994,7 +997,7 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+        if self.enable_tool_json_retry:
             try:
                 args = json.loads(last_msg.content[0].text)
             except json.JSONDecodeError as e:
