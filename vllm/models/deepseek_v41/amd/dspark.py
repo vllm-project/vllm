@@ -48,6 +48,7 @@ from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
     _use_sequence_parallel,
 )
@@ -311,6 +312,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
 
+    packed_modules_mapping = DeepseekV41LLMForCausalLM.packed_modules_mapping
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -419,8 +422,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         are skipped here. `embed_tokens`/`lm_head` are aliased from the target.
         """
         # Draft MoE layers use the dspark_* expert counts, not the
-        # backbone's (see DeepseekV4MoE and the reference
-        # ModelArgs.get_moe_config).
+        # backbone's (see the reference ModelArgs.get_moe_config).
         n_draft_experts = (
             getattr(self.config, "dspark_n_routed_experts", 0)
             or self.config.n_routed_experts

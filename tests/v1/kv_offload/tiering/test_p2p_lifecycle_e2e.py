@@ -1,23 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import socket
 import time
 
 import pytest
 
 
 @pytest.fixture
-def p2p_control_peer():
+def reserve_ports():
+    """Return a function that holds free loopback ports until teardown.
+
+    Releasing a probe socket before the P2P tier binds lets any other
+    ephemeral bind or connect (NIXL/UCX, torch.distributed, the other engine)
+    take the port. The held sockets set `SO_REUSEADDR` and never listen, so
+    the kernel skips their ports for ephemeral allocation while libzmq, which
+    also sets `SO_REUSEADDR`, can still bind them.
+    """
+    with contextlib.ExitStack() as stack:
+
+        def reserve(count: int) -> list[int]:
+            ports = []
+            for _ in range(count):
+                sock = stack.enter_context(socket.socket())
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", 0))
+                ports.append(sock.getsockname()[1])
+            return ports
+
+        yield reserve
+
+
+@pytest.fixture
+def p2p_control_peer(reserve_ports):
     """A control-only peer: delay its handshake or fail fetches on demand."""
     import queue
-    import socket
     import threading
 
     from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
     from vllm.v1.kv_offload.tiering.p2p.control.zmq import ZmqTransport
 
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
+    (port,) = reserve_ports(1)
     handshake = threading.Event()
     reply_to_fetch = threading.Event()
     fetches: queue.Queue[dict] = queue.Queue()
@@ -84,7 +107,7 @@ def p2p_control_peer():
 
 
 def test_inference_reuses_a_finished_kv_request_id(
-    vllm_runner, monkeypatch, p2p_control_peer
+    vllm_runner, monkeypatch, p2p_control_peer, reserve_ports
 ):
     """A cancellation's late failure must not suppress a later request's fetch."""
     from vllm import SamplingParams
@@ -94,11 +117,7 @@ def test_inference_reuses_a_finished_kv_request_id(
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "120")
     peer_port, handshake, reply_to_fetch, fetches = p2p_control_peer
-    import socket
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        local_port = sock.getsockname()[1]
+    (local_port,) = reserve_ports(1)
     config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -239,10 +258,11 @@ def _serve_p2p_inference_source(port, ready, stop):
         llm.llm_engine.engine_core.shutdown()
 
 
-def test_inference_uses_completion_buffered_after_disconnect(vllm_runner, monkeypatch):
+def test_inference_uses_completion_buffered_after_disconnect(
+    vllm_runner, monkeypatch, reserve_ports
+):
     """A completed NIXL transfer must not become a failed promotion on disconnect."""
     import multiprocessing
-    import socket
     import threading
 
     import msgspec.msgpack
@@ -254,11 +274,7 @@ def test_inference_uses_completion_buffered_after_disconnect(vllm_runner, monkey
 
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    ports = []
-    for _ in range(2):
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            ports.append(sock.getsockname()[1])
+    ports = reserve_ports(2)
     source_id = f"127.0.0.1:{ports[0]}".encode()
     target_endpoint = f"tcp://127.0.0.1:{ports[1]}".encode()
     buffered = threading.Event()
