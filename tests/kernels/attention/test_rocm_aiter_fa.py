@@ -1315,12 +1315,12 @@ def test_aiter_fa_flydsl_pa_decode_requirements():
         AiterFlashAttentionBackend,
         AiterFlashAttentionImpl,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     config = _flydsl_pa_decode_config()
 
     def kernel_block_sizes(head_size: int) -> list:
-        spec = FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=64,
             num_kv_heads=2,
             head_size=head_size,
@@ -1385,7 +1385,7 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
         AiterFlashAttentionImpl,
         AiterFlashAttentionMetadataBuilder,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     _assert_aiter_supported()
     block_size, num_blocks, head_size = 64, 64, 256
@@ -1418,7 +1418,7 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
         assert isinstance(impl, AiterFlashAttentionImpl)
         assert impl.use_flydsl_pa_decode
         builder = AiterFlashAttentionMetadataBuilder(
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=num_kv_heads,
                 head_size=head_size,

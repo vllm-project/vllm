@@ -558,7 +558,7 @@ class AiterFlashAttentionMetadataBuilder(
             logger.warning_once(
                 "FlyDSL paged-attention decode needs one GQA ratio per KV cache "
                 "group, got %s; using the default decode path.",
-                sorted(flydsl_num_queries_per_kv),
+                tuple(sorted(flydsl_num_queries_per_kv)),
             )
             self.use_flydsl_pa_decode = False
         self._flydsl_num_queries_per_kv = min(flydsl_num_queries_per_kv, default=1)
@@ -696,7 +696,7 @@ class AiterFlashAttentionMetadataBuilder(
         decode_query_lens: torch.Tensor,
         max_query_len: int,
         num_decode_tokens: int,
-        causal: bool,
+        causal: bool | torch.Tensor,
     ) -> bool:
         """Whether the FlyDSL decode can take this batch's decodes.
 
@@ -709,8 +709,10 @@ class AiterFlashAttentionMetadataBuilder(
             return False
         if max_query_len == 1:
             return num_decode_tokens == decode_query_lens.numel()
+        # The kernel masks every request causally; a tensor may mark some
+        # requests non-causal.
         return (
-            causal
+            causal is True
             and num_decode_tokens == decode_query_lens.numel() * max_query_len
             and bool(
                 ((decode_query_lens == max_query_len) | (decode_query_lens == 0)).all()
@@ -795,7 +797,7 @@ class AiterFlashAttentionMetadataBuilder(
         decode_metadata = None
         if num_decodes > 0:
             decode_query_lens = query_lens_cpu[:num_decodes]
-            decode_max_query_len = decode_query_lens.max().item()
+            decode_max_query_len = int(decode_query_lens.max())
             swa_block_table, swa_seq_lens, swa_max_seq_len = None, None, 0
             if decode_max_query_len == 1:
                 swa_block_table, swa_seq_lens, swa_max_seq_len = (
