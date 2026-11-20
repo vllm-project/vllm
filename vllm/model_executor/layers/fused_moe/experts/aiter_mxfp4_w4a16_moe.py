@@ -349,12 +349,25 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def is_supported_config(
         cls, moe_config, weight_key, activation_key, activation_format
     ):
-        if moe_config.has_hash_routing and moe_config.moe_parallel_config.dp_size > 1:
+        from vllm.platforms.rocm import on_gfx1250
+
+        parallel_config = moe_config.moe_parallel_config
+        if moe_config.has_hash_routing and parallel_config.dp_size > 1:
             return False, (
                 "kernel does not support hash routing with data parallelism: "
                 "the naive DP prepare/finalize all-gathers router logits across "
                 "DP ranks but not input_ids, so hash routing would index "
                 "out of range"
+            )
+        if (
+            parallel_config.use_ep
+            and moe_config.activation == MoEActivation.SILU
+            and on_gfx1250()
+        ):
+            return False, (
+                "kernel does not support expert parallelism with SILU on "
+                "gfx1250: SILU falls back to the a8w4 kernel there, which "
+                "takes no expert_map"
             )
         return super().is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
@@ -387,12 +400,11 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        # DP is served by the naive all-gather / reduce-scatter monolithic
-        # prepare/finalize, so only the all2all paths remain unsupported.
+        # DP+EP unsupported unless using the naive all-gather/reduce-scatter all2all
         return (
             not moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.enable_eplb
-        )
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_routing_method(

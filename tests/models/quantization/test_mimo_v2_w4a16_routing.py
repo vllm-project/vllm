@@ -73,6 +73,30 @@ def dp_parallel_config(dp_size: int = 2) -> FusedMoEParallelConfig:
     )
 
 
+def dp_ep_parallel_config(
+    dp_size: int = 2, all2all_backend: str = "allgather_reducescatter"
+) -> FusedMoEParallelConfig:
+    """DP attention with expert parallelism (``-dp N --enable-expert-parallel``).
+
+    ``use_ep`` is True and ``dp_size > 1``, so ``use_all2all_kernels`` is set
+    and the backend decides whether the kernel can serve the deployment.
+    """
+    return FusedMoEParallelConfig(
+        tp_size=1,
+        tp_rank=0,
+        pcp_size=1,
+        pcp_rank=0,
+        dp_size=dp_size,
+        dp_rank=0,
+        ep_size=dp_size,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend=all2all_backend,
+        enable_eplb=False,
+    )
+
+
 def mimo_moe_config(num_experts: int = MIMO_EXPERTS) -> FusedMoEConfig:
     return FusedMoEConfig(
         num_experts=num_experts,
@@ -113,6 +137,53 @@ def test_aiter_w4a16_supports_dp_without_all2all() -> None:
     all2all paths stay unsupported.
     """
     assert AiterW4A16ExpertsMonolithic._supports_parallel_config(dp_parallel_config())
+
+
+@pytest.mark.parametrize(
+    "all2all_backend,supported",
+    [("allgather_reducescatter", True), ("deepep_high_throughput", False)],
+)
+def test_aiter_w4a16_dp_ep_support_follows_all2all_backend(
+    all2all_backend: str, supported: bool
+) -> None:
+    """DP + EP is only servable when the all2all is allgather/RS.
+
+    That backend resolves to the same naive monolithic prepare/finalize as
+    DP-without-EP, so the only delta is the ``expert_map`` the kernel already
+    consumes for TP + EP. A dispatching backend instead hands the kernel a
+    layout it cannot read.
+    """
+    assert (
+        AiterW4A16ExpertsMonolithic._supports_parallel_config(
+            dp_ep_parallel_config(all2all_backend=all2all_backend)
+        )
+        is supported
+    )
+
+
+def test_aiter_w4a16_rejects_ep_with_silu_on_gfx1250(monkeypatch) -> None:
+    """SILU on gfx1250 runs the a8w4 kernel, which takes no ``expert_map``.
+
+    The gate has to reject it, otherwise the oracle picks this backend and the
+    forward pass raises ``NotImplementedError`` mid-step.
+    """
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: True)
+    moe_config = dataclasses.replace(
+        mimo_moe_config(),
+        moe_parallel_config=dp_ep_parallel_config(),
+        activation=MoEActivation.SILU,
+    )
+
+    supported, reason = AiterW4A16ExpertsMonolithic.is_supported_config(
+        AiterW4A16ExpertsMonolithic,
+        moe_config,
+        kMxfp4Static,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert not supported
+    assert reason is not None and "gfx1250" in reason
 
 
 def test_aiter_w4a16_rejects_hash_routing_under_dp() -> None:
