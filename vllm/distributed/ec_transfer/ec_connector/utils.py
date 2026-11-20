@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EC connector helper utilities."""
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -53,7 +54,7 @@ class PlaceholderMetadataResolver:
 
 
 def collect_ec_item_metadata(
-    mm_features: "list[MultiModalFeatureSpec]",
+    mm_features: "Sequence[MultiModalFeatureSpec]",
     resolver: PlaceholderMetadataResolver,
 ) -> dict[str, dict[str, Any]]:
     """Build one `ec_transfer_params` entry per feature for `request_finished()`.

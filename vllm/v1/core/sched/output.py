@@ -66,7 +66,9 @@ class NewRequestData:
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
             mm_features=strip_covered_mm_data(
-                request.mm_features,
+                # Rebuilds packed features: the scheduler keeps packing them,
+                # and a uniprocess worker shares this list.
+                list(request.mm_features),
                 request.num_computed_tokens,
                 uses_mrope=uses_mrope,
             ),

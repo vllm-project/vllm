@@ -445,7 +445,7 @@ def test_consumed_cpu_input_updates_are_request_local_and_replayable():
     cache.encoder_outputs["same"] = torch.ones(8, HIDDEN)
     cache.update_encoder_inputs("a", {0: None})
     assert cache.mm_features["a"][0].data is None
-    assert cache.mm_features["a"][0].mm_position is feature.mm_position
+    assert cache.mm_features["a"][0].mm_position == feature.mm_position
     assert cache.mm_features["a"][1].data is feature.data
     assert cache.mm_features["b"][0].data is feature.data
     assert source[0].data is not None
@@ -476,6 +476,33 @@ def test_consumed_cpu_input_releases_storage_before_request_finishes():
     cache.update_encoder_inputs("a", {0: None})
     assert ref() is None
     assert "a" in cache.mm_features
+
+
+def test_released_inputs_are_packed_until_replayed():
+    features = [
+        replace(
+            _feature(f"h{i}", 8 * i, 8),
+            data=_embeds_item(torch.full((8, HIDDEN), float(i))),
+        )
+        for i in range(4)
+    ]
+    cache = EncoderCache()
+    cache.add_request("a", features)
+    packed = cache.mm_features["a"]
+
+    cache.update_encoder_inputs("a", {0: None, 1: None, 2: None})
+    assert packed.num_packed == 3
+
+    cache.update_encoder_inputs("a", {1: features[1].data})
+    assert packed.num_packed == 1
+    assert packed[1].data is features[1].data
+
+    cache.update_encoder_inputs("a", {1: None})
+    assert packed.num_packed == 3
+    assert list(packed) == [
+        *(replace(feature, data=None) for feature in features[:3]),
+        features[3],
+    ]
 
 
 # ------------------ encoder cache residency profiling ------------------ #

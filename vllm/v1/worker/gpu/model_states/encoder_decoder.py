@@ -174,7 +174,7 @@ class EncoderDecoderModelState(ModelState):
         if not for_capture:
             # During normal execution, use actual encoder lengths.
             for i, req_id in enumerate(req_ids):
-                mm_features = self.encoder_cache.mm_features.get(req_id, [])
+                mm_features = self.encoder_cache.mm_features.get(req_id, ())
                 encoder_seq_lens_np[i] = sum(
                     feature.mm_position.get_num_embeds() for feature in mm_features
                 )

@@ -150,7 +150,7 @@ class EncoderDecoderModelState(ModelState):
         encoder_seq_lens_np = self.encoder_seq_lens_np[:num_reqs]
         encoder_seq_lens_np.fill(0)
         for i, req_id in enumerate(req_ids):
-            mm_features = self.encoder_cache.mm_features.get(req_id, [])
+            mm_features = self.encoder_cache.mm_features.get(req_id, ())
             encoder_seq_lens_np[i] = sum(
                 feature.mm_position.get_num_embeds() for feature in mm_features
             )

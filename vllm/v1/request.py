@@ -4,7 +4,7 @@
 import enum
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.packed_features import PackedMMFeatures
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
@@ -41,7 +42,7 @@ class StreamingUpdate:
     with new input data.
     """
 
-    mm_features: list[MultiModalFeatureSpec] | None
+    mm_features: Sequence[MultiModalFeatureSpec] | None
     prompt_token_ids: list[int] | None
     max_tokens: int
     arrival_time: float
@@ -197,7 +198,9 @@ class Request:
         self.cache_salt: str | None = cache_salt
 
         # Multi-modal related
-        self.mm_features = mm_features or []
+        self.mm_features: list[MultiModalFeatureSpec] | PackedMMFeatures = (
+            mm_features or []
+        )
         # Number of leading `mm_features` the workers have received.
         self.num_sent_mm_features = 0
 

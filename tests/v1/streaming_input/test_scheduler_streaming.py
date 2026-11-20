@@ -16,10 +16,13 @@ from tests.v1.core.utils import create_scheduler as create_spec_scheduler
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
     MultiModalFeatureSpec,
+    MultiModalFieldElem,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.multimodal.packed_features import PackedMMFeatures
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
@@ -921,6 +924,51 @@ def test_session_resumes_in_place(async_scheduling, chunk_queued_before_stop):
         assert output.encoder_input_updates == ({"session": {0: None}} if i else {})
 
     assert list(session.all_token_ids) == [1, 2, 3, 10, 11]
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_session_packs_consumed_features_and_replays_them(async_scheduling):
+    """A session packs the features of the chunks the workers are done with,
+    and replays all of them when it is rebuilt after a preemption."""
+    scheduler = create_async_scheduler(
+        model="llava-hf/llava-1.5-7b-hf", async_scheduling=async_scheduling
+    )
+    session = _chunk(prompt_token_ids=[1, 2, 3])
+    scheduler.add_request(session)
+    output = scheduler.schedule()
+
+    features = []
+    for i in range(8):
+        audio = torch.full((160,), float(i))
+        feature = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem(
+                {"audio": MultiModalFieldElem(audio, MultiModalBatchedField())}
+            ),
+            modality="audio",
+            identifier=f"audio-{i}",
+            mm_position=PlaceholderRange(offset=0, length=1),
+        )
+        features.append(feature)
+        scheduler.update_from_output(output, _model_output("session", [10 + i]))
+        scheduler.add_request(_chunk(mm_features=[feature]))
+        output = scheduler.schedule()
+        assert output.scheduled_encoder_inputs == {"session": [i]}
+
+    # The last two chunks are still being encoded or released by the workers.
+    assert isinstance(session.mm_features, PackedMMFeatures)
+    assert session.mm_features.num_packed == 6
+
+    scheduler.running.remove(session)
+    scheduler._preempt_request(session, timestamp=0.0)
+    scheduler.update_from_output(output, _model_output("session", [18]))
+    # Evicted while the session waits, so that all its chunks are encoded again.
+    scheduler.reset_encoder_cache()
+    scheduler.add_request(_chunk())
+    output = scheduler.schedule()
+
+    [new_request] = output.scheduled_new_reqs
+    assert new_request.mm_features == features
+    assert output.scheduled_encoder_inputs == {"session": list(range(8))}
 
 
 @pytest.mark.parametrize("chunk_queued_before_stop", [False, True])

@@ -61,7 +61,7 @@ def test_consumed_input_updates_are_request_local_and_replayable() -> None:
     cache.update_encoder_inputs("a", {0: None})
 
     assert cache.mm_features["a"][0].data is None
-    assert cache.mm_features["a"][0].mm_position is feature.mm_position
+    assert cache.mm_features["a"][0].mm_position == feature.mm_position
     assert cache.mm_features["a"][1].data is feature.data
     assert cache.mm_features["b"][0].data is feature.data
     assert source[0].data is not None

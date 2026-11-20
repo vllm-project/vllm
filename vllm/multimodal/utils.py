@@ -31,6 +31,7 @@ from .media import (
     MediaWithBytes,
     VideoMediaIO,
 )
+from .packed_features import PackedMMFeatures
 
 if TYPE_CHECKING:
     import torch.types
@@ -120,7 +121,7 @@ def encode_video_url(
 
 
 def get_mm_features_in_window(
-    mm_features: list[MultiModalFeatureSpec],
+    mm_features: Sequence[MultiModalFeatureSpec],
     start: int,
     end: int,
 ) -> tuple[int, int]:
@@ -129,6 +130,8 @@ def get_mm_features_in_window(
     Assumes mm_features are sorted by offset and non-overlapping, so
     offset + length is also sorted.
     """
+    if isinstance(mm_features, PackedMMFeatures):
+        return mm_features.window(start, end)
     lo = bisect.bisect_left(
         mm_features,
         start + 1,

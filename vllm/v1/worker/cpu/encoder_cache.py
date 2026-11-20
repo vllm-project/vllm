@@ -6,12 +6,13 @@ from dataclasses import replace
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+from vllm.multimodal.packed_features import PackedMMFeatures
 
 
 class EncoderCache:
     def __init__(self):
         # req_id -> MM features
-        self.mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
+        self.mm_features: dict[str, PackedMMFeatures] = {}
         # MM hash -> encoder outputs
         self.encoder_outputs: dict[str, torch.Tensor] = {}
 
@@ -22,7 +23,9 @@ class EncoderCache:
         self, req_id: str, mm_features: list[MultiModalFeatureSpec]
     ) -> None:
         # The uniprocess executor can share this list with EngineCore.
-        self.mm_features[req_id] = list(mm_features)
+        features = PackedMMFeatures(list(mm_features))
+        _pack_consumed(features)
+        self.mm_features[req_id] = features
 
     def remove_request(self, req_id: str) -> None:
         self.mm_features.pop(req_id, None)
@@ -34,6 +37,7 @@ class EncoderCache:
         for input_id, data in updates.items():
             # Replace entries so EngineCore keeps its original payload for replay.
             features[input_id] = replace(features[input_id], data=data)
+        _pack_consumed(features)
 
     def reset_mm_cache(self) -> None:
         """Clear the multi-modal cache that was used during profiling,
@@ -52,3 +56,10 @@ class EncoderCache:
 
     def free_encoder_cache(self, mm_hash: str) -> None:
         self.encoder_outputs.pop(mm_hash, None)
+
+
+def _pack_consumed(features: PackedMMFeatures) -> None:
+    """Pack the leading features without data: EngineCore drops the data once
+    an input is consumed, and sends it again only on a rewind, which unpacks
+    the feature."""
+    features.pack_while(lambda _, feature: feature.data is None)

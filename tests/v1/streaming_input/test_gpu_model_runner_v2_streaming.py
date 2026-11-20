@@ -135,7 +135,7 @@ def test_e2e_streaming_with_multimodal_features(
     runner.add_requests(_make_scheduler_output([initial_req_data]))
     assert req_id in req_states.req_id_to_index
 
-    assert runner.encoder_cache.mm_features[req_id] == [mm_feature_1]
+    assert list(runner.encoder_cache.mm_features[req_id]) == [mm_feature_1]
 
     # Step 2: Create streaming update with additional multimodal feature
     # The scheduler has folded the intermediate output (100) into
@@ -163,7 +163,10 @@ def test_e2e_streaming_with_multimodal_features(
     assert len(req_states.free_indices) == initial_free - 1
     assert sum(1 for v in req_states.index_to_req_id.values() if v == req_id) == 1
 
-    assert runner.encoder_cache.mm_features[req_id] == [mm_feature_1, mm_feature_2]
+    assert list(runner.encoder_cache.mm_features[req_id]) == [
+        mm_feature_1,
+        mm_feature_2,
+    ]
     new_idx = req_states.req_id_to_index[req_id]
 
     # Verify updated prefill length

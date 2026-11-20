@@ -34,6 +34,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+from vllm.multimodal.packed_features import PackedMMFeatures
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
 from vllm.utils.math_utils import cdiv
@@ -1999,6 +2000,7 @@ class Scheduler(SchedulerInterface):
             return False
 
         assert start >= session.num_computed_tokens
+        self._pack_consumed_mm_features(session)
         if update.mm_features:
             for mm_feature in update.mm_features:
                 mm_feature.mm_position = replace(
@@ -2047,6 +2049,32 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
         return True
+
+    def _pack_consumed_mm_features(self, session: Request) -> None:
+        """Pack the session's features that the workers no longer encode.
+
+        A session keeps the features of all its input chunks to replay them
+        after a preemption. As objects, they would slow down full GC passes
+        more and more as the session goes on.
+        """
+        features = session.mm_features
+        if not isinstance(features, PackedMMFeatures):
+            if not features:
+                return
+            features = session.mm_features = PackedMMFeatures(features)
+        pending = self._pending_encoder_input_ids.get(session.request_id, ())
+        cached = self.encoder_cache_manager.get_cached_input_ids(session)
+        # Confirmed progress, as in _get_encoder_input_updates.
+        computed = session.num_computed_tokens - max(
+            session.num_output_placeholders, session.num_in_flight_tokens
+        )
+        features.pack_while(
+            lambda input_id, feature: (
+                input_id not in pending
+                and input_id not in cached
+                and feature.mm_position.offset + feature.mm_position.length <= computed
+            )
+        )
 
     def _emit_dropped_streaming_updates(
         self, outputs: dict[int, list[EngineCoreOutput]]
