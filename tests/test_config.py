@@ -1032,9 +1032,9 @@ def test_no_hisparse_connector_keeps_attention_config_unset(monkeypatch):
     assert config.attention_config.hisparse_config is None
 
 
-def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    paths and off breakable cudagraphs by default."""
+def test_rocm_breakable_cudagraph_architecture_defaults(monkeypatch):
+    """ROCm enables breakable cudagraphs for supported DSA architectures
+    while keeping DeepseekV32ForCausalLM excluded by default."""
     from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
