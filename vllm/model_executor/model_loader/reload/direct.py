@@ -151,17 +151,12 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
     params = {
         _unwrapped(n): p for n, p in model.named_parameters(remove_duplicate=False)
     }
-
-    def resolve(name: str) -> torch.Tensor | str:
-        name = _unwrapped(name)
-        return params.get(name, name)
-
-    delivered = {resolve(n) for n in loaded}
+    delivered = {params.get(n, n) for n in map(_unwrapped, loaded)}
     missing = sorted(
         n
-        for n in required
-        if resolve(n) not in delivered
-        and not any(fnmatchcase(_unwrapped(n), _unwrapped(p)) for p in preserved)
+        for n in map(_unwrapped, required)
+        if params.get(n, n) not in delivered
+        and not any(fnmatchcase(n, _unwrapped(p)) for p in preserved)
     )
     if missing:
         raise RuntimeError(
