@@ -28,6 +28,7 @@ from vllm.distributed.aux_output_connector.connector import (
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -120,7 +121,7 @@ def test_mamba_decode_checkpoint_publication(
         block_size=block_size,
         kv_cache_layer_config=MambaManager.layer_config(
             MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
             num_speculative_blocks=int(num_speculative_tokens > 0),
         ),
     )
@@ -1502,7 +1503,7 @@ def test_cache_aware_admission_is_safe_on_a_mamba_spec():
         cache_aware_admission_threshold=0.0,
         kv_cache_layer_config=MambaManager.layer_config(
             MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
     )
     assert scheduler.cache_aware_window == 4
@@ -5875,6 +5876,83 @@ def test_ec_connector_cache_hit_external_load(use_kv_connector):
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_cache_miss_fails_metadata_only_item(use_kv_connector):
+    """An item with only placeholder metadata cannot be encoded locally.
+
+    On an EC miss the request must finish with an error rather than hand the
+    vision encoder an item with no pixels.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        mm_positions=[[PlaceholderRange(offset=0, length=100)]],
+    )[0]
+    grid = MultiModalFieldElem(
+        data=torch.tensor([1, 10, 10]), field=MultiModalBatchedField()
+    )
+    request.mm_features[0].data = MultiModalKwargsItem({"image_grid_thw": grid})
+    resolver = PlaceholderMetadataResolver(scheduler.vllm_config.model_config)
+    resolver._cache["image"] = {"image_grid_thw"}
+    scheduler._ec_metadata_resolver = resolver
+    scheduler.ec_connector.has_cache_item = Mock(return_value=False)
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.request_id not in output.num_scheduled_tokens
+    assert not output.scheduled_encoder_inputs
+
+    engine_core_outputs = scheduler.update_from_output(
+        output, make_empty_encoder_model_runner_output(output)
+    )
+    assert request.status == RequestStatus.FINISHED_ERROR
+    (error,) = engine_core_outputs[0].outputs
+    assert error.request_id == request.request_id
+    assert error.finish_reason == FinishReason.ERROR
+    assert request.request_id not in scheduler.requests
+
+
+def test_kv_consumer_without_kv_fails_metadata_only_item():
+    """A KV consumer accepts metadata-only items because P's KV covers them.
+
+    Without an EC connector, a prompt the KV does not cover (here, no KV at
+    all, as after a recomputed load) must fail rather than reach the encoder.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_kv_connector=True,
+        kv_role="kv_consumer",
+    )
+    assert scheduler.ec_connector is None
+    request = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        mm_positions=[[PlaceholderRange(offset=0, length=100)]],
+    )[0]
+    grid = MultiModalFieldElem(
+        data=torch.tensor([1, 10, 10]), field=MultiModalBatchedField()
+    )
+    request.mm_features[0].data = MultiModalKwargsItem({"image_grid_thw": grid})
+    resolver = PlaceholderMetadataResolver(scheduler.vllm_config.model_config)
+    resolver._cache["image"] = {"image_grid_thw"}
+    scheduler._ec_metadata_resolver = resolver
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.request_id not in output.num_scheduled_tokens
+    assert not output.scheduled_encoder_inputs
+
+    scheduler.update_from_output(output, make_empty_encoder_model_runner_output(output))
+    assert request.status == RequestStatus.FINISHED_ERROR
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_cache_miss_computes_locally(use_kv_connector):
     """Test consumer can compute encoder locally when cache miss (fallback)."""
     # encoder cache itself if it doesn't receive it from external storage
@@ -8436,7 +8514,6 @@ def _create_hybrid_mamba_connector_scheduler(
         cache_config=CacheConfig(
             block_size=block_size,
             enable_prefix_caching=True,
-            mamba_cache_mode="align",
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="MockKVConnector",
@@ -8469,7 +8546,7 @@ def _create_hybrid_mamba_connector_scheduler(
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
