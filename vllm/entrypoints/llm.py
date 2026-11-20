@@ -302,6 +302,10 @@ class LLM(
                 "'examples/features/data_parallel/data_parallel_offline.py'."
             )
 
+        # The synchronous offline renderer never uses the renderer thread pool,
+        # so keep it at one worker unless the caller asks for more.
+        kwargs.setdefault("renderer_num_workers", 1)
+
         engine_args = EngineArgs(
             model=model,
             runner=runner,

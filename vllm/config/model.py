@@ -83,6 +83,9 @@ else:
 
 logger = init_logger(__name__)
 
+# Default size of the renderer thread pool when --renderer-num-workers is not set.
+DEFAULT_RENDERER_NUM_WORKERS = 4
+
 # Process-local record of which (arch, target) model-class overrides have been
 # registered in *this* process. Must not live on ModelConfig: that instance is
 # pickled to each worker, so an instance flag would arrive already "registered"
@@ -432,16 +435,23 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
-    renderer_num_workers: int = 1
+    renderer_num_workers: int | None = None
     """Number of worker threads in the renderer thread pool. The pool is
     consumed by the async renderer path (e.g. the OpenAI-compatible API
     server started by `vllm serve`) to parallelize tokenization, chat
     template rendering, and multimodal preprocessing across concurrent
     requests.
 
+    If unset, defaults to 4 for the async renderer path, or to 1 for pooling
+    runners (their preprocessing runs on the renderer workers, which is not
+    compatible with the multimodal processor cache when multi-threaded). A
+    single worker serializes tokenization of long prompts in each API server
+    process and can cap the request rate well below what the engine can
+    sustain.
+
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
-    this setting has no effect there."""
+    this setting has no effect there (the offline default is 1)."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -732,6 +742,10 @@ class ModelConfig:
         self.runner_type = self._get_runner_type(
             architectures, self.runner, self.convert
         )
+        if self.renderer_num_workers is None:
+            self.renderer_num_workers = (
+                1 if self.runner_type == "pooling" else DEFAULT_RENDERER_NUM_WORKERS
+            )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
