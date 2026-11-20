@@ -224,11 +224,9 @@ class SessionObjectWriter:
         return time.monotonic() - self._last_progress >= self._put_stall_timeout_s
 
     def _hung(self) -> bool:
+        now = time.monotonic()
         busy_since = self._busy_since
-        return (
-            busy_since is not None
-            and time.monotonic() - busy_since >= self._put_stall_timeout_s
-        )
+        return busy_since is not None and now - busy_since >= self._put_stall_timeout_s
 
     def _drop(self, keys: list[str], reason: object) -> None:
         if not self._dropped:
