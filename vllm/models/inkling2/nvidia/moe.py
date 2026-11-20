@@ -22,9 +22,11 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 
+from .ops import use_sm100_kernels
 from .ops.activation import swiglu_quantize
 from .ops.block_scales import shuffle_rows, swizzle_block_scales
 from .ops.moe import NUM_COUNTERS, combine, combine_push, route
+from .ops.moe_sm90 import HummingExperts, select_experts
 from .ops.seq_parallel import SeqParallel
 from .ops.trtllm_bmm import bmm, expert_plan, load_kernels
 
@@ -139,11 +141,15 @@ class Inkling2Experts(nn.Module):
         self.register_buffer(
             "ones", torch.ones(self.num_experts, dtype=torch.float32), persistent=False
         )
-        load_kernels(
-            (self.w13_weight, self.w2_weight),
-            (self.w13_weight_scale, self.w2_weight_scale),
-            self.topk,
-        )
+        # Hopper runs Humming GEMMs on weights repacked after loading.
+        self.sm100 = use_sm100_kernels()
+        self.humming: HummingExperts | None = None
+        if self.sm100:
+            load_kernels(
+                (self.w13_weight, self.w2_weight),
+                (self.w13_weight_scale, self.w2_weight_scale),
+                self.topk,
+            )
 
     def _register(
         self,
@@ -167,11 +173,13 @@ class Inkling2Experts(nn.Module):
 
     def _load_weight(self, param: nn.Parameter, loaded: torch.Tensor) -> None:
         self._load_expert_shard(param, loaded)
-        param.data.copy_(shuffle_rows(param.data))
+        if self.sm100:
+            param.data.copy_(shuffle_rows(param.data))
 
     def _load_block_scales(self, param: nn.Parameter, loaded: torch.Tensor) -> None:
         self._load_expert_shard(param, loaded)
-        param.data.copy_(swizzle_block_scales(shuffle_rows(param.data)))
+        if self.sm100:
+            param.data.copy_(swizzle_block_scales(shuffle_rows(param.data)))
 
     @staticmethod
     def _load_full(param: nn.Parameter, loaded: torch.Tensor) -> None:
@@ -179,6 +187,27 @@ class Inkling2Experts(nn.Module):
             f"{loaded.shape} {loaded.dtype} != {param.shape} {param.dtype}"
         )
         param.data.copy_(loaded)
+
+    def process_weights_after_loading(self) -> None:
+        if self.sm100:
+            return
+        weights = {}
+        for name in ("w13", "w2"):
+            amax, denominator = self.scales(name)
+            global_scale = None
+            if amax is not None and denominator is not None:
+                global_scale = amax.data / denominator.data
+            weights[name] = (
+                getattr(self, f"{name}_weight").data,
+                getattr(self, f"{name}_weight_scale").data,
+                global_scale,
+            )
+        self.humming = HummingExperts(weights, self.shapes, self.nvfp4)
+        # The Humming copies replace the checkpoint layout.
+        for name in ("w13", "w2"):
+            for suffix in ("weight", "weight_scale"):
+                param = getattr(self, f"{name}_{suffix}")
+                param.data = param.data.new_empty((0,))
 
     def plan(self, tokens: int):
         return expert_plan(tokens, self.topk, self.num_experts, self.nvfp4, self.shapes)
@@ -216,24 +245,39 @@ class Inkling2Experts(nn.Module):
         push: SeqParallel | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
         """`routing` and `quantized` (`x` in the expert layout) are from
-        `ops.moe.route`. The routing weight is applied inside the SwiGLU,
-        before the down projection. Without `reduce`, returns the local
-        expert rows and `src2dst` for the consumer to combine and reduce,
-        or pushes their combine to the token shard owners."""
-        src2dst, gammas, rows, tiles = routing
-        gate_up = self._gemm(quantized, "w13", tiles, plan, 0)
-        m = plan.max_ctas
-        activated = swiglu_quantize(
-            gate_up,
-            gammas,
-            self.gate_cap,
-            self.up_cap,
-            (rows, tiles[2 * m + 2 :], tiles[:m]),
-            plan.tile,
-            *self.scales("w2"),
-        )
-        del gate_up
-        down = self._gemm(activated, "w2", tiles, plan, 1)
+        `ops.moe.route` (on Hopper, `routing` is from
+        `ops.moe_sm90.select_experts` and `quantized` is None). The routing
+        weight is applied inside the SwiGLU, before the down projection.
+        Without `reduce`, returns the local expert rows and `src2dst` for
+        the consumer to combine and reduce, or pushes their combine to the
+        token shard owners."""
+        if self.sm100:
+            src2dst, gammas, rows, tiles = routing
+            gate_up = self._gemm(quantized, "w13", tiles, plan, 0)
+            m = plan.max_ctas
+            activated = swiglu_quantize(
+                gate_up,
+                gammas,
+                self.gate_cap,
+                self.up_cap,
+                (rows, tiles[2 * m + 2 :], tiles[:m]),
+                plan.tile,
+                *self.scales("w2"),
+            )
+            del gate_up
+            down = self._gemm(activated, "w2", tiles, plan, 1)
+        else:
+            assert self.humming is not None, "process_weights_after_loading"
+            ids, gammas, src2dst = routing
+            down = self.humming(
+                x,
+                ids,
+                gammas,
+                src2dst,
+                self.num_experts * self.ep_size,
+                self.gate_cap,
+                self.up_cap,
+            )
         if push is not None:
             # Each rank's fp32 combine is rounded once to bf16.
             combine_push(down, src2dst, self.topk, push)
@@ -274,10 +318,21 @@ class Inkling2MoE(nn.Module):
             )
         x = x.contiguous()
         gate, experts = self.gate, self.experts
-        plan = experts.plan(x.shape[0])
         is_padding = None
         if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
             is_padding = get_forward_context().is_padding
+        if not experts.sm100:
+            selected = select_experts(
+                x,
+                gate.weight,
+                gate.bias,
+                gate.topk,
+                gate.route_scale,
+                experts.expert_bounds,
+                is_padding,
+            )
+            return experts(x, selected, None, None, reduce, push)
+        plan = experts.plan(x.shape[0])
         routing, quantized = route(
             x,
             gate.weight,
