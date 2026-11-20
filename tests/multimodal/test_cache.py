@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import gc
 import multiprocessing as mp
+import sys
 import threading
+import weakref
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
@@ -370,6 +373,37 @@ def test_receiver_cache_replaces_stale_item_when_payload_resent():
     assert p1.get_and_update_item(small, mm_hash) is small
     assert p1.get_and_update_item(large, mm_hash) is large
     assert p1.get_and_update_item(None, mm_hash) is large
+
+
+def test_receiver_cache_hides_cached_items_from_gc():
+    """Cached items are long-lived, so oldest-generation collections in
+    EngineCore would rescan every one of them on each pass. They must stay
+    out of the cyclic GC, still serve cache hits, and be freed on eviction.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1e-6)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    # Same structure as a zero-copy decoded tensor: a view over a buffer.
+    frame = bytearray(256)
+    view = torch.frombuffer(frame, dtype=torch.uint8).view(16, 16)
+    item = MultiModalKwargsItem(
+        {"x": MultiModalFieldElem(data=view, field=MultiModalBatchedField())}
+    )
+    refs_without_view = sys.getrefcount(frame) - 1
+
+    assert p1.get_and_update_item(item, "a") is item
+    cached = item["x"].data
+    assert torch.equal(cached, view)
+    del view
+    # The cached copy no longer pins the IPC frame.
+    assert sys.getrefcount(frame) == refs_without_view
+    for obj in (cached, item, item.data, item["x"], item["x"].field):
+        assert not gc.is_tracked(obj), type(obj)
+    assert p1.get_and_update_item(None, "a") is item
+
+    freed = weakref.ref(cached)
+    del item, cached
+    p1.get_and_update_item(MultiModalKwargsItem.dummy(nbytes=1000), "b")
+    assert freed() is None
 
 
 def test_receiver_cache_features_keep_resent_payload():

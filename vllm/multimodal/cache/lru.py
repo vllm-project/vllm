@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Implementation of Key-Replicated Cache (see docs/configuration/optimization.md)."""
 
+import dataclasses
+
+import torch
 from typing_extensions import override
 
 from vllm.config import ModelConfig
 from vllm.utils.cache import CacheInfo
+from vllm.utils.gc_utils import gc_untrack
 
-from ..inputs import MultiModalKwargsItem
+from ..inputs import MultiModalFieldElem, MultiModalKwargsItem
 from .base import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
@@ -83,6 +87,29 @@ class LruKeyReplicatedSenderCache(BaseMultiModalProcessorCache):
         self._cache.pop(mm_hash, None)
 
 
+def _untrack_cached(obj: object) -> None:
+    if isinstance(obj, torch.Tensor):
+        if obj._base is not None:
+            gc_untrack(obj._base)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _untrack_cached(value)
+    elif isinstance(obj, MultiModalFieldElem):
+        if isinstance(obj.data, torch.Tensor) and obj.data._base is not None:
+            # Zero-copy decoded tensors keep their IPC frame alive.
+            obj.data = obj.data.clone()
+        _untrack_cached(obj.data)
+        _untrack_cached(obj.field)
+    elif isinstance(obj, MultiModalKwargsItem):
+        gc_untrack(obj.data)
+        for value in obj.data.values():
+            _untrack_cached(value)
+    elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        for field in dataclasses.fields(obj):
+            _untrack_cached(getattr(obj, field.name))
+    gc_untrack(obj)
+
+
 class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
     """The cache which is used on P1 when LRU caching is enabled.
 
@@ -118,7 +145,10 @@ class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
             # item and crash the engine. Drop first so a too-large replacement
             # cannot leave the previous entry in place.
             self._cache.pop(mm_hash, None)
-            self.cache_if_fits(self._cache, mm_hash, mm_item)
+            if self.cache_if_fits(self._cache, mm_hash, mm_item):
+                # Cached items are long-lived and acyclic: keep them out of the
+                # cyclic GC so oldest-generation collections do not rescan them.
+                _untrack_cached(mm_item)
             return mm_item
 
         if (cached_item := self._cache.get(mm_hash)) is not None:
