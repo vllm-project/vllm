@@ -437,15 +437,24 @@ class _KernelSpy:
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("rows_profile", [3, 4], ids=["cdna3_rows", "cdna4_rows"])
 @pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
-@pytest.mark.parametrize("case", ["mixed", "decode1", "decode32", "decode33"])
+@pytest.mark.parametrize("case", ["mixed", "decode1", "decode_max", "decode_over"])
 def test_qsa_mqa_paged_matches_reference(
-    monkeypatch: pytest.MonkeyPatch, dtype: str, case: str
+    monkeypatch: pytest.MonkeyPatch, rows_profile: int, dtype: str, case: str
 ) -> None:
     # mixed: a prefill chunk, a decode request and rows with nothing visible
     # share one 16-row block of the tiled kernel, whose widest row sees 257
-    # columns (one past a 64-column block). decodeN: one row per request,
-    # lengths ending mid-page; up to 32 rows use the gfx942 one-row kernel.
+    # columns (one past a 64-column block). decode*: one row per request,
+    # lengths ending mid-page; up to the profile's max rows use the one-row
+    # kernel with that profile's tile, one more uses the tiled kernel. The
+    # profile is forced for this GPU's CDNA version, so the tiled kernel's
+    # dot dtype still follows the hardware.
+    profile = qsa_ops._ROWS_KERNEL_PROFILES[rows_profile]
+    monkeypatch.setattr(
+        qsa_ops, "_ROWS_KERNEL_PROFILES", {qsa_ops.get_cdna_version(): profile}
+    )
+    max_rows = profile[0]
     spy = _KernelSpy(qsa_ops._qsa_mqa_paged_rows_kernel)
     monkeypatch.setattr(qsa_ops, "_qsa_mqa_paged_rows_kernel", spy)
     generator = torch.Generator(device="cuda").manual_seed(0)
@@ -462,7 +471,7 @@ def test_qsa_mqa_paged_matches_reference(
             [i for p in positions for i in p], device="cuda", dtype=torch.int64
         )
     else:
-        num_requests = int(case.removeprefix("decode"))
+        num_requests = {"decode1": 1, "decode_max": max_rows}.get(case, max_rows + 1)
         lengths = torch.randint(
             1,
             1500,
@@ -492,9 +501,7 @@ def test_qsa_mqa_paged_matches_reference(
         single_row_decode=case != "mixed",
     )
 
-    assert spy.launches == (
-        qsa_ops.get_cdna_version() == 3 and case in ("decode1", "decode32")
-    )
+    assert spy.launches == (case in ("decode1", "decode_max"))
     expected_visible = torch.minimum(
         (query_positions + 1) // compress_ratio,
         lengths[token_to_req.long()] // compress_ratio,
@@ -510,29 +517,135 @@ def test_qsa_mqa_paged_matches_reference(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("single_row_decode", [False, True], ids=["tiled", "rows"])
+def test_qsa_select_bounds_columns_to_max_seq_len(
+    monkeypatch: pytest.MonkeyPatch, single_row_decode: bool
+) -> None:
+    # The longest request (64 tokens) sees exactly cdiv(64, 4) = 16 compressed
+    # blocks, and its last one gets the top score, so a bound one column short
+    # changes the selection.
+    monkeypatch.setattr(
+        qsa_ops, "_ROWS_KERNEL_PROFILES", {qsa_ops.get_cdna_version(): (32, 32, 4)}
+    )
+    scored_columns = []
+    real_mqa_paged = qsa_ops.qsa_mqa_paged
+
+    def mqa_paged(*args, **kwargs):
+        scored_columns.append(kwargs["num_columns"])
+        return real_mqa_paged(*args, **kwargs)
+
+    monkeypatch.setattr(qsa_ops, "qsa_mqa_paged", mqa_paged)
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    page_size, compress_ratio, table_width, token_topk = 16, 4, 24, 8
+    lengths = torch.tensor([64, 5, 33, 8, 47, 12, 60], device="cuda", dtype=torch.int32)
+    num_requests = lengths.numel()
+    num_pages = num_requests * table_width + 8
+    q = _indexer_tensor((num_requests, 2, 32), "bf16", generator)
+    k_cache = _indexer_tensor((num_pages, page_size, 1, 32), "bf16", generator)
+    page_table = torch.randperm(
+        num_pages, device="cuda", dtype=torch.int32, generator=generator
+    )[: num_requests * table_width].view(num_requests, table_width)
+    k_cache[page_table[0, 0], 15, 0] = 4 * q[0].sum(dim=0)
+    args = (
+        q,
+        k_cache,
+        page_table,
+        torch.arange(num_requests, device="cuda", dtype=torch.int32),
+        (lengths - 1).long(),
+        lengths,
+        token_topk,
+        compress_ratio,
+    )
+
+    expected = qsa_ops.qsa_select_paged_tokens(
+        *args, single_row_decode=single_row_decode
+    )
+    actual = qsa_ops.qsa_select_paged_tokens(
+        *args, single_row_decode=single_row_decode, max_seq_len=64
+    )
+
+    assert scored_columns == [table_width * page_size, 16]
+    assert ((expected[0] >= 15 * compress_ratio) & (expected[0] < 64)).any()
+    # top-k emits the selected blocks in unspecified order.
+    torch.testing.assert_close(
+        actual.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_prefills", "decode_query_len", "single_row_decode"),
+    [(0, 1, True), (1, 1, False), (0, 4, False)],
+    ids=["decode", "mixed", "spec-decode"],
+)
+def test_qsa_indexer_forwards_selection_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    num_prefills: int,
+    decode_query_len: int,
+    single_row_decode: bool,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def select(*args, **kwargs):
+        seen.update(kwargs)
+        return args[-1]
+
+    monkeypatch.setattr(qsa_ops, "qsa_select_paged_tokens", select)
+    indexer = SimpleNamespace(
+        compressed_key_cache=SimpleNamespace(kv_cache=None),
+        token_topk=8,
+        compress_ratio=4,
+    )
+    metadata = SimpleNamespace(
+        block_table=None,
+        token_to_req=None,
+        logical_positions=None,
+        seq_lens=None,
+        num_prefills=num_prefills,
+        decode_query_len=decode_query_len,
+        max_seq_len=1234,
+    )
+    QSAIndexer._select(indexer, None, metadata, None)  # type: ignore[arg-type]
+    assert seen == {"single_row_decode": single_row_decode, "max_seq_len": 1234}
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("cdna_version", [3, 4])
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
     "num_rows,num_query_heads,num_kv_heads,page_size",
     [
-        # The _split1 cases exceed 512 programs (rows x KV heads) and run the
-        # per-CDNA-version profile.
-        pytest.param(1, 24, 2, 1792, id="tp1_split64"),
-        pytest.param(257, 24, 2, 1792, id="tp1_split1"),
-        pytest.param(16, 12, 1, 1792, id="tp2_split32"),
-        pytest.param(513, 12, 1, 1792, id="tp2_split1"),
-        pytest.param(32, 6, 1, 1024, id="tp4_split8"),
-        pytest.param(257, 6, 1, 1024, id="tp4_split4"),
-        pytest.param(513, 6, 1, 1024, id="tp4_split1"),
-        pytest.param(513, 3, 1, 1024, id="tp8_split1"),
+        # Ids give programs (rows x KV heads). BF16 on CDNA3/4 pads the head
+        # group to 16 rows. From 32 programs it takes its splits from the
+        # program count (on CDNA4, up to 128 programs use more splits and
+        # four warps), and from 2048 programs one split writes the output
+        # directly. FP8 keeps the shared profiles; past 512 programs it uses
+        # one warp.
+        pytest.param(1, 24, 2, 1792, id="tp1_p2"),
+        pytest.param(257, 24, 2, 1792, id="tp1_p514"),
+        pytest.param(16, 12, 1, 1792, id="tp2_p16"),
+        pytest.param(513, 12, 1, 1792, id="tp2_p513"),
+        pytest.param(8, 6, 1, 1024, id="tp4_p8"),
+        pytest.param(32, 6, 1, 1024, id="tp4_p32"),
+        pytest.param(128, 6, 1, 1024, id="tp4_p128"),
+        pytest.param(129, 6, 1, 1024, id="tp4_p129"),
+        pytest.param(257, 6, 1, 1024, id="tp4_p257"),
+        pytest.param(513, 6, 1, 1024, id="tp4_p513"),
+        pytest.param(2048, 6, 1, 1024, id="tp4_p2048"),
+        pytest.param(1, 3, 1, 1024, id="tp8_p1"),
+        pytest.param(513, 3, 1, 1024, id="tp8_p513"),
     ],
 )
 def test_qsa_sparse_paged_attention_matches_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
     num_rows: int,
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
     use_fp8: bool,
 ) -> None:
+    # Every CDNA version's launch profile runs on any ROCm GPU.
+    monkeypatch.setattr(qsa_ops, "get_cdna_version", lambda: cdna_version)
     torch.manual_seed(2)
     head_dim = 256
     num_requests = 2
