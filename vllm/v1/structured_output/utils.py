@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import TYPE_CHECKING, TypeVar
 
 import regex as re
+import torch
 from cachetools import LRUCache
 
 import vllm.envs as envs
@@ -39,6 +40,21 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 
 CACHE = None
+
+
+def allocate_token_bitmask(num_rows: int, vocab_size: int) -> torch.Tensor:
+    """Allocate a CPU token bitmask for structured output grammars.
+
+    Args:
+        num_rows: Number of grammar-mask rows to allocate.
+        vocab_size: Model/logit vocabulary width.
+
+    Returns:
+        A contiguous, int32 CPU tensor initialized to allow every token.
+
+    """
+    shape = (num_rows, (vocab_size + 31) // 32)
+    return torch.full(shape, -1, dtype=torch.int32, device="cpu")
 
 
 def strip_speculative_padding(token_ids: list[int]) -> list[int]:

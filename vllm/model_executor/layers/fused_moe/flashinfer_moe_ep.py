@@ -49,15 +49,15 @@ _WEIGHT_FORMATS: dict[QuantKey | None, FlashInferMoeEpWeightFormat] = {
     kFp8Static128BlockSym: "fp8_block",
 }
 
-# FP4 weights run on the Blackwell megakernels (NVFP4 also on SM107). Block FP8
-# and MXFP4 weights run on the Hopper pull-style CuTeDSL megakernels with FP8
+# FP4 weights run on the Blackwell megakernels (SM107 included). Block FP8 and
+# MXFP4 weights run on the Hopper pull-style CuTeDSL megakernels with FP8
 # activations.
 _SM90_CAPABILITY = (9, 0)
 _BLACKWELL_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 _SM107_CAPABILITY = (10, 7)
 _FORMAT_CAPABILITIES: dict[FlashInferMoeEpWeightFormat, frozenset[tuple[int, int]]] = {
     "nvfp4": _BLACKWELL_CAPABILITIES | {_SM107_CAPABILITY},
-    "mxfp4": _BLACKWELL_CAPABILITIES | {_SM90_CAPABILITY},
+    "mxfp4": _BLACKWELL_CAPABILITIES | {_SM107_CAPABILITY, _SM90_CAPABILITY},
     "fp8_block": frozenset({_SM90_CAPABILITY}),
 }
 _SUPPORTED_CAPABILITIES = frozenset().union(*_FORMAT_CAPABILITIES.values())
@@ -184,6 +184,8 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append(f"{weight_format.upper()} weights on this GPU")
     elif spec.kernel == "deep_gemm" and capability == _SM90_CAPABILITY:
         unsupported.append("FlashInfer DeepGEMM kernel on Hopper")
+    elif spec.kernel == "deep_gemm" and capability not in _BLACKWELL_CAPABILITIES:
+        unsupported.append(f"{weight_format.upper()} weights on this GPU")
     if weight_key == kNvfp4Static and activation_key is None:
         unsupported.append("A16 activations with NVFP4 weights")
     if weight_key == kFp8Static128BlockSym and activation_key != kFp8Dynamic128Sym:
@@ -288,7 +290,11 @@ def mxfp4_moe_ep_weights(
     w2_scale: torch.Tensor,
 ) -> FlashInferMoeEpWeights:
     spec = flashinfer_moe_ep_backend_spec(moe_backend)
-    if spec.kernel == "deep_gemm" or _current_capability() == _SM90_CAPABILITY:
+    if (
+        spec.kernel == "deep_gemm"
+        or is_sm107_device()
+        or _current_capability() == _SM90_CAPABILITY
+    ):
         return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
     return FlashInferMoeEpWeights(
         w13=_dequant_mxfp4_experts(w13, w13_scale),
@@ -363,6 +369,7 @@ class _FlashInferMoeEpApi:
                 PrequantizedMoEWeights,
                 Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig,
                 Sm90PullFp8MegaMoeConfig,
+                Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig,
                 Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig,
             )
         except ImportError as err:
@@ -383,6 +390,7 @@ class _FlashInferMoeEpApi:
         self.Sm90PullFp8MegaMoeConfig = Sm90PullFp8MegaMoeConfig
         self.Sm90Mxfp4MegaMoeConfig = Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig
         self.Sm107Nvfp4MegaMoeConfig = Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
+        self.Sm107Mxfp4MegaMoeConfig = Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig
 
 
 def _load_flashinfer_moe_ep_api() -> _FlashInferMoeEpApi:
@@ -406,7 +414,7 @@ class FlashInferMoeEp:
         epilogue: FlashInferMoeEpEpilogue | None = None,
         *,
         apply_topk_in_fc1: bool,
-        sm90_format: Sm90WeightFormat | None = None,
+        weight_format: FlashInferMoeEpWeightFormat,
     ) -> None:
         spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
         if spec.kernel == "deep_gemm":
@@ -426,7 +434,18 @@ class FlashInferMoeEp:
             max_tokens_per_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
         )
-        sm107 = is_sm107_device()
+        capability = _current_capability()
+        sm107 = capability == _SM107_CAPABILITY
+        sm90_format: Sm90WeightFormat | None = (
+            "fp8_block"
+            if weight_format == "fp8_block"
+            else (
+                "mxfp4"
+                if capability == _SM90_CAPABILITY and weight_format == "mxfp4"
+                else None
+            )
+        )
+        sm107_mxfp4 = sm107 and weight_format == "mxfp4"
         if sm107 and moe.routing_method is RoutingMethodType.DeepseekV4:
             # The DeepSeek-V4 router can return non-finite scores on valid routes,
             # which FlashInfer 0.7.3's SM107 route check turns into a device assert.
@@ -445,9 +464,22 @@ class FlashInferMoeEp:
                 gate_up_clamp=moe.swiglu_limit,
             )
         elif spec.kernel == "cutedsl":
-            config_cls = (
-                api.Sm107Nvfp4MegaMoeConfig if sm107 else api.Nvfp4CutedslMegaMoeConfig
-            )
+            scale_kwargs: dict[str, Any] = {}
+            if sm107_mxfp4:
+                # MXFP4 weights with MXFP8 activations, which have no global scales.
+                config_cls = api.Sm107Mxfp4MegaMoeConfig
+            else:
+                config_cls = (
+                    api.Sm107Nvfp4MegaMoeConfig
+                    if sm107
+                    else api.Nvfp4CutedslMegaMoeConfig
+                )
+                scale_kwargs = {
+                    "input_norm_const": epilogue.input_norm_const,
+                    "fc1_alpha": None,
+                    "fc2_alpha": None,
+                    "fc1_norm_const": None,
+                }
             # In-kernel fc2 reduce keeps its default (off).
             megakernel = config_cls(
                 intermediate_size=moe.intermediate_size,
@@ -456,11 +488,8 @@ class FlashInferMoeEp:
                 fast_math=True,
                 apply_routing_weights_before_fc2=apply_topk_in_fc1,
                 combine_dtype="bf16",
-                input_norm_const=epilogue.input_norm_const,
-                fc1_alpha=None,
-                fc2_alpha=None,
-                fc1_norm_const=None,
                 knobs=None,
+                **scale_kwargs,
             )
         else:
             megakernel = api.DeepGemmMegaMoeConfig(
@@ -485,8 +514,14 @@ class FlashInferMoeEp:
                 ),
             )
         else:
-            # Packed MXFP4 goes in as loaded: FlashInfer folds its E8M0 scales
-            # into the kernel layout instead of requantizing.
+            w13_scale, w2_scale = weights.w13_scale, weights.w2_scale
+            if sm107_mxfp4:
+                # FlashInfer takes the MXFP4 block scales typed as E8M0.
+                assert w13_scale is not None and w2_scale is not None
+                w13_scale = w13_scale.view(torch.float8_e8m0fnu)
+                w2_scale = w2_scale.view(torch.float8_e8m0fnu)
+            # Packed SM90 MXFP4 goes in as loaded: FlashInfer folds its E8M0
+            # scales into the kernel layout instead of requantizing.
             weight_pack_cls = (
                 api.PrequantizedMoEWeights
                 if sm90_format == "mxfp4"
@@ -495,8 +530,8 @@ class FlashInferMoeEp:
             weight_pack = weight_pack_cls(
                 w13=weights.w13,
                 w2=weights.w2,
-                w13_scale=weights.w13_scale,
-                w2_scale=weights.w2_scale,
+                w13_scale=w13_scale,
+                w2_scale=w2_scale,
             )
             backend = api.MegaConfig(
                 megakernel=megakernel,

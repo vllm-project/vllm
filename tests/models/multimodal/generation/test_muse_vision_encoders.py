@@ -103,7 +103,7 @@ def test_glimmer_sparse_permutation_orders_tokens_by_window(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("grid_height", "grid_width"), GRIDS + [(128, 128)])
-def test_glimmer_pos_emb_layout_is_bilinear_interpolation(
+def test_glimmer_pos_emb_layout_matches_trainer_reference(
     glimmer_layout_encoder: MuseGlimmerVisionEncoder, grid_height: int, grid_width: int
 ) -> None:
     table = torch.randn(32, 32, 8, dtype=torch.float64)
@@ -117,9 +117,9 @@ def test_glimmer_pos_emb_layout_is_bilinear_interpolation(
         * torch.from_numpy(weights).double()[..., None]
     ).sum(0)
 
-    y = (torch.arange(grid_height, dtype=torch.float64) + 0.5) / grid_height * 2 - 1
-    x = (torch.arange(grid_width, dtype=torch.float64) + 0.5) / grid_width * 2 - 1
-    grid = torch.stack(torch.meshgrid(x, y, indexing="xy"), dim=-1)[None]
+    pos_h = (torch.arange(grid_height, dtype=torch.float64) + 0.5) / grid_height * 2 - 1
+    pos_w = (torch.arange(grid_width, dtype=torch.float64) + 0.5) / grid_width * 2 - 1
+    grid = torch.stack(torch.meshgrid(pos_h, pos_w, indexing="xy"), dim=-1)[None]
     expected = F.grid_sample(
         table.permute(2, 0, 1)[None], grid, mode="bilinear", align_corners=False
     )[0].reshape(8, -1)
@@ -231,7 +231,6 @@ def test_glimmer_engine_has_no_gpu_sync(monkeypatch, vllm_runner) -> None:
 
     with vllm_runner(
         model_info.default,
-        trust_remote_code=False,
         load_format="dummy",
         enforce_eager=True,
         max_model_len=8192,

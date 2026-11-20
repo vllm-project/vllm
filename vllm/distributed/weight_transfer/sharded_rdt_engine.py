@@ -1400,8 +1400,6 @@ class ShardedRDTWeightTransferEngine(
                     # The stamp was ATTACHED to a param that had no loader
                     # (see _install_recording_stamps); leave none behind.
                     del tensor.weight_loader
-        if hasattr(model, "_original_do_torchao_reload"):
-            model._do_torchao_reload = model._original_do_torchao_reload
 
     # ---------------- Background post-processing (pull/process pipeline) -------
 
@@ -1564,9 +1562,9 @@ class ShardedRDTWeightTransferEngine(
              pulls nothing from it). Every group is signaled exactly once by
              construction. The stream has no per-group call boundaries, so group
              L+1's first chunk issues while L's still stream.
-          2. Per leaf module, find its FIRST and LAST chunk — materialize on the
-             first, quant/kernel/reset on the last, correct by construction
-             instead of by runtime counters.
+          2. For modules using layerwise reload, materialize on their FIRST
+             chunk and quant/kernel/reset on their LAST. Modules that opt out
+             receive their slices directly in their existing storage.
           3. Assemble `_Chunk`s: dedup keys and precompute the packed layout.
         """
         baked: _InitState = self if state is None else state
@@ -1618,6 +1616,8 @@ class ShardedRDTWeightTransferEngine(
         layer_by_id: dict[int, Any] = {}
         for ci, scatters in enumerate(raw_chunks):
             for sc in scatters:
+                if getattr(sc.layer, "_skip_layerwise_reload", False):
+                    continue
                 lid = id(sc.layer)
                 layer_by_id[lid] = sc.layer
                 first_at.setdefault(lid, ci)
