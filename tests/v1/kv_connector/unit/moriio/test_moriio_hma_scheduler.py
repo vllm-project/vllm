@@ -191,7 +191,7 @@ def _mamba_group(
     enable_kv_transfer: bool = True,
 ) -> KVCacheGroup:
     config = MambaManager.config(
-        mamba_cache_mode="align", num_speculative_blocks=num_speculative_blocks
+        enable_prefix_caching=True, num_speculative_blocks=num_speculative_blocks
     )
     layer = KVCacheLayerConfig(config, spec or _mamba_spec())
     return KVCacheGroup.from_layers(
@@ -210,7 +210,6 @@ def _gate_vllm_config(
     block_size: int = 16,
     num_lookahead_tokens: int = 0,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "align",
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
@@ -224,10 +223,7 @@ def _gate_vllm_config(
             kv_role="kv_consumer",
         ),
         speculative_config=speculative_config,
-        cache_config=SimpleNamespace(
-            block_size=block_size,
-            mamba_cache_mode=mamba_cache_mode,
-        ),
+        cache_config=SimpleNamespace(block_size=block_size),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         num_lookahead_tokens=num_lookahead_tokens,
         num_speculative_tokens=num_speculative_tokens,
@@ -346,7 +342,7 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
     """GLM-5.3-Flash-shaped groups from the real grouping, with an MTP layer."""
     kpool, num_spec = 4, 1
     mamba = MambaManager.layer_config(
-        _mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=num_spec
+        _mamba_spec(), enable_prefix_caching=True, num_speculative_blocks=num_spec
     )
     layers: dict[str, KVCacheLayerConfig] = {}
     for i in range(7):
