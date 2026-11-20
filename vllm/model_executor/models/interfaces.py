@@ -386,6 +386,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         modalities: set[str] | str,
         *,
         targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+        offload: bool = True,
     ):
         """Mark each child module that was assigned to this model during this context
         as a tower model component.
@@ -399,7 +400,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
         Marked components are also routed through the active offloader (when
         it supports tower offloading), since `make_layers` only ever sees the
-        decoder layer stack.
+        decoder layer stack. Pass `offload=False` if the caller offloads the
+        components itself, e.g. because they are not materialised yet.
         """
         from vllm.distributed import get_pp_group
         from vllm.model_executor.offloader import get_offloader
@@ -429,20 +431,17 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             ):
                 yield
 
-        self._tower_model_names = children_names
+        # Models with several towers mark each of them in its own context
+        self._tower_model_names = [*self._tower_model_names, *children_names]
 
         # Towers are constructed directly, so `make_layers` never routes them
         # through the offloader. Do it here, at the same construction stage,
         # so offloaded tower weights are never allocated on the device.
-        # Towers still on `meta` have nothing to offload yet, so whatever materialises
-        # them offloads them (e.g. `recursive_replace` in the Transformers backend).
         offloader = get_offloader()
-        if offloader.supports_tower_offload:
+        if offload and offloader.supports_tower_offload:
             for name in children_names:
-                tower = attrgetter(name)(self)
-                if all(p.is_meta for p in tower.parameters()):
-                    continue
-                offloader.wrap_modules(iter([tower]), prefix=name)
+                modules = (module for module in [attrgetter(name)(self)])
+                offloader.wrap_modules(modules, prefix=name)
 
     @contextmanager
     def _mark_composite_model(

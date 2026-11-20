@@ -585,11 +585,18 @@ class Base(
         # Decoder layers are detected as they are built, after their pre-replace hook
         fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
         # Towers were built on `meta`, so `_mark_tower_model` could not offload them
-        towers = (
-            tuple(self._pre_trained_model_classes.encoders.values())
+        tower_names = (
+            set(getattr(self, "_tower_model_names", ()))
             if offloader.supports_tower_offload
-            else ()
+            else set()
         )
+
+        def _materialise(module: nn.Module, prefix: str) -> nn.Module:
+            """Mimic what `__init__` does to the whole model, for a module offloaded
+            early."""
+            self.init_parameters(module)
+            self.keep_in_fp32(module, prefix.removeprefix("model."))
+            return module
 
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
             """Build this rank's decoder layers one at a time and offload each as
@@ -617,23 +624,26 @@ class Base(
                     self._pre_decoder_layer_replace(layers[i], layer_prefix)
                     fusers.add(layers[i])
                     _replace_child(layers, str(i), layers[i], prefix)
-                    self.init_parameters(layers[i])
-                    self.keep_in_fp32(layers[i], layer_prefix.removeprefix("model."))
-                    yield layers[i]
+                    yield _materialise(layers[i], layer_prefix)
 
             offloader.wrap_modules(build_layers())
+
+        def _replace_tower(tower: nn.Module, prefix: str):
+            """Offload a tower as soon as it is built, as `_mark_tower_model` does for
+            native models."""
+            for child_name, child_module in tower.named_children():
+                _replace_child(tower, child_name, child_module, prefix)
+            offloader.wrap_modules(iter([_materialise(tower, prefix)]), prefix=prefix)
 
         def _recursive_replace(module: nn.Module, prefix: str):
             if module is decoder_layers:
                 _replace_decoder_layers(module, prefix)
                 return
+            if prefix in tower_names:
+                _replace_tower(module, prefix)
+                return
             for child_name, child_module in module.named_children():
                 _replace_child(module, child_name, child_module, prefix)
-            # Offload each tower as soon as it is built, as `_mark_tower_model` does
-            if isinstance(module, towers):
-                self.init_parameters(module)
-                self.keep_in_fp32(module, prefix.removeprefix("model."))
-                offloader.wrap_modules(iter([module]), prefix=prefix)
 
         def _replace_child(
             module: nn.Module, child_name: str, child_module: nn.Module, prefix: str

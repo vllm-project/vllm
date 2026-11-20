@@ -172,11 +172,12 @@ def test_tower_weight_offloading(
 
             # Everything outside the towers must stay resident.
             towers = tuple(f"{name}." for name in model._tower_model_names)
-            resident = [
-                p for n, p in model.named_parameters() if not n.startswith(towers)
-            ]
-            assert resident
-            assert not any(_is_offloaded(p) for p in resident)
+            offloaded = {
+                _is_offloaded(p)
+                for n, p in model.named_parameters()
+                if not n.startswith(towers)
+            }
+            assert offloaded == {False}
     finally:
         set_offloader(original_offloader)
         envs.disable_envs_cache()
