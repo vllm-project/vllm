@@ -162,11 +162,11 @@ class SessionObjectWriter:
     `_PUT_RETRY_INTERVAL_S`, and queuing and draining wait while it is. Once
     writes have been pending for `put_stall_timeout_s` without a successful
     put, the batch is dropped, and later batches get one attempt each until a
-    put succeeds with no refusal in the last `put_stall_timeout_s`. A dropped
-    object is absent from the store; the responses that list it are not
-    changed. Once a put has not returned for `put_stall_timeout_s`, queuing and
-    draining stop waiting for it, and the puts queued behind it are
-    dropped."""
+    put succeeds. A dropped object is absent from the store; the responses that
+    list it are not changed. While batches are dropped, or no put succeeded for
+    `put_stall_timeout_s`, queuing does not wait: a batch that meets a full
+    queue is dropped. Once a put has not returned for `put_stall_timeout_s`,
+    draining stops waiting for it and drops the puts queued behind it."""
 
     def __init__(
         self,
@@ -182,7 +182,6 @@ class SessionObjectWriter:
         self._fields = fields
         self._put_stall_timeout_s = put_stall_timeout_s
         self._last_progress = time.monotonic()
-        self._last_refusal = float("-inf")
         self._busy_since: float | None = None
         self._dropped = 0
         self._enqueued = 0
@@ -244,7 +243,6 @@ class SessionObjectWriter:
                 self._store.put_batch(*batch)
             except BlockObjectStoreError as error:
                 self._busy_since = None
-                self._last_refusal = time.monotonic()
                 if (
                     self._dropped
                     or self._stalled()
@@ -255,11 +253,7 @@ class SessionObjectWriter:
             else:
                 self._busy_since = None
                 self._last_progress = time.monotonic()
-                if (
-                    self._dropped
-                    and self._last_progress - self._last_refusal
-                    >= self._put_stall_timeout_s
-                ):
+                if self._dropped:
                     logger.warning(
                         "Auxiliary output objects are written again; %d were dropped.",
                         self._dropped,
@@ -280,16 +274,15 @@ class SessionObjectWriter:
         if not self._queue.unfinished_tasks:
             self._last_progress = time.monotonic()
         while True:
-            hung = self._hung()
+            wait = not (self._dropped or self._stalled() or self._hung())
             try:
-                self._queue.put(batch, not hung, _PUT_RETRY_INTERVAL_S)
+                self._queue.put(batch, wait, _PUT_RETRY_INTERVAL_S)
                 self._enqueued += 1
                 return
             except queue.Full:
                 self.check()
-                if hung:
-                    self._abandon_upto = self._enqueued
-                    self._drop(batch[0], "a put hangs")
+                if not wait:
+                    self._drop(batch[0], "the queue is full while the store fails")
                     return
 
     def drain(self, timeout_s: float | None = None) -> None:
