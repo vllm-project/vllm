@@ -56,6 +56,18 @@ _VALUE_READS = frozenset(
 )
 
 
+def _is_basic_index(index: object) -> bool:
+    """Whether `index` holds only ints, int slices, None and Ellipsis."""
+    parts = index if isinstance(index, tuple) else (index,)
+    for x in parts:
+        if isinstance(x, slice):
+            if not all(v is None or type(v) is int for v in (x.start, x.stop, x.step)):
+                return False
+        elif not (x is None or x is Ellipsis or type(x) is int):
+            return False
+    return True
+
+
 class TraceTensor(torch.Tensor):
     """Zero-storage meta tensor that records how a loader slices a checkpoint
     tensor.
@@ -109,6 +121,22 @@ class TraceTensor(torch.Tensor):
             src = args[1] if len(args) > 1 else kwargs.get("src")
             if isinstance(src, cls) and not isinstance(args[0], cls):
                 return src._sink.accept_copy(args[0], src)
+        if func is torch.Tensor.__setitem__ and len(args) == 3:
+            # `dst[index] = src` is `dst[index].copy_(src)` for a basic index;
+            # any other index goes to dispatch unevaluated.
+            dst, index, src = args
+            if (
+                isinstance(src, cls)
+                and not isinstance(dst, cls)
+                and _is_basic_index(index)
+            ):
+                with torch._C.DisableTorchFunctionSubclass():
+                    view = dst[index]
+                if view._is_view() and view.untyped_storage()._cdata == (
+                    dst.untyped_storage()._cdata
+                ):
+                    src._sink.accept_copy(view, src)
+                    return None
         self_ = args[0] if args else None
         if isinstance(self_, cls):
             if func in VIEW_OPS:
