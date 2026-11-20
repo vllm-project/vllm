@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
     TritonWNA16Experts,
 )
+from vllm.model_executor.layers.fused_moe.oracle import fp8 as fp8_oracle
 from vllm.model_executor.layers.fused_moe.oracle import int_wna16 as int_wna16_oracle
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     Fp8MoEKernelOracle,
+    convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     map_fp8_backend,
     select_fp8_moe_backend,
@@ -485,6 +487,66 @@ def test_fp8_aiter_env_selection(
             select()
         return
     assert select()[0] is expected
+
+
+@pytest.mark.parametrize(
+    ("out_of_tree", "registered", "expected"),
+    [
+        pytest.param(True, True, Fp8MoeBackend.OOT, id="oot-registered"),
+        pytest.param(True, False, Fp8MoeBackend.NONE, id="oot-unregistered"),
+        pytest.param(False, True, Fp8MoeBackend.NONE, id="in-tree-ignores-hook"),
+    ],
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_oot_platform_experts(out_of_tree, registered, expected, monkeypatch):
+    """An out-of-tree platform's FP8 MoE experts are probed in the platform's
+    order, skipping unsupported ones; a platform registering none still gets
+    `NONE`, and in-tree platforms never consult the hook."""
+
+    def experts(supported: bool) -> type[mk.FusedMoEExperts]:
+        return type(
+            "OOTExperts",
+            (TritonExperts,),
+            {"is_supported_config": staticmethod(lambda *_: (supported, None))},
+        )
+
+    unsupported, supported = experts(False), experts(True)
+    monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: out_of_tree)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(
+        current_platform,
+        "get_fp8_moe_experts_cls",
+        lambda: [unsupported, supported] if registered else [],
+    )
+    # Isolate from the in-tree kernels available on the test host.
+    in_tree = fp8_oracle.backend_to_kernel_cls
+    monkeypatch.setattr(
+        fp8_oracle,
+        "backend_to_kernel_cls",
+        lambda backend: in_tree(backend) if backend is Fp8MoeBackend.OOT else [],
+    )
+
+    assert select_fp8_moe_backend(make_dummy_moe_config(), None, None) == (
+        expected,
+        supported if expected is Fp8MoeBackend.OOT else None,
+    )
+
+
+def test_fp8_oot_backend_keeps_weight_layout():
+    """OOT experts receive the canonical weights; their own
+    `process_weights_after_loading` owns any layout change."""
+    w13, w2 = torch.empty(2, 8, 4), torch.empty(2, 4, 4)
+    w13_scale, w2_scale = torch.ones(2), torch.ones(2)
+
+    converted = convert_to_fp8_moe_kernel_format(
+        Fp8MoeBackend.OOT, Mock(spec=[]), w13, w2, w13_scale, w2_scale, None, None
+    )
+
+    assert all(
+        out is inp
+        for out, inp in zip(converted, (w13, w2, w13_scale, w2_scale), strict=True)
+    )
 
 
 _FORMAT = mk.FusedMoEActivationFormat
