@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
+    VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1454,6 +1455,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
     "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
+    ),
+    # Whether the ROCm MXFP4 sparse indexer (indexer_kv_dtype="mxfp4") scores
+    # and selects the decode rows' top-512 keys with aiter's fused FlyDSL op
+    # (aiter.ops.flydsl.mxfp4_indexer_topk) where it is faster than the
+    # paged MXFP4 MQA logits + top-k chain. gfx950 only; needs
+    # VLLM_ROCM_USE_AITER and an aiter build with the op, else the chain runs.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
