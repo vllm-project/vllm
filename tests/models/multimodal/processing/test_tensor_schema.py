@@ -35,6 +35,7 @@ from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
@@ -150,6 +151,7 @@ def initialize_dummy_model(
             backend="nccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
+        init_workspace_manager(torch.device(current_platform.device_type, 0))
 
         with set_default_torch_dtype(model_config.dtype):
             torch.set_default_device(current_platform.device_type)
@@ -158,6 +160,7 @@ def initialize_dummy_model(
         yield model
 
     del model
+    reset_workspace_manager()
     cleanup_dist_env_and_memory()
 
 
@@ -181,6 +184,12 @@ def test_model_tensor_schema(model_id: str):
 
     if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")
+
+    if (
+        model_id == "thinkingmachines/Inkling-2-Small"
+        and not current_platform.is_cuda()
+    ):
+        pytest.skip("Inkling 2 Small is only supported on CUDA")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
 
@@ -216,8 +225,20 @@ def test_model_tensor_schema(model_id: str):
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    assert supports_multimodal(model_cls)
+    assert isinstance(model_cls, type)
 
+    if (
+        model_config.hf_config.model_type == "hy_v4_flash_vl"
+        and not current_platform.is_cuda()
+    ):
+        # Flash has no non-CUDA implementation; enforce its runtime contract.
+        with pytest.raises(
+            NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA"
+        ):
+            model_cls(vllm_config=VllmConfig(model_config=model_config))
+        return
+
+    assert supports_multimodal(model_cls)
     factories = model_cls._processor_factory
 
     # Capture helpers return capture-buffer containers (e.g.
