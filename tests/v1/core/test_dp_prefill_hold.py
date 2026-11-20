@@ -9,6 +9,7 @@ import pytest
 from tests.v1.core.utils import create_requests, create_scheduler
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import ModelConfig
+from vllm.config import vllm as vllm_config_module
 from vllm.v1.core.sched import dp_prefill_hold as dph
 from vllm.v1.core.sched.dp_prefill_hold import PrefillHold
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -237,6 +238,27 @@ def test_requires_dp_on_a_moe_model(monkeypatch, dp_size: int, is_moe: bool):
     monkeypatch.setattr(ModelConfig, "is_moe", property(lambda self: is_moe))
     with pytest.raises(ValueError, match="requires data parallelism"):
         create_scheduler(prefill_hold_ttft_target=T, data_parallel_size=dp_size)
+
+
+@pytest.mark.parametrize(
+    ("kv_role", "warned"),
+    [("kv_producer", True), ("kv_consumer", True), ("kv_both", False)],
+)
+def test_warns_on_a_prefill_or_decode_only_instance(
+    monkeypatch, kv_role: str, warned: bool
+):
+    """In disaggregated serving a prefill-only instance runs no decodes and a
+    decode-only one has next to nothing to prefill, so the hold never holds."""
+    warning = Mock()
+    monkeypatch.setattr(vllm_config_module.logger, "warning", warning)
+    create_scheduler(
+        prefill_hold_ttft_target=T,
+        data_parallel_size=2,
+        use_kv_connector=MockKVConfig(),
+        kv_role=kv_role,
+    )
+    calls = [c.args[0] for c in warning.call_args_list]
+    assert any("prefill_hold_ttft_target" in m for m in calls) == warned
 
 
 def test_local_row_offers_one_budget_and_scales_slack_by_releases_left():

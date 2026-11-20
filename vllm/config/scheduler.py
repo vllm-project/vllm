@@ -246,7 +246,8 @@ class SchedulerConfig:
     is held only while it can still meet the target given the releases it
     needs; one that has missed it is held at most this long at a time.
     Requires data parallelism on a MoE model, and cannot be combined with
-    `prefill_schedule_interval`."""
+    `prefill_schedule_interval`. Has no effect on the prefill-only and
+    decode-only instances of disaggregated serving."""
 
     prefill_hold_alpha: float = Field(default=1.0, gt=0)
     """How much one second of TTFT per waiting request weighs against one

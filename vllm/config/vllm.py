@@ -1308,6 +1308,15 @@ class VllmConfig:
                 "prefill_hold_ttft_target requires data parallelism "
                 "(data_parallel_size > 1) on a MoE model."
             )
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None and (
+            kv_transfer_config.is_kv_producer != kv_transfer_config.is_kv_consumer
+        ):
+            logger.warning(
+                "prefill_hold_ttft_target has no effect on a prefill-only or "
+                "decode-only instance: it holds prefills only while they would "
+                "stall running decodes."
+            )
 
     def _check_supports_watermarking(
         self,
