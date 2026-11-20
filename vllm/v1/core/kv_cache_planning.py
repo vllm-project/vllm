@@ -730,36 +730,54 @@ def _private_pool_groups(
     return dict(sorted(pools.items()))
 
 
-def _private_pool_blocks_per_request(
-    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroup]
-) -> int:
-    """A request's admission cap in a private pool, over its groups."""
-    return sum(
-        group.max_allocated_blocks_per_request(vllm_config) for group in kv_cache_groups
-    )
-
-
 def _private_pool_num_blocks(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroup]
 ) -> int:
-    """Blocks of a private pool: its requests at their admission cap,
-    `draft_kv_pool_cache_fraction` more for prefix-cached blocks, and the null
-    block. Its requests are up to `max_num_seqs` running plus up to
-    `max_num_inflight_kv_loads` holding blocks for an async KV load, which
-    don't count toward `max_num_seqs`.
+    """Blocks of a private pool (the drafter's, under --draft-kv-pool): what
+    its requests can hold at once, room for prefix-cached blocks, and the null
+    block.
+
+    A request holds one tail outside prefill. A prefill chunk in flight backs
+    one more, at most as long as the chunk, so a request reaches its cap only
+    while long chunks are in flight, and the chunks of all in-flight steps
+    total at most `max_concurrent_batches * max_num_batched_tokens` tokens. Per
+    group, the pool holds:
+    - one tail for each of `max_num_seqs` running requests;
+    - the tails of in-flight chunks: that token budget, plus a block of
+      rounding at each end of each chunk;
+    - one request's cap less its tail, since admission checks a request
+      against its cap;
+    never more than every running request at its cap. On top come
+    `max_num_inflight_kv_loads` async loads at their cap, which hold blocks
+    outside `max_num_seqs`, and `draft_kv_pool_cache_fraction` of the running
+    requests' tails for prefix-cached blocks.
 
     Sized from specs alone, so every worker, and the scheduler, agrees on it
     whether or not it holds the pool's layers.
     """
     cache_config = vllm_config.cache_config
     scheduler_config = vllm_config.scheduler_config
-    max_seqs = scheduler_config.max_num_seqs + (
-        scheduler_config.max_num_inflight_kv_loads or 0
-    )
-    running_set = max_seqs * _private_pool_blocks_per_request(
-        vllm_config, kv_cache_groups
-    )
-    return 1 + math.ceil(running_set * (1 + cache_config.draft_kv_pool_cache_fraction))
+    max_seqs = scheduler_config.max_num_seqs
+    max_loads = scheduler_config.max_num_inflight_kv_loads or 0
+    max_steps = vllm_config.max_concurrent_batches
+    num_blocks = 1
+    for group in kv_cache_groups:
+        assert group.manager_cls is DFlashSlidingWindowManager
+        cap = group.max_allocated_blocks_per_request(vllm_config)
+        tail = min(
+            DFlashSlidingWindowManager.tail_blocks(
+                group.manager_config, group.block_size
+            ),
+            cap,
+        )
+        in_flight = max_steps * (
+            cdiv(scheduler_config.max_num_batched_tokens, group.block_size)
+            + 2 * max_seqs
+        )
+        running = min(max_seqs * tail + in_flight + cap - tail, max_seqs * cap)
+        cached = math.ceil(max_seqs * tail * cache_config.draft_kv_pool_cache_fraction)
+        num_blocks += running + max_loads * cap + cached
+    return num_blocks
 
 
 def _private_pool_bytes(

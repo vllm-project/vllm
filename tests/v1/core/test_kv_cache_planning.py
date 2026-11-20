@@ -35,6 +35,7 @@ from vllm.config import (
 )
 from vllm.config.attention import HiSparseConfig
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
     can_share_block_table,
@@ -2358,12 +2359,31 @@ def _draft_kv_pool_layers() -> dict[str, KVCacheLayerConfig]:
     }
 
 
+def _expected_draft_pool_blocks(config: VllmConfig, draft_group) -> int:
+    """The drafter pool's size, term by term: one tail per running request,
+    the in-flight chunks' tails, one admission's cap headroom (capped at every
+    request at its cap), async loads at their cap, cached tails, null block."""
+    scheduler_config = config.scheduler_config
+    seqs = scheduler_config.max_num_seqs
+    loads = scheduler_config.max_num_inflight_kv_loads or 0
+    cap = draft_group.max_allocated_blocks_per_request(config)
+    tail = DFlashSlidingWindowManager.tail_blocks(
+        draft_group.manager_config, draft_group.block_size
+    )
+    in_flight = config.max_concurrent_batches * (
+        cdiv(scheduler_config.max_num_batched_tokens, draft_group.block_size) + 2 * seqs
+    )
+    running = min(seqs * tail + in_flight + cap - tail, seqs * cap)
+    cached = math.ceil(seqs * tail * config.cache_config.draft_kv_pool_cache_fraction)
+    return 1 + running + loads * cap + cached
+
+
 @pytest.mark.parametrize("max_loads", [None, 4])
 def test_draft_kv_pool_places_the_drafter_after_the_shared_pool(max_loads):
     """--draft-kv-pool groups the drafter's layers on their own in pool 1, sized
-    for max_num_seqs requests plus --max-num-inflight-kv-loads async loads at
-    their admission cap plus the cache fraction, and laid out after the shared
-    pool, which gets the memory left."""
+    for what its requests can hold at once plus --max-num-inflight-kv-loads
+    async loads at their admission cap plus the cache fraction, and laid out
+    after the shared pool, which gets the memory left."""
     config = _draft_kv_pool_config()
     config.scheduler_config.max_num_inflight_kv_loads = max_loads
     (kv_cache_config,) = get_kv_cache_configs(
@@ -2376,8 +2396,7 @@ def test_draft_kv_pool_places_the_drafter_after_the_shared_pool(max_loads):
     assert draft_group.manager_cls is DFlashSlidingWindowManager
     assert not any(group.pool_id for group in shared_groups)
 
-    cap = draft_group.max_allocated_blocks_per_request(config)
-    num_pool_blocks = 1 + math.ceil((8 + (max_loads or 0)) * cap * 1.5)
+    num_pool_blocks = _expected_draft_pool_blocks(config, draft_group)
     assert kv_cache_config.pool_num_blocks == {1: num_pool_blocks}
 
     shared_bytes_per_block = kv_cache_planning._pool_bytes_per_block(
@@ -2394,6 +2413,66 @@ def test_draft_kv_pool_places_the_drafter_after_the_shared_pool(max_loads):
     assert pool_tensor.layers == ["draft.0", "draft.1"]
     assert pool_tensor.offset == shared_bytes
     assert pool_tensor.block_stride == pool_bytes_per_block
+
+
+def test_draft_kv_pool_tail_is_the_window_plus_in_flight_drafts():
+    """A tail covers the window and the drafts each in-flight step may still
+    reject, plus a block for a window that doesn't start on a block boundary;
+    the admission cap is one tail per in-flight step plus the processed one."""
+    config = _draft_kv_pool_config()
+    (kv_cache_config,) = get_kv_cache_configs(
+        config, [_draft_kv_pool_layers()], [2**30]
+    )
+    *_, draft_group = kv_cache_config.kv_cache_groups
+    params = draft_group.manager_config.params
+    tail = DFlashSlidingWindowManager.tail_blocks(
+        draft_group.manager_config, draft_group.block_size
+    )
+    tail_tokens = 64 + 3 * params.max_in_flight_steps
+    expected_tail = (
+        cdiv(
+            tail_tokens + params.extra_retained_tokens + params.num_lookahead_tokens,
+            draft_group.block_size,
+        )
+        + 1
+    )
+    assert tail == expected_tail
+    assert (
+        draft_group.max_allocated_blocks_per_request(config)
+        <= (params.max_in_flight_steps + 1) * tail
+    )
+
+
+def test_draft_kv_pool_is_sized_for_in_flight_tails_not_every_cap():
+    """With many requests, only the chunks in flight push requests past one
+    tail, so the pool is far smaller than every request at its cap."""
+    config = _draft_kv_pool_config()
+    config.scheduler_config.max_num_seqs = 64
+    (kv_cache_config,) = get_kv_cache_configs(
+        config, [_draft_kv_pool_layers()], [2**30]
+    )
+    *_, draft_group = kv_cache_config.kv_cache_groups
+    cap = draft_group.max_allocated_blocks_per_request(config)
+    every_cap = 1 + math.ceil(64 * cap * 1.5)
+    num_pool_blocks = kv_cache_config.pool_num_blocks[1]
+    assert num_pool_blocks == _expected_draft_pool_blocks(config, draft_group)
+    assert num_pool_blocks < every_cap
+
+
+def test_draft_kv_pool_never_exceeds_every_request_at_its_cap():
+    """With a single request, the in-flight term alone would exceed the
+    request at its cap; the pool keeps the smaller of the two."""
+    config = _draft_kv_pool_config()
+    config.scheduler_config.max_num_seqs = 1
+    (kv_cache_config,) = get_kv_cache_configs(
+        config, [_draft_kv_pool_layers()], [2**30]
+    )
+    *_, draft_group = kv_cache_config.kv_cache_groups
+    cap = draft_group.max_allocated_blocks_per_request(config)
+    tail = DFlashSlidingWindowManager.tail_blocks(
+        draft_group.manager_config, draft_group.block_size
+    )
+    assert kv_cache_config.pool_num_blocks == {1: 1 + cap + math.ceil(tail * 0.5)}
 
 
 def test_draft_kv_pool_sizes_agree_across_pp_stages():

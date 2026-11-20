@@ -1472,7 +1472,19 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
             max_model_len,
         )
         assert window_blocks is not None
-        tail_blocks = (
+        return min(
+            window_blocks,
+            (params.max_in_flight_steps + 1) * cls.tail_blocks(config, block_size),
+        )
+
+    @classmethod
+    def tail_blocks(cls, config: ManagerConfig, block_size: int) -> int:
+        """Blocks of one tail: what a request holds outside prefill. Each
+        prefill chunk in flight backs one more, up to the chunk's length.
+        +1 because the tail may not start on a block boundary."""
+        params = config.params
+        assert isinstance(params, DFlashSlidingWindowManager.Params)
+        return (
             cdiv(
                 params.tail_tokens
                 + params.extra_retained_tokens
@@ -1481,7 +1493,6 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
             )
             + 1
         )
-        return min(window_blocks, (params.max_in_flight_steps + 1) * tail_blocks)
 
     def __init__(self, kv_cache_group: KVCacheGroup, **kwargs) -> None:
         super().__init__(kv_cache_group, **kwargs)

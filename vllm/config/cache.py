@@ -424,13 +424,14 @@ class CacheConfig:
     """Give a DFlash or DSpark drafter's sliding-window KV its own block pool,
     sized for the window each request keeps, instead of blocks of the shared
     pool, which are as large as its widest group's. Needs the hybrid KV cache
-    manager. The pool holds max_num_seqs requests plus
-    --max-num-inflight-kv-loads async loads at their admission cap, so a KV
-    consumer needs that cap."""
+    manager. The pool holds a window tail for each of max_num_seqs requests,
+    the extra tails that prefill chunks in flight can back (bounded by
+    max_num_batched_tokens per step), and --max-num-inflight-kv-loads async
+    loads at their admission cap, so a KV consumer needs that cap."""
 
     draft_kv_pool_cache_fraction: float = Field(default=0.5, ge=0)
     """Extra drafter pool blocks for prefix-cached drafter KV, as a fraction of
-    the blocks its requests hold at their cap."""
+    the window tails its running requests hold."""
 
     def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config, add it to
