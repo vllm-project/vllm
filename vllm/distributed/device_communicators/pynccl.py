@@ -5,6 +5,8 @@
 # ===================== import region =====================
 import contextlib
 import threading
+from collections.abc import Callable
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -96,6 +98,8 @@ class PyNcclCommunicator:
         group: ProcessGroup | StatelessProcessGroup,
         device: int | str | torch.device,
         library_path: str | None = None,
+        *,
+        _get_current_stream: Callable[[], torch.cuda.Stream] | None = None,
     ):
         """Args:
             group: the process group to work on. If None, it will use the
@@ -104,6 +108,7 @@ class PyNcclCommunicator:
                 it will be bound to f"cuda:{local_rank}".
             library_path: the path to the NCCL library. If None, it will
                 use the default library path.
+            _get_current_stream: vLLM groups supply their dedicated stream getter.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
 
@@ -159,9 +164,13 @@ class PyNcclCommunicator:
                 self.unique_id.internal[i] = byte
         else:
             self.unique_id = group.broadcast_obj(self.unique_id, src=0)
-        self._init_comm(device)
+        self._init_comm(device, _get_current_stream)
 
-    def _init_comm(self, device: int | str | torch.device) -> None:
+    def _init_comm(
+        self,
+        device: int | str | torch.device,
+        get_current_stream: Callable[[], torch.cuda.Stream] | None = None,
+    ) -> None:
         """Create the communicator on `device` from the already-resolved
         `self.unique_id` / `self.rank` / `self.world_size`, then run the
         one-element warm-up all_reduce. Shared by `__init__` and
@@ -174,6 +183,9 @@ class PyNcclCommunicator:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
+        self._current_stream = get_current_stream or partial(
+            torch.cuda.current_stream, device
+        )
         # nccl communicator and stream will use this device
         # Streams with their own communicator; the others use self.comm.
         self._stream_comms: dict[int, PyNcclCommunicator] = {}
@@ -279,11 +291,9 @@ class PyNcclCommunicator:
         if self.disabled or stream.cuda_stream in self._stream_comms:
             return
         assert self.group is not None
-        self._stream_comms[stream.cuda_stream] = type(self)(self.group, self.device)
-
-    def _current_stream(self) -> torch.cuda.Stream:
-        # Unlike vLLM's `current_stream()`, this never switches the caller's stream.
-        return torch.cuda.current_stream(self.device)
+        self._stream_comms[stream.cuda_stream] = PyNcclCommunicator(
+            self.group, self.device, _get_current_stream=self._current_stream
+        )
 
     def _comm_for(self, stream) -> ncclComm_t:
         stream_comm = self._stream_comms.get(stream.cuda_stream)
