@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -11,9 +12,10 @@ from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.forward_context import set_forward_context
-from vllm.lora.layers import FusedMoE3DWithLoRA
+from vllm.lora.layers import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.attention.ops import pcp as attention_pcp
@@ -21,6 +23,7 @@ from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
+from vllm.v1.worker.gpu.lora_utils import LoraState, create_lora_capture_hook
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
@@ -86,13 +89,20 @@ def test_validate_config_accepts_lora():
     PCPManager.validate_config(config, supports_mm_inputs=False)
 
 
-def test_validate_lora_modules_rejects_expert_lora():
-    """PCP gathers MoE tokens across ranks, so expert LoRA must be refused."""
+def test_validate_lora_modules_rejects_expert_lora_with_ep():
+    """PCP + EP does not provide the routed-expert LoRA token mapping."""
     attn_lora = object()
     expert_lora = object.__new__(FusedMoE3DWithLoRA)
-    PCPManager.validate_lora_modules([attn_lora])
-    with pytest.raises(NotImplementedError, match="attention-only LoRA"):
-        PCPManager.validate_lora_modules([attn_lora, expert_lora])
+    PCPManager.validate_lora_modules([attn_lora], expert_lora_supported=False)
+    with pytest.raises(NotImplementedError, match=r"PCP \+ EP expert LoRA"):
+        PCPManager.validate_lora_modules(
+            [attn_lora, expert_lora], expert_lora_supported=False
+        )
+
+
+def test_validate_lora_modules_accepts_pcp_only_expert_lora():
+    expert_lora = object.__new__(FusedMoE3DWithLoRA)
+    PCPManager.validate_lora_modules([expert_lora], expert_lora_supported=True)
 
 
 def _make_lora_adapter(adapter_id: int, module_name: str) -> LoRAModel:
@@ -116,12 +126,169 @@ def test_validate_lora_adapter_accepts_attention_only():
     PCPManager.validate_lora_adapter(adapter)
 
 
-def test_validate_lora_adapter_rejects_expert_weights():
+def test_validate_lora_adapter_rejects_expert_weights_with_ep():
     adapter = _make_lora_adapter(2, "model.layers.0.mlp.experts")
-    with pytest.raises(NotImplementedError, match="attention-only LoRA") as exc_info:
-        PCPManager.validate_lora_adapter(adapter)
-    assert "adapter 2" in str(exc_info.value)
+    with pytest.raises(NotImplementedError, match=r"PCP \+ EP expert LoRA") as exc_info:
+        PCPManager.validate_lora_adapter(adapter, expert_lora_supported=False)
+    assert "Adapter 2" in str(exc_info.value)
     assert "model.layers.0.mlp.experts" in str(exc_info.value)
+
+
+def test_validate_lora_adapter_accepts_pcp_only_expert_weights():
+    adapter = _make_lora_adapter(2, "model.layers.0.mlp.experts")
+    PCPManager.validate_lora_adapter(adapter, expert_lora_supported=True)
+
+
+def test_expert_lora_support_depends_on_ep():
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        expert_lora_supported=False,
+    )
+    assert not manager.expert_lora_supported
+
+
+def _make_moe_mapping_manager(
+    num_scheduled_tokens: list[int],
+    is_prefilling: list[bool],
+    padded_num_tokens: int = 4,
+) -> PCPManager:
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    manager._build_batch_layout(
+        num_scheduled_tokens=np.asarray(num_scheduled_tokens, dtype=np.int32),
+        num_computed_tokens=np.zeros(len(num_scheduled_tokens), dtype=np.int32),
+        is_prefilling=np.asarray(is_prefilling, dtype=np.bool_),
+        query_start_loc_np=np.concatenate(
+            [[0], np.cumsum(num_scheduled_tokens)]
+        ).astype(np.int32),
+        padded_num_tokens=padded_num_tokens,
+    )
+    return manager
+
+
+def _make_mapping_lora_state(lora_ids: list[int]) -> LoraState:
+    state = LoraState(max_num_reqs=4)
+    state.lora_ids[: len(lora_ids)] = lora_ids
+    return state
+
+
+def test_moe_lora_mapping_follows_sharded_rows_and_padding(monkeypatch):
+    """Each gathered row uses its request's active slot, not its rank's slots."""
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+    manager = _make_moe_mapping_manager([1, 1, 1], [False, False, False])
+    state = _make_mapping_lora_state([3, 4, 5])
+    global_batch = SimpleNamespace(
+        idx_mapping_np=np.array([2, 1, 0], dtype=np.int32),
+        num_scheduled_tokens=np.ones(3, dtype=np.int32),
+    )
+
+    mapping = manager.build_moe_lora_mapping(
+        state, global_batch, lora_index_to_id=[5, None, 3, 4]
+    )
+
+    assert mapping is not None
+    assert mapping.dtype == torch.int32
+    assert mapping.data_ptr() == manager._pcp_moe_lora_mapping.data_ptr()
+    assert mapping.tolist() == [0, 2, -1, -1, 3, -1, -1, -1]
+
+
+def test_moe_lora_mapping_preserves_replicated_and_split_prefill_rows(monkeypatch):
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+    manager = _make_moe_mapping_manager([8, 1], [True, False], padded_num_tokens=5)
+    state = _make_mapping_lora_state([3, 0])
+    global_batch = SimpleNamespace(
+        idx_mapping_np=np.array([0, 1], dtype=np.int32),
+        num_scheduled_tokens=np.array([8, 1], dtype=np.int32),
+    )
+
+    mapping = manager.build_moe_lora_mapping(state, global_batch, lora_index_to_id=[3])
+
+    assert mapping is not None
+    assert mapping.tolist() == [-1, 0, 0, 0, 0, 0, 0, 0, 0, -1]
+
+
+def test_moe_lora_mapping_is_none_for_base_and_dummy_batches(monkeypatch):
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+    manager = _make_moe_mapping_manager([1, 1], [False, False])
+    state = _make_mapping_lora_state([0, 0])
+    global_batch = SimpleNamespace(
+        idx_mapping_np=np.arange(2, dtype=np.int32),
+        num_scheduled_tokens=np.ones(2, dtype=np.int32),
+    )
+
+    assert manager.build_moe_lora_mapping(state, global_batch, [1]) is None
+    state.lora_ids[0] = 1
+    assert manager.build_moe_lora_mapping(state, None, [1]) is None
+
+
+def _make_moe_lora_context() -> MoELoRAContext:
+    tensor = torch.empty(0)
+    return MoELoRAContext(
+        w13_lora_a_stacked=(tensor,),
+        w13_lora_b_stacked=(tensor,),
+        w2_lora_a_stacked=(tensor,),
+        w2_lora_b_stacked=(tensor,),
+        adapter_enabled=tensor,
+        max_loras=1,
+        top_k=1,
+        w13_num_slices=1,
+        fully_sharded=False,
+        tp_rank=0,
+        tp_size=1,
+        local_num_experts=1,
+        punica_wrapper=None,
+        use_tuned_config=False,
+    )
+
+
+def test_moe_lora_capture_hook_uses_static_pcp_mapping():
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    layer = object.__new__(FusedMoEWithLoRA)
+    layer._lora_context = _make_moe_lora_context()
+    runner = SimpleNamespace(
+        maybe_select_dummy_loras=lambda *args, **kwargs: nullcontext()
+    )
+    hook = create_lora_capture_hook(
+        LoRAConfig(target_modules=["q_proj"]),
+        runner,
+        pcp_manager=manager,
+        moe_lora_layers=[layer],
+    )
+    assert hook is not None
+
+    hook(num_active_loras=1, num_reqs=2, num_tokens=4)
+
+    mapping = layer._lora_context.local_token_lora_mapping
+    assert mapping is not None
+    assert mapping.data_ptr() == manager._pcp_moe_lora_mapping.data_ptr()
+    assert mapping.tolist() == [-1] * 8
+
+
+def test_fused_moe_pcp_mapping_is_scoped_to_forward():
+    layer = object.__new__(FusedMoEWithLoRA)
+    layer._lora_context = _make_moe_lora_context()
+    mapping = torch.tensor([0, -1], dtype=torch.int32)
+
+    layer.set_pcp_token_lora_mapping(mapping)
+    assert layer._lora_context.local_token_lora_mapping is mapping
+    layer.clear_pcp_token_lora_mapping()
+    assert layer._lora_context.local_token_lora_mapping is None
 
 
 def test_validate_config_rejects_full_graph_for_prefills():

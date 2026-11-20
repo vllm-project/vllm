@@ -61,6 +61,8 @@ def get_num_active_loras_for_dispatch(
 def create_lora_capture_hook(
     lora_config: "LoRAConfig | None",
     runner: Any,
+    pcp_manager: Any = None,
+    moe_lora_layers: Any = (),
 ) -> Callable[[int, int, int], None] | None:
     """Create a hook to set up LoRA state before each cudagraph capture."""
     if lora_config is None:
@@ -76,7 +78,8 @@ def create_lora_capture_hook(
         with runner.maybe_select_dummy_loras(
             lora_config, num_scheduled, num_active_loras=num_active_loras
         ):
-            pass
+            if pcp_manager is not None and moe_lora_layers:
+                pcp_manager.prepare_moe_lora_capture(moe_lora_layers, num_tokens)
 
     return hook
 
