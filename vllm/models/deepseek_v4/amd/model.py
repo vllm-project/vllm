@@ -908,7 +908,8 @@ class DeepseekV4MoE(nn.Module):
             or gate.tid2eid is not None
             or gate.e_score_correction_bias is None
             # The kernel has no bias_vl term. Without image inputs, bias_vl
-            # would only select experts for image-placeholder ids in text.
+            # only routes image-placeholder ids sent as text; this router
+            # gives those tokens the text bias instead.
             or (gate.bias_vl is not None and not self.text_only)
         ):
             return
@@ -929,7 +930,6 @@ class DeepseekV4MoE(nn.Module):
                 hidden_states,
                 self.flydsl_router_gate,
                 self.gate.e_score_correction_bias,
-                self.n_activated_experts,
                 self.routed_scaling_factor,
                 get_moe_padding_mask(hidden_states.shape[0]),
             )

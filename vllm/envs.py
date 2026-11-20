@@ -1460,6 +1460,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # on AITER's FlyDSL kernel for the decode batches it supports (bf16
     # [<=768, 5120] x [384, 5120], MegaMoE backend); other batches keep the
     # GateLinear GEMM + top-k. gfx950 only. Disabled by default.
+    # The kernel has no `bias_vl` term: with --language-model-only, image
+    # placeholder token ids in a text prompt are routed with the text bias,
+    # where the default router uses `bias_vl`. With image inputs enabled,
+    # layers with `bias_vl` keep the default router.
     "VLLM_ROCM_USE_AITER_FLYDSL_ROUTER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_ROUTER", "False").lower() in ("true", "1")
     ),

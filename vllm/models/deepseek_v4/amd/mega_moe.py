@@ -11,6 +11,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.online.base import (
     ONLINE_SHARED_EXPERT_QUANTIZERS,
 )
@@ -21,6 +22,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2, prev_power_of_2
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -286,6 +289,7 @@ DeepseekV4AiterMegaMoEExperts.weight_loader.supports_moe_loading = True  # type:
 
 
 def finalize_mega_moe_weights(model: nn.Module) -> None:
+    num_layers = num_flydsl_router_layers = 0
     for module in list(model.modules()):
         experts = getattr(module, "experts", None)
         if isinstance(experts, DeepseekV4AiterMegaMoEExperts):
@@ -293,3 +297,12 @@ def finalize_mega_moe_weights(model: nn.Module) -> None:
                 experts.load_shared_expert(module.shared_experts)
                 module.shared_experts = None
             experts.finalize_weights()
+            num_layers += 1
+            if getattr(module, "flydsl_router_gate", None) is not None:
+                num_flydsl_router_layers += 1
+    if num_layers and rocm_aiter_ops.is_flydsl_router_enabled():
+        logger.info(
+            "AITER FlyDSL MoE router serves %d of %d MegaMoE layers",
+            num_flydsl_router_layers,
+            num_layers,
+        )
