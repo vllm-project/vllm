@@ -1024,6 +1024,41 @@ class AiterSiluMulMxfp4AsmQuantPattern(AiterSiluMulMxfp4QuantPattern):
     FUSED_OP = rocm_aiter_ops.get_act_mul_fused_mxfp4_asm_quant_op()
 
 
+class AiterSiluMulMxfp4QuantViewPattern(AiterSiluMulMxfp4QuantPattern):
+    """`AiterSiluMulMxfp4QuantPattern` for a 3D activation that the linear
+    flattens to 2D in front of its quant (`apply_flattened`). The Transformers
+    modeling backend passes `[batch, seq, hidden]` activations, Llama included,
+    and the view between silu_and_mul and the quant hides the 2D pattern.
+    """
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [self.silu_and_mul_matcher.empty(1, 5, 4)]
+
+    @property
+    def pattern(self):
+        def _pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            act = self.silu_and_mul_matcher(input)
+            at = self.QUANT_OP(act.view(-1, act.shape[-1]))
+            return at[0], at[1]
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            at = self.FUSED_OP(input.view(-1, input.shape[-1]))
+            return at[0], at[1]
+
+        return _replacement
+
+
+class AiterSiluMulMxfp4AsmQuantViewPattern(AiterSiluMulMxfp4QuantViewPattern):
+    """`AiterSiluMulMxfp4AsmQuantPattern` through the same 2D flatten."""
+
+    QUANT_OP = rocm_aiter_ops.get_dynamic_mxfp4_asm_quant_op()
+    FUSED_OP = rocm_aiter_ops.get_act_mul_fused_mxfp4_asm_quant_op()
+
+
 class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     """This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
@@ -1043,8 +1078,10 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         )
         if rocm_aiter_ops.is_mxfp4_quant_fusion_supported():
             self.register(AiterSiluMulMxfp4QuantPattern())
+            self.register(AiterSiluMulMxfp4QuantViewPattern())
         if rocm_aiter_ops.is_mxfp4_asm_quant_fusion_supported():
             self.register(AiterSiluMulMxfp4AsmQuantPattern())
+            self.register(AiterSiluMulMxfp4AsmQuantViewPattern())
 
         self.dump_patterns(config, self.pm_pass)
 

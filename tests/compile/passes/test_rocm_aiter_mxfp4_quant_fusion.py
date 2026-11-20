@@ -36,13 +36,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _flatten(y: torch.Tensor) -> torch.Tensor:
+    # what apply_flattened does for the [batch, seq, hidden] activations of the
+    # Transformers modeling backend
+    return y.view(-1, y.shape[-1]) if y.ndim > 2 else y
+
+
 class SiluMulMxfp4Model(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.silu_and_mul = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        y = self.silu_and_mul(x)
+        y = _flatten(self.silu_and_mul(x))
         q, s = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()(y)
         return q, s
 
@@ -53,7 +59,7 @@ class SiluMulMxfp4AsmModel(torch.nn.Module):
         self.silu_and_mul = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        y = self.silu_and_mul(x)
+        y = _flatten(self.silu_and_mul(x))
         q, s = rocm_aiter_ops.get_dynamic_mxfp4_asm_quant_op()(y)
         return q, s
 
@@ -122,10 +128,12 @@ def _compile(config, make_passes, make_model, *args):
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 257])
 @pytest.mark.parametrize("hidden_size", [256, 2048])
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
+@pytest.mark.parametrize("input_3d", [False, True])
 def test_silu_mul_mxfp4_quant_fusion(
     num_tokens: int,
     hidden_size: int,
     enable_silu_mul_custom_op: bool,
+    input_3d: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
@@ -142,14 +150,15 @@ def test_silu_mul_mxfp4_quant_fusion(
     quant_op = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()
     fused_op = rocm_aiter_ops.get_act_mul_fused_mxfp4_quant_op()
     torch.manual_seed(0)
-    x = torch.randn(num_tokens, 2 * hidden_size, dtype=torch.bfloat16, device="cuda")
+    shape = (1, num_tokens) if input_3d else (num_tokens,)
+    x = torch.randn(*shape, 2 * hidden_size, dtype=torch.bfloat16, device="cuda")
 
     results = {}
     for enabled in (False, True):
         with monkeypatch.context() as m:
             _setup(m)
             xi = x.clone()
-            torch._dynamo.mark_dynamic(xi, 0)
+            torch._dynamo.mark_dynamic(xi, xi.ndim - 2)
             config = _config(custom_ops, fuse_act_quant=enabled, fuse_norm_quant=False)
             results[enabled], fusion_passes, backend = _compile(
                 config, make_passes, SiluMulMxfp4Model, xi
@@ -192,10 +201,12 @@ def _asm_scales(s: torch.Tensor, m: int, n: int) -> torch.Tensor:
 @pytest.mark.parametrize("num_tokens", [1, 7, 31, 32, 64, 65, 257])
 @pytest.mark.parametrize("hidden_size", [256, 2048])
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
+@pytest.mark.parametrize("input_3d", [False, True])
 def test_silu_mul_mxfp4_asm_quant_fusion(
     num_tokens: int,
     hidden_size: int,
     enable_silu_mul_custom_op: bool,
+    input_3d: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
@@ -211,7 +222,8 @@ def test_silu_mul_mxfp4_asm_quant_fusion(
     quant_op = rocm_aiter_ops.get_dynamic_mxfp4_asm_quant_op()
     fused_op = rocm_aiter_ops.get_act_mul_fused_mxfp4_asm_quant_op()
     torch.manual_seed(0)
-    x = torch.randn(num_tokens, 2 * hidden_size, dtype=torch.bfloat16, device="cuda")
+    shape = (1, num_tokens) if input_3d else (num_tokens,)
+    x = torch.randn(*shape, 2 * hidden_size, dtype=torch.bfloat16, device="cuda")
 
     results = {}
     for enabled in (False, True):
@@ -220,7 +232,7 @@ def test_silu_mul_mxfp4_asm_quant_fusion(
             if not rocm_aiter_ops.is_mxfp4_asm_quant_fusion_supported():
                 pytest.skip("installed AITER lacks scaling_mode='ceil'")
             xi = x.clone()
-            torch._dynamo.mark_dynamic(xi, 0)
+            torch._dynamo.mark_dynamic(xi, xi.ndim - 2)
             config = _config(custom_ops, fuse_act_quant=enabled, fuse_norm_quant=False)
             results[enabled], fusion_passes, backend = _compile(
                 config, make_passes, SiluMulMxfp4AsmModel, xi
