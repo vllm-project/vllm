@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side wiring of HiSparse caches to attention layers."""
 
+from collections import defaultdict
 from collections.abc import Callable, Mapping
 from copy import copy
 from dataclasses import replace
 from math import gcd, lcm
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -22,8 +23,8 @@ from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
-    get_hisparse_kv_cache_groups,
-    is_hisparse_source_layer,
+    get_hisparse_page_layer_configs,
+    get_hisparse_source_layers,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -34,7 +35,6 @@ from vllm.v1.hisparse.runtime import (
     release_pinned_state,
 )
 from vllm.v1.kv_cache_interface import (
-    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheLayerConfig,
     KVCacheLayout,
@@ -57,19 +57,16 @@ def resolve_hisparse_specs(
     layer_configs: dict[str, KVCacheLayerConfig],
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheLayerConfig]:
-    """Resolve a common kernel block size for HiSparse MLA specs, and add the
-    resident/hot specs HiSparse derives from them, then fit align-mode Mamba
-    blocks to the resized attention blocks."""
-    mla_specs = {
-        name: lc for name, lc in layer_configs.items() if is_hisparse_source_layer(lc)
-    }
-    if not mla_specs:
+    """Resolve sparse source and indexer block sizes, derive resident and hot
+    caches, and fit align-mode Mamba blocks to the resulting attention blocks."""
+    sparse_layers = get_hisparse_source_layers(layer_configs)
+    if not sparse_layers:
         return layer_configs
-    block_sizes = {lc.spec.block_size for lc in mla_specs.values()}
+    block_sizes = {lc.spec.block_size for lc in sparse_layers.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
-    backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
-    specs = [lc.spec for lc in mla_specs.values()]
+    backends = [attn_layers[name].get_attn_backend() for name in sparse_layers]
+    specs = [lc.spec for lc in sparse_layers.values()]
     try:
         block_size = select_common_block_size(block_sizes.pop(), backends, specs)
     except ValueError as error:
@@ -77,37 +74,29 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    indexer_names = [
-        name
-        for name, lc in mla_specs.items()
-        if cast(MLAAttentionSpec, lc.spec).cache_role is SparseCacheRole.INDEXER
-    ]
+    indexer_specs = {
+        name: lc.spec
+        for name, lc in sparse_layers.items()
+        if isinstance(lc.spec, MLAAttentionSpec)
+        and lc.spec.cache_role is SparseCacheRole.INDEXER
+    }
     indexer_block_size = _largest_exact_kernel_block_size(
         block_size,
-        [attn_layers[name].get_attn_backend() for name in indexer_names],
-        [cast(MLAAttentionSpec, mla_specs[name].spec) for name in indexer_names],
+        [attn_layers[name].get_attn_backend() for name in indexer_specs],
+        list(indexer_specs.values()),
     )
-    layer_configs = layer_configs | {
+    sparse_layers = {
         name: replace(
             lc,
             spec=lc.spec.copy_with_new_block_size(
-                indexer_block_size if name in indexer_names else block_size
+                indexer_block_size if name in indexer_specs else block_size
             ),
         )
-        for name, lc in mla_specs.items()
+        for name, lc in sparse_layers.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, layer_configs)
-    assert groups is not None
+    page_layer_configs = get_hisparse_page_layer_configs(vllm_config, sparse_layers)
     return fit_mamba_blocks_to_attention(
-        vllm_config,
-        layer_configs
-        | {
-            layer_name: KVCacheLayerConfig(group.manager_config, spec)
-            for group in groups
-            for layer_name, spec in group.kv_cache_specs.items()
-            if isinstance(spec, HiSparsePageSpec)
-        },
-        attn_layers,
+        vllm_config, layer_configs | sparse_layers | page_layer_configs, attn_layers
     )
 
 
@@ -271,6 +260,20 @@ def _get_hisparse_cache(
     return hisparse_cache
 
 
+def get_kv_sharing_readers(
+    forward_context: dict[str, Any],
+) -> defaultdict[str, list[HiSparseCacheHandle]]:
+    """Cross-layer KV-sharing layers by target: they own no cache, so HiSparse
+    binds them to their target's resident, hot and host buffers."""
+    readers: defaultdict[str, list[HiSparseCacheHandle]] = defaultdict(list)
+    for layer in forward_context.values():
+        target = getattr(layer, "kv_sharing_target_layer_name", None)
+        cache = getattr(layer, "hisparse_cache", None)
+        if target is not None and cache is not None:
+            readers[target].append(cache)
+    return readers
+
+
 def unbind_hisparse_caches(forward_context: dict[str, Any]) -> None:
     """Detach HiSparse cache bindings without unregistering the host pool."""
     for layer in forward_context.values():
@@ -302,6 +305,9 @@ def bind_hisparse_kv_caches(
 ) -> list[HiSparseCacheHandle]:
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
+    (source_group_id,) = kv_cache_config.host_group_ids
+    source_specs = kv_cache_config.kv_cache_groups[source_group_id].kv_cache_specs
+    kv_sharing_readers = get_kv_sharing_readers(forward_context)
     tensor_configs = _tensor_placements(kv_cache_config)
     resident_groups = [
         (group_id, group)
@@ -329,19 +335,20 @@ def bind_hisparse_kv_caches(
             tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
-            cache_handle.bind_cache(
-                kv_caches[cache_name],
-                byte_offset=byte_offset,
-                block_stride=tensor_config.block_stride,
-                num_blocks=kv_cache_config.num_blocks,
-                block_size=group.block_size,
-                block_table=residency[resident_source_index],
-                slot_mapping=block_tables.slot_mappings[group_id],
-            )
-            cache_handle.residency = residency
+            for handle in (cache_handle, *kv_sharing_readers[layer_name]):
+                handle.bind_cache(
+                    kv_caches[cache_name],
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=group.block_size,
+                    block_table=residency[resident_source_index],
+                    slot_mapping=block_tables.slot_mappings[group_id],
+                )
+                handle.residency = residency
+                handle.runtime.resident_source_index = resident_source_index
             assert cache_handle.view is not None
             kv_caches[cache_name] = cache_handle.view.cache
-            cache_handle.runtime.resident_source_index = resident_source_index
 
     hot_backing: torch.Tensor | None = None
     cache_handles: list[HiSparseCacheHandle] = []
@@ -361,14 +368,17 @@ def bind_hisparse_kv_caches(
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
-            cache_handle.runtime.bind_hot_cache(
-                raw_tensor,
-                byte_offset=byte_offset,
-                block_stride=tensor_config.block_stride,
-                num_blocks=kv_cache_config.num_blocks,
-                block_size=group.block_size,
-                block_table=block_tables.input_block_tables[group_id],
-            )
+            readers = kv_sharing_readers[layer_name]
+            for handle in (cache_handle, *readers):
+                handle.runtime.bind_hot_cache(
+                    raw_tensor,
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=group.block_size,
+                    block_table=block_tables.input_block_tables[group_id],
+                    owner=None if handle is cache_handle else cache_handle.runtime,
+                )
             resident = cache_handle.view
             hot = cache_handle.runtime.hot
             assert resident is not None
@@ -383,20 +393,29 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
-            cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
-            cache_handle.runtime.host_pool = host_pool
-            cache_handle.runtime.bind_source_cache(
-                source_cache,
-                registered_host_pool=host_pool.registered,
-            )
-            cache_handles.append(cache_handle)
+            if not isinstance(source_specs[layer_name], MLAAttentionSpec):
+                token_rows = source_cache.transpose(1, 2)
+                try:
+                    source_cache = token_rows.view(*token_rows.shape[:2], -1)
+                except RuntimeError as error:
+                    raise ValueError(
+                        "HiSparse sparse GQA requires unpadded, "
+                        "contiguous token rows in the host KV cache."
+                    ) from error
+            for handle in (cache_handle, *readers):
+                handle.draft_layer = forward_context[layer_name].is_draft_layer
+                handle.runtime.host_pool = host_pool
+                handle.runtime.bind_source_cache(
+                    source_cache,
+                    registered_host_pool=host_pool.registered,
+                )
+            cache_handles.extend((cache_handle, *readers))
             # The hot slab is raw storage owned by the runtime, not a layer
             # cache: nothing downstream binds or registers it.
             del kv_caches[cache_name]
 
     if hot_backing is None or not cache_handles:
         raise RuntimeError("HiSparse found no hot-cache handles.")
-    (source_group_id,) = kv_cache_config.host_group_ids
     for cache_handle in cache_handles:
         cache_handle.source_block_table = block_tables.input_block_tables[
             source_group_id
@@ -418,6 +437,7 @@ def rebind_hisparse_device_caches(
     views and hot entries are dropped.
     """
     tensor_configs = _tensor_placements(kv_cache_config)
+    kv_sharing_readers = get_kv_sharing_readers(forward_context)
     for group in kv_cache_config.kv_cache_groups:
         for cache_name in group.layer_names:
             if issubclass(group.manager_cls, HiSparseResidentManager):
@@ -426,26 +446,31 @@ def rebind_hisparse_device_caches(
                 tensor_config, byte_offset = tensor_configs[cache_name]
                 assert cache_handle.block_table is not None
                 assert cache_handle.slot_mapping is not None
-                cache_handle.bind_cache(
-                    kv_caches[cache_name],
-                    byte_offset=byte_offset,
-                    block_stride=tensor_config.block_stride,
-                    num_blocks=kv_cache_config.num_blocks,
-                    block_size=group.block_size,
-                    block_table=cache_handle.block_table,
-                    slot_mapping=cache_handle.slot_mapping,
-                )
+                for handle in (cache_handle, *kv_sharing_readers[layer_name]):
+                    handle.bind_cache(
+                        kv_caches[cache_name],
+                        byte_offset=byte_offset,
+                        block_stride=tensor_config.block_stride,
+                        num_blocks=kv_cache_config.num_blocks,
+                        block_size=group.block_size,
+                        block_table=cache_handle.block_table,
+                        slot_mapping=cache_handle.slot_mapping,
+                    )
                 assert cache_handle.view is not None
                 kv_caches[cache_name] = cache_handle.view.cache
             elif issubclass(group.manager_cls, HiSparseHotManager):
                 layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
                 runtime = _get_hisparse_cache(forward_context, layer_name).runtime
                 tensor_config, byte_offset = tensor_configs[cache_name]
-                runtime.bind_hot_cache(
-                    kv_caches.pop(cache_name),
-                    byte_offset=byte_offset,
-                    block_stride=tensor_config.block_stride,
-                    num_blocks=kv_cache_config.num_blocks,
-                    block_size=group.block_size,
-                    block_table=runtime.hot_block_table,
-                )
+                raw_tensor = kv_caches.pop(cache_name)
+                readers = kv_sharing_readers[layer_name]
+                for reader_runtime in (runtime, *(r.runtime for r in readers)):
+                    reader_runtime.bind_hot_cache(
+                        raw_tensor,
+                        byte_offset=byte_offset,
+                        block_stride=tensor_config.block_stride,
+                        num_blocks=kv_cache_config.num_blocks,
+                        block_size=group.block_size,
+                        block_table=runtime.hot_block_table,
+                        owner=None if reader_runtime is runtime else runtime,
+                    )

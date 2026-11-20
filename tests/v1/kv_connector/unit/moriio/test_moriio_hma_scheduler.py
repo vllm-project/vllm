@@ -80,6 +80,8 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
 
     def __init__(self, **attrs):
         self.mode = MoRIIOMode.READ
+        self.is_producer = False
+        self.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._attn_group_is_state: list[bool] = [False]
@@ -730,6 +732,8 @@ def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
 ):
     sched = _FakeScheduler(
         mode=MoRIIOMode.WRITE,
+        is_producer=False,
+        _write_recvs_in_flight={},
         _has_mamba=False,
         block_size=16,
         tp_size=1,

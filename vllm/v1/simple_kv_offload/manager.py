@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class BlockStoreMeta:
     """Per-block metadata snapshot for BlockStored event emission.
 
@@ -81,14 +81,14 @@ class BlockStoreMeta:
     lookahead_token_ids: list[int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferMeta:
     gpu_block_ids: list[int]
     cpu_block_ids: list[int]
     block_meta: list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadRequestState:
     request: "Request"
     transfer_meta: TransferMeta
@@ -97,7 +97,7 @@ class LoadRequestState:
 
 
 # NOTE: This per-request state is only used in eager mode.
-@dataclass
+@dataclass(slots=True)
 class StoreRequestState:
     request: "Request"
     # Accumulated block IDs from scheduler_output via yield_req_data.
@@ -116,7 +116,7 @@ class _StoreAdmission(Enum):
     ALREADY_CACHED = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class BoundaryStoreStats:
     """Cumulative counters for boundary hand-off stores.
 
