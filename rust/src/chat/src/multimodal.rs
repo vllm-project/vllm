@@ -451,7 +451,7 @@ impl MultimodalModelInfo {
             Some(path) => {
                 let text = fs::read_to_string(path)
                     .map_err(|error| multimodal!("failed to read config.json: {error}"))?;
-                serde_json::from_str(&text)
+                vllm_text::backend::hf::from_lenient_json(&text)
                     .map_err(|error| multimodal!("failed to parse config.json: {error}"))?
             }
             None => serde_json::Value::Object(Default::default()),

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_with::{DefaultOnError, serde_as};
@@ -356,12 +357,12 @@ impl ModelConfig {
 
 /// Load the tokenizer-side EOS metadata if a config file is present.
 pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
-    read_json_file(path)
+    read_json_file(path, false)
 }
 
 /// Load `generation_config.json`, if present.
 pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
-    read_json_file(path)
+    read_json_file(path, false)
 }
 
 /// Parse merged generation-config JSON into its sampling defaults.
@@ -376,10 +377,12 @@ pub(super) fn parse_sampling_defaults(config: Map<String, Value>) -> Result<Samp
 
 /// Load the model-side config (`config.json`) if present.
 pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
-    read_json_file(path)
+    read_json_file(path, true)
 }
 
-fn read_json_file<T>(path: Option<&Path>) -> Result<T>
+/// Read one checkpoint JSON file; `lenient` also accepts Python's bare
+/// non-finite constants, see [`from_lenient_json`].
+fn read_json_file<T>(path: Option<&Path>, lenient: bool) -> Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
 {
@@ -393,7 +396,12 @@ where
             error.as_report()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
+    let parsed = if lenient {
+        from_lenient_json(&content)
+    } else {
+        serde_json::from_str(&content)
+    };
+    parsed.map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
@@ -402,9 +410,67 @@ where
     })
 }
 
+/// Parse a checkpoint's `config.json`, also accepting the bare constants
+/// `NaN`, `Infinity` and `-Infinity` that Python's `json` module writes and
+/// reads (e.g. Nemotron Nano V2 VL's `"time_step_limit": [0.0, Infinity]`).
+///
+/// serde_json has no non-finite numbers, so each such constant outside a
+/// string is read as `null`.
+pub fn from_lenient_json<T: DeserializeOwned>(text: &str) -> serde_json::Result<T> {
+    const CONSTANTS: [&str; 3] = ["-Infinity", "Infinity", "NaN"];
+    let bytes = text.as_bytes();
+    let mut json = String::with_capacity(text.len());
+    let (mut copied, mut index) = (0, 0);
+    let (mut in_string, mut escaped) = (false, false);
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if let Some(constant) = CONSTANTS
+            .iter()
+            .find(|constant| bytes[index..].starts_with(constant.as_bytes()))
+        {
+            json.push_str(&text[copied..index]);
+            json.push_str("null");
+            index += constant.len();
+            copied = index;
+            continue;
+        }
+        index += 1;
+    }
+    json.push_str(&text[copied..]);
+    serde_json::from_str(&json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HfTokenizerConfig, ModelConfig, ModelDtype, SamplingDefaults};
+
+    #[test]
+    fn lenient_json_reads_bare_constants_outside_strings_as_null() {
+        let config: serde_json::Value = super::from_lenient_json(
+            r#"{"time_step_limit": [0.0, Infinity], "low": -Infinity, "nan": NaN,
+                "max": {"__float__": "Infinity"}, "text": "a \"NaN\" b"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "time_step_limit": [0.0, null],
+                "low": null,
+                "nan": null,
+                "max": {"__float__": "Infinity"},
+                "text": "a \"NaN\" b",
+            })
+        );
+    }
 
     #[test]
     fn tokenizer_config_reads_single_and_named_chat_templates() {
