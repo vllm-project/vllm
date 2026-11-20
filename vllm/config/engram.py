@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from vllm.config.utils import CompileFactors, config, get_compile_factors
 
@@ -25,6 +25,8 @@ _NGRAM_LAYER_FIELDS = {
     "Qwen4ExpForCausalLM": "ple_layer_ids",
     "Qwen4ExpForConditionalGeneration": "ple_layer_ids",
 }
+# Fields of models whose tables an Engram pool can split (`peer_group_size`).
+_PEER_GROUP_FIELDS = {"engram_layer_ids"}
 
 
 def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
@@ -70,11 +72,38 @@ class EngramConfig:
     Always on for private tables on ROCm."""
 
     peer_group_size: int = 0
-    """Split each GPU table's rows over this many GPUs of several engines in one
-    NVLink domain (the sum of their GPU counts); lookups read rows from the
-    owning GPU's HBM. Every engine passes the same value and `peer_group_store`.
-    Requires DeepSeek V4.1, CUDA FABRIC handles (an IMEX channel), tables in HBM,
-    TP=1 and PP=1."""
+    """Split each table's rows over this many GPUs of several engines (the sum
+    of their GPU counts); lookups read rows from the owning GPU. Every engine
+    passes the same value, `peer_group_store` and `peer_group_transport`.
+    Requires a model with Engram pool support (DeepSeek V4.1), CUDA, TP=1 and
+    PP=1."""
+
+    peer_group_transport: Literal["nvlink", "rdma"] = "nvlink"
+    """How a peer group reads rows: `nvlink` loads them from peers' HBM (CUDA
+    FABRIC handles, an IMEX channel, cpu_offload=False); with `rdma`, the NICs
+    of the GPUs holding them gather them from HBM, or from host memory with
+    cpu_offload."""
+
+    peer_group_fetch: Literal["sync", "async"] = "sync"
+    """Where a peer group's fetch kernels run. `sync`: on the compute stream,
+    started before the decoder layers, each Engram layer waiting for its own
+    rows; over RDMA the rows move without SMs in between. `async`: on a side
+    stream beside the layers, so their SM work (all of NVLink's gather)
+    overlaps compute. Full CUDA graphs capture both; piecewise ones break at
+    the start and at each Engram layer's wait."""
+
+    peer_group_rdma_inflight: int = Field(default=8, ge=0)
+    """With `rdma`, the most prefill-sized gathers (64 WRs each) a GPU's NIC
+    has in flight for its peers; 0 means no limit. Decode-sized fetches bypass
+    it, so one engine's prefill delays another engine's decode by at most this
+    backlog. The default (~2 MB) keeps prefill fetches at full rate."""
+
+    peer_group_thp_dir: str | None = None
+    """With `rdma` and cpu_offload: a directory on a tmpfs mounted with
+    `huge=always`, where host shards are placed on transparent huge pages.
+    NICs gather rows at random, so a large shard on base pages misses the
+    NIC's address-translation cache on nearly every row, which can make large
+    fetches several times slower."""
 
     peer_group_store: str | None = None
     """File through which a peer group's engines meet once at startup. Required
@@ -89,12 +118,29 @@ class EngramConfig:
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
             )
+        if self.peer_group_thp_dir is not None and not (
+            self.peer_group_size
+            and self.cpu_offload
+            and self.peer_group_transport == "rdma"
+        ):
+            raise ValueError(
+                "peer_group_thp_dir requires peer_group_size, cpu_offload and "
+                "peer_group_transport='rdma'"
+            )
         if (self.peer_group_size > 0) != (self.peer_group_store is not None):
             raise ValueError(
                 "peer_group_size and peer_group_store must be set together"
             )
         if self.peer_group_size and self.cpu_offload:
-            raise ValueError("peer_group_size requires cpu_offload=False")
+            if self.peer_group_transport != "rdma":
+                raise ValueError(
+                    "peer_group_size with cpu_offload requires "
+                    "peer_group_transport='rdma'"
+                )
+            if self.dp_shared_memory or self.use_thp:
+                raise ValueError(
+                    "peer_group_size does not support dp_shared_memory or use_thp"
+                )
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
@@ -122,10 +168,10 @@ class EngramConfig:
 
             if field != "ple_layer_ids" or not current_platform.is_cuda():
                 raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
-        # TODO: split Qwen4Exp's GPU tables over a peer group too; Engram models
-        # on NVL72 should all use one.
-        if self.peer_group_size and field != "engram_layer_ids":
-            raise ValueError("peer_group_size requires a DeepSeek V4.1 model")
+        if self.peer_group_size and field not in _PEER_GROUP_FIELDS:
+            raise ValueError(
+                "peer_group_size requires a model with Engram pool support"
+            )
 
     def resolve_dp_shared_memory(
         self,
@@ -137,6 +183,7 @@ class EngramConfig:
             self.dp_shared_memory = (
                 self.cpu_offload
                 and not self.use_thp
+                and not self.peer_group_size
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
                 and (
@@ -167,13 +214,16 @@ class EngramConfig:
 
             if (
                 not current_platform.is_cuda()
+                # Pool rows are dequantized from FP8 (e4m3), which Triton
+                # supports from SM89 on.
+                or not current_platform.has_device_capability(89)
                 or parallel_config.tensor_parallel_size > 1
                 # Every GPU of the group must build the same tables.
                 or parallel_config.pipeline_parallel_size > 1
                 or parallel_config.enable_elastic_ep
             ):
                 raise ValueError(
-                    "peer_group_size requires CUDA, TP=1, PP=1 and no elastic EP"
+                    "peer_group_size requires CUDA SM89+, TP=1, PP=1 and no elastic EP"
                 )
             if self.peer_group_size < parallel_config.data_parallel_size:
                 raise ValueError(
@@ -192,4 +242,6 @@ class EngramConfig:
         """Hash settings that affect embedding execution and graph structure."""
         # The store only matters at startup; a per-launch path must not
         # invalidate the compile cache.
-        return get_compile_factors(self, {"peer_group_store"})
+        return get_compile_factors(
+            self, {"peer_group_store", "peer_group_rdma_inflight"}
+        )
