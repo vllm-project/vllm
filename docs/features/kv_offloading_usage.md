@@ -111,22 +111,35 @@ Secondary tiers are not supported yet on engines whose workers span several node
 
 ## Shared Memory (`/dev/shm`)
 
-With `CPUOffloadingSpec` on CUDA and XPU, and with `TieringOffloadingSpec` on
-any platform, the CPU tier is backed by files in `/dev/shm` rather than private
-process memory. A single-node engine needs up to `cpu_bytes_to_use` of free
-space there (`--kv-offloading-size` sets it in GiB), plus room for other users
-of `/dev/shm`; data-parallel engines on the same node each allocate their own
-tier. vLLM checks the free space at startup, before allocating the tier, and
-fails with an `Insufficient space in /dev/shm` error if the tier does not fit.
+`/dev/shm` is a Linux filesystem whose files are kept in RAM. vLLM puts the CPU
+tier there when you use `CPUOffloadingSpec` (the default, and what
+`--kv-offloading-size` sets up) on NVIDIA (CUDA) or Intel (XPU) GPUs, or
+`TieringOffloadingSpec` on any GPU. `/dev/shm` must then be big enough to hold
+the whole tier. If it isn't, vLLM stops during startup, after loading the model,
+with an `Insufficient space in /dev/shm` error. On AMD (ROCm) GPUs,
+`CPUOffloadingSpec` keeps the tier in vLLM's own process memory instead, so this
+section doesn't apply.
 
-Containers often get a small `/dev/shm`; Docker's default is 64 MiB. Raise it
-with `--shm-size`, or share the host's with `--ipc=host`. On Kubernetes, mount
-an `emptyDir` with `medium: Memory` at `/dev/shm`, as in the
+Give `/dev/shm` room for:
+
+- the CPU tier: `--kv-offloading-size` GiB, or `cpu_bytes_to_use` bytes;
+- a few GiB more for vLLM's other uses of `/dev/shm`, such as communication
+  between its processes;
+- one tier per engine, if several data-parallel engines share the machine.
+
+For example, one engine with `--kv-offloading-size 64` needs about 70 GiB.
+
+Containers often start with a small `/dev/shm`; Docker's default is 64 MiB.
+With Docker, pass `--shm-size` (for example `--shm-size=70g`), or `--ipc=host`
+to use the host's `/dev/shm`. On Kubernetes, mount an `emptyDir` with
+`medium: Memory` at `/dev/shm`, as in the
 [Kubernetes examples](../deployment/k8s.md#deployment-with-gpus), and set its
-`sizeLimit` to fit the tier. Files in a memory-backed `/dev/shm` count toward
-the memory limit of the container that writes them, so raise that limit too;
-vLLM logs a warning at startup when less memory is left under the limit than
-the tier needs.
+`sizeLimit` (for example `70Gi`).
+
+Files in `/dev/shm` use RAM that counts toward the container's memory limit, so
+raise that limit by the size of the tier as well. vLLM fills the whole tier up
+front, not as the cache is used, and logs a warning at startup if the memory
+limit leaves too little room.
 
 ## `kv_connector_extra_config` Reference
 

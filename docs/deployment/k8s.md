@@ -336,7 +336,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
-      KV cache offloading to CPU memory, for example with `--kv-offloading-size`, can also place its CPU tier in `/dev/shm`. If you enable it, raise the `shm` volume's `sizeLimit` and the container's memory limit to fit the tier; see [Shared Memory](../features/kv_offloading_usage.md#shared-memory-devshm) in the KV offloading guide.
+      KV cache offloading to CPU memory can need far more shared memory than these examples give it. On NVIDIA GPUs, `--kv-offloading-size` keeps the offloaded KV cache in `/dev/shm` by default, so the `shm` volume must hold it. For example, with `--kv-offloading-size 64`, set `sizeLimit` to about `70Gi`, and raise the container's memory limit by 64 GiB, because files in `/dev/shm` count toward it. For other GPUs and setups, see [Shared Memory](../features/kv_offloading_usage.md#shared-memory-devshm) in the KV offloading guide.
 
 2. Create a Kubernetes Service for vLLM
 
