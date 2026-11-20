@@ -108,7 +108,8 @@ class PyNcclCommunicator:
                 it will be bound to f"cuda:{local_rank}".
             library_path: the path to the NCCL library. If None, it will
                 use the default library path.
-            _get_current_stream: vLLM groups supply their dedicated stream getter.
+            _get_current_stream: returns the stream for collectives called
+                without `stream=`. Defaults to the current stream of `device`.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
 

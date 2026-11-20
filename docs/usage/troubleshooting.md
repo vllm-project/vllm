@@ -138,8 +138,6 @@ To identify the particular CUDA operation that causes the error, you can add `--
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
 
-A standalone `PyNcclCommunicator` preserves the calling thread's current CUDA stream. Collectives use the current stream for the communicator's device unless you pass `stream=`.
-
 ??? code
 
     ```python
