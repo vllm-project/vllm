@@ -360,13 +360,41 @@ def _int4_tile_packed_to_humming(
         )
         q[:, k0:k1] = out[:, :n].T.to(torch.int32) + 8
 
-    # A zero scale makes tinygemm return `zero` for the whole group; Humming gets
-    # it from q = 8, zero_point = 7 and scale = zero.
-    zero_scale = scale == 0
-    q.view(n, num_groups, group_size)[zero_scale] = 8
-    zero_point = 8 - zero / scale.masked_fill(zero_scale, 1)
-    zero_point = torch.where(zero_scale, 7.0, zero_point)
-    scale = torch.where(zero_scale, zero, scale)
+    zero_point = 8 - zero / scale
+    return (
+        pack_cols(q, 4, n, k),
+        scale.to(params_dtype),
+        zero_point.to(params_dtype),
+    )
+
+
+def _int4_plain_to_humming(
+    weight: torch.Tensor, params_dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Convert a torchao `Int4Tensor` (plain layout) to Humming's packed uint4
+    weight, group scale and float zero point, or None if it has no Humming
+    equivalent.
+
+    `Int4Tensor` packs signed int4 two per byte (even k in the low nibble) and
+    dequantizes `q * scale + zero` with `scale` and `zero` of shape
+    `[K // group_size, N]`; with `u = q + 8` that is `(u - 8) * scale + zero`.
+    """
+    from vllm.model_executor.layers.quantization.utils.quant_utils import pack_cols
+
+    n, k = weight.shape
+    group_size = weight.block_size[-1]
+    if (
+        weight.qdata.dim() != 2
+        or weight.block_size[0] != 1
+        or k % group_size
+        or weight.act_pre_scale is not None
+    ):
+        return None
+    packed = weight.qdata.to(torch.int32) & 0xFF
+    q = torch.stack([packed & 0xF, packed >> 4], dim=-1).reshape(n, k) ^ 8
+    scale = weight.scale.t().float()
+    zero = weight.zero_point.t().float()
+    zero_point = 8 - zero / scale
     return (
         pack_cols(q, 4, n, k),
         scale.to(params_dtype),
@@ -386,9 +414,11 @@ def _humming_supports_layer(weight: torch.Tensor) -> bool:
     ):
         return False
     try:
-        from torchao.quantization import Int4TilePackedTo4dTensor
+        from torchao.quantization import Int4Tensor, Int4TilePackedTo4dTensor
     except ImportError:
         return False
+    if isinstance(weight, Int4Tensor):
+        return weight.activation_dtype == torch.bfloat16
     return isinstance(weight, Int4TilePackedTo4dTensor)
 
 
@@ -490,12 +520,20 @@ class TorchAOLinearMethod(LinearMethodBase):
 
     @staticmethod
     def _maybe_use_humming(layer: torch.nn.Module) -> None:
-        """Run tinygemm-packed int4 weights on Humming, whose kernel keeps up with
-        batch sizes above 1; tinygemm is tuned for batch size 1."""
+        """Run torchao int4 weights on Humming. tinygemm (`Int4TilePackedTo4dTensor`)
+        is tuned for batch size 1, and the mslk kernel of `Int4Tensor` needs SM90,
+        where torchao repacks it before this runs."""
         if not _humming_supports_layer(layer.weight):
             return
+        from torchao.quantization import Int4Tensor
+
         group_size = layer.weight.block_size[-1]
-        tensors = _int4_tile_packed_to_humming(layer.weight, layer.params_dtype)
+        to_humming = (
+            _int4_plain_to_humming
+            if isinstance(layer.weight, Int4Tensor)
+            else _int4_tile_packed_to_humming
+        )
+        tensors = to_humming(layer.weight, layer.params_dtype)
         if tensors is None:
             return
         from vllm.model_executor.layers.quantization.utils.humming import (

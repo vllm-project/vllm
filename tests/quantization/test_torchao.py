@@ -460,5 +460,50 @@ def test_int4_tile_packed_runs_on_humming(vllm_runner, hf_runner, enable_pickle)
     )
 
 
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+def test_int4_plain_to_humming_matches_int4_tensor():
+    """`Int4Tensor` weights (plain layout; their mslk kernel needs SM90) convert
+    to Humming's uint4 format with the same dequantized values."""
+    from torchao.quantization import Int4Tensor
+
+    from vllm.model_executor.layers.quantization.torchao import (
+        _int4_plain_to_humming,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        unpack_cols,
+    )
+
+    n, k, group_size = 64, 512, 128
+    torch.manual_seed(0)
+    q = torch.randint(-8, 8, (n, k), dtype=torch.int8)
+    scale = torch.rand(k // group_size, n) + 0.01
+    # int4_row_quantize_zp stores zero = min + 8 * scale with min / scale in
+    # [-15, 0], so the Humming zero point 8 - zero / scale lies in [0, 15].
+    zero = (8 - 15 * torch.rand(k // group_size, n)) * scale
+    scale, zero = scale.to(torch.bfloat16), zero.to(torch.bfloat16)
+    weight = Int4Tensor(
+        qdata=(q[:, 1::2] << 4) | (q[:, ::2] & 0xF),
+        scale=scale,
+        zero_point=zero,
+        block_size=[1, group_size],
+        shape=torch.Size([n, k]),
+    )
+
+    tensors = _int4_plain_to_humming(weight, torch.bfloat16)
+    assert tensors is not None
+    packed, h_scale, h_zero = tensors
+
+    def per_column(t):
+        return t.float().t().repeat_interleave(group_size, dim=1)
+
+    expected = q.float() * per_column(scale) + per_column(zero)
+    u = unpack_cols(packed, 4, n, k).float()
+    actual = (u - per_column(h_zero.t())) * per_column(h_scale.t())
+    # The zero point is stored in bf16: half an ulp below 16 is 2**-5.
+    torch.testing.assert_close(
+        actual, expected, atol=float(scale.float().max()) * 2**-5, rtol=0
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
