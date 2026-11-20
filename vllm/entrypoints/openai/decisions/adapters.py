@@ -20,6 +20,7 @@ from .question_types import (
     Question,
     StructuredDecisionError,
     argmax,
+    build_question,
 )
 from .question_types import (
     ChoiceQuestion as LabelQuestion,
@@ -30,8 +31,11 @@ def make_read_question(
     index: int, question: DecisionQuestion, max_options: int = len(LABELS)
 ) -> Question:
     if isinstance(question, PredicateQuestion):
-        options = [Option("false"), Option("true")]
-    elif isinstance(question, ChoiceQuestion):
+        # The same read as a /v1/systemone noul question: yes, then no.
+        return build_question(
+            str(index), "noul", question.instructions, None, max_options
+        )
+    if isinstance(question, ChoiceQuestion):
         options = [
             Option(json.dumps(c.value, ensure_ascii=False), c.description)
             for c in question.choices
@@ -56,7 +60,7 @@ def make_answer(
     question: DecisionQuestion, probs: list[float], label_mass: float
 ) -> DecisionAnswer:
     if isinstance(question, PredicateQuestion):
-        return PredicateAnswer(name=question.name, probability=probs[1])
+        return PredicateAnswer(name=question.name, probability=probs[0])
     top = argmax(probs)
     confidence = probs[top] * label_mass
     if isinstance(question, ChoiceQuestion):
