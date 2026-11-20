@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import faulthandler
 import os
+import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -41,6 +42,10 @@ class NoopWatchDog(WatchDog):
 class ThreadedWatchDog(WatchDog):
     """Dumps the stacks of all threads when not fed within the timeout."""
 
+    # Reentrant: handle_failure() may be re-entered from a signal handler.
+    lock = threading.RLock()
+    handler = None
+
     def __init__(self, name: str, watchdog_config: WatchdogConfig, logger: Logger):
         self.name = name
         self.timeout = watchdog_config.timeout
@@ -49,17 +54,14 @@ class ThreadedWatchDog(WatchDog):
         self.dump_file = os.path.join(
             self.dump_dir, f"VLLM_STACK_DUMP_for_{name}_{os.getpid()}.log"
         )
-        self.dump_seq = 1
+        self.dump_seq = 0
         self.logger = logger
         self.last_feed_time = time.monotonic()
         # 0.0 so that the first timeout is always dumped.
         self.last_timeout_log = 0.0
         self.active = True
-        # Reentrant: handle_failure() may be re-entered from a signal handler.
-        self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
-        self.handler = None
 
     def feed(self) -> None:
         self.last_feed_time = time.monotonic()
@@ -76,34 +78,54 @@ class ThreadedWatchDog(WatchDog):
     def handle_failure(self, reason: str) -> None:
         """Append a numbered dump of all thread stacks to the dump file."""
         with self.lock:
+            self.dump_seq += 1
             if self.handler is None:
                 self.dump_stack(reason)
             else:
                 self.handler(reason)
 
-    def dump_stack(self, reason: str) -> None:
+    def dump_to_file(self, dump_func, reason: str):
         try:
             os.makedirs(self.dump_dir, exist_ok=True)
             with open(self.dump_file, "a") as f:
                 f.write(
-                    f"\n>>> Call stack dump #{self.dump_seq} at "
+                    f"\n>>> Dump #{self.dump_seq} at "
                     f"{time.ctime()} due to {reason}\n\n"
                 )
-                faulthandler.dump_traceback(file=f, all_threads=True)
+                dump_func(file=f)
                 f.write("\n" + "=" * 64 + "\n")
             self.dump_seq += 1
             self.logger.info(
-                "[Watchdog]Dumped stack to %s due to %s", self.dump_file, reason
+                "[Watchdog]Dumped to %s due to %s", self.dump_file, reason
             )
         except Exception as e:
             self.logger.warning(
-                "[Watchdog]Failed to dump stack trace to %s: %s",
+                "[Watchdog]Failed to dump to %s: %s",
                 self.dump_file,
                 e,
             )
 
-    def set_handler(self, handler) -> None:
-        self.handler = handler
+    def dump_stack(self, reason: str) -> None:
+        self.dump_to_file(faulthandler.dump_traceback, reason)
+
+    def dump_py_spy(self, reason: str) -> None:
+        def dump_py_spy_to_file(file):
+            pid = os.getpid()
+            cmd = f"py-spy dump --pid {pid}".strip()
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, check=True
+                )
+                file.write(result.stdout)
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"Pyspy failed ({cmd}). Error: {e.stderr}")
+
+        self.dump_to_file(dump_py_spy_to_file, reason)
+
+    @classmethod
+    def set_handler(cls, handler) -> None:
+        with cls.lock:
+            cls.handler = handler
 
     def _check_loop(self) -> None:
         while not self.stop_event.wait(self.check_interval):
@@ -170,5 +192,6 @@ def start_watch_dog(
     )
     faulthandler.enable(all_threads=True)
     _watch_dog = ThreadedWatchDog(name, watchdog_config, logger)
+    _watch_dog.set_handler(_watch_dog.dump_py_spy)
     _watch_dog.start()
     return _watch_dog
