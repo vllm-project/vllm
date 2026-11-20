@@ -47,6 +47,12 @@ def _all_workers_barrier() -> None:
     group.barrier()
 
 
+def cpu_offload_uses_shared_region() -> bool:
+    return (
+        current_platform.is_cuda_alike() and not current_platform.is_rocm()
+    ) or current_platform.is_xpu()
+
+
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     SHARED_REGION_PER_RANK = True
@@ -214,9 +220,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
-        return (
-            current_platform.is_cuda_alike() and not current_platform.is_rocm()
-        ) or current_platform.is_xpu()
+        return cpu_offload_uses_shared_region()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None

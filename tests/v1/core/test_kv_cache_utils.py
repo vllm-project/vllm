@@ -151,7 +151,7 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
 
 
 def _hisparse_mla_layout_inputs(
-    monkeypatch, kv_transfer_config=None, hisparse_config=None
+    monkeypatch, kv_transfer_config=None, hisparse_config=None, tp_size=1
 ):
     monkeypatch.setattr(
         current_platform,
@@ -166,6 +166,7 @@ def _hisparse_mla_layout_inputs(
             dtype=torch.bfloat16,
             cache_role=SparseCacheRole.SPARSE,
             is_index_group_leader=True,
+            max_tp_shards=1,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
             block_size=64,
@@ -173,6 +174,7 @@ def _hisparse_mla_layout_inputs(
             head_size=128,
             dtype=torch.bfloat16,
             cache_role=SparseCacheRole.INDEXER,
+            max_tp_shards=1,
         ),
     }
     config = SimpleNamespace(
@@ -180,9 +182,19 @@ def _hisparse_mla_layout_inputs(
             hisparse_config=hisparse_config or HiSparseConfig()
         ),
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
+            hf_text_config=SimpleNamespace(index_topk=128),
+            max_model_len=64 * 4,
+            use_mla=True,
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size,
+            world_size=tp_size,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7, kv_cache_layout=None),
         kv_transfer_config=kv_transfer_config,
     )
@@ -239,6 +251,47 @@ def test_hisparse_host_pool_shared_with_indexer_offload(monkeypatch, managed):
     )
     assert layout.host_num_blocks == host_budget // (
         layout.host_block_stride + (indexer_bytes_per_block if managed else 0)
+    )
+
+
+@pytest.mark.parametrize("shared_region,indexer_copies", [(True, 1), (False, 4)])
+def test_hisparse_host_pool_counts_indexer_offload_copies(
+    monkeypatch, shared_region, indexer_copies
+):
+    """Under TP, the indexer tier's share of hisparse_config.host_pool_gib
+    counts one copy when the ranks share it and one per rank otherwise."""
+    monkeypatch.setattr(
+        "vllm.v1.hisparse.layout.cpu_offload_uses_shared_region",
+        lambda: shared_region,
+    )
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "HiSparseConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {"host_pool_gib": 1},
+                },
+                {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
+            ]
+        },
+    )
+    config, groups, _ = _hisparse_mla_layout_inputs(
+        monkeypatch, kv_transfer_config, HiSparseConfig(host_pool_gib=1), tp_size=4
+    )
+    (indexer,) = [g for g in groups if g.role is KVCacheGroupRole.HISPARSE_INDEXER]
+    host_budget = 1000 * 64 * 1024
+
+    layout = create_hisparse_layout(config, groups, host_budget=host_budget)
+
+    indexer_bytes_per_block = cdiv(
+        round_up(indexer.page_size_bytes, mmap.PAGESIZE) * 64 * indexer_copies,
+        indexer.block_size,
+    )
+    assert layout.host_num_blocks == host_budget // (
+        layout.host_block_stride + indexer_bytes_per_block
     )
 
 

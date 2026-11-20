@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import cpu_offload_uses_shared_region
 
 logger = init_logger(__name__)
 
@@ -363,8 +364,10 @@ def create_hisparse_layout(
         )
     gpu_block_size = source_group.block_size
     # A vLLM-managed indexer offload tier holds the same tokens as the host
-    # pool, so the budget is split in proportion to their per-token sizes.
+    # pool, so the budget is split in proportion to their per-token sizes,
+    # counting each copy the tier keeps per copy of the host pool.
     indexer_chunk_bytes = indexer_block_size = 0
+    indexer_copies = host_pool_copies = 1
     hisparse_config = vllm_config.attention_config.hisparse_config
     assert hisparse_config is not None
     kv_transfer_config = vllm_config.kv_transfer_config
@@ -380,12 +383,36 @@ def create_hisparse_layout(
         indexer_chunk_bytes = round_up(
             indexer_group.page_size_bytes, SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
         )
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+            use_replicated_offload_layout,
+        )
+        from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
+
+        parallel_config = vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        dcp_size = parallel_config.decode_context_parallel_size
+        indexer_replicas = kv_cache_groups_tp_replicas(
+            [indexer_group], tp_size, dcp_size
+        )
+        if not (
+            cpu_offload_uses_shared_region()
+            and use_replicated_offload_layout(vllm_config, indexer_replicas)
+        ):
+            indexer_copies = indexer_replicas
+        if not shared_host_pool and not gqa_source_specs:
+            host_pool_copies = kv_cache_groups_tp_replicas(
+                [source_group], tp_size, dcp_size
+            )
         logical_block_bytes += cdiv(
-            indexer_chunk_bytes * gpu_block_size, indexer_block_size
+            indexer_chunk_bytes * gpu_block_size * indexer_copies,
+            indexer_block_size * host_pool_copies,
         )
     host_num_blocks = host_budget // logical_block_bytes
     indexer_offload_bytes = (
-        cdiv(host_num_blocks * gpu_block_size, indexer_block_size) * indexer_chunk_bytes
+        cdiv(host_num_blocks * gpu_block_size, indexer_block_size)
+        * indexer_chunk_bytes
+        * indexer_copies
+        // host_pool_copies
         if indexer_block_size
         else 0
     )

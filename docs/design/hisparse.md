@@ -54,7 +54,9 @@ vllm serve DSA_MODEL --kv-transfer-config '{
 ```
 
 The flag sizes the indexer tier by token count rather than bytes, so the two
-pools always cover the same tokens.
+pools always cover the same tokens. It also counts the tier's copies: one when
+the TP ranks share it (single-node MLA on CUDA or XPU), otherwise one per rank,
+which an explicit `cpu_bytes_to_use` must include.
 
 For P/D, keep the NIXL `--kv-transfer-config` and add the same flag; vLLM
 composes its connectors with yours through `MultiConnector`:
