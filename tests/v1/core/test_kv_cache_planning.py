@@ -815,8 +815,6 @@ def test_pipeline_stages_describe_every_stage():
 
     page = kv_cache_planning._get_layer_block_stride(layer.spec)
     assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
-    # An engine core that plans only its own worker cannot describe the stages.
-    assert get_pipeline_stages(vllm_config, kv_cache_configs[:1]) == ()
 
 
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])

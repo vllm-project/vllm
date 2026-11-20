@@ -1466,20 +1466,22 @@ def get_pipeline_stages(
 
     Args:
         vllm_config: The global VllmConfig.
-        kv_cache_configs: The KV cache config of each worker.
+        kv_cache_configs: The KV cache config of each worker. They cover every
+            stage: the external launcher, whose engine core plans only its own
+            worker, rejects pipeline parallelism.
 
     Returns:
-        One `KVCacheStage` per PP rank, or an empty tuple when the configs do
-        not cover every stage, as under the external launcher, where each
-        engine core plans only its own worker.
+        One `KVCacheStage` per PP rank.
 
     """
     pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
     num_workers = len(kv_cache_configs)
-    if num_workers == 0 or num_workers % pipeline_parallel_size:
-        return ()
+    workers_per_stage, remainder = divmod(num_workers, pipeline_parallel_size)
+    assert workers_per_stage > 0 and remainder == 0, (
+        f"{num_workers} KV cache configs do not cover "
+        f"{pipeline_parallel_size} pipeline stages."
+    )
     builder = get_kv_cache_config_builder(vllm_config)
-    workers_per_stage = num_workers // pipeline_parallel_size
     stages: list[KVCacheStage] = []
     for first in range(0, num_workers, workers_per_stage):
         config = kv_cache_configs[first]
