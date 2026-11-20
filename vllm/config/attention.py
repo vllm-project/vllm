@@ -93,9 +93,10 @@ class AttentionConfig:
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill. On ROCM_AITER_FA
-    (gfx950, FP8 KV cache) this applies to the full-attention layers. Without
-    a calibrated q scale in the checkpoint, the query is quantized with scale
-    1.0, so values whose magnitude exceeds the FP8 maximum are clipped."""
+    (gfx950, FP8 KV cache) this applies to the full-attention layers. As in the
+    attention backends that quantize the query with an FP8 KV cache, the query
+    uses the layer's static q scale, 1.0 unless the checkpoint provides one, so
+    values whose magnitude exceeds the FP8 maximum are clipped."""
 
     trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen"
     """Kernel backend for cached-context TRTLLM_RAGGED MLA prefill.
