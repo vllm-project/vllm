@@ -73,13 +73,8 @@ variants:
       - h200
       - b200
       - b300
-      - gb300
-    tp:
-      h200: 8
-      b200: 8
-      b300: 4
-      gb300: 4
-    description: "All routed experts in MXFP8. ~623 GB on disk including the DSpark draft. TP8 on H200/B200, TP4 on B300/GB300. Thinking Machines recommends the NVFP4 checkpoint, the native training precision; MXFP8 scores 1-2 points higher on evals."
+    tp: 8
+    description: "All routed experts in MXFP8. ~623 GB on disk including the DSpark draft. TP8 on H200, B200 and B300. Thinking Machines recommends the NVFP4 checkpoint, the native training precision; MXFP8 scores 1-2 points higher on evals."
 
 compatible_strategies:
   - single_node_tp
@@ -173,8 +168,8 @@ guide: |
   block-scaled tensor cores, so the experts run as W4A16 (NVFP4) and W8A16 (MXFP8) GEMMs
   with BF16 activations. GSM8K is 0.976 at TP4, the same as the reference.
 
-  The MXFP8 checkpoint (`thinkingmachines/Inkling-2-Small-MXFP8`) needs about 750 GB: TP8 on H200
-  or B200, TP4 on B300 or GB300. On H200 at TP8 it scores 0.974-0.976 on GSM8K.
+  The MXFP8 checkpoint (`thinkingmachines/Inkling-2-Small-MXFP8`) needs about 750 GB. Run it at TP8 on H200, B200
+  or B300. On H200 at TP8 it scores 0.974-0.976 on GSM8K.
 
   LoRA adapters are supported on the attention projections and the routed experts. Expert
   adapters need BF16 expert weights; with the NVFP4/MXFP8 experts of this checkpoint, use
