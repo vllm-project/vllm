@@ -200,8 +200,8 @@ def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
 
 
 def test_infer_dynamic_arg_dims():
-    """Tensor arguments are dynamic, and so are unannotated ones unless their
-    default makes them a flag."""
+    """Unannotated and tensor arguments are dynamic, unless a non-`None` default
+    means they are passed as a plain value (e.g. Gemma 4's `logits_to_keep=0`)."""
 
     class Encoder(nn.Module):
         def forward(
@@ -217,7 +217,7 @@ def test_infer_dynamic_arg_dims():
         ):
             pass
 
-    dynamic = ("pixel_values", "position_ids", "mask", "logits_to_keep")
+    dynamic = ("pixel_values", "position_ids", "mask")
     assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
     assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 
