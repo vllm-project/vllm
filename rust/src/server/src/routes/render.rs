@@ -57,7 +57,7 @@ async fn health() -> StatusCode {
 /// `root` = adapter path and `parent` = base model.
 async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsResponse> {
     let created = unix_timestamp() as i64;
-    let base_cards = state.served_model_names.names().iter().map(|model| ModelObject {
+    let base_cards = state.served_model_names.base_names().iter().map(|model| ModelObject {
         id: model.clone(),
         object: "model".to_string(),
         created,
