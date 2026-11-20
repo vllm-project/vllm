@@ -38,10 +38,6 @@ def offline_processor_and_context():
                 "chat_template_kwargs": {"instruction": "Keep this instruction"}
             }
         ),
-        tokenization_kwargs=None,
-        chat_template=None,
-        lora_request=None,
-        priorities=None,
     )
     return proc, ctx
 

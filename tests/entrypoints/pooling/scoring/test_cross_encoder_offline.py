@@ -9,6 +9,7 @@ import torch
 
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 
 MODEL_NAME = "vllm-project/Qwen3-Reranker-0.6B-seq-cls"
 PROMPT = "The chef prepared a delicious meal."
@@ -104,13 +105,15 @@ def test_classify(llm):
 @pytest.mark.parametrize(
     "content_format",
     [
-        pytest.param(None, id="detected-default"),
+        pytest.param("auto", id="detected-default"),
         pytest.param("openai", id="structured"),
         pytest.param("string", id="explicit-string"),
     ],
 )
 @pytest.mark.skip_global_cleanup
-def test_score_content_format_override_matches_classify(llm: LLM, content_format):
+def test_score_content_format_override_matches_classify(
+    llm: LLM, content_format: ChatTemplateContentFormatOption
+):
     query, document = TEXTS_1[0], TEXTS_2[0]
     expected_prompt = json.dumps(
         [
@@ -119,7 +122,7 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
         ]
     )
     chat_template = "{{ messages | tojson }}"
-    if content_format is None:
+    if content_format == "auto":
         chat_template = (
             "{% for message in messages %}"
             "{% for part in message.content %}{{ part.text }}{% endfor %}"
@@ -135,17 +138,12 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
         expected_prompt = query + document
     # Compare full-prefill executions; a prefix-cache hit changes the compute path.
     llm.reset_prefix_cache()
-    format_kwargs = (
-        {}
-        if content_format is None
-        else {"chat_template_content_format": content_format}
-    )
     (scored,) = llm.score(
         query,
         document,
         chat_template=chat_template,
-        **format_kwargs,
-        tokenization_kwargs={"add_special_tokens": False},
+        chat_template_content_format=content_format,
+        add_special_tokens=False,
         use_tqdm=False,
     )
     llm.reset_prefix_cache()

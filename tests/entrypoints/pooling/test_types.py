@@ -13,7 +13,7 @@ from vllm.exceptions import VLLMValidationError
 
 
 def _make_tokenize_params() -> MagicMock:
-    """A stand-in for ``TokenizeParams`` that records ``with_kwargs`` calls."""
+    """A stand-in for `TokenizeParams` that records `with_kwargs` calls."""
     tp = MagicMock(name="TokenizeParams")
     tp.with_kwargs = MagicMock(
         name="TokenizeParams.with_kwargs",
@@ -49,7 +49,7 @@ def _build_chat_params(
     default_template: str | None = None,
     default_format: str = "string",
 ) -> MagicMock:
-    """Call ``ctx.build_chat_params`` with the real resolver."""
+    """Call `ctx.build_chat_params` with the real resolver."""
     if params is None:
         params = _make_pooling_params()
 
@@ -178,7 +178,7 @@ class TestBuildChatTemplateKwargs:
 
 
 class TestBuildChatParams:
-    """``OfflineInputsContext.build_chat_params`` -> ``ChatParams`` assembly."""
+    """`OfflineInputsContext.build_chat_params` -> `ChatParams` assembly."""
 
     def test_defaults_are_wired_into_chat_params(self):
         ctx = _make_context()

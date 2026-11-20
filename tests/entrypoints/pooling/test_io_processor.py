@@ -61,9 +61,6 @@ def test_rejects_conflicting_pooling_task(processor: PoolingIOProcessor):
     )
     ctx = OfflineEncodeInputsContext(
         pooling_task="embed",
-        tokenization_kwargs=None,
-        lora_request=None,
-        priorities=None,
         prompts=[[1]],
         pooling_params=PoolingParams(task="classify"),
     )

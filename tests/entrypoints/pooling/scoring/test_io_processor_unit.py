@@ -143,9 +143,6 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     )
     ctx = OfflineScoringInputsContext(
         pooling_task="classify",
-        tokenization_kwargs=None,
-        lora_request=None,
-        priorities=None,
         scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
         chat_template=request_template,
         pooling_params=PoolingParams(),
