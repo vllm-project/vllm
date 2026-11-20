@@ -40,6 +40,7 @@ from vllm.v1.core.kv_cache_planning import (
     can_share_block_table,
     check_enough_kv_cache_memory,
     estimate_max_model_len,
+    get_global_kv_cache_groups,
     get_kv_cache_groups,
     kv_cache_groups_tp_replicas,
 )
@@ -2247,9 +2248,15 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
-def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
+def _spec_decode_kv_cache_groups(
+    worker_specs, use_eagle_block_drop=True, *, with_kv_transfer=False
+):
     config = VllmConfig(model_config=ModelConfig(max_model_len=64))
     config.cache_config.kv_cache_layout = "BLHNC"
+    if with_kv_transfer:
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both"
+        )
     config.speculative_config = fake_speculative_config(
         method="dflash",
         use_eagle=lambda: True,
@@ -2302,18 +2309,29 @@ def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
     specs = make_specs()
     draft_layers = {name for name, spec in specs.items() if spec.is_draft}
     untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
-    groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.kv_cache_specs, g.manager_config) for g in groups] == [
-        (g.kv_cache_specs, g.manager_config)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
+    groups = _spec_decode_kv_cache_groups([specs], with_kv_transfer=True)
+
+    def grouping(kv_cache_groups):
+        return [
+            (
+                g.kv_cache_specs,
+                g.manager_config.replace_params(extra_retained_tokens=0)
+                if isinstance(g.manager_config.params, SlidingWindowManager.Params)
+                else g.manager_config,
+            )
+            for g in kv_cache_groups
+        ]
+
+    assert grouping(groups) == grouping(
+        _spec_decode_kv_cache_groups([untagged], with_kv_transfer=True)
+    )
 
     worker_specs = [
         {n: s for n, s in specs.items() if n not in draft_layers},
         {n: s for n, s in specs.items() if n in draft_layers},
     ]
     scheduler_groups = _spec_decode_kv_cache_groups(
-        [specs] if pp == 1 else worker_specs
+        [specs] if pp == 1 else worker_specs, with_kv_transfer=True
     )
     assert [g.is_eagle_group for g in scheduler_groups] == [
         bool(draft_layers & set(g.layer_names)) for g in groups
@@ -2420,6 +2438,61 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
     assert params.num_speculative_tokens == 3
     assert params.max_in_flight_steps == config.max_concurrent_batches
     assert params.num_lookahead_tokens == num_lookahead_tokens
+
+
+def test_sliding_window_group_retains_hit_blocks_below_window():
+    config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector", kv_role="kv_both"
+    )
+
+    def speculative_config(drop):
+        return fake_speculative_config(
+            method="eagle",
+            use_eagle_block_drop=lambda: drop,
+            use_multi_module_mtp=lambda: False,
+        )
+
+    config.speculative_config = speculative_config(True)
+    draft = new_sliding_window_layer(block_size=16, sliding_window=64)
+    target = new_sliding_window_layer(block_size=16, sliding_window=128)
+
+    def retained(layers):
+        groups = get_global_kv_cache_groups(config, [layers])
+        return {
+            name: getattr(group.manager_config.params, "extra_retained_tokens", None)
+            for group in groups
+            for name in group.layer_names
+        }
+
+    assert retained({"target": new_kv_cache_layer(), "draft": draft}) == {
+        "target": None,
+        "draft": 17,
+    }
+    layers = {"target": target, "draft": _as_draft(draft)}
+    assert retained(layers) == {"target": 2, "draft": 17}
+    config.num_hash_lookahead_tokens = 1
+    assert retained(layers) == {"target": 2, "draft": 2}
+    config.num_hash_lookahead_tokens = 0
+    config.speculative_config = speculative_config(False)
+    assert retained(layers) == {"target": 2, "draft": 2}
+    config.speculative_config = None
+    assert retained(layers) == {"target": 2, "draft": 2}
+
+    tail_only_draft = DFlashSlidingWindowManager.layer_config(
+        draft.spec, sliding_window=64, num_speculative_tokens=3
+    )
+    assert retained({"target": target, "draft": tail_only_draft}) == {
+        "target": 2,
+        "draft": 0,
+    }
+
+    config.speculative_config = speculative_config(True)
+    config.kv_transfer_config = None
+    assert retained(layers) == {"target": 0, "draft": 0}
+    config.kv_transfer_config = KVTransferConfig()
+    assert retained(layers) == {"target": 0, "draft": 0}
 
 
 _GQA_SPEC = AttentionSpec(

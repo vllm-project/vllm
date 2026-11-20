@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
     get_current_attn_backends,
+    get_sliding_window_blocks_per_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -695,17 +696,7 @@ class MoRIIOConnectorScheduler:
                     "--disable-hybrid-kv-cache-manager."
                 )
 
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (p.sliding_window, g.block_size)
-            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
-            else (0, self.block_size)
-            for g in kv_cache_config.transfer_groups
-        ]
-        # +1 conservatively covers window/block boundary overlap.
-        self.blocks_per_sw = [
-            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
-            for n_tokens, block_size in sw_sizes_tokens
-        ]
+        self.blocks_per_sw = get_sliding_window_blocks_per_group(kv_cache_config)
         # Per-group block size over transfer_groups (matching blocks_per_sw and
         # the connector's block payload), used to clamp each full-attention group
         # to its prompt length on the WRITE save path.

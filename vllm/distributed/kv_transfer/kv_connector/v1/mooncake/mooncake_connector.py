@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
+    get_sliding_window_blocks_per_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -77,7 +78,6 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
@@ -87,7 +87,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     FullAttentionManager,
     MambaManager,
-    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1073,18 +1072,7 @@ class MooncakeConnectorScheduler:
         self._last_heartbeat_time = 0.0
 
         # Compute sliding window block counts per KV cache group.
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (p.sliding_window, g.block_size)
-            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
-            else (0, self.block_size)
-            for g in kv_cache_config.transfer_groups
-        ]
-        # cdiv(n_tokens, block_size) gives blocks/window; add 1 to
-        # conservatively account for boundary overlap.
-        self.blocks_per_sw = [
-            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
-            for n_tokens, block_size in sw_sizes_tokens
-        ]
+        self.blocks_per_sw = get_sliding_window_blocks_per_group(kv_cache_config)
 
     def get_sw_clipped_blocks(
         self,
