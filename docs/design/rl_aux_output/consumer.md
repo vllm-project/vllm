@@ -2,7 +2,7 @@
 
 This page is the contract between the engine and the trainer for session requests. How the engine names and writes objects is in the [protocol](protocol.md).
 
-The `rl/aux-output-session-wise` branch (head `04495f3806`) carries the version of this page that matches its code, including how a trajectory built from several responses takes each position's row and how an aborted request is continued.
+This page describes the contract at the base of the stack. The `rl/aux-output-session-wise` branch (head `957235e726`) carries the version that matches its code, including how a trajectory built from several responses takes each position's row, how an aborted request is continued, and what to do with an object still missing after a pause: it is lost, so drop the samples that list it and retire the session ([fault tolerance](request_wise.md#fault-tolerance)).
 
 ## What the rollout keeps
 

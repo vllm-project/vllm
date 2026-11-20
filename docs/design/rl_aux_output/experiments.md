@@ -1,12 +1,12 @@
 # Experiments
 
-This page has four parts: how the design is validated, the results so far, the items still open, and earlier measurements that still inform it. The design is in the [protocol](protocol.md); alternatives in [design space](design_space.md).
+This page covers the validation of the session stack at its base, how overhead is measured, the store failure tests, the items still open, and earlier measurements that still inform the design. The design is in the [protocol](protocol.md); alternatives in [design space](design_space.md). The final validation of both designs, session-wise and request-wise, on eight scenarios is in [request-wise evidence](request_wise.md#evidence).
 
 ## Validation
 
 ### Setup
 
-- Hardware: GB200 nodes.
+- Hardware: nodes with 4 GPUs each.
 - Models: Qwen3-30B-A3B with batch invariance, so rows are compared bitwise; DeepSeek-V4-Flash at TP4 with MTP (one draft token), whose sparse sliding-window attention has no batch-invariant mode on this base, so its rows are checked structurally (row counts, and every position's rows of the hash-routed layers, which depend on the tokens only); gpt-oss with batch invariance for the version-label runs.
 - Store: Mooncake in standalone store mode for objects, on its own master.
 - Engine: prefix caching on, prefix replay off, `prefix_cache_retention_interval` set to `null`.
@@ -52,15 +52,31 @@ All runs are on this branch.
 
 **Pause.** Draining the writers at a pause costs about 5 µs when nothing is queued. With an in-memory store it took 3 ms for 64 queued objects of 8 KB and 27 ms for 512; with 1 ms per put, 0.07 s and 0.54 s. The wait is the time to write what is queued.
 
-### Why same-node interleaving
+### Measuring overhead
 
-Two sessions-off runs of one build differed by 4.1% in TTFT, and an earlier comparison that always ran the sessions-on arm first showed TTFT +5–11% that disappeared when the arms alternated. Arms of an overhead comparison run on one node, alternating; differences of a few points between single runs are not conclusions.
+- **Same node, arms alternating.** Two sessions-off runs of one build differed by 4.1% in TTFT, and an earlier comparison that always ran the sessions-on arm first showed TTFT +5–11% that disappeared when the arms alternated.
+- **Generated tokens per second from single runs is not usable.** In the closed-loop simulator (DeepSeek V4.1 Flash, keep-only, 120 versions), two aux-off runs of the same build on the same node differed by 16% in generated tokens per second in the steady-state window, because the mix of long and short trajectories in the window varies. Differences of a few points, or even 10 to 15 points, between single runs are not results.
+- **Prefill computed per generated token is stable.** The same two aux-off runs gave 29.9 and 30.1. It shows where extra compute goes even when throughput is noisy.
+- **What it showed for session-wise.** Session-wise gave 40.9 and 41.3 (+37%) in two pairs run in opposite order. All of the excess was in first turns: the scenario's sessions come in pairs that send the same first prompt, and with the session in the cache salt from position 0 the second session computed the prompt again. First turns computed 69.5% of their prompt positions, against 28.9% with aux outputs off. The fork fix and its measurement are in [comparing the two designs](comparing.md#performance-and-integration).
+
+### Store failures
+
+The writer change on both branch heads keeps the engine running when the store fails: it retries refused puts until the stall deadline, then drops what the store does not take ([fault tolerance](request_wise.md#store-errors-in-the-engine)). Unit tests added with it fail on the code before it.
+
+Kill tests with request-wise engines, synchronous training, 64 samples per step, 4 steps; a holder or the master killed during the second step's rollout and restarted:
+
+| Kill | Steps completed | Engine errors | Masked samples in the step with the kill | Later steps |
+| --- | --- | --- | --- | --- |
+| holder (`client_ttl` 30 s) | 4 of 4 | none | 8 of 64; the trainer's read waited out its 600 s deadline | 0 masked, step time as before the kill |
+| master | 4 of 4 | none | 8 of 64; the same wait | 0 masked, step time as before the kill |
+
+Before the change, the same kills stopped the engine within about a second (the failed put raised at the next step), and the run failed.
 
 ## Open items
 
 - **Prefix-cache collapse under backlog.** Under a backlog of requests the prefix-hit rate collapses, with aux outputs on and off. The offloading connector's tier holds only about 1M tokens for DeepSeek-V4-Flash, because each key takes the slot of a full block.
 - **Sleep during connector loads.** A sleep while KV connector loads are in flight raises; callers must retry it.
-- **A full object store** stops the engine. Renaming after a pause that clears the cache multiplies the footprint: the objects computed again are written under new names, and the old ones stay until their session is released.
+- **A full object store.** Writes stall; when nothing frees the store for the stall deadline, the writer drops objects and the trainer masks the samples that need them (on the branch heads; at the base the engine stopped). Renaming after a pause that clears the cache multiplies the footprint: the objects computed again are written under new names, and the old ones stay until their session is released.
 - **Cost of a reset.** Sending the hashes of live requests again, and the `begin_step` and `salt_from_hit` work that follows (V4).
 - **Late decode blocks in the Mooncake store.** With `save_decode_cache`, session requests and asynchronous scheduling, in runs with two engines per node, the next turn of an earlier revision missed the last block of the previous turn in 7 of 11 runs. Without aux outputs 0 of 3 runs missed; with asynchronous scheduling off, or 60 s between turns, every run hit. The blocks were stored and their hashes at store and lookup were equal; they became visible late. The V1 runs with the decode cache hit every token.
 
@@ -75,8 +91,8 @@ These come from earlier implementations of aux output delivery; each entry says 
 | The same key written twice | Both puts return success. Sequential writes keep the first object; concurrent writes keep one of them, not determined which, never a mix. | immutable objects (protocol §5) |
 | Removal right after a read | Without force nothing is removed (read lease, error −706); with force everything is. | release with force (protocol §10) |
 | `remove_by_regex` during writes | Silently skips keys still being written and returns only the count it removed. Scans every key: 36–74 ms at 200K keys. | release only after a pause (protocol §10) |
-| A holder process killed | The master still lists its keys; every get returns empty; puts fail. | missing objects fail the read |
-| Store full, or master killed | The request whose write fails gets an engine error; nothing is lost silently. | engine stops on a failed write |
+| A holder process killed | The master still lists its keys, and keeps the holder's segments for `client_ttl` (600 s by default): puts placed on them fail and readers retry against the dead holder. | missing objects are masked by the trainer; a short `client_ttl` (fault tolerance) |
+| Store full, or master killed | With the base code, the request whose write fails gets an engine error and the engine stops; nothing is lost silently. | replaced on the branch heads by retry, then drop and mask (fault tolerance) |
 | A client created before the engine in one process | CUDA initialization fails in the engine's workers. | consumer contract |
 | Reader after the master dies | Hangs for more than 70 s. | reads need their own timeout |
 | SSD offload at put | Lost 2,976 of 100K small objects (3%) with no error. Offload on eviction kept 100K of 100K. | SSD offload not used with pinned objects |

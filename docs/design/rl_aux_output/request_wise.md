@@ -6,8 +6,10 @@ Code:
 
 | Branch | Design |
 | --- | --- |
-| `rl/aux-output-session-wise` | Session design, all five layers of the [PR stack](README.md#pr-stack), with aborted requests that list their keys |
-| `rl/aux-output-request-wise` | Request-wise design on the same base: request ids in the cache salts, the `held` rule (`aux_held`), partial objects at preemption, removal of outputs never delivered. Objects are still block-hash objects; the chunk references of this document are not implemented. The branch's own `request_wise.md` describes its code and limits. |
+| `rl/aux-output-session-wise` | Session design, all five layers of the [PR stack](README.md#pr-stack), with aborted requests that list their keys and writer degradation on store failures ([fault tolerance](#fault-tolerance)) |
+| `rl/aux-output-request-wise` | Request-wise design on the same base: request ids in the cache salts, the `held` rule (`aux_held`), partial objects at preemption, removal of outputs never delivered, and the same writer degradation. Objects are still block-hash objects; the chunk references of this document are not implemented. The branch's own `request_wise.md` describes its code and limits. |
+
+The two designs are compared side by side in [comparing the two designs](comparing.md).
 
 Assumptions: batch invariance (the same tokens at the same weight versions on the same prefix give bitwise identical outputs); keep and reset weight updates are both supported.
 
@@ -79,22 +81,35 @@ What request-wise gives up:
 
 ## Fault tolerance
 
-This section applies to both designs. It covers what the engine, the store and the trainer do when a write, a read, the store or the job's coordinator fails. Each part says whether it is implemented or planned.
+This section applies to both designs. It covers what the engine, the store and the trainer do when a write, a read, the store or the job's coordinator fails, and says what is implemented.
 
 ### Publication and reads
 
 - The engine lists a key in the response when it starts writing the object, not when the write completes. The trainer may read as soon as the response arrives.
 - Mooncake publishes an object only when its put completes. A reader sees either no object or the whole object, never part of one.
-- Readers poll with a deadline. `read_aux_rows` retries a missing key until its timeout, which defaults to 600 s and should be no shorter than `object_put_stall_timeout_s`.
-- **Write barrier.** Take a request that has ended. Once every engine that served it has completed a pause that started afterwards (for example the pause before a weight update, or a sleep), every object the request wrote is in the store. This is the pause rule of the [protocol](protocol.md) for the session design, and E7 and F5 above for the request-wise design. A key still missing after the barrier is lost, not late.
+- Readers poll with a deadline. `read_aux_rows` retries a missing key until its timeout, which defaults to 600 s and should be no shorter than the engine's stall deadline (below).
+- **Write barrier.** Take a request that has ended. Once every engine that served it has completed a pause that started afterwards (for example the pause before a weight update, or a sleep), every object the request wrote is in the store or never will be: the writer dropped it, or the holder that kept it died. The one exception is an object held by a store call that hung past the stall deadline, which may still land. A key still missing after the barrier is lost, not late. This is the pause rule of the [protocol](protocol.md) for the session design, and E7 and F5 above for the request-wise design.
 
 Status: implemented in both designs.
 
+### Store errors in the engine
+
+The engine never exits because of a store error. It retries, then drops what the store does not take, and the trainer masks the samples that need the dropped objects.
+
+- **Retry.** A put the store refuses is retried every 0.2 s, whatever the error: no memory (the store is full while it offloads, or a pinned pool waits for releases), a holder that is gone, or an RPC failure from a master that is gone. A replaced process can take the write.
+- **Stall deadline.** `object_put_stall_timeout_s`, 600 s by default, capped at half of `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`, so 150 s by default. A step that waits longer than the execute timeout for the writer queue would stop the engine.
+- **Drop.** When no put has succeeded for the deadline, the writer drops the rest of the batch it is writing. From then on each batch gets one attempt and is dropped if the store refuses it, and enqueueing no longer waits for a full queue, so a store that stays down holds back steps for at most one deadline. The first put that succeeds ends this, and retries resume. A store that takes writes, only more slowly than the engine produces them, slows the engine down; nothing is dropped.
+- **Responses.** A response keeps listing a dropped key; it may already have been sent when the put failed. The trainer finds the object missing after the write barrier and masks its samples. There is no error marker per request.
+- **A lost object stays lost.** A later request that hits the object's KV lists the same key and does not compute it again. Session-wise: drop every sample that lists the key and retire the session. Request-wise: drop the samples whose plans reference the key and do not extend those plans.
+- **A store call that hangs.** It does not stop the engine. Once it has run for the deadline, a batch that meets a full queue is dropped, and a pause stops waiting for it and drops what is queued behind it. The hung call itself can still land later; the release of the session or the prefix removes it. Shutdown waits for it.
+- **Other writer errors** are bugs, not store errors. They stop the engine at its next step, and a pause fails with them.
+
+Status: implemented on both branch heads. The unit tests added with it fail on the code before it.
+
 ### Failure of one request or one object
 
-Such a failure explicitly fails the samples that need the object. The rest of the batch trains as usual.
+Such a failure fails the samples that need the object. The rest of the batch trains as usual.
 
-- **Writes.** The engine retries a put the store refuses until `object_put_stall_timeout_s` (600 s by default). After that the engine stops with a write error, and its steps and pauses fail instead of hanging. Implemented.
 - **Outputs no one reads.** These are the objects of aborted requests, of final outputs the frontend dropped, and of `generate` calls that were cancelled. The request-wise design removes them in the engine (E7). The session design removes them with the session. Implemented.
 - **Reads.** The trainer masks a sample whose object is missing:
   - at once, if the object's request has passed the write barrier;
@@ -111,15 +126,29 @@ Evidence comes from deleting objects on purpose before the trainer read them:
 ### Store failure
 
 - **A holder is lost.** The objects in its memory segment and on its SSD are lost, so many reads miss at once.
-- **The master is lost.** All metadata is lost, so no object can be found.
+- **The master is lost.** All metadata is lost. A restarted master knows no object written before it, so every such read misses.
 
-Planned handling:
+**Kill tests.** Synchronous training with request-wise engines, 64 samples per step, 4 steps. During the second step's rollout the test killed a holder in one run and the master in the other, then restarted it.
 
-- **Engine.** A write that cannot reach the store fails at the write deadline instead of hanging.
-- **Trainer.** Missing objects in bulk count as a store failure. Signs are the share of missing samples in a batch rising above a threshold, or store connection errors. The trainer then drops the batch and generates it again, instead of waiting out each read.
-- **Restart.** Start a new master and new holders on new directories, under a new key prefix, and let the engines and readers reconnect. Sessions in flight are abandoned.
+- Both runs completed all 4 steps. The engines logged no error.
+- In the step with the kill, 8 of 64 samples were masked on every rank. Its rollout took 119 to 121 s instead of 59 to 61 s. The trainer's read took 607 s: transport errors are not failed fast yet, so the reader waited out its 600 s deadline before masking.
+- The next two steps masked nothing and took 118 to 122 s, as before the kill.
+- The kill tests ran at a commit before the last change to how the writer detects a hung put. That change and its test are covered by unit tests. The session-wise branch has the same writer change, covered by unit tests only.
 
-Status: planned. Tests that kill a holder and that kill the master are in progress.
+Earlier rounds of the same tests found three problems outside the engine:
+
+- **All samples of a step lost at once.** Objects of a prompt prefix that all samples of a group share were written before the master was killed. Later requests hit that KV and listed the lost keys, so every sample of the step was masked, and the trainer raised instead of skipping the step.
+- **Reads hung on a dead holder.** The master keeps a dead holder's segments registered for `client_ttl` (600 s by default). It keeps placing puts on them and listing their objects, and the reader kept retrying connections to the dead holder. The holder test that passed lowered `client_ttl` to 30 s.
+- **Master restart.** All objects written before the restart are gone. The trainer masks them; objects written after the restart are read normally.
+
+Remaining work:
+
+| Item | Where | Status |
+| --- | --- | --- |
+| A transport error (connection refused, holder gone) fails the read at once instead of waiting out the read deadline | trainer | in progress |
+| A step whose samples are all masked is skipped instead of raising | trainer | in progress |
+| The master drops a dead holder's segments at once, not after `client_ttl`; until then, set a short `client_ttl` | Mooncake | needs an upstream fix |
+| Master metadata survives a restart | Mooncake | not addressed; a restart costs the samples whose objects were written before it |
 
 ### Coordinator crash
 
@@ -180,17 +209,17 @@ A run is accepted only if all of the following hold:
 | Asynchronous KV load failures injected (recompute) | 93 (19.1M) | 145 (29.2M) |
 | Synchronous KV load failures injected (recompute) | 196 (36.6M) | 156 (30.7M) |
 
-- Request-wise ran at its head `7a3f62ba55`.
-- Session ran at `de72f5cf5a`. Its head `04495f3806` adds a simplification with identical test results.
-- In every run:
+- Code: request-wise ran at `7a3f62ba55`, session at `de72f5cf5a`; `04495f3806` simplified the session code with identical unit test results. The branch heads add writer degradation on store failures, and on request-wise the fix for a synchronous `LLMEngine` abort; the scenarios were not run again at the heads. Until no put has succeeded for the stall deadline, which no accepted run reached, the writer at the heads retries as before ([fault tolerance](#store-errors-in-the-engine)).
+- In every accepted run:
   - no row differs from the row first produced;
   - no undelivered object is left;
   - no other session's object is removed;
   - nothing is evicted;
   - every planted fault is caught.
+- One request-wise run of the abort-pause scenario was not accepted. Every check passed except two: 6 removed objects that reappeared (Mooncake, see [fault tolerance](#removed-objects-that-reappear-mooncake-0314)), and 8 objects of one session still in the store 9 minutes after the client dropped them, with no release message for that session. The table shows its rerun. Two reruns with per-key logging did not reproduce the 8 objects; the cause is not known.
 - The sampled logprob and the stored top-k logprob come from two different computations, and without batch invariance they differ by up to 3.4e-2. A 1M-token request resubmitted across a weight update shows differences of the same order. In both cases the rows are the first-produced ones.
 
-**Qwen3-30B-A3B, with batch invariance.** Both designs were run on five scenarios (keep, sleep and reset, aborts, mixed with preemption, sub-agents and compaction), each with 50 to 80 versions. The request-wise runs used its head.
+**Qwen3-30B-A3B, with batch invariance.** Both designs were run on five scenarios (keep, sleep and reset, aborts, mixed with preemption, sub-agents and compaction), each with 50 to 80 versions, at the same commits as above.
 
 - The first-produced check found 0 mismatches: 24.9M positions for session, 25.5M for request-wise.
 - A reference engine replays each trajectory under its listed versions and matches bit for bit. The exceptions are positions whose KV was reused across another version history: 6 trajectories for session, 80 for request-wise. For those, a reference that replays the KV of the producing request reproduces every row exactly.
@@ -206,19 +235,20 @@ A run is accepted only if all of the following hold:
   - sub-agents keep more sessions per group.
 - A trainer that consumes trajectories many versions late holds those trajectories' objects as well; the simulator consumed them at once.
 
-**Overhead.**
+**Overhead.** Measured on one node, in the keep-only scenario with 120 versions per run, aux outputs off and on, back to back on the same node.
 
-- Request-wise, measured on one node in the keep-only scenario with 120 versions per run:
-  - With aux outputs on, generated tokens per second in steady state drop by 2.6%. Decode speed per running request is unchanged.
-  - Trainer reads take 9.4 s at p50 and 18.1 s at p99.
-  - The simulator's own read-back costs another 11%, which a deployment does not pay.
-- Session: the same measurement is pending.
+- **Generated tokens per second does not separate the arms.** Two aux-off runs of the same build on the same node differed by 16% (788 and 662 tokens per second in the steady-state window), because the mix of long and short trajectories in the window varies from run to run. Single-run differences are therefore not results: request-wise −2.6% in one pair, session-wise −14.1% and −6.7% in two pairs run in opposite order.
+- **Prefill computed per generated token is stable.** It was 29.9 and 30.1 in the two aux-off runs. Session-wise: 40.9 and 41.3 (+37%). Request-wise: 32.9 against 30.1 (+9%, one pair, not yet attributed).
+- **The session-wise excess comes from first turns.** The scenario's sessions come in pairs that send the same first prompt. With aux outputs off, the second session hits the first one's prompt; with session-wise, the session is in the cache salt from position 0, so it computes the prompt again. First turns computed 69.5% of their prompt positions, against 28.9% with aux outputs off; later turns computed the same share in both arms. The fix is an explicit fork ([comparing the two designs](comparing.md#performance-and-integration)); the measurement after it is running.
+- **Decode speed per running request** was unchanged with request-wise: 93.8 tokens per second against 91.5 with aux outputs off.
+- **Trainer reads** took 9.4 s at p50 and 18.1 s at p99 with request-wise, 5.4 s and 11.7 s with session-wise.
+- **The simulator's own read-back** of every delivered row cost another 11% (request-wise) and 34% (session-wise) of generated tokens per second. A deployment does not pay it.
 
 **Deployment.**
 
 - Mooncake disk eviction must be off:
   - With the default bucket eviction, a quota or a full disk deletes unreleased objects, oldest bucket first. Reads then miss, but no wrong row is delivered.
-  - With eviction off, writes that do not fit are refused, and the engine stops at the put stall deadline.
+  - With eviction off, writes that do not fit are refused. On the code the scenarios ran, the engine then stopped at the stall deadline; on the branch heads the writer drops those objects and the trainer masks the samples that need them ([fault tolerance](#store-errors-in-the-engine)). Either way the samples that need those objects are lost, so admission has to keep the disk from filling.
 - Admission by free disk is therefore required (the session branch's protocol, section 8).
 - Its bound (the longest context times all branches times the group size) reserved about ten times what the sub-agent scenario wrote. This lowered concurrency there. A bound per live branch is future work.
 

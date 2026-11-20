@@ -66,7 +66,7 @@ The session is chosen. A shared system prompt is computed once per session, a sm
 | **Immutable objects, first write kept** | **Chosen.** Under batch invariance a second computation under the same name has the same rows. A write to an existing key succeeds, and Mooncake keeps one object per key, never a mix. |
 | Per-trajectory copies when versions differ | Needed only when names do not carry versions; obsolete with V3. |
 
-**Failures.** A failed put is logged and stops the engine at its next step or pause. Retry machinery, error markers per request and readers that tell partial samples apart were part of the earlier protocol and are not carried over: a full pool is a sizing error, and a stopped engine makes it visible.
+**Failures.** A put the store refuses is retried until a stall deadline, since a full store frees memory by offloading or by releases, and a lost holder or master can be replaced. After the deadline the writer drops what the store does not take, and the engine keeps running: a failing store costs the samples that need the missing objects, not the run. Responses keep listing dropped keys, and the pause tells a lost object from a late one, so error markers per request, part of the earlier protocol, are not carried over. At the base of the stack a failed put stopped the engine; both design branches carry the retry and drop ([fault tolerance](request_wise.md#fault-tolerance)).
 
 ## Store
 

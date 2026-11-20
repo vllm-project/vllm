@@ -66,22 +66,39 @@ Later:
 | [Consumer contract](consumer.md) | How a trainer reads objects, what each field holds, and what it must do |
 | [Design space](design_space.md) | The alternatives for each decision and why this one |
 | [Scenarios](scenarios.md) | Sizing: bytes per position, KV tier capacity, object pool, object counts |
-| [Experiments](experiments.md) | Validation results, open items, and earlier measurements |
+| [Experiments](experiments.md) | Validation of the session stack, how overhead is measured, store failure tests, open items, and earlier measurements |
+| [Comparing the two designs](comparing.md) | Session-wise and request-wise side by side on correctness, storage and faults, and performance, with open items and questions for reviewers |
 | [Request-wise design](request_wise.md) | An alternative where objects belong to the request that wrote them: names without versions, the `held` rule, release by reference count, and a comparison with this design |
 | [Fault tolerance](request_wise.md#fault-tolerance) | For both designs: publication and the write barrier, failures of one object, of the store and of the coordinator, and removed objects that Mooncake registers again |
 
 ## Status
 
-All six layers are on the branch. Requests without `aux_session` keep the inline behavior: routed experts and indexer selections returned in the response. Validation of the full stack is tracked in [experiments](experiments.md); the runs on the current branch are pending.
+The code is on two branches, one per design, both on the same base commit of the session stack (`cfcec38b62`). This branch, `rl/aux-output`, holds these documents. Requests without `aux_session` keep the inline behavior on both: routed experts and indexer selections are returned in the response.
+
+- **Correctness.** Both designs are valid in all eight validation scenarios on DeepSeek V4.1 Flash without batch invariance, and in five scenarios on Qwen3-30B-A3B with batch invariance ([evidence](request_wise.md#evidence)).
+- **Store failures.** Both engines keep running when the store fails: the writer retries until the stall deadline and then drops the objects the store does not take, and the trainer masks the samples that need them. A holder and a master were killed during training runs with request-wise engines, and the runs continued ([fault tolerance](request_wise.md#fault-tolerance)).
+- **Sharing across sessions.** Session-wise needs an explicit fork to share a prompt between sessions. The fix is implemented on a local branch and being measured; it is not on `rl/aux-output-session-wise` ([comparing the two designs](comparing.md#performance-and-integration)).
+- **Overhead.** Not settled for either design: same-node noise is larger than the differences measured so far ([evidence](request_wise.md#evidence)).
 
 RFC #64380 described an earlier protocol (manifests, per-trajectory copies, a writer-side version ledger). This folder replaces it.
 
 ## Branches
 
-Both design branches start from the same commit of the session stack, `cfcec38b62`, and each carries documents that describe its own code.
-
-| Branch | Head | Status |
+| Branch | Head | Content |
 | --- | --- | --- |
-| `rl/aux-output` | | This branch: the integration branch with these documents. |
-| `rl/aux-output-session-wise` | `04495f3806` | The five layers of the PR stack, plus one commit that makes aborted session requests list their keys. Its protocol and consumer contract add the rule for building a trajectory from several responses, and the limits found in validation. Valid in all eight validation scenarios; overhead measurement pending ([evidence](request_wise.md#evidence)). |
-| `rl/aux-output-request-wise` | `7a3f62ba55` | The request-wise design ([request-wise design](request_wise.md)): 19 code commits and one document commit on the same base. Its own `request_wise.md` describes the code. Valid in all eight validation scenarios at this head ([evidence](request_wise.md#evidence)). |
+| `rl/aux-output` | | These documents. Protocol, consumer contract, design space, scenarios and experiments describe the session-wise design at the base; `request_wise.md` and `comparing.md` describe and compare both designs at the heads below. |
+| `rl/aux-output-request-wise` | `35f26d0096` | The request-wise design: names by request, `held`, release by reference count, removal of outputs never delivered, writer degradation on store failures, and the fix for a synchronous `LLMEngine` abort that leaked the keys of a queued final output. 35 commits on the base. Its own `request_wise.md` describes the code. |
+| `rl/aux-output-session-wise` | `957235e726` | The session design: the five layers of the [PR stack](#pr-stack), aborted session requests that list their keys, and writer degradation on store failures. 15 commits on the base. Its protocol and consumer contract match its code. |
+
+The validation scenarios ran at `7a3f62ba55` (request-wise) and `de72f5cf5a` (session-wise). The commits after them change the store-failure path, and on request-wise the `LLMEngine` abort. They are covered by unit tests that fail on the code before them, and on request-wise by the kill tests in [fault tolerance](request_wise.md#fault-tolerance).
+
+## How to review
+
+Read in this order:
+
+1. This page, for the terms and the session design in short.
+2. [Comparing the two designs](comparing.md): mechanisms, costs, evidence and open items of each design, side by side.
+3. [Request-wise design](request_wise.md): its rules, fault tolerance for both designs, and the evidence.
+4. [Protocol](protocol.md) and [consumer contract](consumer.md) for the session design in detail; [design space](design_space.md), [scenarios](scenarios.md) and [experiments](experiments.md) as needed.
+
+The questions we would like reviewers to judge are at the end of [comparing the two designs](comparing.md#questions-for-reviewers): which design should go upstream and why, whether RL frameworks can issue an explicit fork, whether the pluggable object-store interface is the right boundary and which backends matter, whether cross-cluster writing matters, and which outputs should be on by default given their size.

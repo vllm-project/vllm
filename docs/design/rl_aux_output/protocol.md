@@ -2,7 +2,7 @@
 
 This page specifies what the engine does with a session request, from admission to release. Terms are defined in the [README](README.md#terms), alternatives in [design space](design_space.md), sizes in [scenarios](scenarios.md).
 
-The `rl/aux-output-session-wise` branch (head `04495f3806`) carries the version of this page that matches its code: aborted session requests list their keys, sessions are admitted by free disk, and the limits include those found in validation ([evidence](request_wise.md#evidence)).
+This page describes the session design at the base of the stack. The `rl/aux-output-session-wise` branch (head `957235e726`) carries the version that matches its code: aborted session requests list their keys, sessions are admitted by free disk, a failing store makes the writer drop objects instead of stopping the engine ([fault tolerance](request_wise.md#fault-tolerance)), and the limits include those found in validation ([evidence](request_wise.md#evidence)).
 
 ## 1. The idea
 
