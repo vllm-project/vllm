@@ -562,6 +562,7 @@ steps:
 
 - label: ":nvidia: (H100) ShardQ Sequence Parallel"
   key: deepseek-shardq-sequence-parallel
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   working_dir: "/vllm-workspace/"
@@ -570,6 +571,8 @@ steps:
   - vllm/models/deepseek_v32/
   - vllm/models/hy_v4/nvidia/attention.py
   - vllm/models/hy_v4/nvidia/flashmla_sparse.py
+  - vllm/models/hy_v4/nvidia/model.py
+  - vllm/models/hy_v4/nvidia/moe.py
   - vllm/models/common/ops/sequence_parallel.py
   - vllm/model_executor/layers/attention/
   - vllm/model_executor/models/deepseek_v2.py
@@ -581,11 +584,13 @@ steps:
   - vllm/config/attention.py
   - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
   - tests/models/hy_v4/test_shardq_sinks.py
+  - tests/models/hy_v4/test_sequence_parallel.py
   commands:
   - >-
     pytest -v -s
     tests/models/deepseek_v32/test_shardq_sequence_parallel.py
     tests/models/hy_v4/test_shardq_sinks.py
+    tests/models/hy_v4/test_sequence_parallel.py
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
