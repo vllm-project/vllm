@@ -396,6 +396,10 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+        if hf_to_vllm_mapper is not None:
+            derived = hf_to_vllm_mapper.get_packed_modules_mapping()
+            for stacked, shards in derived.items():
+                quant_config.packed_modules_mapping.setdefault(stacked, shards)
 
 
 def log_layer_backends(

@@ -218,3 +218,70 @@ def test_quark_and_compressed_tensors_ignore_fused_layers_identically(patterns):
 
     assert should_ignore_layer(layer_name, patterns, fused_mapping)
     assert quark_should_ignore_layer(layer_name, patterns, fused_mapping)
+
+
+_MLA_STACKED = {
+    ".q_a_proj": (".fused_qkv_a_proj", 0),
+    ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
+}
+
+
+def test_packed_modules_mapping_is_derived_from_stacked_rules():
+    """A model whose loader stacks shards via `orig_to_new_stacked` needs no
+    separate `packed_modules_mapping` declaration for quantization."""
+    import torch.nn as nn
+
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.model_executor.layers.quantization.base_config import (
+        resolve_quant_method,
+    )
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.model_loader.utils import configure_quant_config
+    from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    class Model(nn.Module):
+        hf_to_vllm_mapper = WeightsMapper(orig_to_new_stacked=_MLA_STACKED)
+
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        ignored_layers=[
+            "model.layers.0.self_attn.q_a_proj",
+            "model.layers.0.self_attn.kv_a_proj_with_mqa",
+        ],
+    )
+    configure_quant_config(quant_config, Model)
+    assert quant_config.packed_modules_mapping == {
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
+    }
+
+    layer = DeepSeekV2FusedQkvAProjLinear.__new__(DeepSeekV2FusedQkvAProjLinear)
+    prefix = "model.layers.0.self_attn.fused_qkv_a_proj"
+    method = resolve_quant_method(quant_config, layer, prefix)
+    assert isinstance(method, UnquantizedLinearMethod)
+    assert layer.resolved_shard_names == ["q_a_proj", "kv_a_proj_with_mqa"]
+
+
+@pytest.mark.parametrize("resolved", [None, ["q_a_proj", "kv_a_proj_with_mqa"]])
+def test_loader_flags_stacked_layer_resolved_without_shard_names(caplog, resolved):
+    """The loader warns when a quantized stacked layer was loaded from separate
+    checkpoint shards but its quant method never saw their names."""
+    import logging
+
+    import torch.nn as nn
+
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.model_loader.default_loader import (
+        check_stacked_quant_resolution,
+    )
+
+    layer = MergedColumnParallelLinear.__new__(MergedColumnParallelLinear)
+    nn.Module.__init__(layer)
+    layer.quant_config = object()
+    layer.loaded_split = True
+    layer.resolved_shard_names = resolved
+    model = nn.ModuleDict({"fused_qkv_a_proj": layer})
+
+    with caplog.at_level(logging.WARNING, logger="vllm"):
+        check_stacked_quant_resolution(model)
+    assert ("without their checkpoint shard names" in caplog.text) is (resolved is None)

@@ -51,6 +51,34 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def check_stacked_quant_resolution(model: nn.Module) -> None:
+    """Flag stacked layers whose checkpoint stores them as separate shards but
+    whose quant method was resolved without knowing the shard names.
+
+    Quant configs resolve a stacked layer from its checkpoint shard names
+    (`packed_modules_mapping`). Without them they resolve it from the stacked
+    name, which the checkpoint does not contain, so exclusions and per-layer
+    schemes of the shards are silently ignored."""
+    unresolved = [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, StackedColumnParallelLinear)
+        and module.quant_config is not None
+        and module.loaded_split
+        and module.resolved_shard_names is None
+    ]
+    if unresolved:
+        logger.warning(
+            "The quantization method of %d stacked layer(s) was chosen without "
+            "their checkpoint shard names, so per-shard quantization settings "
+            "were ignored (e.g. %s). Declare the stacked module in the model's "
+            "`packed_modules_mapping` or in `hf_to_vllm_mapper.orig_to_new_stacked`.",
+            len(unresolved),
+            ", ".join(unresolved[:3]),
+        )
+
+
 # fbgemm_fp8 builds input_scale_ub from its config; checkpoints do not carry it.
 _CONFIG_BUILT_PARAMS = ("input_scale_ub",)
 
@@ -565,6 +593,7 @@ class DefaultModelLoader(BaseModelLoader):
         self._init_mm_encoder_only_weight_filter(model, model_config)
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
+        check_stacked_quant_resolution(model)
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(

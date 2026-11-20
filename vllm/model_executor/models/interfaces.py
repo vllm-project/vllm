@@ -1336,6 +1336,10 @@ class SupportsQuant:
             self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_modules_mapping := getattr(self, "packed_modules_mapping", None):
             self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
+        if hf_to_vllm_mapper is not None:
+            derived = hf_to_vllm_mapper.get_packed_modules_mapping()
+            for stacked, shards in derived.items():
+                self.quant_config.packed_modules_mapping.setdefault(stacked, shards)
 
 
 @runtime_checkable
