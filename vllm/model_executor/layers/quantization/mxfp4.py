@@ -167,6 +167,32 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         self.w13_precision_config = None
         self.w2_precision_config = None
 
+    def load_stacked_weight(
+        self, layer: "RoutedExperts", name: str, weight: torch.Tensor
+    ) -> str | None:
+        """Load HF's `{gate_up,down}_proj_{blocks,scales,bias}` whole: gate and
+        up are interleaved, so splitting them into halves would scramble them."""
+        if not name.startswith(("gate_up_proj_", "down_proj_")):
+            return None
+        parallel_config = self.moe.moe_parallel_config
+        if parallel_config.tp_size > 1 or parallel_config.ep_size > 1:
+            raise NotImplementedError(
+                "gpt-oss MXFP4 does not support TP or EP for stacked checkpoints."
+            )
+        param_name = (
+            name.replace("gate_up_proj", "w13")
+            .replace("down_proj", "w2")
+            .replace("_blocks", "_weight")
+            .replace("_scales", "_weight_scale")
+        )
+        param = getattr(layer, param_name)
+        if name.endswith("_blocks"):  # (E, N, K // 32, 16) -> (E, N, K // 2)
+            weight = weight.flatten(2)
+        param.weight_loader(
+            param, weight, weight_name=param_name, shard_id=None, expert_id=None
+        )
+        return param_name
+
     @property
     def skip_forward_padding(self) -> bool:
         # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant

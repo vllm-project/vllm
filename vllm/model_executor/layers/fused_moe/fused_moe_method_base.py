@@ -60,6 +60,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ):
         raise NotImplementedError
 
+    def load_stacked_weight(
+        self, layer: "RoutedExperts", name: str, weight: torch.Tensor
+    ) -> str | None:
+        """Load a checkpoint tensor stacked over experts straight into its
+        parameter and return that parameter's name, or return None to leave
+        it to the generic expert mapping."""
+        return None
+
     def uses_weight_scale_2_pattern(self) -> bool:
         """Returns True if this quantization method uses 'weight_scale_2' pattern
         for per-tensor weight scales (e.g., FP4 variants), False otherwise.

@@ -1034,6 +1034,11 @@ class RoutedExperts(PluggableLayer):
         mapping_by_expert = _index_expert_mapping(expert_mapping)
 
         for expert_name, loaded_weight in weights:
+            if param_name := self.quant_method.load_stacked_weight(
+                self, expert_name, loaded_weight
+            ):
+                yield param_name
+                continue
             qual_name = f"{self.layer_name}.{expert_name}"
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (

@@ -189,10 +189,9 @@ class Base(
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
             # Check for unsupported quantization methods.
-            if quant_method_name in ("mxfp4", "gpt_oss_mxfp4"):
+            if quant_method_name == "mxfp4":
                 raise NotImplementedError(
-                    "Transformers modeling backend does "
-                    "not support MXFP4 quantization yet."
+                    "Transformers backend only supports MXFP4 for gpt-oss checkpoints."
                 )
 
         if self.model_config.uses_mrope:
