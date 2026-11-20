@@ -2200,6 +2200,9 @@ class EngineCoreProc(EngineCore):
             allow_missing_mm_embeddings=(
                 mm_config is not None and mm_config.allow_missing_mm_embeddings
             ),
+            max_mm_embeds_per_request=getattr(
+                self.scheduler, "max_mm_embeds_per_request", None
+            ),
         )
 
     def process_input_sockets(
