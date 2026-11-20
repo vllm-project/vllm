@@ -89,19 +89,35 @@ def _faults_pageable_copies(device: torch.device) -> bool:
     return err == cudart.cudaError_t.cudaSuccess and bool(value)
 
 
+# 1-byte dtypes whose bytes are the value (raw bytes, MX scales, packed FP4)
+_BYTE_CONTAINERS = frozenset(
+    {torch.uint8, torch.int8, torch.float8_e8m0fnu, torch.float4_e2m1fn_x2}
+)
+
+
 def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     """`dst.copy_(src)` for weight loaders.
 
     Model-specific weight loaders should call this instead of `.copy_()` when
-    copying a checkpoint tensor to the device. It is a plain `copy_` except on
-    integrated GPUs and GPUs that read pageable memory through the host page
-    tables: there a host-to-device copy straight from a safetensors mmap takes
-    its page faults inside the driver copy, which is several times slower
+    copying a checkpoint tensor to the device. It is a plain `copy_`, except
+    that a copy between two byte containers (`uint8`, `int8`, `float8_e8m0fnu`,
+    `float4_e2m1fn_x2`) keeps the bytes, where `copy_` would convert E8M0
+    scales by value. Float8 value formats still convert by value.
+
+    On integrated GPUs and GPUs that read pageable memory through the host page
+    tables, a host-to-device copy straight from a safetensors mmap takes its
+    page faults inside the driver copy, which is several times slower
     than faulting them on the CPU, so touch one byte per page of `src` first.
     PyTorch already stages non-contiguous and dtype-converting copies through
     a CPU temporary. Sources with at most one element are skipped: they count
     as contiguous with any stride, which `view(torch.uint8)` rejects.
     """
+    if (
+        src.dtype != dst.dtype
+        and src.dtype in _BYTE_CONTAINERS
+        and dst.dtype in _BYTE_CONTAINERS
+    ):
+        src = src.view(dst.dtype)
     if (
         src.device.type == "cpu"
         and src.dtype == dst.dtype
@@ -252,12 +268,9 @@ def replace_parameter(
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
-            from vllm.model_executor.model_loader.reload.direct import (
-                direct_reload_enabled,
-            )
-
+            # a recorded checkpoint layout must keep its storage across reloads
             old_param.data = _in_own_storage(
-                old_param, new_tensor, whole_storage=direct_reload_enabled()
+                old_param, new_tensor, whole_storage=hasattr(old_param, "_ckpt")
             )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
