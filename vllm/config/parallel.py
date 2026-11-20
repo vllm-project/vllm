@@ -3,7 +3,7 @@
 
 import os
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
@@ -1086,17 +1086,17 @@ class ParallelConfig:
         dp_group: ProcessGroup,
         has_unfinished: bool,
         pending_pause: bool,
-        row: list[float] | None = None,
+        row: Sequence[float] | None = None,
     ) -> tuple[bool, bool, list[list[float]] | None]:
         """Combined all-reduce for DP state synchronization.
 
         Uses a single SUM all-reduce on a 2-element tensor:
-          [0] = 1 if this rank has unfinished work, else 0.
-                SUM > 0 ≡ logical OR across ranks → any rank has work.
-          [1] = 1 if this rank has a pending pause request, else 0.
+          `[0]` = 1 if this rank has unfinished work, else 0.
+                SUM > 0 ≡ logical OR across ranks -> any rank has work.
+          `[1]` = 1 if this rank has a pending pause request, else 0.
                 SUM == dp_size ≡ all ranks reached pause consensus.
 
-        has_unfinished_global is true if any rank has unfinished work,
+        `has_unfinished_global` is true if any rank has unfinished work,
         or if some ranks are waiting for a pause consensus.
 
         `row`, if given, is all-gathered in the same all-reduce: each rank
@@ -1104,20 +1104,25 @@ class ParallelConfig:
         appended to the tensor. Every rank must pass a row of the same length.
 
         Returns:
-            (has_unfinished_global, pause_consensus, rows), where `rows` holds
+            `(has_unfinished_global, pause_consensus, rows)`, where `rows` holds
             every rank's `row` in rank order, or is None without `row`.
 
         """
         dp_size = dp_group.size()
-        flags = [int(has_unfinished), int(pending_pause)]
         if row is None:
-            tensor = torch.tensor(flags, dtype=torch.int32, device="cpu")
+            tensor = torch.tensor(
+                [int(has_unfinished), int(pending_pause)],
+                dtype=torch.int32,
+                device="cpu",
+            )
         else:
             n = len(row)
+            buf = [0.0] * (2 + dp_size * n)
+            buf[0] = float(has_unfinished)
+            buf[1] = float(pending_pause)
             start = 2 + dp_group.rank() * n
-            tensor = torch.zeros(2 + dp_size * n, dtype=torch.float64)
-            tensor[:2] = torch.tensor(flags, dtype=torch.float64)
-            tensor[start : start + n] = torch.tensor(row, dtype=torch.float64)
+            buf[start : start + n] = row
+            tensor = torch.tensor(buf, dtype=torch.float64, device="cpu")
         cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
         rows = None if row is None else tensor[2:].view(dp_size, n).tolist()
         pause_count = int(tensor[1].item())

@@ -250,22 +250,27 @@ class SchedulerConfig:
 
     With DP attention + EP all ranks step in lockstep, so a prefill on any rank
     slows the step for all of them. With this set, all ranks hold or release
-    prefills together each step. They hold while the decode time saved by
-    grouping prefills across ranks, predicted from the recent arrival rate and
-    an online fit of measured step times, outweighs the TTFT added. A request
-    is held only while it can still meet the target given the releases it
-    needs; one that has missed it is held at most this long at a time.
-    Every request weighs the same: with the "priority" `policy`, a
-    high-priority request is held as long as any other.
-    Requires data parallelism on a MoE model, and cannot be combined with
-    `prefill_schedule_interval`. Has no effect on the prefill-only and
-    decode-only instances of disaggregated serving."""
+    prefills together each step using an online non-negative 3-parameter step
+    cost model (`F + a * M + b * S`) and Online Ski-Rental against the
+    amortizable waste. A request is held only while it can still meet the
+    target given the releases it needs; a waiting request that has already
+    missed the target is held at most this long at a time.
 
-    prefill_hold_alpha: float = Field(default=1.0, gt=0)
-    """How much one second of TTFT per waiting request weighs against one
-    second of decode stall per running request, for `prefill_hold_ttft_target`.
-    At 1 the two weigh the same. Higher values hold less, favouring TTFT over
-    ITL; lower values hold longer."""
+    Every request weighs the same: with the "priority" `policy`, a
+    high-priority request is held as long as any other. Enabling this performs
+    a per-step DP CPU all-reduce (overriding `dp_sync_interval`), which may
+    add latency on high-latency multi-node networks with very short decode
+    steps. The step cost model is calibrated for text prefills; multimodal
+    vision encoder time is not modeled separately. Requires data parallelism on
+    a MoE model, and cannot be combined with `prefill_schedule_interval`. Has
+    no effect on the prefill-only and decode-only instances of disaggregated
+    serving."""
+
+    prefill_hold_ttft_weight: float = Field(default=1.0, gt=0)
+    """Weight of waiting requests' TTFT against running decodes' stall time for
+    `prefill_hold_ttft_target`. At 1.0 (the default), the hold targets
+    end-to-end latency. Higher values hold less (favouring TTFT, including at
+    low arrival rates); lower values hold longer (favouring ITL)."""
 
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
@@ -382,7 +387,7 @@ class SchedulerConfig:
             "watermark",
             "prefill_schedule_interval",
             "prefill_hold_ttft_target",
-            "prefill_hold_alpha",
+            "prefill_hold_ttft_weight",
             "async_scheduling",
             "stream_interval",
         }

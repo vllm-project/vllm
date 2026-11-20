@@ -4,7 +4,7 @@ import heapq
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -429,11 +429,16 @@ class Scheduler(SchedulerInterface):
         # Whether the last release stopped for lack of KV blocks, or preempted.
         self.prefill_kv_stopped = False
         if self.scheduler_config.prefill_hold_ttft_target is not None:
+            spec = self.vllm_config.speculative_config
+            draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
             self.prefill_hold = PrefillHold(
                 self._prefill_queue_state,
                 self.scheduler_config.prefill_hold_ttft_target,
-                self.scheduler_config.prefill_hold_alpha,
-                self.scheduler_config.max_num_batched_tokens,
+                self.scheduler_config.prefill_hold_ttft_weight,
+                self.max_num_scheduled_tokens,
+                input_budget=self.scheduler_config.max_num_batched_tokens,
+                decode_tokens_per_req=1 + self.num_spec_tokens,
+                draft_slots_per_req=draft_slots,
                 lag_steps=self.vllm_config.max_concurrent_batches - 1,
                 log_stats=self.parallel_config.data_parallel_rank == 0,
             )
@@ -803,18 +808,9 @@ class Scheduler(SchedulerInterface):
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
         num_running, num_waiting = self.get_request_counts()
-        num_eligible_reqs = num_running + num_waiting
-        long_prefill_token_threshold = (
-            self.scheduler_config.long_prefill_token_threshold
-            if self.scheduler_config.enable_chunked_prefill and num_eligible_reqs > 1
-            else 0
+        long_prefill_token_threshold = self._effective_long_prefill_threshold(
+            num_running + num_waiting
         )
-        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
-            # Floor the cap at a fair share of the input budget so it never
-            # cuts a request below max_num_batched_tokens / num requests.
-            long_prefill_token_threshold = max(
-                long_prefill_token_threshold, input_budget // num_eligible_reqs
-            )
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -3148,8 +3144,6 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
-            if self.prefill_hold is not None:
-                self.prefill_hold.on_arrival()
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3166,14 +3160,29 @@ class Scheduler(SchedulerInterface):
             if self.ec_connector is not None:
                 self.ec_connector.on_new_request(request)
 
+    def _effective_long_prefill_threshold(self, num_eligible_reqs: int) -> int:
+        threshold = (
+            self.scheduler_config.long_prefill_token_threshold
+            if self.scheduler_config.enable_chunked_prefill and num_eligible_reqs > 1
+            else 0
+        )
+        if threshold > 0 and self.adaptive_long_prefill_threshold:
+            # Floor the cap at a fair share of the input budget so it never
+            # cuts a request below max_num_batched_tokens / num requests.
+            threshold = max(
+                threshold,
+                self.scheduler_config.max_num_batched_tokens // num_eligible_reqs,
+            )
+        return threshold
+
     def _prefill_queue_state(self) -> PrefillQueueState:
+        num_running, num_waiting = self.get_request_counts()
         return PrefillQueueState(
             self.running,
             # HiSparse also tracks async KV loads parked in kv_holding_waiting.
             [r for r in self._inflight_prefills if r.status == RequestStatus.RUNNING],
             self._startable_waiting,
-            self.get_request_counts()[1],
-            len(self.finished_recving_kv_req_ids),
+            num_waiting,
             # Sessions waiting for their next streaming input keep their slots.
             self.max_num_active_reqs - self.num_waiting_for_streaming_input,
             self.kv_cache_manager.get_num_cached_tokens,
@@ -3182,14 +3191,16 @@ class Scheduler(SchedulerInterface):
             if self.prefill_kv_stopped
             else None,
             self._num_blocks_to_admit,
+            self._effective_long_prefill_threshold(num_running + num_waiting),
         )
 
-    def _num_blocks_to_admit(self, request: Request) -> int:
+    def _num_blocks_to_admit(self, request: Request, cached_tokens: int) -> int:
         """Roughly the KV blocks a waiting request needs to be admitted: those
-        of its full sequence it lacks, less its local prefix hit's share."""
+        of its full sequence it lacks, less its prefix hit's share."""
         blocks = self._request_remaining_blocks(request)
-        hit = self.kv_cache_manager.get_num_cached_tokens(request)
-        return blocks - blocks * hit // max(request.num_tokens, 1)
+        if request.num_computed_tokens or not cached_tokens:
+            return blocks
+        return blocks - blocks * cached_tokens // max(request.num_tokens, 1)
 
     def _startable_waiting(self) -> Iterator[Request]:
         """Waiting requests that can start now, in the order `schedule` admits
@@ -3206,14 +3217,10 @@ class Scheduler(SchedulerInterface):
             self._can_start_waiting, itertools.chain(self.kv_holding_waiting, merged)
         )
 
-    def prepare_dp_row(self) -> None:
-        if self.prefill_hold is not None:
-            self.prefill_hold.prepare_row()
-
-    def dp_row(self) -> list[float] | None:
+    def dp_row(self) -> Sequence[float] | None:
         return None if self.prefill_hold is None else self.prefill_hold.local_row()
 
-    def update_from_dp_rows(self, rows: list[list[float]], idle: bool) -> None:
+    def update_from_dp_rows(self, rows: Sequence[Sequence[float]], idle: bool) -> None:
         assert self.prefill_hold is not None
         self.prefill_hold.update(rows)
         if idle:
@@ -3797,8 +3804,10 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _can_start_waiting(self, request: Request) -> bool:
-        """Whether `_handle_blocked_waiting_request` would let `request`
-        proceed, without promoting it."""
+        """Whether `_handle_blocked_waiting_request` and the stale-output guard
+        would let `request` proceed, without promoting it."""
+        if request.num_stale_output_tokens and not request.drop_stale_output:
+            return False
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             return request.request_id in self.finished_recving_kv_req_ids
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:

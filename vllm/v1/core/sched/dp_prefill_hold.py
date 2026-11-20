@@ -1,26 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Cost-based prefill hold across data parallel ranks.
+"""Cost-based cross-DP prefill hold for MoE models with DP attention + EP.
 
-With DP attention + EP, all ranks step in lockstep, so a prefill on one rank
-makes the step mixed for every rank. Each step, every rank reports a row of
-local state (`PrefillHold.local_row`). The rows are all-gathered by the DP
-engine core's state sync, and every rank runs the same deterministic
-`PrefillHold.update` on them, so all ranks hold or release together.
+Because all DP ranks step in lockstep, a prefill on any rank slows the step
+for every rank's running decodes. Each rank reports a compact `_RankRow`
+piggybacked on the DP state sync all-reduce; every rank runs the same
+deterministic `PrefillHold.update` so all ranks hold or release prefills
+together without extra RPCs.
 
-- Hold while waiting pays: the decode time saved by doing the queued prefill
-  at the per-token cost predicted after one more decode step must exceed
-  `alpha` times the TTFT the wait adds, even at the 97.5% lower confidence
-  bound.
-- Bound the hold per request: a request of age `a` with `k` releases still
-  ahead of it may be held `(T - a - (k - 1) * e) / k - t_mix` more, where `e`
-  is the time held so far, `t_mix` is the mixed step time and `T` is the TTFT
-  target. A request that has waited `T` can no longer meet it, so from then
-  on its age is the time held so far. Only what admission could take
-  counts: the queue ends at the first request without a free running slot
-  or, after a release stopped for lack of KV blocks, without the blocks.
-- Step costs come from an online least-squares fit of measured step times,
-  with no latency model. Until the fit is pinned down, it releases.
+The hold fits an online non-negative 3-parameter mixed-step overhead model
+`extra_ms(M, S) = F + a * M + b * S` (fixed overhead, slowest-rank tokens `M`,
+total tokens `S`), then applies Online Ski-Rental against the amortizable waste
+`(F, a)` while bounding each request's hold time by the TTFT target `T`.
 """
 
 import math
@@ -37,137 +28,191 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Layout of the row each rank reports per step.
-ROW_SIZE = 14
-(
-    _DONE,  # a step with scheduled tokens finished since the previous sync
-    _PERIOD,  # seconds since the previous sync
-    _DONE_TOKENS,  # prefill tokens of that step
-    _DONE_ATTN,  # attention work of that step, sum(n * (ctx + n / 2))
-    _WORK,  # has prefill work
-    _X,  # prefill tokens it would run if released now, at most one budget
-    _X_ATTN,  # attention work of those
-    _DECODES,  # running decode requests
-    _QUEUED,  # requests with prefill work it can start
-    _SLACK,  # min over them of (T - age - (k - 1) * e) / k
-    _ARRIVED,  # requests that arrived since the previous sync
-    _ADMITTED,  # requests scheduled for the first time since the previous sync
-    _ADMITTED_UNCACHED,  # their prompt tokens past the local and external hits
-    _ADMITTED_CACHED,  # their prompt tokens covered by those hits
-) = range(ROW_SIZE)
-
-# Time constant of the arrival rate and request size estimates.
-_RATE_TAU_S = 30.0
-# Time constant of the decode-only step time estimate.
-_DEC_TAU_S = 1.0
-# The cost fit forgets over about this many mixed steps.
+# Pure-decode step time EWMA time constant, in seconds.
+_DEC_TAU_S = 10.0
+# Mixed-step exponential forgetting window, in steps.
 _FIT_WINDOW = 200.0
-# A step this many times longer than expected for its shape stalled, as on a
-# GPU hang or a kernel compile, and says nothing about step costs.
-_STALL_FACTOR = 10.0
-_RIDGE = 1e-6
-_LOG_INTERVAL_S = 60.0
-
-# Two-sided 95% (one-sided 97.5%) Student t quantiles by degrees of freedom.
-_T975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
-         8: 2.306, 9: 2.262, 10: 2.228, 12: 2.179, 15: 2.131, 20: 2.086,
-         30: 2.042}  # fmt: skip
-
-
-def _t975(dof: float) -> float:
-    if dof > 30:
-        return 1.96
-    return _T975[max(k for k in _T975 if k <= dof)]
+# Step periods beyond this multiple of the current estimate are treated as
+# stalls until `_MAX_STALL_REJECTS` consecutive samples indicate a regime shift.
+_STALL_FACTOR = 3.0
+_MAX_STALL_REJECTS = 5
+# Cold-start pure-decode samples collected before switching to EWMA.
+_DEC_INIT_SAMPLES = 3
+# Upper bound on startable waiting requests scanned per step.
+_MAX_QUEUE_SCAN = 256
+# Periodic summary log interval on DP rank 0, in seconds.
+_LOG_INTERVAL_S = 30.0
 
 
-def _inverse(m: list[list[float]]) -> list[list[float]]:
-    """Gauss-Jordan inverse of a small nonsingular matrix."""
-    n = len(m)
-    a = [row[:] + [float(i == j) for j in range(n)] for i, row in enumerate(m)]
-    for k in range(n):
-        p = max(range(k, n), key=lambda i: abs(a[i][k]))
-        a[k], a[p] = a[p], a[k]
-        pivot = a[k][k]
-        a[k] = [v / pivot for v in a[k]]
-        for i in range(n):
-            f = a[i][k]
-            if i != k and f != 0.0:
-                a[i] = [v - f * u for v, u in zip(a[i], a[k])]
-    return [row[n:] for row in a]
+class _RankRow(NamedTuple):
+    """Per-rank state all-gathered each step in `sync_dp_state`."""
+
+    done: float
+    period: float
+    done_tokens: float
+    work: float
+    x: float
+    decodes: float
+    queued: float
+    slack: float
 
 
-class _StepCostFit:
-    """Online fit of a mixed step's extra time over a decode-only step.
+ROW_SIZE = len(_RankRow._fields)
 
-    The model is `F + a * M + b * S + c * C` ms, where `M` and `S` are the
-    max and the sum over ranks of prefill Ktok, and `C` is the max over ranks
-    of prefill attention work in Gtok^2. Weighted least squares, each step's
-    weight decaying by `1 - 1 / _FIT_WINDOW` per later mixed step. There is no
-    prior: a tiny ridge only keeps the solve finite along combinations the
-    steps never varied, and `sd` reports how poorly a prediction is pinned
-    there. A residual beyond 3 times the running mean absolute residual is
-    down-weighted to that bound.
+
+def _solve_3x3(a: list[list[float]], b: list[float]) -> list[float] | None:
+    """Solve a regularized 3x3 linear system with partial pivoting.
+
+    Returns None if the system is ill-conditioned.
+    """
+    col_norms = [max(abs(a[i][k]) for i in range(3)) for k in range(3)]
+    m = [
+        [a[i][j] + (1e-6 * max(1.0, a[i][i]) if i == j else 0.0) for j in range(3)]
+        + [b[i]]
+        for i in range(3)
+    ]
+    for k in range(3):
+        if col_norms[k] < 1e-12:
+            return None
+        p = max(range(k, 3), key=lambda i: abs(m[i][k]))
+        piv = m[p][k]
+        if abs(piv) < 1e-4 * col_norms[k]:
+            return None
+        if p != k:
+            m[k], m[p] = m[p], m[k]
+        for j in range(k, 4):
+            m[k][j] /= piv
+        for i in range(3):
+            if i != k and m[i][k] != 0.0:
+                factor = m[i][k]
+                for j in range(k, 4):
+                    m[i][j] -= factor * m[k][j]
+    return [m[0][3], m[1][3], m[2][3]]
+
+
+class _Cost3D:
+    """Online non-negative WLS for `extra_ms(M, S) = F + a * M + b * S`.
+
+    `M = max_r x_r / 1e3` (busiest-rank ktok) and `S = sum_r x_r / 1e3`
+    (total ktok across ranks). Uses Huber 3-sigma downweighting and an
+    exponential forgetting window of `_FIT_WINDOW` mixed steps.
     """
 
     def __init__(self) -> None:
-        self.a = [[0.0] * 4 for _ in range(4)]
-        self.b = [0.0] * 4
-        self.yy = 0.0
+        self.reset()
+
+    def reset(self) -> None:
+        self.a_mat = [[0.0] * 3 for _ in range(3)]
+        self.b_vec = [0.0, 0.0, 0.0]
         self.w = 0.0
-        self.theta = [0.0] * 4
-        self.p: list[list[float]] | None = None
-        self.var: float | None = None
+        self.mean_y = 0.0
+        self.f = 0.0
+        self.a = 0.0
+        self.b = 0.0
         self.sig: float | None = None
+        self.s_minus_m_sq = 0.0
+        self.has_3d = False
 
-    @staticmethod
-    def features(tokens: list[float], attn: list[float]) -> list[float]:
-        return [1.0, max(tokens) / 1e3, sum(tokens) / 1e3, max(attn) / 1e9]
+    def predict_ms(self, m_ktok: float, s_ktok: float) -> float:
+        return self.f + self.a * m_ktok + self.b * s_ktok
 
-    @property
-    def dof(self) -> float:
-        return self.w - 4
-
-    def predict_ms(self, phi: list[float]) -> float:
-        return sum(t * f for t, f in zip(self.theta, phi))
-
-    def sd_ms(self, d: list[float]) -> float:
-        """Standard error of `theta . d`; inf until there is a residual dof."""
-        if self.var is None or self.p is None:
-            return math.inf
-        q = sum(
-            di * sum(pij * dj for pij, dj in zip(pi, d)) for di, pi in zip(d, self.p)
+    def update(self, m_ktok: float, s_ktok: float, y_ms: float) -> None:
+        y_ms = max(0.0, y_ms)
+        err = abs(y_ms - self.predict_ms(m_ktok, s_ktok))
+        wt = (
+            3.0 * self.sig / err
+            if self.sig is not None and err > 3.0 * self.sig and err > 0.0
+            else 1.0
         )
-        return math.sqrt(self.var * max(q, 0.0))
-
-    def update(self, phi: list[float], y_ms: float) -> None:
-        err = abs(y_ms - self.predict_ms(phi))
-        wt = 3 * self.sig / err if self.sig is not None and err > 3 * self.sig else 1.0
         self.sig = err if self.sig is None else 0.95 * self.sig + 0.05 * err
+
         keep = 1.0 - 1.0 / _FIT_WINDOW
         self.w = keep * self.w + wt
-        self.yy = keep * self.yy + wt * y_ms * y_ms
-        for i in range(4):
-            self.b[i] = keep * self.b[i] + wt * phi[i] * y_ms
-            for j in range(4):
-                self.a[i][j] = keep * self.a[i][j] + wt * phi[i] * phi[j]
-        self.p = _inverse(
-            [
-                [
-                    aij * (1.0 + _RIDGE / self.w) if i == j else aij
-                    for j, aij in enumerate(row)
-                ]
-                for i, row in enumerate(self.a)
-            ]
-        )
-        self.theta = [sum(pij * bj for pij, bj in zip(pi, self.b)) for pi in self.p]
-        if self.dof >= 1:
-            a_theta = [
-                sum(aij * tj for aij, tj in zip(ai, self.theta)) for ai in self.a
-            ]
-            rss = self.yy + sum(
-                t * (at - 2 * bi) for t, at, bi in zip(self.theta, a_theta, self.b)
+        self.s_minus_m_sq = keep * self.s_minus_m_sq + wt * (s_ktok - m_ktok) ** 2
+        phi = (1.0, m_ktok, s_ktok)
+        for i in range(3):
+            self.b_vec[i] = keep * self.b_vec[i] + wt * phi[i] * y_ms
+            for j in range(3):
+                self.a_mat[i][j] = keep * self.a_mat[i][j] + wt * phi[i] * phi[j]
+        self.mean_y = self.b_vec[0] / self.w
+
+        sol = None
+        if self.w >= 4.0 and self.s_minus_m_sq / self.w > 1e-3:
+            sol = _solve_3x3(self.a_mat, self.b_vec)
+
+        if sol is not None:
+            f, a, b = sol
+            if f < 0.0 or a < 0.0 or b < 0.0:
+                f, a, b = self._nnls_active_set()
+            self.f, self.a, self.b = f, a, b
+            self.has_3d = True
+            return
+
+        m_bar = self.a_mat[0][1] / self.w
+        s_bar = self.a_mat[0][2] / self.w
+        if self.has_3d:
+            # Steady-state collinearity (e.g. repeated full batches): preserve
+            # the learned (F, a, b) ratios and rescale gently to mean_y.
+            pred_bar = self.predict_ms(m_bar, s_bar)
+            if pred_bar > 1e-6 and self.mean_y > 0.0:
+                scale = self.mean_y / pred_bar
+                self.f *= scale
+                self.a *= scale
+                self.b *= scale
+            return
+
+        # Cold-start fallback before multi-rank variation: 2D (F + a * M) -> 1D (F).
+        var_m = self.a_mat[1][1] / self.w - m_bar * m_bar
+        if self.w < 2.0 or var_m <= 1e-4:
+            self.f, self.a, self.b = max(0.0, self.mean_y), 0.0, 0.0
+            return
+        cov_my = self.b_vec[1] / self.w - m_bar * self.mean_y
+        a = max(0.0, cov_my / var_m)
+        f = self.mean_y - a * m_bar
+        if f < 0.0:
+            f = 0.0
+            a = max(0.0, self.b_vec[1] / max(self.a_mat[1][1], 1e-12))
+        self.f, self.a, self.b = f, a, 0.0
+
+    def _nnls_active_set(self) -> tuple[float, float, float]:
+        """Exact non-negative least squares over 1- and 2-variable subsets."""
+        best_obj: float | None = None
+        best_c: tuple[float, float, float] | None = None
+        for mask in range(1, 7):
+            idx = [i for i in range(3) if mask & (1 << i)]
+            if len(idx) == 1:
+                i0 = idx[0]
+                diag = self.a_mat[i0][i0] + 1e-6 * max(1.0, self.a_mat[i0][i0])
+                vals = [self.b_vec[i0] / diag]
+            else:
+                i0, i1 = idx
+                a00 = self.a_mat[i0][i0] + 1e-6 * max(1.0, self.a_mat[i0][i0])
+                a11 = self.a_mat[i1][i1] + 1e-6 * max(1.0, self.a_mat[i1][i1])
+                a01 = self.a_mat[i0][i1]
+                det = a00 * a11 - a01 * a01
+                if abs(det) < 1e-8 * a00 * a11:
+                    continue
+                b0, b1 = self.b_vec[i0], self.b_vec[i1]
+                vals = [(b0 * a11 - b1 * a01) / det, (a00 * b1 - a01 * b0) / det]
+            if any(v < 0.0 for v in vals):
+                continue
+            cand = [0.0, 0.0, 0.0]
+            for i, v in zip(idx, vals):
+                cand[i] = v
+            obj = sum(
+                cand[i]
+                * (
+                    sum(self.a_mat[i][j] * cand[j] for j in range(3))
+                    - 2.0 * self.b_vec[i]
+                )
+                for i in range(3)
             )
-            self.var = max(rss, 0.0) / self.dof
+            if best_obj is None or obj < best_obj:
+                best_obj = obj
+                best_c = (cand[0], cand[1], cand[2])
+        if best_c is not None:
+            return best_c
+        return max(0.0, self.mean_y), 0.0, 0.0
 
 
 class PrefillQueueState(NamedTuple):
@@ -181,48 +226,38 @@ class PrefillQueueState(NamedTuple):
     waiting: Callable[[], Iterator["Request"]]
     # Requests in the waiting queues, whether or not they can start.
     num_waiting: int
-    # Async KV loads finished but not yet admitted: one finishing lets a
-    # waiting request start without changing `num_waiting`.
-    num_loaded: int
     max_active_reqs: int
     num_cached_tokens: Callable[["Request"], int]
     # Free KV blocks if the last release stopped for lack of them, else None.
     kv_free_blocks: int | None
-    num_blocks_needed: Callable[["Request"], int]
-
-    @property
-    def scan_key(self) -> tuple[int, int, int]:
-        """Changes when the queue may scan differently, other than by time."""
-        return len(self.prefill_chunks), self.num_waiting, self.num_loaded
-
-
-class _QueueScan(NamedTuple):
-    """`local_row`'s fields read off the prefill queue at monotonic time `at`,
-    when its `PrefillQueueState.scan_key` was `key`."""
-
-    at: float
-    key: tuple[int, int, int]
-    x: int
-    x_attn: float
-    queued: int
-    slack: float
+    # Estimated KV blocks needed to admit `(request, cached_tokens)`.
+    num_blocks_needed: Callable[["Request", int], int]
+    # Effective per-request prefill token cap for the next step (0 = uncapped).
+    long_prefill_token_threshold: int = 0
 
 
 class PrefillHold:
     """Decides, once per step and identically on every DP rank, whether all
-    ranks hold their prefills on the next step. The DP engine core feeds every
-    rank's `local_row` to `update` each step, through the scheduler; without
-    that, it never holds.
+    ranks hold their prefills on the next step.
+
+    The DP engine core feeds every rank's `local_row` to `update` each step
+    through the scheduler; without that, it never holds.
 
     Args:
         queue_state: Returns a read-only view of the scheduler's queues.
         ttft_target_s: TTFT target `T` in seconds.
-        alpha: Weight of one second of TTFT per waiting request against one
-            second of decode stall per running request.
-        token_budget: Max tokens per step per rank.
+        ttft_weight: Weight on waiting requests' TTFT against running decodes'
+            stall time. `1.0` targets end-to-end latency; higher values hold
+            less (favouring TTFT), lower values hold longer (favouring ITL).
+        token_budget: Max scheduled tokens per step per rank.
+        input_budget: Max model-input tokens per step per rank. Defaults to
+            `token_budget`.
+        decode_tokens_per_req: Scheduled tokens consumed per running decode
+            request (`1 + num_spec_tokens`).
+        draft_slots_per_req: Extra input-budget slots reserved per request for
+            drafting.
         lag_steps: Steps between a decision and the step it takes effect on
-            the GPU beyond the next one (`max_concurrent_batches - 1`, so 1
-            with async scheduling and no pipeline parallelism).
+            the GPU beyond the next one (`max_concurrent_batches - 1`).
         log_stats: Whether this rank logs a periodic summary; DP rank 0 does.
 
     """
@@ -231,139 +266,124 @@ class PrefillHold:
         self,
         queue_state: Callable[[], PrefillQueueState],
         ttft_target_s: float,
-        alpha: float,
+        ttft_weight: float,
         token_budget: int,
+        input_budget: int | None = None,
+        decode_tokens_per_req: int = 1,
+        draft_slots_per_req: int = 0,
         lag_steps: int = 0,
         log_stats: bool = False,
     ) -> None:
         self._queue_state = queue_state
         self.ttft_target = ttft_target_s
-        self.alpha = alpha
-        self.budget = token_budget
+        self.ttft_weight = ttft_weight
+        self.token_budget = token_budget
+        self.input_budget = token_budget if input_budget is None else input_budget
+        self.decode_tokens_per_req = decode_tokens_per_req
+        self.draft_slots_per_req = draft_slots_per_req
         self.lag_steps = lag_steps
         self.log_stats = log_stats
-        # Whether to hold prefills on the next step.
         self.hold = False
 
         # Global state: identical on every rank, updated only from the rows.
-        self._fit = _StepCostFit()
+        self._cost = _Cost3D()
         self._t_dec: float | None = None
+        self._t_dec_init: list[float] = []
+        self._t_dec_warm = False
         self._t_dec_at = 0.0
+        self._t_dec_rejects = 0
+        self._mix_rejects = 0
+        self._num_ranks: int | None = None
         self._clock = 0.0
-        self._rate = 0.0
-        self._w_admitted = 0.0
-        self._w_uncached = 0.0
-        self._w_cached = 0.0
         self._hold_start: float | None = None
+        self._rent = 0.0
+        self._prev_queued = 0.0
         self._skip_sample = True
         self._reasons: dict[str, int] = {}
         self._logged_at = 0.0
 
         # Local state.
         self._last_sync: float | None = None
-        self._arrived = 0
-        self._admitted = [0, 0, 0]
         self._cached_tokens: dict[str, int] = {}
-        # (output, prefill tokens, attention work) of scheduled steps awaiting
-        # their output, and those of the last finished step not yet reported.
-        self._pending: deque[tuple[SchedulerOutput, int, float]] = deque()
-        self._done: tuple[int, float] | None = None
-        self._scan: _QueueScan | None = None
+        # `(output, prefill_tokens)` of scheduled steps awaiting their output,
+        # and the prefill tokens of the last finished step not yet reported.
+        self._pending: deque[tuple[SchedulerOutput, int]] = deque()
+        self._done_tokens: int | None = None
 
-    def reset(self) -> None:
-        """Called when all ranks go idle; the rate estimates decay over it."""
+    def _clear_hold(self) -> None:
         self.hold = False
         self._hold_start = None
+        self._rent = 0.0
+        self._prev_queued = 0.0
+
+    def reset(self) -> None:
+        """Called when all ranks go idle."""
+        self._clear_hold()
         self._skip_sample = True
         self._pending.clear()
-        self._done = None
-
-    def on_arrival(self) -> None:
-        """Counts an arrival toward the rate. Its size is taken when it is first
-        scheduled (`on_scheduled`): a KV connector's hit is unknown until the
-        scheduler looks the request up."""
-        self._arrived += 1
+        self._done_tokens = None
 
     def on_lookup(self, request: "Request", num_computed_tokens: int) -> None:
-        """Takes the prefix hit, local and external, the scheduler just looked
-        up, for the queue scan: a request it defers or skips keeps no computed
-        tokens, which would leave the scan with only the local hit."""
+        """Records the prefix hit (local + external) looked up by the scheduler."""
         self._cached_tokens[request.request_id] = num_computed_tokens
 
     def on_scheduled(
         self, output: "SchedulerOutput", requests: Mapping[str, "Request"]
     ) -> None:
-        """Records a scheduled step's prefill tokens and attention work, the
-        sum over prefill chunks of `n * (ctx + n / 2)` for `n` new tokens after
-        `ctx` computed ones, and the sizes of requests scheduled for the first
-        time. Must run before the scheduler advances `num_computed_tokens`, so
-        that `is_prefill_chunk` is pre-step."""
+        """Records a scheduled step's prefill tokens and trims cached hits.
+
+        Must run before the scheduler advances `num_computed_tokens`, so that
+        `is_prefill_chunk` reflects the pre-step state.
+        """
+        if output.preempted_req_ids:
+            for req_id in output.preempted_req_ids:
+                self._cached_tokens.pop(req_id, None)
         if output.total_num_scheduled_tokens == 0:
             return
-        for new in output.scheduled_new_reqs:
-            request = requests[new.req_id]
-            if request.num_preemptions == 0:
-                self._admitted[0] += 1
-                self._admitted[1] += request.num_tokens - new.num_computed_tokens
-                self._admitted[2] += new.num_computed_tokens
         num_scheduled = output.num_scheduled_tokens
-        tokens, attn = 0, 0.0
-        # Every request admitted from the waiting queue starts a prefill.
-        chunks = [(r.req_id, r.num_computed_tokens) for r in output.scheduled_new_reqs]
-        cached = output.scheduled_cached_reqs
-        chunks += [
-            (req_id, ctx)
-            for req_id, ctx in zip(cached.req_ids, cached.num_computed_tokens)
-            if requests[req_id].is_prefill_chunk
-        ]
-        for req_id, ctx in chunks:
-            n = num_scheduled[req_id]
-            tokens += n
-            attn += n * (ctx + n / 2)
-        self._pending.append((output, tokens, attn))
+        tokens = 0
+        for new in output.scheduled_new_reqs:
+            self._cached_tokens.pop(new.req_id, None)
+            tokens += num_scheduled[new.req_id]
+        for req_id in output.scheduled_cached_reqs.req_ids:
+            if requests[req_id].is_prefill_chunk:
+                tokens += num_scheduled[req_id]
+        self._pending.append((output, tokens))
 
     def on_step_finished(self, output: "SchedulerOutput") -> None:
         """Marks a step recorded by `on_scheduled` as finished, to time it."""
-        for i, (pending, tokens, attn) in enumerate(self._pending):
+        for i, (pending, tokens) in enumerate(self._pending):
             if pending is output:
                 for _ in range(i + 1):
                     self._pending.popleft()
-                self._done = (tokens, attn)
+                self._done_tokens = tokens
                 return
 
-    def prepare_row(self) -> None:
-        """Scans the prefill queue ahead of the next `local_row`. The engine
-        core calls this while the GPU runs a step, off the critical path."""
-        state = self._queue_state()
-        if state.kv_free_blocks is not None:
-            return  # blocks the step frees change the scan; scan at the sync
-        at = time.monotonic()
-        self._scan = (
-            self._scan_queue(state, at, self._held(at))
-            if state.prefill_chunks or state.num_waiting
-            else None
+    def _prefill_budget(self, decodes: float) -> int:
+        """Token budget left for prefill after `decodes` running decode requests."""
+        d = int(decodes)
+        tok_left = self.token_budget - d * self.decode_tokens_per_req
+        inp_left = (
+            self.input_budget
+            - d * (self.decode_tokens_per_req + self.draft_slots_per_req)
+            - self.draft_slots_per_req
         )
+        return max(0, min(tok_left, inp_left))
 
-    def local_row(self) -> list[float]:
+    def local_row(self) -> _RankRow:
         """This rank's row for the next all-gather."""
         state = self._queue_state()
         now = time.monotonic()
         held = self._held(now)
         period = 0.0 if self._last_sync is None else now - self._last_sync
         self._last_sync = now
-        scan, self._scan = self._scan, None
-        row = [0.0] * ROW_SIZE
-        row[_PERIOD] = period
-        row[_SLACK] = self.ttft_target
-        done = self._done
-        if done is not None:
-            self._done = None
-            row[_DONE] = 1.0
-            row[_DONE_TOKENS], row[_DONE_ATTN] = done
-        row[_ARRIVED] = self._arrived
-        row[_ADMITTED], row[_ADMITTED_UNCACHED], row[_ADMITTED_CACHED] = self._admitted
-        self._arrived = 0
-        self._admitted = [0, 0, 0]
+
+        done = 0.0
+        done_tokens = 0.0
+        if self._done_tokens is not None:
+            done = 1.0
+            done_tokens = float(self._done_tokens)
+            self._done_tokens = None
 
         chunks = state.prefill_chunks
         if len(self._cached_tokens) > 2 * state.num_waiting + 256:
@@ -372,22 +392,22 @@ class PrefillHold:
                 for r in state.waiting()
                 if r.request_id in self._cached_tokens
             }
-        row[_DECODES] = max(0, len(state.running) - len(chunks))
+        decodes = float(max(0, len(state.running) - len(chunks)))
         if not chunks and next(state.waiting(), None) is None:
-            return row
-        row[_WORK] = 1.0
+            return _RankRow(
+                done, period, done_tokens, 0.0, 0.0, decodes, 0.0, self.ttft_target
+            )
 
-        # Aborts, the finished step and finished KV loads may have changed the
-        # queue since the prepared scan.
-        if scan is None or scan.key != state.scan_key:
-            scan = self._scan_queue(state, now, held)
-        row[_X] = scan.x
-        row[_X_ATTN] = scan.x_attn
-        row[_QUEUED] = scan.queued
-        # Every allowance shrinks at rate 1 while holding and at most 1 if not,
-        # so this is exact while holding and a lower bound otherwise.
-        row[_SLACK] = scan.slack - (now - scan.at)
-        return row
+        budget = self._prefill_budget(decodes)
+        if budget <= 0:
+            return _RankRow(
+                done, period, done_tokens, 1.0, 0.0, decodes, 0.0, self.ttft_target
+            )
+
+        x, queued, slack = self._scan_queue(state, budget, held)
+        return _RankRow(
+            done, period, done_tokens, 1.0, float(x), decodes, float(queued), slack
+        )
 
     def _held(self, at: float) -> float:
         """How long the current hold has lasted at monotonic time `at`."""
@@ -397,231 +417,217 @@ class PrefillHold:
         return self._clock - self._hold_start + since_sync
 
     def _scan_queue(
-        self, state: PrefillQueueState, at: float, held: float
-    ) -> _QueueScan:
+        self, state: PrefillQueueState, budget: int, held: float
+    ) -> tuple[int, int, float]:
         wall = time.time()
-        budget = self.budget
         target = self.ttft_target
+        cap = state.long_prefill_token_threshold
         x = queued = queue_tokens = 0
-        x_attn = 0.0
         slack = target
-        for arrival, remaining, ctx in self._prefill_queue(state):
+        for arrival, remaining, in_progress in self._prefill_queue(state):
             if x < budget:
-                n = min(remaining, budget - x)
-                x += n
-                x_attn += n * (ctx + n / 2)
+                step_cap = min(remaining, cap) if cap > 0 else remaining
+                x += min(step_cap, budget - x)
             queued += 1
             queue_tokens += remaining
             k = -(-queue_tokens // budget)
+            if cap > 0:
+                k = max(k, -(-remaining // cap))
             age = wall - arrival
-            if age >= target:
-                age = min(age, held)  # it missed the target; bound the hold only
+            if not in_progress and age >= target:
+                age = min(age, held)
             slack = min(slack, (target - age - (k - 1) * min(held, age)) / k)
-            if slack <= 0:
-                # Releases whatever the rest of the queue is.
+            if slack <= 0.0:
                 break
-        return _QueueScan(at, state.scan_key, x, x_attn, queued, slack)
+        return x, queued, slack
 
     def _prefill_queue(
         self, state: PrefillQueueState
-    ) -> Iterator[tuple[float, int, int]]:
-        """(arrival time, uncached tokens left, cached or computed tokens) of
-        each request with prefill work, in-progress prefills first."""
+    ) -> Iterator[tuple[float, int, bool]]:
+        """Yield `(arrival_time, uncached_tokens, in_progress)` in admission order."""
         for req in sorted(state.prefill_chunks, key=lambda r: r.arrival_time):
             remaining = req.num_tokens - req.num_computed_tokens
             if remaining > 0:
-                yield req.arrival_time, remaining, req.num_computed_tokens
+                yield req.arrival_time, remaining, True
         cached_tokens = self._cached_tokens
         probe = state.num_cached_tokens
         free = state.kv_free_blocks
-        slots = state.max_active_reqs - len(state.running)
+        slots = min(state.max_active_reqs - len(state.running), _MAX_QUEUE_SCAN)
         for req in state.waiting():
             slots -= 1
-            if free is not None:
-                free -= state.num_blocks_needed(req)
-            if slots < 0 or (free is not None and free < 0):
-                return  # admission stops here too
-            # A request holding KV blocks, such as a finished async KV load,
-            # resumes from them.
+            if slots < 0:
+                return
             cached = req.num_computed_tokens or cached_tokens.get(req.request_id)
             if cached is None:
                 cached = cached_tokens[req.request_id] = probe(req)
-            if req.num_tokens > cached:
-                yield req.arrival_time, req.num_tokens - cached, cached
+            if free is not None:
+                free -= state.num_blocks_needed(req, cached)
+                if free < 0:
+                    return
+            # Full prefix hits leave 1 token, which the scheduler never defers.
+            if req.num_tokens - cached > 1:
+                yield req.arrival_time, req.num_tokens - cached, False
 
-    def update(self, rows: list[list[float]]) -> str:
-        """Advances the global state with all ranks' rows and sets `hold`.
+    def update(self, rows: Sequence[Sequence[float]]) -> str:
+        """Advance global state with all ranks' rows and set `hold`.
 
         Returns:
-            Why it holds (`wait`, or `idle` with no prefill work yet) or
-            releases.
+            Reason string (`wait` or `idle` hold; all other reasons release).
 
         """
+        if not rows or any(
+            len(r) != ROW_SIZE or any(not math.isfinite(v) for v in r) for r in rows
+        ):
+            self._clear_hold()
+            self._reasons["invalid"] = self._reasons.get("invalid", 0) + 1
+            return "invalid"
+
         num_ranks = len(rows)
-        period = sum(r[_PERIOD] for r in rows) / num_ranks
+        if self._num_ranks is not None and num_ranks != self._num_ranks:
+            self._cost.reset()
+            self._t_dec = None
+            self._t_dec_init.clear()
+            self._t_dec_warm = False
+            self._t_dec_rejects = 0
+            self._mix_rejects = 0
+        self._num_ranks = num_ranks
+
+        parsed = [_RankRow(*r) for r in rows]
+        period = sum(r.period for r in parsed) / num_ranks
         self._clock += period
-        self._learn(rows, period)
+        self._learn(parsed, period)
 
-        decay = math.exp(-period / _RATE_TAU_S)
-        arrived = sum(r[_ARRIVED] for r in rows)
-        self._rate = self._rate * decay + arrived / _RATE_TAU_S
-        # Sizes have their own count: a hold delays first scheduling, not
-        # arrivals, so dividing by arrivals would shrink them over every hold.
-        self._w_admitted = self._w_admitted * decay + sum(r[_ADMITTED] for r in rows)
-        self._w_uncached = self._w_uncached * decay + sum(
-            r[_ADMITTED_UNCACHED] for r in rows
-        )
-        self._w_cached = self._w_cached * decay + sum(r[_ADMITTED_CACHED] for r in rows)
+        if self._hold_start is not None:
+            self._rent += self.ttft_weight * self._prev_queued * period
 
-        reason = self._decide(rows)
+        reason = self._decide(parsed)
         self.hold = reason in ("wait", "idle")
         if reason == "wait":
             if self._hold_start is None:
                 self._hold_start = self._clock
+            self._prev_queued = sum(r.queued for r in parsed)
         else:
             self._hold_start = None
+            self._rent = 0.0
+            self._prev_queued = 0.0
         if self.log_stats:
             self._log(reason)
         return reason
 
-    def _learn(self, rows: list[list[float]], period: float) -> None:
+    def _learn(self, rows: list[_RankRow], period: float) -> None:
         if self._skip_sample:
             self._skip_sample = False
             return
-        if not any(r[_DONE] for r in rows):
+        if period <= 0.0 or not any(r.done for r in rows):
             return
-        tokens = [r[_DONE_TOKENS] for r in rows]
-        if any(tokens):
-            if self._t_dec is not None:
-                phi = self._fit.features(tokens, [r[_DONE_ATTN] for r in rows])
-                extra = max(0.0, self._fit.predict_ms(phi)) / 1e3
-                if self._fit.dof < 1 or period < _STALL_FACTOR * (self._t_dec + extra):
-                    self._fit.update(phi, (period - self._t_dec) * 1e3)
-        elif self._t_dec is None:
-            self._t_dec = period
+        max_tok = max(r.done_tokens for r in rows)
+        if max_tok > 0.0:
+            if self._t_dec is None:
+                return
+            m_ktok = max_tok / 1e3
+            s_ktok = sum(r.done_tokens for r in rows) / 1e3
+            extra_s = self._cost.predict_ms(m_ktok, s_ktok) / 1e3
+            if self._cost.w < 1.0 or period < _STALL_FACTOR * (self._t_dec + extra_s):
+                self._mix_rejects = 0
+                self._cost.update(m_ktok, s_ktok, (period - self._t_dec) * 1e3)
+            else:
+                self._mix_rejects += 1
+                if self._mix_rejects >= _MAX_STALL_REJECTS:
+                    self._mix_rejects = 0
+                    self._cost.update(m_ktok, s_ktok, (period - self._t_dec) * 1e3)
+            return
+
+        if not self._t_dec_warm:
+            self._t_dec_init.append(period)
+            ordered = sorted(self._t_dec_init)
+            # Index (n - 1) // 2 takes min on sample 2 (drops compile spike)
+            # and median on sample 3.
+            self._t_dec = ordered[(len(ordered) - 1) // 2]
             self._t_dec_at = self._clock
-        elif period < _STALL_FACTOR * self._t_dec:
+            if len(self._t_dec_init) >= _DEC_INIT_SAMPLES:
+                self._t_dec_warm = True
+                self._t_dec_init.clear()
+        elif self._t_dec is not None and period < _STALL_FACTOR * self._t_dec:
+            self._t_dec_rejects = 0
             w = math.exp(-(self._clock - self._t_dec_at) / _DEC_TAU_S)
             self._t_dec = w * self._t_dec + (1.0 - w) * period
             self._t_dec_at = self._clock
+        else:
+            self._t_dec_rejects += 1
+            if self._t_dec_rejects >= _MAX_STALL_REJECTS:
+                self._t_dec = period
+                self._t_dec_at = self._clock
+                self._t_dec_rejects = 0
 
-    def _decide(self, rows: list[list[float]]) -> str:
-        """`wait` or `idle` to hold, otherwise why to release."""
-        decodes = sum(r[_DECODES] for r in rows)
-        cold = self._t_dec is None or self._fit.dof < 1
-        if decodes == 0:
+    def _decide(self, rows: list[_RankRow]) -> str:
+        decodes = sum(r.decodes for r in rows)
+        if decodes == 0.0:
             return "no_decode"
-        if cold:
+        if self._t_dec is None or self._cost.w < 1.0:
             return "cold"
-        # A rank with prefill work it cannot start admits no arrival either.
-        blocked = [r[_WORK] > 0 and r[_X] == 0 for r in rows]
-        if not any(r[_WORK] for r in rows):
-            # The next step may admit what arrives before it: hold if a typical
-            # request alone on one rank would be held.
-            if self._w_admitted <= 0:
-                return "nothing"
-            size = min(self._w_uncached / self._w_admitted, self.budget)
-            ctx = self._w_cached / self._w_admitted
-            x = [size] + [0.0] * (len(rows) - 1)
-            attn = [size * (ctx + size / 2)] + [0.0] * (len(rows) - 1)
-            reason = self._judge(x, attn, blocked, decodes, 1, 0.0, self.ttft_target)
-            return "idle" if reason == "wait" else "nothing"
-        x = [r[_X] for r in rows]
-        if sum(x) == 0:
+        # Mirror scheduler.py's per-rank no-decode exemption: if any rank will
+        # run a prefill anyway, release all ranks to piggyback on the step.
+        if any(r.decodes == 0.0 and r.x > 0.0 for r in rows):
+            return "no_local_decode"
+
+        avail = [r for r in rows if not (r.work > 0.0 and r.x == 0.0)]
+        n_avail = len(avail)
+        if n_avail == 0:
             return "blocked"
-        held = 0.0 if self._hold_start is None else self._clock - self._hold_start
-        return self._judge(
-            x,
-            [r[_X_ATTN] for r in rows],
-            blocked,
-            decodes,
-            sum(r[_QUEUED] for r in rows),
-            held,
-            min(r[_SLACK] for r in rows),
-        )
 
-    def _judge(
-        self,
-        x: list[float],
-        attn: list[float],
-        blocked: list[bool],
-        decodes: float,
-        queued: float,
-        held: float,
-        slack: float,
-    ) -> str:
-        fit = self._fit
         t_dec = self._t_dec
-        assert t_dec is not None
-        z = _t975(fit.dof)
-        phi = fit.features(x, attn)
-        extra = max(0.0, fit.predict_ms(phi)) / 1e3
-        t_mix = t_dec + extra
-        lag = self.lag_steps * t_dec
-        # How much longer this hold may last, at the point estimate (h0) and
-        # budgeting the upper bound of t_mix (h).
-        h0 = min(self.ttft_target - held, slack - t_mix) - lag
-        h = min(h0, slack - t_mix - z * fit.sd_ms(phi) / 1e3 - lag)
-        if h <= 0:
-            return "deadline" if h0 <= 0 else "unsure"
+        c = self._cost
+        if not any(r.work for r in rows):
+            m_typ = c.a_mat[0][1] / c.w if c.w > 0.0 else 0.0
+            amort_ms = (
+                (c.f + c.a * m_typ) * (1.0 - 1.0 / n_avail) if n_avail > 1 else c.f
+            )
+            if 0.5 * decodes * (amort_ms / 1e3) > self.ttft_weight * t_dec:
+                return "idle"
+            return "nothing"
 
-        # Expected prefill after one more decode step, assuming arrivals spread
-        # evenly over the ranks.
-        wait = min(t_dec, h)
-        rate = self._rate / len(x)
-        size = self._w_uncached / self._w_admitted if self._w_admitted > 0 else 0.0
-        ctx = self._w_cached / self._w_admitted if self._w_admitted > 0 else 0.0
-        budget = self.budget
-        p_new = 1.0 - math.exp(-rate * wait)
-        add = [
-            0.0
-            if b
-            else p_new * min(size, budget)
-            if xr == 0
-            else min(budget - xr, rate * wait * size)
-            for xr, b in zip(x, blocked)
-        ]
-        sx, sa = sum(x), sum(add)
-        if sa <= 0:
-            return "cost"
-        # Arrivals are whole requests, so `a` expected tokens do the attention
-        # work of `a` tokens of full-size prefills, not of one `a`-token chunk.
-        phi_hat = fit.features(
-            [xr + a for xr, a in zip(x, add)],
-            [i + a * (ctx + min(size, budget) / 2) for i, a in zip(attn, add)],
+        if sum(r.x for r in rows) == 0.0:
+            return "blocked"
+
+        held = 0.0 if self._hold_start is None else self._clock - self._hold_start
+        slack = min(r.slack for r in rows)
+        m_ktok = max(r.x for r in rows) / 1e3
+        s_ktok = sum(r.x for r in rows) / 1e3
+        t_mix = t_dec + c.predict_ms(m_ktok, s_ktok) / 1e3
+        lag = self.lag_steps * t_dec
+        h = min(self.ttft_target - held, slack - t_mix) - lag
+        if h <= 0.0:
+            return "deadline"
+
+        avail_budget_ktok = sum(self._prefill_budget(r.decodes) for r in avail) / 1e3
+        f_waste = (
+            c.f * max(0.0, 1.0 - s_ktok / avail_budget_ktok)
+            if avail_budget_ktok > 0.0
+            else 0.0
         )
-        c_hat = max(0.0, fit.predict_ms(phi_hat)) / 1e3 / (sx + sa)
-        gain = decodes * sx * (extra / sx - c_hat)
-        cost = self.alpha * queued * wait
-        if gain <= cost:
-            return "cost"
-        r = sx / (sx + sa)
-        d = [p - r * q for p, q in zip(phi, phi_hat)]
-        if gain - decodes * z * fit.sd_ms(d) / 1e3 > cost:
+        a_waste = c.a * max(0.0, m_ktok - s_ktok / n_avail)
+        # Factor 0.5 aligns default ttft_weight=1.0 with the E2E optimum.
+        buy_cost = 0.5 * decodes * (f_waste + a_waste) / 1e3
+        wait = min(t_dec, h)
+        queued = sum(r.queued for r in rows)
+        if self._rent + self.ttft_weight * queued * wait < buy_cost:
             return "wait"
-        return "unsure"
+        return "cost"
 
     def _log(self, reason: str) -> None:
         self._reasons[reason] = self._reasons.get(reason, 0) + 1
         if self._clock - self._logged_at < _LOG_INTERVAL_S:
             return
         self._logged_at = self._clock
-        total = sum(self._reasons.values())
-        held = self._reasons.get("wait", 0) + self._reasons.get("idle", 0)
-        f, a, b, c = self._fit.theta
+        c = self._cost
         logger.info(
-            "DP prefill hold: held %.1f%% of %d steps, decisions %s; "
-            "t_dec %.1f ms, fit F=%.1f ms a=%.2f b=%.2f ms/Ktok c=%.2f ms/Gtok^2 "
-            "(dof %.0f), rate %.2f req/s",
-            100.0 * held / total,
-            total,
-            self._reasons,
-            1e3 * (self._t_dec or 0.0),
-            f,
-            a,
-            b,
-            c,
-            self._fit.dof,
-            self._rate,
+            "DP prefill hold: %s | t_dec=%.1fms F=%.1fms a=%.1fms/ktok "
+            "b=%.1fms/ktok w=%.0f",
+            " ".join(f"{k}={v}" for k, v in sorted(self._reasons.items())),
+            (self._t_dec or 0.0) * 1e3,
+            c.f,
+            c.a,
+            c.b,
+            c.w,
         )
         self._reasons = {}

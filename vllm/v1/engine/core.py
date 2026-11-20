@@ -726,7 +726,6 @@ class EngineCore:
             self.num_executed_steps += 1
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        self.scheduler.prepare_dp_row()
         with self.log_error_detail(scheduler_output):
             model_output = self._wait_for_output(future)
             if model_output is None:
@@ -834,7 +833,6 @@ class EngineCore:
             # is non-empty.
             return None, False
 
-        self.scheduler.prepare_dp_row()
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with self.log_error_detail(scheduler_output):

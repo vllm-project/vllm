@@ -1442,6 +1442,12 @@ class VllmConfig:
                 "prefill_hold_ttft_target requires data parallelism "
                 "(data_parallel_size > 1) on a MoE model."
             )
+        if self.parallel_config.pipeline_parallel_size > 1:
+            logger.warning(
+                "prefill_hold_ttft_target with pipeline_parallel_size > 1 "
+                "measures overlapped pipeline stage intervals, which can "
+                "increase step-cost model noise."
+            )
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is not None and (
             kv_transfer_config.is_kv_producer != kv_transfer_config.is_kv_consumer
