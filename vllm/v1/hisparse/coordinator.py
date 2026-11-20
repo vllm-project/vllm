@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -66,6 +66,8 @@ class _HiSparseRequestState:
     unpinned_pages: set[int] = field(default_factory=set)
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
+    # Imported prefix pages eligible for optional GPU restoration.
+    pages_to_promote: int = 0
     # The worker holds this request's residency for every page below
     # synced_pages, except the stale pages changed since it was sent.
     synced_pages: int = 0
@@ -141,7 +143,6 @@ class HiSparseCoordinator:
                 manager.coordinator = self
                 manager.bind_host_pool(num_host_blocks)
         self.transition_watermark = 0
-        self.get_reserved_blocks: Callable[[], int] = lambda: 0
         if self.resident_managers:
             assert self.host_manager is not None
             assert self.host_group_id is not None
@@ -189,7 +190,8 @@ class HiSparseCoordinator:
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
-        self._owners: dict[int, set[tuple[str, int]]] = {}
+        self._owners: dict[int, tuple[tuple[str, int], ...]] = {}
+        self._reuse_watcher = self._on_block_reused
 
     @property
     def gpu_pool(self) -> BlockPool:
@@ -413,19 +415,28 @@ class HiSparseCoordinator:
             manager.get_residency_pages(request_id, pages)
             for manager in self.resident_managers
         ]
+        null_slots = {
+            slot
+            for column in columns
+            for slot, block in enumerate(column)
+            if block.is_null
+        }
+        slots = [slot for slot in range(len(pages)) if slot not in null_slots]
+        if not slots:
+            return
+        unpinned = [pages[slot] for slot in slots]
+        single_owners = [((request_id, page_idx),) for page_idx in unpinned]
+        owners = self._owners
         released: list[KVCacheBlock] = []
-        for page_idx, blocks in zip(pages, zip(*columns)):
-            if any(block.is_null for block in blocks):
-                continue
-            for block in blocks:
-                self._owners.setdefault(block.block_id, set()).add(
-                    (request_id, page_idx)
-                )
-            released.extend(blocks)
-            state.pinned_clean.discard(page_idx)
-            state.unpinned_pages.add(page_idx)
-        if released:
-            self.gpu_pool.unpin_blocks(released, self._on_block_reused)
+        for slot, single in zip(slots, single_owners):
+            for column in columns:
+                block = column[slot]
+                current = owners.get(block.block_id)
+                owners[block.block_id] = single if current is None else current + single
+                released.append(block)
+        state.pinned_clean.difference_update(unpinned)
+        state.unpinned_pages.update(unpinned)
+        self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
@@ -440,6 +451,16 @@ class HiSparseCoordinator:
         for request_id, page_idx in self._owners.pop(block.block_id, ()):
             self._lose_page(request_id, page_idx)
 
+    def _discard_owner(self, block_id: int, owner: tuple[str, int]) -> None:
+        owners = self._owners.get(block_id)
+        if owners is None or owner not in owners:
+            return
+        remaining = tuple(o for o in owners if o != owner)
+        if remaining:
+            self._owners[block_id] = remaining
+        else:
+            del self._owners[block_id]
+
     def _lose_page(self, request_id: str, page_idx: int) -> None:
         self._resident_requests.discard(request_id)
         state = self.request_states.get(request_id)
@@ -449,9 +470,7 @@ class HiSparseCoordinator:
             block = manager.drop_resident_page(request_id, page_idx)
             if block is None:
                 continue
-            owners = self._owners.get(block.block_id)
-            if owners is not None:
-                owners.discard((request_id, page_idx))
+            self._discard_owner(block.block_id, (request_id, page_idx))
         state.unpinned_pages.discard(page_idx)
         if page_idx < state.synced_pages:
             state.stale_pages.add(page_idx)
@@ -486,7 +505,9 @@ class HiSparseCoordinator:
     # Host publication and spills
     # ------------------------------------------------------------------
 
-    def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
+    def advance_scheduled(
+        self, requests: Iterable[tuple[str, int]], *, promote_imports: bool = True
+    ) -> None:
         """Run the per-step residency work for each scheduled request.
 
         `requests` pairs a request id with the number of tokens computed
@@ -500,6 +521,13 @@ class HiSparseCoordinator:
             self.plan_prefix_materialization(
                 request_id, max(0, num_tokens - self.num_reprefillable_tokens)
             )
+            state = self._get_request_state(request_id)
+            if promote_imports and state.pages_to_promote:
+                pages = self._promote_imported_pages(request_id, state.pages_to_promote)
+                state.pages_to_promote = 0
+                self._plan_page_transfers(
+                    request_id, pages, budget=len(pages), restore=True
+                )
             self.update_residency(request_id)
 
     def plan_prefix_materialization(
@@ -621,12 +649,16 @@ class HiSparseCoordinator:
         if num_pages > 0:
             self._import_reservations[request_id] = num_pages
 
-    def finish_host_import(self, request_id: str, *, failed: bool) -> None:
+    def finish_host_import(
+        self, request_id: str, *, failed: bool, restore: bool = True
+    ) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
         if num_tokens is not None and not failed:
-            self.complete_host_import(request_id, num_tokens)
+            self.complete_host_import(request_id, num_tokens, restore=restore)
 
-    def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
+    def complete_host_import(
+        self, request_id: str, num_computed_tokens: int, *, restore: bool = True
+    ) -> None:
         """Publish externally populated host pages after connector completion."""
         if not self.resident_managers:
             return
@@ -635,15 +667,17 @@ class HiSparseCoordinator:
         state = self._get_request_state(request_id)
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
-        if num_computed_tokens:
+        if not restore:
+            # Publish the host prefix after cancellation, but skip these pages
+            # when indexing GPU copies: their landing blocks were never filled.
+            state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_pages)
+        elif num_computed_tokens:
             # A local prefix hit's surviving GPU copies cost no copy, so adopt
             # them before promoting the rest.
             self._adopt_pending_copies(request_id, state)
             tail_page = (num_computed_tokens - 1) // block_size
-            pages = (tail_page, *self._promote_imported_pages(request_id, tail_page))
-            self._plan_page_transfers(
-                request_id, pages, budget=len(pages), restore=True
-            )
+            self._plan_page_transfers(request_id, (tail_page,), budget=1, restore=True)
+            state.pages_to_promote = tail_page
         self._publish_host_blocks_if_ready(request_id)
 
     def _promote_imported_pages(self, request_id: str, num_pages: int) -> list[int]:
@@ -657,13 +691,7 @@ class HiSparseCoordinator:
         """
         assert self.host_manager is not None
         num_managers = len(self.resident_managers)
-        if not num_pages:
-            return []
-        # The load may finish several steps after admission. Only spend blocks
-        # left over after both the transition floor and current reservations.
-        spare = self.gpu_pool.get_num_free_blocks() - max(
-            self.transition_watermark, self.get_reserved_blocks()
-        )
+        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
         host_blocks = self.host_manager.req_to_blocks[request_id]
         num_pages = min(
             num_pages, len(host_blocks), self._num_resident_pages(request_id)
@@ -1040,9 +1068,7 @@ class HiSparseCoordinator:
                 if block.is_null:
                     continue
                 if page_idx in state.unpinned_pages:
-                    owners = self._owners.get(block.block_id)
-                    if owners is not None:
-                        owners.discard((request_id, page_idx))
+                    self._discard_owner(block.block_id, (request_id, page_idx))
                 elif (
                     page_idx in state.valid_pages
                     and page_idx not in state.pending_pages
@@ -1052,7 +1078,7 @@ class HiSparseCoordinator:
                     continue
                 dropped.append(page_idx)
             if released:
-                self.gpu_pool.unpin_blocks(released, self._on_block_reused)
+                self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
             manager.drop_resident_pages(request_id, dropped)
 
 

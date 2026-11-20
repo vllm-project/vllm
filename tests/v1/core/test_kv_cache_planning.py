@@ -28,6 +28,7 @@ from tests.v1.core.utils import (
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -93,6 +94,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
@@ -189,6 +191,112 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     assert scheduler_block_size == hash_block_size == gpu_block_size
 
 
+def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch):
+    from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
+    source_names = {"model.layers.0.self_attn", "model.layers.1.self_attn"}
+    indexer_names = {f"{name}.indexer" for name in source_names}
+    layer_configs: dict[str, KVCacheLayerConfig] = {
+        # Dense attention has no sparse cache role, so it stays on the device.
+        "dense": full_layer(
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16
+            )
+        )
+    }
+    for name in sorted(source_names):
+        layer_configs[name] = full_layer(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=32,
+                dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
+                topk_buffer_width=35,
+                is_index_group_leader=True,
+            )
+        )
+        layer_configs[f"{name}.indexer"] = full_layer(
+            MLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                tokens_per_state=4,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        # QSA has no MLA-only index_topk field.
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(),
+            max_model_len=128,
+            get_total_num_kv_heads=lambda: 2,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            mamba_cache_mode="none",
+            kv_cache_layout=KVCacheLayout.BLNHC.name,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+        max_in_flight_tokens=128,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1 / 1024},
+        ),
+    )
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda _: [16])
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend)
+        for name in source_names | indexer_names
+    }
+    layer_configs = resolve_hisparse_specs(config, layer_configs, layers)
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, get_kv_cache_groups(config, layer_configs), available_memory=2**20
+    )
+
+    # A logical block has 2 layers x 16 tokens x 2 unique heads x K/V x
+    # 32 dimensions x 2 bytes = 8192 B. A 1 MiB logical budget holds 128
+    # blocks, with half the payload on each TP rank.
+    assert cache_config.hisparse_host_num_blocks == 128
+    assert cache_config.hisparse_host_block_stride == 4096
+    (host_group,) = [g for g in cache_config.kv_cache_groups if g.host_resident]
+    assert set(host_group.layer_names) == source_names
+    hot_groups = [
+        group
+        for group in cache_config.kv_cache_groups
+        if group.manager_cls is HiSparseHotManager
+    ]
+    assert {tuple(group.layer_names) for group in hot_groups} == {
+        (f"{name}.hisparse_hot",) for name in source_names
+    }
+    # One decode query plus one selection's LRU slack: 70 rows occupy five
+    # 16-token blocks, without reducing the 35 selected token slots.
+    assert all(
+        group.manager_config == HiSparseHotManager.config(blocks_per_request=5)
+        for group in hot_groups
+    )
+
+
 @pytest.mark.parametrize(
     "max_model_len,num_gpu_blocks,ok",
     [
@@ -224,6 +332,7 @@ def test_hisparse_pool_must_fit_max_model_len(
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         )
@@ -767,6 +876,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
                 state_content_bytes=656,
                 block_stride_alignment=656,
                 cache_dtype_str="fp8_ds_mla",
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),

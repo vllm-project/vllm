@@ -393,7 +393,9 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
         draft_kv_lookahead=4,
     )
     scheduler.bind_coordinator(coordinator)
-    request = SimpleNamespace(request_id="request", num_output_placeholders=3)
+    request = make_request("request", list(range(104)), HISPARSE_BLOCK_SIZE, sha256)
+    request.num_computed_tokens = 103
+    request.num_output_placeholders = 3
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = scheduler
     connector.update_state_after_alloc(request, None, 0)
@@ -730,6 +732,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert not coordinator.build_offload_command().page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
+    coordinator.advance_scheduled([(request.request_id, num_tokens)])
     # The tail comes first; the pool has room to promote the rest.
     restore, *promotions = coordinator.build_offload_command().page_transfers
     assert len(promotions) == len(source) - 1
@@ -780,8 +783,9 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     host_tail, gpu_tail = source[-1], resident[-1]
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
     manager.free(request)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
     coordinator.update_spills(
         {t.transfer_id: 2 for t in transfers}, {t.transfer_id: 1 for t in transfers}
@@ -792,13 +796,8 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     assert not coordinator.has_pending_work()
 
 
-@pytest.mark.parametrize(
-    "above_watermark,unreserved,num_promoted",
-    [(4, 4, 4), (0, 4, 0), (4, 1, 1), (4, 0, 0)],
-)
-def test_hisparse_import_promotes_host_pages_when_pool_has_room(
-    above_watermark, unreserved, num_promoted
-):
+@pytest.mark.parametrize("has_room", [True, False])
+def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
     """An import lands on host; spare GPU pages bring its whole prefix back."""
     manager = make_hisparse_kv_cache_manager(256, 16)
     num_tokens = 4 * HISPARSE_BLOCK_SIZE + 1
@@ -809,26 +808,30 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(
     source, _, resident, _ = manager.get_blocks(request.request_id).blocks
     coordinator = get_hisparse_coordinator(manager)
     pool = coordinator.gpu_pool
-    pool.get_new_blocks(
-        pool.get_num_free_blocks() - coordinator.transition_watermark - above_watermark
-    )
-    free = pool.get_num_free_blocks()
-    coordinator.get_reserved_blocks = lambda: free - unreserved
-
+    free_before = pool.get_num_free_blocks()
     coordinator.finish_host_import(request.request_id, failed=False)
+    coordinator.advance_scheduled(
+        [(request.request_id, num_tokens)], promote_imports=False
+    )
     transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1  # The mandatory tail is independent of promotion.
+    assert pool.get_num_free_blocks() == free_before
+    if not has_room:
+        # Other requests allocate before optional promotion is considered.
+        pool.get_new_blocks(
+            pool.get_num_free_blocks() - coordinator.transition_watermark
+        )
+
+    coordinator.advance_scheduled([(request.request_id, num_tokens)])
+    transfers += coordinator.build_offload_command().page_transfers
     assert all(transfer.restore for transfer in transfers)
-    promoted = range(num_promoted)
-    assert pool.get_num_free_blocks() == free - num_promoted
+    promoted = range(4) if has_room else range(0)
     assert [t.host_block_id for t in transfers] == [
         source[-1].block_id,
         *(source[page].block_id for page in promoted),
     ]
     row = _resident_block_ids(manager, request.request_id)
-    assert [block_id != 0 for block_id in row] == [
-        *(page in promoted for page in range(4)),
-        True,
-    ]
+    assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
     assert [t.resident_block_ids for t in transfers[1:]] == [
         (row[page],) for page in promoted
     ]
@@ -857,6 +860,9 @@ def test_hisparse_import_respects_prefill_admitted_while_receiving():
         create_vllm_config,
     )
     from vllm.config import KVTransferConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiKVConnectorWorkerMetadata,
+    )
     from vllm.v1.outputs import ModelRunnerOutput
 
     config = create_vllm_config(
@@ -876,9 +882,10 @@ def test_hisparse_import_respects_prefill_admitted_while_receiving():
             ],
         },
     )
-    config.scheduler_config.long_prefill_token_threshold = 96
+    config.scheduler_config.async_scheduling = True
+    config.scheduler_config.long_prefill_token_threshold = 64
     scheduler = create_scheduler(
-        config, 56, make_hisparse_kv_cache_config(56, 64, num_resident_groups=3)
+        config, 80, make_hisparse_kv_cache_config(80, 64, num_resident_groups=3)
     )
     manager = scheduler.kv_cache_manager
     imported = create_request(
@@ -890,33 +897,50 @@ def test_hisparse_import_respects_prefill_admitted_while_receiving():
     host, _, *gpu_groups = manager.get_blocks(imported.request_id).blocks
     tail = (host[-1].block_id, tuple(group[-1].block_id for group in gpu_groups[::2]))
     scheduler.update_from_output(admission, ModelRunnerOutput(req_ids=[]))
-    initial_reservation = scheduler._inflight_prefill_reserved_blocks()
 
-    prefill = create_request(num_tokens=160)
+    prefill = create_request(num_tokens=224)
     scheduler.add_request(prefill)
     chunk = scheduler.schedule()
-    assert chunk.num_scheduled_tokens == {prefill.request_id: 96}
-    reservation = scheduler._inflight_prefill_reserved_blocks()
-    assert reservation > initial_reservation
-    # A historical page needs one free block in each of the three resident groups.
-    assert 0 < manager.block_pool.get_num_free_blocks() - reservation < 3
+    assert chunk.num_scheduled_tokens == {prefill.request_id: 64}
 
-    scheduler.update_from_output(
-        chunk,
-        ModelRunnerOutput(
-            req_ids=[prefill.request_id],
-            sampled_token_ids=[[]],
-            kv_connector_output=KVConnectorOutput(
-                finished_recving={imported.request_id}
+    def complete(output, *, received=False):
+        transfers = output.kv_connector_metadata.metadata[1].command.page_transfers
+        counts = {t.transfer_id: 1 for t in transfers}
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[
+                    [] if req_id == prefill.request_id else [123] for req_id in req_ids
+                ],
+                kv_connector_output=KVConnectorOutput(
+                    finished_recving={imported.request_id} if received else None,
+                    kv_connector_worker_meta=MultiKVConnectorWorkerMetadata(
+                        (None, HiSparseConnectorWorkerMetadata(counts, counts))
+                    ),
+                ),
             ),
-        ),
-    )
-    following = scheduler.schedule()
-    assert following.num_scheduled_tokens.get(prefill.request_id) == 64
-    transfers = following.kv_connector_metadata.metadata[1].command.page_transfers
-    assert [
-        (t.host_block_id, t.resident_block_ids) for t in transfers if t.restore
-    ] == [tail]
+        )
+
+    complete(chunk, received=True)
+    pending = None
+    # Keep one batch in flight: promotion must also protect later prefill chunks.
+    for expected_tokens in (64, 64, 32):
+        following = scheduler.schedule()
+        assert following.num_scheduled_tokens.get(prefill.request_id) == expected_tokens
+        if pending is None:
+            transfers = following.kv_connector_metadata.metadata[
+                1
+            ].command.page_transfers
+            assert [
+                (t.host_block_id, t.resident_block_ids) for t in transfers if t.restore
+            ] == [tail]
+        else:
+            complete(pending)
+        pending = following
+    complete(pending)
+    assert prefill.num_preemptions == 0
 
 
 def test_hisparse_aborted_promotion_keeps_pages_until_restored():
@@ -929,6 +953,7 @@ def test_hisparse_aborted_promotion_keeps_pages_until_restored():
     assert allocate_external_prefix(manager, request, num_tokens) is not None
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
+    coordinator.advance_scheduled([(request.request_id, num_tokens)])
     transfers = coordinator.build_offload_command().page_transfers
     assert len(transfers) == 3
     row = _resident_block_ids(manager, request.request_id)
@@ -1354,9 +1379,10 @@ def test_hisparse_host_exhaustion_defers_allocation(enable_caching):
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_host_receive_completion_without_spill_metadata(failed):
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_host_receive_completion_without_spill_metadata(failed, cancelled):
     """Only successful external receives make host pages readable."""
-    manager = make_hisparse_kv_cache_manager(32, 16)
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     request = make_request("import", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
     assert allocate_external_prefix(manager, request, 32) is not None
     request.num_computed_tokens = 32
@@ -1368,6 +1394,14 @@ def test_host_receive_completion_without_spill_metadata(failed):
     connector.connector_scheduler = scheduler
     composite = object.__new__(MultiConnector)
     composite._connectors = (connector,)
+    if cancelled:
+        # A publication awaiting the receive may cache the host prefix, but its
+        # allocated GPU tail has never been filled.
+        manager.cache_blocks(request, request.num_computed_tokens)
+        request.status = RequestStatus.FINISHED_ABORTED
+        connector.request_finished_all_groups(
+            request, manager.get_block_ids(request.request_id)
+        )
     composite.update_connector_output(
         KVConnectorOutput(
             finished_recving={request.request_id},
@@ -1376,9 +1410,19 @@ def test_host_receive_completion_without_spill_metadata(failed):
     )
     state = get_hisparse_coordinator(manager).request_states.get(request.request_id)
     if failed:
-        assert state is None
+        assert state is None or not state.valid_pages
     else:
         assert state is not None and state.valid_pages == {0, 1}
+    coordinator = get_hisparse_coordinator(manager)
+    command = coordinator.build_offload_command()
+    assert command is not None
+    assert bool(command.page_transfers) == (not failed and not cancelled)
+    if cancelled:
+        source = manager.get_blocks(request.request_id).blocks[0]
+        assert all((block.block_hash is None) == failed for block in source)
+        assert not coordinator.copies
+        manager.free(request)
+        assert not coordinator.has_pending_work()
 
 
 def test_hisparse_recomputation_does_not_complete_failed_host_import():
@@ -1456,6 +1500,40 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     command = get_hisparse_coordinator(manager).build_offload_command()
     counts = {spill.transfer_id: 1 for spill in command.page_transfers}
     get_hisparse_coordinator(manager).update_spills(counts, counts)
+
+
+def test_hisparse_mamba_prefix_hit_leaves_a_writable_tail():
+    """Publishing a later host page must not expose an unwritable partial hit."""
+    config = make_hisparse_kv_cache_config(64, 32, num_resident_groups=2)
+    config.kv_cache_groups.append(
+        new_kv_cache_group(
+            ["mamba"],
+            _mamba_layer(
+                block_size=16,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        )
+    )
+    manager = make_kv_cache_manager(
+        config, max_model_len=128, enable_caching=True, hash_block_size=4
+    )
+    producer = make_request("producer", list(range(21)), 4, sha256)
+    for count in (16, 4, 1, *[1] * 12):
+        if producer.num_computed_tokens >= 21:
+            producer.append_output_token_ids([1000 + producer.num_computed_tokens])
+        manager.new_step_starts()
+        assert _allocate_scheduled(manager, producer, count) is not None
+        _, retained = manager.take_kv_cache_block_copies()
+        manager.block_pool.free_blocks(retained)
+        _publish_hisparse_pages(manager)
+        producer.num_computed_tokens += count
+
+    consumer = make_request("consumer", list(range(20)) + [2000] * 5, 4, sha256)
+    manager.new_step_starts()
+    _, hit_tokens, _ = manager.get_computed_blocks(consumer)
+    assert hit_tokens == 16
 
 
 @pytest.mark.parametrize("lookahead", [0, 1])

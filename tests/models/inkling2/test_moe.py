@@ -16,7 +16,6 @@ if not (
     pytest.skip("Inkling2 MoE requires Hopper or Blackwell", allow_module_level=True)
 
 import vllm.models.inkling2.nvidia.moe as moe_module  # noqa: E402
-import vllm.models.inkling2.nvidia.ops.moe_sm90 as moe_sm90  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
 from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
 from vllm.models.inkling2.nvidia.ops import use_sm100_kernels  # noqa: E402
@@ -30,6 +29,10 @@ from vllm.models.inkling2.nvidia.ops.block_scales import (  # noqa: E402
     swizzle_block_scales,
 )
 from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.moe_sm90 import (  # noqa: E402
+    HummingExperts,
+    select_experts,
+)
 from vllm.models.inkling2.nvidia.ops.mxfp8 import mxfp8_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.nvfp4 import nvfp4_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.trtllm_bmm import ExpertPlan  # noqa: E402
@@ -47,12 +50,6 @@ def dequant_nvfp4(values: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
 def dequant_mxfp8(values: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     exp2 = torch.exp2(scales.float() - 127).repeat_interleave(32, -1)
     return values.float() * exp2
-
-
-def unswizzle_block_scales(scales: torch.Tensor) -> torch.Tensor:
-    *lead, rows, cols = scales.shape
-    tiles = scales.reshape(-1, rows // 128, cols // 4, 32, 4, 4)
-    return tiles.permute(0, 1, 4, 3, 2, 5).reshape(scales.shape)
 
 
 def unshuffle_rows(x: torch.Tensor) -> torch.Tensor:
@@ -233,6 +230,12 @@ def test_shuffle_rows_matches_flashinfer():
     torch.testing.assert_close(unshuffle_rows(shuffle_rows(x)), x)
 
 
+requires_sm100 = pytest.mark.skipif(
+    not use_sm100_kernels(), reason="TRT-LLM-gen expert GEMMs (Blackwell)"
+)
+
+
+@requires_sm100
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 @pytest.mark.parametrize("tile", [8, 128])
 def test_bmm_matches_dequantized_matmul(fmt: str, tile: int):
@@ -262,19 +265,12 @@ def test_bmm_matches_dequantized_matmul(fmt: str, tile: int):
         device="cuda",
     )
     swizzle = swizzle_block_scales if tile >= 128 else r8c4_block_scales
-    if use_sm100_kernels():
-        bmm = trtllm_bmm.bmm
-        weight_scale_in = swizzle_block_scales(shuffle_rows(weight_scale))
-        weight_in = shuffle_rows(weight)
-    else:
-        # The Hopper GEMMs take row-major weights and block scales.
-        bmm, weight_in, weight_scale_in = moe_sm90.bmm, weight, weight_scale
-    out = bmm(
+    out = trtllm_bmm.bmm(
         act,
         swizzle(act_scale),
         row_scale,
-        weight_in,
-        weight_scale_in,
+        shuffle_rows(weight),
+        swizzle_block_scales(shuffle_rows(weight_scale)),
         torch.ones(len(counts), device="cuda"),
         tiles,
         plan,
@@ -293,6 +289,42 @@ def test_bmm_matches_dequantized_matmul(fmt: str, tile: int):
     torch.testing.assert_close(
         out[index].float(), ref, atol=1e-3 * ref.abs().max().item(), rtol=1e-2
     )
+
+
+@pytest.mark.skipif(use_sm100_kernels(), reason="Humming experts (Hopper)")
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("tokens", [1, 32])
+def test_humming_experts_are_deterministic(fmt: str, tokens: int):
+    """Repeated runs give bitwise the same rows, also for few local rows of
+    large experts (EP), where Humming's default kernels would add K slices
+    into the output with atomics."""
+    torch.manual_seed(0)
+    nvfp4 = fmt == "nvfp4"
+    hidden, inter, num_experts, num_global = 4608, 2304, 96, 384
+    random_q = random_nvfp4 if nvfp4 else random_mxfp8
+    global_scale = torch.full((num_experts,), 1 / 64, device="cuda") if nvfp4 else None
+    experts = HummingExperts(
+        {
+            "w13": (*random_q(num_experts, 2 * inter, hidden), global_scale),
+            "w2": (*random_q(num_experts, hidden, inter), global_scale),
+        },
+        ((2 * inter, hidden), (hidden, inter)),
+        nvfp4,
+    )
+    ids = torch.randint(0, num_global, (tokens, 8), device="cuda", dtype=torch.int32)
+    ids = torch.where(ids < num_experts, ids, -1)
+    rows = torch.arange(tokens * 8, device="cuda", dtype=torch.int32)
+    src2dst = torch.where(ids.flatten() >= 0, rows, -1)
+    weights = torch.rand(tokens * 8, device="cuda")
+    x = torch.randn(tokens, hidden, device="cuda").bfloat16()
+    local = src2dst >= 0
+    assert local.any()
+    outs = [
+        experts(x, ids, weights, src2dst, num_global, 4.0, 25.0)[local]
+        for _ in range(5)
+    ]
+    for out in outs[1:]:
+        torch.testing.assert_close(out, outs[0], atol=0, rtol=0)
 
 
 def _torch_select_experts(logits, bias, topk, route_scale):
@@ -322,6 +354,28 @@ def test_routing_matches_torch_and_breaks_ties_low(dist_init, tokens: int):
     assert (ids[:, :3] == torch.tensor([1, 2, 3], device="cuda")).all()
     torch.testing.assert_close(ids[:, 3:].long(), ref_ids[:, 3:])
     torch.testing.assert_close(weights, ref_weights)
+
+
+@pytest.mark.parametrize("tokens", [5, 12, 64, 200, 2100])
+def test_select_experts_matches_torch(dist_init, tokens: int):
+    """The Hopper router: each (token, slot) has its expert's index among
+    the local experts (-1 if not local) and its routing weight, and only
+    local slots have a row in `src2dst`."""
+    moe = _build_moe("nvfp4", _random_moe_weights("nvfp4"))
+    gate = moe.gate
+    x = torch.randn(tokens, 512, device="cuda").bfloat16()
+    bounds = torch.tensor([4, 12], dtype=torch.int32, device="cuda")
+    ids, weights, src2dst = select_experts(x, gate.weight, gate.bias, 8, 8.0, bounds)
+
+    logits = linear_k_groups(x, gate.weight)
+    ref_weights, ref_ids = _torch_select_experts(logits, gate.bias, 8, 8.0)
+    local = (ref_ids >= 4) & (ref_ids < 12)
+    torch.testing.assert_close(ids.long(), torch.where(local, ref_ids - 4, -1))
+    torch.testing.assert_close(weights.view(tokens, -1), ref_weights)
+    rows = torch.arange(tokens * 8, device="cuda").view(tokens, -1)
+    torch.testing.assert_close(
+        src2dst.view(tokens, -1).long(), torch.where(local, rows, -1)
+    )
 
 
 @pytest.mark.parametrize("tokens", [5, 200, 1100])
@@ -420,8 +474,12 @@ def test_linear_k_groups_fp32(tokens: int):
     torch.testing.assert_close(out, x.double() @ w.double().T, check_dtype=False)
 
 
-def _moe_reference(moe: Inkling2MoE, x: torch.Tensor, cfg) -> torch.Tensor:
-    weights, ids = _torch_select_experts(
+def _moe_reference(
+    moe: Inkling2MoE, weights: dict[str, torch.Tensor], x: torch.Tensor, cfg
+) -> torch.Tensor:
+    """Per-token loop over the dequantized checkpoint `weights`, with the
+    activations quantized as Blackwell does (Hopper keeps them in bf16)."""
+    routing_weights, ids = _torch_select_experts(
         linear_k_groups(x, moe.gate.weight),
         moe.gate.bias,
         cfg.num_experts_per_tok,
@@ -430,21 +488,20 @@ def _moe_reference(moe: Inkling2MoE, x: torch.Tensor, cfg) -> torch.Tensor:
     exp = moe.experts
 
     def linear(a, name, e):
-        w = getattr(exp, f"{name}_weight")[e]
-        s = getattr(exp, f"{name}_weight_scale")[e]
-        if exp.sm100:
-            w = unshuffle_rows(w)
-            s = unshuffle_rows(unswizzle_block_scales(s))
+        prefix = f"experts.{name}_weight"
+        w, s = weights[prefix][e], weights[f"{prefix}_scale"][e]
         if exp.nvfp4:
-            av, as_, aa = nvfp4_quantize(a)
-            out = dequant_nvfp4(av, as_).double() @ dequant_nvfp4(w, s).double().T
-            amax = getattr(exp, f"{name}_weight_amax")[e]
-            den = getattr(exp, f"{name}_weight_outer_scale_denominator")
-            out = out * (aa * amax / (1536 * den))[:, None]
+            w = dequant_nvfp4(w, s).double()
+            amax = weights[f"{prefix}_amax"][e]
+            w = w * (amax / weights[f"{prefix}_outer_scale_denominator"]).double()
+            if exp.sm100:
+                av, as_, aa = nvfp4_quantize(a)
+                a = dequant_nvfp4(av, as_) * (aa / 1536)[:, None]
         else:
-            av, as_ = mxfp8_quantize(a)
-            out = dequant_mxfp8(av, as_).double() @ dequant_mxfp8(w, s).double().T
-        return out.bfloat16()
+            w = dequant_mxfp8(w, s).double()
+            if exp.sm100:
+                a = dequant_mxfp8(*mxfp8_quantize(a))
+        return (a.double() @ w.T).bfloat16()
 
     out = torch.zeros(x.shape, dtype=torch.float64, device=x.device)
     for t in range(x.shape[0]):
@@ -458,7 +515,7 @@ def _moe_reference(moe: Inkling2MoE, x: torch.Tensor, cfg) -> torch.Tensor:
                 * torch.sigmoid(gate)
                 * cfg.mlp_up_softcap
                 * torch.tanh(up / cfg.mlp_up_softcap)
-                * weights[t, slot]
+                * routing_weights[t, slot]
             )
             out[t] += linear(act.bfloat16(), "w2", e)[0].double()
     return out.bfloat16()
@@ -500,6 +557,7 @@ def _build_moe(fmt: str, weights: dict[str, torch.Tensor]) -> Inkling2MoE:
         moe = Inkling2MoE(MOE_CONFIG, fmt)
     for name, param in moe.named_parameters():
         param.weight_loader(param, weights[name])
+    moe.experts.process_weights_after_loading()
     return moe
 
 
@@ -508,15 +566,17 @@ def _build_moe(fmt: str, weights: dict[str, torch.Tensor]) -> Inkling2MoE:
 def test_moe_layer_matches_reference(dist_init, fmt: str, tokens: int):
     """Full layer (TP=1) vs. a per-token loop over dequantized experts, with
     fused (few tokens) and separate routing."""
-    moe = _build_moe(fmt, _random_moe_weights(fmt))
+    weights = _random_moe_weights(fmt)
+    moe = _build_moe(fmt, weights)
     x = torch.randn(tokens, 512, device="cuda").bfloat16()
     out = moe(x)
-    ref = _moe_reference(moe, x, MOE_CONFIG)
+    ref = _moe_reference(moe, weights, x, MOE_CONFIG)
     scale = ref.abs().max().item()
     assert scale > 0.1
     torch.testing.assert_close(out, ref, atol=1e-2 * scale, rtol=2e-2)
 
 
+@requires_sm100
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 @pytest.mark.parametrize("tokens", [5, 64])
 def test_token_tiles_match(dist_init, monkeypatch, fmt: str, tokens: int):

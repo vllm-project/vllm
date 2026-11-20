@@ -562,6 +562,7 @@ steps:
 
 - label: ":nvidia: (H100) ShardQ Sequence Parallel"
   key: deepseek-shardq-sequence-parallel
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   working_dir: "/vllm-workspace/"

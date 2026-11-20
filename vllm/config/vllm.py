@@ -1907,9 +1907,7 @@ class VllmConfig:
         # native implementation
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
+            self.compilation_config.enable_custom_op_by_default("quant_fp8")
 
         current_platform.apply_config_platform_defaults(self)
 
@@ -2004,11 +2002,15 @@ class VllmConfig:
                     "HiSparse requires --scheduler-reserve-full-isl; remove "
                     "--no-scheduler-reserve-full-isl."
                 )
-            if self.model_config is not None and not hasattr(
-                self.model_config.hf_text_config, "index_topk"
+            if (
+                self.model_config is not None
+                and not hasattr(self.model_config.hf_text_config, "index_topk")
+                and getattr(self.model_config.hf_text_config, "indexer_budget", None)
+                is None
             ):
                 raise ValueError(
-                    "HiSparse is only supported for DSA models with index_topk."
+                    "HiSparse is only supported for DSA models with index_topk "
+                    "and QSA models with indexer_budget."
                 )
 
         self._normalize_piecewise_cudagraph_mode(
@@ -2421,15 +2423,6 @@ class VllmConfig:
                     env_path,
                 )
             self.compilation_config.debug_dump_path = env_path
-
-        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
-        # On H100 the CUDA kernel is faster than
-        # native implementation
-        # https://github.com/vllm-project/vllm/issues/25094
-        if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()
         if self.use_cumem_cudagraph_pool:

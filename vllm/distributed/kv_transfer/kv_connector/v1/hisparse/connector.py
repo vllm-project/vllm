@@ -153,10 +153,19 @@ class HiSparseConnectorScheduler:
         # Runs first: it plans this step's transfers and residency changes.
         self.coordinator.advance_scheduled(
             (
-                request_id,
-                min(start + count, self.requests[request_id].num_tokens),
-            )
-            for request_id, start, count in scheduled_requests
+                (
+                    request_id,
+                    min(start + count, self.requests[request_id].num_tokens),
+                )
+                for request_id, start, count in scheduled_requests
+            ),
+            # Leave capacity for any prefill that still has unscheduled input.
+            promote_imports=not any(
+                request.num_computed_tokens
+                + scheduler_output.num_scheduled_tokens.get(request_id, 0)
+                < request.num_tokens + request.num_output_placeholders
+                for request_id, request in self.requests.items()
+            ),
         )
         command = self.coordinator.build_offload_command()
         host_block_copies = self.coordinator.take_host_block_copies()
@@ -205,7 +214,9 @@ class HiSparseConnectorScheduler:
         assert self.coordinator is not None
         for request_id in connector_output.finished_recving or ():
             self.coordinator.finish_host_import(
-                request_id, failed=request_id in connector_output.failed_recving
+                request_id,
+                failed=request_id in connector_output.failed_recving,
+                restore=request_id in self.requests,
             )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
@@ -225,7 +236,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str:
-        return "BLHNC"
+        return "BLHNC" if vllm_config.model_config.use_mla else "BLNHC"
 
     def __init__(
         self,

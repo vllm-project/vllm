@@ -320,6 +320,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVQuantMode,
     MLAAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -795,6 +796,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
+        self.is_aiter_triton_bf16_bmm_enabled = rocm_aiter_ops.is_mla_enabled()
         # Replaces the bf16 W_UK bmm, the q concat + fp8 quant and the head
         # padding, so only the torch.bmm path qualifies.
         self.is_aiter_fused_decode_query_enabled = (
@@ -1654,6 +1656,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
+            cache_role=(
+                SparseCacheRole.SPARSE if self.topk_buffer_width is not None else None
+            ),
             topk_buffer_width=self.topk_buffer_width,
             is_index_group_leader=self.indexer is not None,
         )
@@ -1693,6 +1698,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+        elif (
+            self.is_aiter_triton_bf16_bmm_enabled
+            and rocm_aiter_ops.is_triton_bf16_bmm_tuned(
+                x.shape[0], x.shape[1], self.v_head_dim, self.kv_lora_rank
+            )
+        ):
+            # Same product as the torch.bmm fallback; the kernel takes W as (N, V, L).
+            rocm_aiter_ops.triton_bf16_bmm(
+                x, self.W_UV.transpose(1, 2), out.transpose(0, 1)
             )
         elif self.is_amx_bmm_enabled:
             # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
