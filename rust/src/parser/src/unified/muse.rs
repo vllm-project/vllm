@@ -106,10 +106,9 @@ enum MuseEvent {
     ParameterText,
     /// `</atem:parameter>` after a string parameter value.
     ParameterClose,
-    /// The complete raw value of a parameter decoded once complete, through
-    /// its close tag.
-    DecodedValue {
-        raw: String,
+    /// The complete raw value of a buffered parameter, through its close tag.
+    BufferedValue {
+        value: String,
     },
     /// `</atem:invoke>`.
     InvokeClose,
@@ -145,7 +144,10 @@ enum AtemBlock {
     /// block holds at least one.
     Invokes { any: bool },
     /// Inside one invoke, streaming it as a tool call.
-    Invoke { call: OpenToolCall, at: InvokeBody },
+    Invoke {
+        call: OpenToolCall,
+        body: InvokeBody,
+    },
 }
 
 /// Where the parser is inside one `<atem:invoke>`.
@@ -154,9 +156,9 @@ enum InvokeBody {
     /// Between parameters.
     Parameters,
     /// Inside a string parameter value, which streams as it arrives.
-    StringValue,
+    Parameter,
     /// Inside another parameter value, which is decoded once complete.
-    DecodedValue {
+    BufferedParameter {
         key: String,
         value_end_scan: MarkerScanState,
     },
@@ -176,8 +178,8 @@ impl MuseMode {
     fn invoke_mut(&mut self) -> Result<(&mut OpenToolCall, &mut InvokeBody)> {
         match self {
             MuseMode::Tool {
-                block: AtemBlock::Invoke { call, at },
-            } => Ok((call, at)),
+                block: AtemBlock::Invoke { call, body },
+            } => Ok((call, body)),
             _ => Err(parsing_failed!("Muse invoke event outside an invoke")),
         }
     }
@@ -256,17 +258,17 @@ impl MuseUnifiedParser {
                 *self.mode.block_mut()? = AtemBlock::Invoke {
                     // The template renders JSON values with Python separators.
                     call: OpenToolCall::new(name, tool_index, JsonStyle::Spaced),
-                    at: InvokeBody::Parameters,
+                    body: InvokeBody::Parameters,
                 };
             }
             MuseEvent::ParameterOpen { key } => {
-                let (call, at) = self.mode.invoke_mut()?;
+                let (call, body) = self.mode.invoke_mut()?;
                 let parameters = self.parameters.get(&call.name).unwrap_or(&Value::Null);
                 if admits_only_string(parameters, &key) {
                     call.arguments.open_string(&key);
-                    *at = InvokeBody::StringValue;
+                    *body = InvokeBody::Parameter;
                 } else {
-                    *at = InvokeBody::DecodedValue {
+                    *body = InvokeBody::BufferedParameter {
                         key,
                         value_end_scan: MarkerScanState::default(),
                     };
@@ -274,19 +276,19 @@ impl MuseUnifiedParser {
             }
             MuseEvent::ParameterText => self.mode.invoke_mut()?.0.arguments.push(&piece.text),
             MuseEvent::ParameterClose => {
-                let (call, at) = self.mode.invoke_mut()?;
+                let (call, body) = self.mode.invoke_mut()?;
                 call.arguments.close();
-                *at = InvokeBody::Parameters;
+                *body = InvokeBody::Parameters;
             }
-            MuseEvent::DecodedValue { raw } => {
-                let (call, at) = self.mode.invoke_mut()?;
-                let InvokeBody::DecodedValue { key, .. } =
-                    std::mem::replace(at, InvokeBody::Parameters)
+            MuseEvent::BufferedValue { value } => {
+                let (call, body) = self.mode.invoke_mut()?;
+                let InvokeBody::BufferedParameter { key, .. } =
+                    std::mem::replace(body, InvokeBody::Parameters)
                 else {
                     return Err(parsing_failed!("Muse parameter value outside a parameter"));
                 };
                 let parameters = self.parameters.get(&call.name).unwrap_or(&Value::Null);
-                let value = convert_parameter_value(parameters, &key, raw);
+                let value = convert_parameter_value(parameters, &key, value);
                 call.arguments.write_value(&key, &value);
             }
             MuseEvent::InvokeClose => {
@@ -480,7 +482,7 @@ fn parse_atem_event(input: &mut MuseInput<'_>, block: &mut AtemBlock) -> ModalRe
         AtemBlock::Invokes { any: true } => {
             atem_structure(preceded(ws0, alt((invoke_open_event, block_close)))).parse_next(input)
         }
-        AtemBlock::Invoke { at, .. } => match at {
+        AtemBlock::Invoke { body, .. } => match body {
             InvokeBody::Parameters => atem_structure(preceded(
                 ws0,
                 alt((
@@ -489,21 +491,21 @@ fn parse_atem_event(input: &mut MuseInput<'_>, block: &mut AtemBlock) -> ModalRe
                 )),
             ))
             .parse_next(input),
-            InvokeBody::StringValue => alt((
+            InvokeBody::Parameter => alt((
                 literal(PARAMETER_CLOSE).value(MuseEvent::ParameterClose),
                 |input: &mut MuseInput<'_>| {
                     safe_text_len(input, PARAMETER_CLOSE).map(|_| MuseEvent::ParameterText)
                 },
             ))
             .parse_next(input),
-            InvokeBody::DecodedValue { value_end_scan, .. } => {
-                let (raw,) = seq!(
+            InvokeBody::BufferedParameter { value_end_scan, .. } => {
+                let (value,) = seq!(
                     take_until_marker(PARAMETER_CLOSE, value_end_scan),
                     _: literal(PARAMETER_CLOSE),
                 )
                 .parse_next(input)?;
-                Ok(MuseEvent::DecodedValue {
-                    raw: raw.to_string(),
+                Ok(MuseEvent::BufferedValue {
+                    value: value.to_string(),
                 })
             }
         },
