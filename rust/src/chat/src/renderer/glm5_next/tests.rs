@@ -355,6 +355,57 @@ fn non_object_tool_call_arguments_match_existing_hf_renderer() {
 }
 
 #[test]
+fn developer_messages_match_existing_hf_renderer() {
+    use crate::renderer::MediaPartSource;
+    use crate::request::ChatContentPart;
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::developer("Reply in French.", None),
+            ChatMessage::user("Hi"),
+            ChatMessage::assistant_text("Bonjour !"),
+            ChatMessage::developer("Be brief.", None),
+            ChatMessage::user("Thanks"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    let native = Glm5NextChatRenderer::default().render(&request).unwrap();
+    for (name, template) in CHECKPOINT_TEMPLATES {
+        assert_eq!(
+            native.prompt,
+            hf_renderer(template).render(&request).unwrap().prompt,
+            "{name}"
+        );
+    }
+    expect_test::expect![[r#"
+        [gMASK]<sop><|system|>Reasoning Effort: Max<|system|>You are a helpful assistant.
+
+        Reply in French.<|user|>Hi<|assistant|><think></think>Bonjour !<|system|>Be brief.<|user|>Thanks<|assistant|><think>"#]].assert_eq(&native.prompt.into_text().unwrap());
+
+    // Media after the merged leading turn keeps its message index.
+    request.messages.push(ChatMessage::user(vec![ChatContentPart::image_url(
+        "unused",
+    )]));
+    let native = Glm5NextChatRenderer::default().with_multimodal(true).render(&request).unwrap();
+    let hf = hf_renderer(CHECKPOINT_TEMPLATES[1].1)
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<|image|>".into()),
+            video_token: Some("<|video|>".into()),
+            audio_token: None,
+        }))
+        .render(&request)
+        .unwrap();
+    assert_eq!(native.prompt, hf.prompt);
+    assert_eq!(
+        native.media_order.unwrap(),
+        vec![MediaPartSource {
+            message_index: 6,
+            content_part_index: 0
+        }]
+    );
+}
+
+#[test]
 fn media_parts_render_reminders_without_multimodal_inputs() {
     let request = ChatRequest {
         messages: vec![ChatMessage::user(vec![

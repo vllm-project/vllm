@@ -437,10 +437,16 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
     }
 }
 
+/// The template messages for `messages`.
+///
+/// The template has no developer role. As in the HF renderer
+/// (`hf::developer`), a leading run of system and developer messages that
+/// includes a developer message becomes one system message, and later
+/// developer messages become system messages in place. Media parts keep the
+/// indices of the message they came from.
 pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
-    messages.iter().enumerate().map(|(index, message)| match message {
-        ChatMessage::System { content: value } => json!({"role": "system", "content": content(value, index)}),
-        ChatMessage::Developer { content: value, .. } => json!({"role": "developer", "content": content(value, index)}),
+    let mut values: Vec<Value> = messages.iter().enumerate().map(|(index, message)| match message {
+        ChatMessage::System { content: value } | ChatMessage::Developer { content: value, .. } => json!({"role": "system", "content": content(value, index)}),
         ChatMessage::User { content: value } => json!({"role": "user", "content": content(value, index)}),
         ChatMessage::Custom { role, content: value } => json!({"role": role, "content": content(value, index)}),
         ChatMessage::ToolResponse { content: value, tool_call_id } => {
@@ -463,7 +469,69 @@ pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
             }
             message
         }
-    }).collect()
+    }).collect();
+    let leading = messages
+        .iter()
+        .take_while(|message| {
+            matches!(
+                message,
+                ChatMessage::System { .. } | ChatMessage::Developer { .. }
+            )
+        })
+        .count();
+    if messages[..leading]
+        .iter()
+        .any(|message| matches!(message, ChatMessage::Developer { .. }))
+    {
+        let content = values
+            .drain(..leading)
+            .map(|mut value| value["content"].take())
+            .reduce(append_content);
+        values.insert(0, json!({"role": "system", "content": content}));
+    }
+    values
+}
+
+/// Join `next` to `content` as `ChatContent::append` joins merged messages:
+/// text on either side of the boundary is joined with a blank line, and parts
+/// keep their order.
+fn append_content(content: Value, next: Value) -> Value {
+    const SEPARATOR: &str = "\n\n";
+    let is_empty = |value: &Value| {
+        value.as_str().is_some_and(str::is_empty) || value.as_array().is_some_and(Vec::is_empty)
+    };
+    if is_empty(&next) {
+        return content;
+    }
+    if is_empty(&content) {
+        return next;
+    }
+    let into_parts = |value: Value| match value {
+        Value::Array(parts) => parts,
+        text => vec![json!({"type": "text", "text": text})],
+    };
+    match (content, next) {
+        (Value::String(text), Value::String(next)) => {
+            Value::String(format!("{text}{SEPARATOR}{next}"))
+        }
+        (content, next) => {
+            let mut parts = into_parts(content);
+            let mut next = into_parts(next).into_iter().peekable();
+            if let Some(last) = parts.last_mut()
+                && last["type"] == "text"
+                && let Some(first) = next.next_if(|part| part["type"] == "text")
+            {
+                let joined = format!(
+                    "{}{SEPARATOR}{}",
+                    last["text"].as_str().unwrap_or_default(),
+                    first["text"].as_str().unwrap_or_default()
+                );
+                last["text"] = Value::String(joined);
+            }
+            parts.extend(next);
+            Value::Array(parts)
+        }
+    }
 }
 
 pub(super) fn tools(tools: &[ChatTool]) -> Vec<Value> {
