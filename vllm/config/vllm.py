@@ -1911,9 +1911,7 @@ class VllmConfig:
         # native implementation
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
+            self.compilation_config.enable_custom_op_by_default("quant_fp8")
 
         current_platform.apply_config_platform_defaults(self)
 
@@ -2429,15 +2427,6 @@ class VllmConfig:
                     env_path,
                 )
             self.compilation_config.debug_dump_path = env_path
-
-        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
-        # On H100 the CUDA kernel is faster than
-        # native implementation
-        # https://github.com/vllm-project/vllm/issues/25094
-        if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()
         if self.use_cumem_cudagraph_pool:
