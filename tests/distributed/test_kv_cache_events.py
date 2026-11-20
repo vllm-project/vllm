@@ -247,3 +247,55 @@ def test_block_stored_session_id_is_wire_compatible():
     assert (
         msgspec.msgpack.decode(new_payload, type=_PreSessionBlockStored).medium == "GPU"
     )
+
+
+@pytest.mark.parametrize("event_type", [BlockStored, BlockRemoved])
+def test_source_is_optional_and_legacy_decoders_preserve_payload(event_type):
+    from msgspec.structs import replace
+
+    from vllm.distributed.kv_events import EventSource
+
+    event = _make_block_stored() if event_type is BlockStored else _make_block_removed()
+    legacy_type = (
+        _LegacyBlockStored if event_type is BlockStored else _LegacyBlockRemoved
+    )
+    payload = msgspec.msgpack.encode(event)
+    assert "source" not in msgspec.msgpack.decode(payload)
+    assert msgspec.msgpack.decode(payload, type=event_type).source is None
+    attributed = replace(event, source=EventSource("connector/1", "connector", "same"))
+    encoded = msgspec.msgpack.encode(attributed)
+    assert msgspec.msgpack.decode(encoded, type=legacy_type) == msgspec.msgpack.decode(
+        payload, type=legacy_type
+    )
+    decoded = msgspec.msgpack.decode(encoded, type=event_type)
+    assert decoded == attributed
+    assert event.source is None
+    built = msgspec.msgpack.decode(payload)
+    built["source"] = None
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(built), type=event_type) == event
+    )
+
+
+def test_source_on_clear_is_origin_only_and_strict_consumers_need_opt_in():
+    from vllm.distributed.kv_events import AllBlocksCleared, EventSource
+
+    class LegacyClear(msgspec.Struct, tag="AllBlocksCleared"):  # type: ignore[call-arg]
+        pass
+
+    class StrictClear(
+        msgspec.Struct,
+        tag="AllBlocksCleared",  # type: ignore[call-arg]
+        forbid_unknown_fields=True,  # type: ignore[call-arg]
+    ):
+        pass
+
+    legacy = msgspec.msgpack.encode(LegacyClear())
+    assert msgspec.msgpack.encode(AllBlocksCleared()) == legacy
+    assert msgspec.msgpack.decode(legacy, type=AllBlocksCleared).source is None
+    wire = msgspec.msgpack.encode(
+        AllBlocksCleared(EventSource("cache_manager", "native"))
+    )
+    assert msgspec.msgpack.decode(wire, type=LegacyClear) == LegacyClear()
+    with pytest.raises(msgspec.ValidationError, match="unknown field"):
+        msgspec.msgpack.decode(wire, type=StrictClear)
