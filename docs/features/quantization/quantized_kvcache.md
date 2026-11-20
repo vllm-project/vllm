@@ -39,6 +39,7 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="auto"`: Use the model's default data type
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
+- `kv_cache_dtype="nvfp4_swa_fp8"` / `"nvfp4_4over6_swa_fp8"`: NVFP4 for full-attention layers and FP8 for sliding-window layers; see [Hybrid NVFP4/FP8 KV Cache for Sliding-Window Models](#hybrid-nvfp4fp8-kv-cache-for-sliding-window-models-nvfp4_swa_fp8)
 
 ### Skipping Specific Layers from KV-Cache Quantization
 
@@ -68,9 +69,9 @@ llm = LLM(
 )
 ```
 
-### NVFP4 Full Attention with FP8 Sliding Window
+### Hybrid NVFP4/FP8 KV Cache for Sliding-Window Models (`nvfp4_swa_fp8`)
 
-For models that interleave full-attention and sliding-window layers, two `--kv-cache-dtype` recipes store full-attention layers in NVFP4 and sliding-window layers in FP8. They require SM100 GPUs with the FlashInfer TRT-LLM attention path, like NVFP4 KV cache on its own.
+For hybrid models that interleave full-attention and sliding-window attention (SWA) layers, the `nvfp4_swa_fp8` and `nvfp4_4over6_swa_fp8` values of `--kv-cache-dtype` store full-attention layers in NVFP4 (or NVFP4 4over6) and sliding-window layers in FP8. This is opt-in; the default `--kv-cache-dtype auto` keeps every layer in the model's dtype. Like NVFP4 KV cache on its own, these recipes require SM100 GPUs with the FlashInfer TRT-LLM attention path.
 
 ```bash
 # Full-attention layers: nvfp4. Sliding-window layers: fp8.
@@ -79,6 +80,14 @@ vllm serve <model> --kv-cache-dtype nvfp4_swa_fp8
 # Full-attention layers: nvfp4_4over6. Sliding-window layers: fp8.
 vllm serve <model> --kv-cache-dtype nvfp4_4over6_swa_fp8
 ```
+
+Programmatic usage:
+
+```python
+llm = LLM(model="<model>", kv_cache_dtype="nvfp4_swa_fp8")
+```
+
+Compared with `--kv-cache-dtype fp8`, the KV capacity gain grows with `--max-model-len`. Sliding-window layers only hold the window plus in-flight tokens, so at long context lengths the NVFP4 full-attention layers dominate KV memory.
 
 Layers passed to `--kv-cache-dtype-skip-layers` keep the model's native dtype under a recipe. A recipe cannot be combined with `--kv-cache-dtype-skip-layers sliding_window`, since the recipe already sets the sliding-window dtype.
 
