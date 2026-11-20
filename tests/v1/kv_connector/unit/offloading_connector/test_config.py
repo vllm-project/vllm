@@ -252,7 +252,7 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-_MAMBA_ALIGN = MambaManager.config(mamba_cache_mode="align")
+_MAMBA_ALIGN = MambaManager.config(enable_prefix_caching=True)
 
 
 def _mamba_spec() -> MambaSpec:
@@ -632,7 +632,6 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
         alignment_tokens=scheduler_config.alignment_tokens,
         block_size=mamba_group.block_size,
         manager_config=mamba_group.manager_config,
-        use_eagle=mamba_group.is_eagle_group,
     )
     assert block_mask is None or [i for i in range(4) if block_mask[i]] == [1, 3]
 

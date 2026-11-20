@@ -37,6 +37,8 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     supported_options = frozenset({"draft_lm_head_quantization"})
     uses_target_hidden_states = True
     supports_watermarking = True
+    # Draft KV depends on the tokens the drafter reads ahead.
+    draft_kv_depends_on_lookahead = True
 
     @classmethod
     def matches(cls, spec: SpeculativeConfig) -> bool:

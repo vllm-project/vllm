@@ -7,7 +7,6 @@ draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-import itertools
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -22,11 +21,11 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        TensorEntry,
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        StorageRecord,
         TensorKind,
-        WeightCacheKey,
     )
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -128,7 +127,8 @@ def build_weight_cache_key(
     Shared with the daemon so the peer loader requests the shard its own
     daemon fingerprinted: TP/PP ranks come from the rank the daemon (or
     engine worker) stamped on `parallel_config.rank`, and the DP placement
-    follows the engine's per-worker view.
+    follows the engine's per-worker view. Draft models always use a single
+    pipeline stage.
     """
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -145,8 +145,8 @@ def build_weight_cache_key(
         cache_config=vllm_config.cache_config,
         tp_size=tp_size,
         tp_rank=rank % tp_size,
-        pp_size=parallel_config.pipeline_parallel_size,
-        pp_rank=rank // tp_size,
+        pp_size=1 if is_draft else parallel_config.pipeline_parallel_size,
+        pp_rank=0 if is_draft else rank // tp_size,
         dp_size=dp_size,
         dp_rank=dp_rank,
         is_draft=is_draft,
@@ -219,42 +219,8 @@ def collect_tensors(
     return tensors, kinds, aliases
 
 
-def export_entries(
-    model: torch.nn.Module,
-) -> tuple[dict[str, "TensorEntry"], dict[str, str]]:
-    """Export a model's tensors as `TensorEntry`s, preserving aliases.
-
-    CUDA reduction arguments must be exported separately for each consumer so
-    that PyTorch registers a reference for each IPC mapping's lifetime.
-
-    Returns:
-        A `(entries, aliases)` pair, as `collect_tensors` but with each
-        tensor exported.
-
-    """
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        TensorEntry,
-    )
-
-    tensors, kinds, aliases = collect_tensors(model)
-    entries = {
-        name: TensorEntry.from_tensor(tensor, kinds[name])
-        for name, tensor in tensors.items()
-    }
-    return entries, aliases
-
-
-def _unique_cuda_storage_bytes(tensors: Iterable[torch.Tensor]) -> int:
-    storages: dict[int, int] = {}
-    for tensor in tensors:
-        if tensor.is_cuda:
-            storage = tensor.untyped_storage()
-            storages[storage.data_ptr()] = storage.nbytes()
-    return sum(storages.values())
-
-
-def exported_weight_bytes(model: torch.nn.Module | None) -> int:
-    """Bytes of the distinct CUDA storages an engine maps from this model.
+def exported_weight_bytes(storages: Iterable["StorageRecord"] | None) -> int:
+    """Allocation bytes of unique non-CPU storages mapped from cached state.
 
     This is the memory the engine would otherwise allocate for the weights
     itself. `memory_allocated()` also counts daemon-only state the engine
@@ -262,8 +228,11 @@ def exported_weight_bytes(model: torch.nn.Module | None) -> int:
     parameters/buffers that the engine rebuilds itself), so reporting it
     would shrink the engine's KV cache below that of a disk load.
     """
-    if model is None:
+    if storages is None:
         return 0
-    return _unique_cuda_storage_bytes(
-        itertools.chain(model.parameters(), model.buffers())
-    )
+    allocations = {
+        (record.storage.device, record.storage.data_ptr()): record.storage
+        for record in storages
+        if record.storage.device.type != "cpu"
+    }
+    return sum(storage.nbytes() for storage in allocations.values())
