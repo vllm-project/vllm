@@ -28,8 +28,7 @@ steps:
 
   - label: ":docker: Build ROCm test image"
     key: image-build-amd
-    depends_on:
-      - refresh-rocm-base-amd
+    depends_on: []   # build.sh waits for the base step: their checkouts overlap
     device: amd_cpu
     no_plugin: true
     commands:
@@ -39,6 +38,8 @@ steps:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
           limit: 1
+        - exit_status: 75  # The base step is still building (build.sh)
+          limit: 4
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost

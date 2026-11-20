@@ -356,8 +356,16 @@ wait_for_trusted() {
   return 1
 }
 
-# load — read stack/runtime refs from Buildkite metadata (written by base mode).
+# load — read stack/runtime refs from Buildkite metadata (written by base mode). The ci step runs
+# alongside the base step, so wait for it; a stack rebuild outlasts the wait: exit 75 to retry.
 load() {
+  local end=$(( $(date +%s) + ${ROCM_BASE_WAIT_MINUTES:-120} * 60 ))
+  until meta exists "rocm-$STACK-stack-wheels"; do   # base mode sets it last
+    [[ $(buildkite-agent step get state --step refresh-rocm-base-amd) != finished ]] \
+      || meta exists "rocm-$STACK-stack-wheels" || { echo "the base step failed" >&2; exit 1; }
+    (( $(date +%s) < end )) || { echo "the base step is still running" >&2; exit 75; }
+    sleep 10
+  done
   STACK_IMAGE=$(meta get "rocm-$STACK-stack")
   STACK_WHEELS=$(meta get "rocm-$STACK-stack-wheels")
   RUNTIME=$(meta get "rocm-$STACK-runtime")
