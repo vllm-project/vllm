@@ -162,8 +162,8 @@ def test_flashinfer_trtllm_sparse_mla_decode_without_rope(dtype, mode, monkeypat
         object.__new__(HiSparseMLAIndexGroup) if mode == "hisparse" else None
     )
     impl._workspace_buffer = workspace
-    impl.bmm1_scale = QK_NOPE_HEAD_DIM**-0.5
-    impl.bmm2_scale = 1.0
+    impl.scale = QK_NOPE_HEAD_DIM**-0.5
+    impl.kv_cache_dtype = "auto"
     impl.is_nope_mla = True
     impl.need_to_return_lse_for_decode = mode == "dcp"
     if mode == "tp":

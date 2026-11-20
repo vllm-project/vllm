@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Checkpoint KV-cache scales reach MLA attention layers."""
+"""Checkpoint KV-cache scales reach MLA attention layers, and FlashInfer MLA
+decode follows them across a weight update under FULL CUDA graphs."""
 
 import json
 from pathlib import Path
@@ -9,12 +10,14 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from tests.models.utils import check_logprobs_close
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
 # compressed-tensors FP8 DeepSeek-V3 (MLA), one decoder layer.
 MODEL = "inference-optimization/DeepSeek-V3-debug-empty-FP8_DYNAMIC"
 KV_SCALE = 0.5
+PROMPTS = ["The capital of France is", "1 2 3 4 5 6"]
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda() or not current_platform.supports_fp8(),
@@ -77,3 +80,44 @@ def test_mla_loads_checkpoint_kv_scales(vllm_runner, monkeypatch, kv_scale_check
     ) as llm:
         scales = llm.collective_rpc(_mla_kv_scales)[0]
     assert scales and all(s == (KV_SCALE,) * 3 for s in scales), scales
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FlashInfer MLA runs on SM100",
+)
+def test_flashinfer_mla_decode_follows_kv_scale_reload(
+    vllm_runner, monkeypatch, kv_scale_checkpoint
+):
+    """A dummy start captures the decode CUDA graphs with dummy KV scales; after
+    reloading the checkpoint, decode must match a cold start on it."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    kwargs = dict(
+        kv_cache_dtype="fp8",
+        attention_config={"backend": "FLASHINFER_MLA"},
+        block_size=64,
+        enable_prefix_caching=False,
+        max_model_len=64,
+        max_num_seqs=len(PROMPTS),
+        # Device-tensor decode scales are used only when updates are enabled.
+        weight_transfer_config={"backend": "ipc"},
+    )
+    with vllm_runner(kv_scale_checkpoint, **kwargs) as llm:
+        cold = llm.generate_greedy_logprobs(PROMPTS, 16, num_logprobs=5)
+
+    with vllm_runner(kv_scale_checkpoint, load_format="dummy", **kwargs) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        llm.collective_rpc(
+            "reload_weights", kwargs={"weights_path": kv_scale_checkpoint}
+        )
+        scales = llm.collective_rpc(_mla_kv_scales)[0]
+        assert scales and all(s == (KV_SCALE,) * 3 for s in scales), scales
+        reloaded = llm.generate_greedy_logprobs(PROMPTS, 16, num_logprobs=5)
+
+    check_logprobs_close(
+        outputs_0_lst=cold, outputs_1_lst=reloaded, name_0="cold", name_1="reloaded"
+    )
