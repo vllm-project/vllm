@@ -12,6 +12,11 @@ from transformers import BatchFeature, LlamaTokenizerFast
 from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
 
+from vllm.transformers_utils.processors.image_budget import (
+    get_image_width_height,
+    validate_image_tensor_budget,
+)
+
 # TODO(Isotr0py): change modes for variants
 # see: https://github.com/deepseek-ai/DeepSeek-OCR/blob/8cf003d38821fa1b19c73da3bd1b0dc262ea8136/DeepSeek-OCR-master/DeepSeek-OCR-vllm/config.py#L1-L6
 # Tiny: base_size = 512, image_size = 512, crop_mode = False
@@ -308,6 +313,18 @@ class DeepseekOCRProcessor(ProcessorMixin):
             color=tuple(int(x * 255) for x in self.image_transform.mean),
         )
 
+    def _get_view_pixels(self, image: Image.Image, cropping: bool) -> int:
+        pixels = self.base_size**2
+        if cropping:
+            width, height = get_image_width_height(image)
+            if max(width, height) > self.image_size:
+                cols, rows = count_tiles(
+                    width, height, max_num=self.max_crops, image_size=self.image_size
+                )
+                if cols > 1 or rows > 1:
+                    pixels += cols * rows * self.image_size**2
+        return pixels
+
     def tokenize_with_images(
         self,
         conversation: str,
@@ -324,6 +341,9 @@ class DeepseekOCRProcessor(ProcessorMixin):
                 f"({num_image_tags}) does not match number of images "
                 f"({len(images)})."
             )
+        validate_image_tensor_budget(
+            images, (self._get_view_pixels(image, cropping) for image in images)
+        )
         text_splits = conversation.split(self.image_token)
         images_list, images_crop_list, images_seq_mask, images_spatial_crop = (
             [],
