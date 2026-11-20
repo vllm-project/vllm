@@ -39,8 +39,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
-    export NCCL_CUMEM_HOST_ENABLE=0 || true &&
+    'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
+    cd tests &&
     pytest --continue-on-collection-errors -v -s v1/fault_tolerance/test_engine_core_sentinel.py || true &&
     pytest --continue-on-collection-errors -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py || true'

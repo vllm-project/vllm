@@ -2,6 +2,42 @@ group: Quantization XPU
 depends_on:
   - image-build-xpu
 steps:
+- label: ':nvidia: (H200 MIG 35GB) Quantization'
+  key: quantization-xpu
+  device: intel_gpu
+  timeout_in_minutes: 120
+  optional: true
+  working_dir: "."
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  automatic_shard: true
+  _raw_old_commands:
+  - export PYTHONPATH=/opt/quantization-deps$${PYTHONPATH:+:$$PYTHONPATH}
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/models/utils.py
+  - vllm/transformers_utils/model_arch_config_convertor.py
+  - vllm/models/deepseek_v41/quant_config.py
+  - vllm/utils/humming.py
+  - tests/quantization
+  - tests/single_rank_group.py
+  - requirements/test/quantization_deps_cuda.txt
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export PYTHONPATH=/opt/quantization-deps$${PYTHONPATH:+:$$PYTHONPATH} || true &&
+    cd tests &&
+    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest --continue-on-collection-errors -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k not test_compressed_tensors_w4a8_fp8 || true'
 - label: ':nvidia: (H200 MIG 35GB) Quantized Fusions'
   key: quantized-fusions
   device: intel_gpu
@@ -96,10 +132,18 @@ steps:
   - pytest -v -s models/quantization
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/model_executor/model_loader/reload/
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/models/deepseek_v32/
+  - vllm/models/glm5next/
+  - vllm/models/hy_v4/
   - tests/models/quantization
+  - tests/quantization/test_fp8_dequant.py
+  - tests/single_rank_group.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/quantization --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s models/quantization quantization/test_fp8_dequant.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
   

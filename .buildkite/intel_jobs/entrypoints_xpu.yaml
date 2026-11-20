@@ -97,7 +97,7 @@ steps:
     pytest --continue-on-collection-errors -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/llm/test_generate.py || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/llm/offline_mode || true'
-- label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N'
+- label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server)'
   key: entrypoints-integration-api-server
   device: intel_gpu
   timeout_in_minutes: 75
@@ -113,6 +113,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB

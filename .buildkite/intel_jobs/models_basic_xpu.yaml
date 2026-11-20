@@ -84,7 +84,7 @@ steps:
     mem: 24+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/deepseek_v41/nvidia/test_fused_markov.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_nvidia_shared_rope.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py models/test_muse_spark_rocm_mono.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/deepseek_v41/nvidia/test_fused_markov.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_nvidia_shared_rope.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py models/test_muse_spark_rocm_mono.py kernels/models/amd/test_muse_spark_fused_markov.py models/test_muse_spark_rocm_drafter.py
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
@@ -105,11 +105,13 @@ steps:
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_mono.py
+  - tests/kernels/models/amd/test_muse_spark_fused_markov.py
+  - tests/models/test_muse_spark_rocm_drafter.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/deepseek_v41/nvidia/test_fused_markov.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_nvidia_shared_rope.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py models/test_muse_spark_rocm_mono.py || true'
+    pytest --continue-on-collection-errors -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/deepseek_v41/nvidia/test_fused_markov.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_nvidia_shared_rope.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py models/test_muse_spark_rocm_mono.py kernels/models/amd/test_muse_spark_fused_markov.py models/test_muse_spark_rocm_drafter.py || true'
 - label: ':nvidia: (B200) Inkling'
   key: inkling-unit-tests-b200
   device: intel_gpu
@@ -203,7 +205,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s models/kimi_k3/test_prefix_cache.py || true'
 - label: ':nvidia: (H200) Step5'
   key: step5-unit-tests
@@ -252,6 +253,7 @@ steps:
   - pytest -v -s models/glm5next
   source_file_dependencies:
   - vllm/models/glm5next/
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
@@ -283,6 +285,10 @@ steps:
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/index_group.py
+  - vllm/model_executor/warmup/qwen4_exp_qsa_warmup.py
   - tests/models/qwen4_exp/
   commands:
   - >-
@@ -318,6 +324,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
@@ -443,3 +450,29 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/glm5next -k specialized_decode || true'
+- label: ':nvidia: (B200) Mistral Large 4'
+  key: mistral-large-4-unit-tests-b200
+  device: intel_gpu
+  timeout_in_minutes: 30
+  optional: true
+  working_dir: "."
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  automatic_shard: true
+  _raw_old_commands:
+  - pytest -v -s models/mistral --ignore=models/mistral/mistral_large4/amd_specialized_decode
+  source_file_dependencies:
+  - vllm/models/mistral/
+  - tests/models/mistral/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/mistral --ignore=models/mistral/mistral_large4/amd_specialized_decode || true'
