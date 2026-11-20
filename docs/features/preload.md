@@ -451,6 +451,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   and engine. Engines reuse the processed weights and scales, including
   fused-projection scales and output padding. This does not enable ModelOpt
   block FP8, FP8 MoE, or other FP8 linear backends.
+  Serialized ModelOpt `INT8_PB_WO` linear layers can also reuse pre-processed
+  weights with the Marlin backend and FP16/BF16 activations. Humming and
+  ModelOpt INT8 MoE layers are not covered.
   Serialized `compressed-tensors` W8A8 FP8 linear layers with 128×128
   weight blocks and dynamic per-token group-128 activations support CUDA IPC
   when both processes select the CUTLASS block-FP8 backend on a supported GPU.
