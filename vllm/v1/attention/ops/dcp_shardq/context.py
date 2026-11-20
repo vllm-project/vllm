@@ -509,11 +509,10 @@ def build_dcp_shardq_context(
 class _GatheredContextIndexRemap(ConvertReqIndexToGlobalIndexKernel):
     """The sparse-MLA top-k remap as a DCP ShardQ step runs it
     (SparseMLACommonImpl.forward_mqa over kv_gathered metadata): onto the
-    workspace's 64-token
-    pages, without DCP, with valid counts, through a block table padded to
-    TABLE_PAGES_ALIGN pages. Its Triton kernel is the one every
-    ConvertReqIndexToGlobalIndexKernel launches, so warming these keys here
-    warms the runtime launches."""
+    workspace's 64-token pages, without DCP, with valid counts, through a
+    block table padded to TABLE_PAGES_ALIGN pages. Its Triton kernel is the
+    one every ConvertReqIndexToGlobalIndexKernel launches, so warming these
+    keys here warms the runtime launches."""
 
     def get_warmup_keys(  # type: ignore[override]
         self, *, num_topk_tokens: int
@@ -565,8 +564,8 @@ WORKSPACE = "workspace full"
 
 
 class DcpShardQStats:
-    """Steps with prefill requests, and their prefill tokens, by path: ShardQ, or
-    the DCP path and why. Rank 0 logs them at most every
+    """Steps with prefill requests, and their prefill tokens, by path: ShardQ,
+    or the DCP path and why. Rank 0 logs them at most every
     VLLM_LOG_STATS_INTERVAL seconds, for the steps since its previous report
     and in total, labeled with the layers of the metadata builder that plans
     them. Every step the builder plans counts, the runner's profile and warmup
@@ -649,7 +648,8 @@ class DcpShardQPlanner:
     ) -> DcpShardQContext | None:
         """The context plan of a step that runs as a DCP ShardQ step with the
         token split `split` (vllm.v1.attention.ops.shardq.build_shardq_split),
-        or None for the DCP path. A step without prefill requests is not counted.
+        or None for the DCP path. Steps without prefill requests are not
+        counted.
 
         The split's decode tokens (requests of at most `max_decode_query_len`
         tokens, which the indexer scores on its decode path) keep the DCP path;

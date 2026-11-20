@@ -310,9 +310,11 @@ def build_shardq_metadata(
         ),
         gathered_context=gathered_context,
     )
-    gathered = {}
     if gathered_context is not None:
-        gathered = dict(
+        # These tokens attend the gathered context instead of the DCP-local
+        # cache.
+        metadata = replace(
+            metadata,
             block_table=gathered_context.block_table,
             block_size=gathered_context.block_size,
             kv_gathered=True,
@@ -326,7 +328,6 @@ def build_shardq_metadata(
             shardq.local_token_ids + num_decode_tokens
         ],
         topk_start=num_decode_tokens,
-        **gathered,
     )
     return shardq
 
@@ -1165,9 +1166,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                     block_stride_rows=block_stride_rows,
                     return_valid_counts=True,
                 )
-            # A gathered-context step's output goes straight back to the head
-            # shards: no DCP combine reads its LSE.
-            extra = {"return_lse": False} if attn_metadata.kv_gathered else {}
             return self._forward_mqa_kernel(
                 q,
                 kv_c_and_k_pe_cache,
@@ -1176,7 +1174,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 layer=layer,
                 block_size=block_size,
                 is_decode=num_decode_tokens >= num_tokens,
-                **extra,
+                # A gathered-context step's output goes straight back to the
+                # head shards: no DCP combine reads its LSE.
+                return_lse=False if attn_metadata.kv_gathered else None,
             )
 
         assert self.dcp_world_size == 1

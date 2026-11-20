@@ -48,10 +48,10 @@ _LSE_KINDS = {torch.float32: 0, torch.bfloat16: 1, torch.float16: 2}
 _OUTPUT_DTYPES = (torch.bfloat16, torch.float16)
 _PUSH_THREADS = 128
 _COMBINE_WARPS = 4
-# The benchmarked range: 2-8 ranks, up to 64 heads per rank (MLA has at most
-# 128 heads and DCP ranks split TP ranks, so at least 2 TP ranks share them),
-# and MLA's 512-dim latent output. The push sends one LSE per thread, so
-# heads_per_rank must not exceed _PUSH_THREADS.
+# The combine holds every source's partials in registers, so the rank count
+# is bounded. The push sends one LSE per thread (heads_per_rank <=
+# _PUSH_THREADS); MLA has at most 128 heads over at least 2 DCP ranks. The
+# output is MLA's 512-dim latent (a combine lane covers 8 of every 256 dims).
 _MAX_WORLD_SIZE = 8
 _MAX_HEADS_PER_RANK = 64
 _HEAD_DIM = 512

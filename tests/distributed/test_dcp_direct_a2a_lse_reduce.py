@@ -845,8 +845,9 @@ _requires_cutedsl_a2a = pytest.mark.skipif(
 )
 _A2A_HEAD_DIM = 512
 _A2A_MAX_NUM_TOKENS = 256
-# GPU cycles (~25 ms) that hold simulated ranks' streams while the host queues
-# their launches (_SimulatedA2ARanks._per_rank_streams).
+# GPU cycles (tens of ms at current clocks) that hold the simulated ranks'
+# streams while the host queues their launches
+# (_SimulatedA2ARanks._per_rank_streams).
 _LAUNCH_GATE_CYCLES = 50_000_000
 
 

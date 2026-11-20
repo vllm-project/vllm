@@ -817,14 +817,8 @@ def sparse_attn_indexer(
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
     # nvidia path, _fused_norm_rope_kernel already cleared the same
     # [:num_tokens, :topk] region earlier in this forward, so skip the redundant
-    # fill. Neither does a decode-only step into a topk_tokens-wide buffer: the
-    # decode top-k writes every token's top-k in full, -1 past a short context.
-    decode_fills_all = (
-        not has_prefill
-        and num_decode_tokens == hidden_states.shape[0]
-        and topk_indices_buffer.shape[1] == topk_tokens
-    )
-    if not (skip_topk_buffer_clear or decode_fills_all):
+    # fill.
+    if not skip_topk_buffer_clear:
         topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
@@ -1078,9 +1072,7 @@ def sparse_attn_indexer(
                     num_positions=max_model_len,
                     direct_max_rows=dcp_direct_topk_max_rows,
                 )
-            # Free this chunk's logits before the next chunk allocates its own:
-            # the profile run has one chunk, so two live chunks would exceed
-            # the logits budget it reserved.
+            # Free this chunk's logits before the next chunk allocates its own.
             del logits
 
     if has_decode:

@@ -76,7 +76,8 @@ MIN_HEADS_FOR_BF16_PREFILL = 32
 
 # Mixed batch mode runs prefill steps through the decode kernel, whose transient
 # memory grows with the token count; longer steps run in chunks of this many
-# tokens (~1% slower than one call at 32k tokens on B300, ~1/4 the memory).
+# tokens (about 1/4 the transient memory of one call at 32k tokens, for a
+# small slowdown).
 FP8_MIXED_BATCH_CHUNK_TOKENS = 8192
 
 
@@ -1286,7 +1287,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
         kernel_metadata: "FlashMLASparseMetadata.FP8KernelMetadata | None" = None,
-        req_id_per_token: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Mixed batch FP8 forward path that treats all tokens as one batch.
 
@@ -1300,10 +1300,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8KernelMetadata)
 
         block_table = attn_metadata.block_table
-        if req_id_per_token is None:
-            # req_id_per_token covers the whole batch; slice it to the MQA
-            # tokens (q may exclude prefill tokens routed to dense MHA).
-            req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
+        # req_id_per_token covers the whole batch; slice it to the MQA tokens
+        # (q may exclude prefill tokens routed to dense MHA).
+        req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
         kv_pages, block_stride_rows = _fp8_kv_pages(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )

@@ -1734,7 +1734,7 @@ class MLADCPManager:
             vllm_config.kernel_config.enable_jit_warmup
             and self.use_a2a
             and (
-                not self._has_direct_a2a_workspace
+                self.direct_a2a is None
                 or self.max_num_tokens
                 < vllm_config.scheduler_config.max_num_batched_tokens
             )
@@ -1788,9 +1788,8 @@ class MLADCPManager:
                 dtype,
                 self.num_ubatches,
             )
-        self._has_direct_a2a_workspace = direct_workspace is not None
+        self.direct_a2a = direct_workspace
         if direct_workspace is not None:
-            self.direct_a2a = direct_workspace
             logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
             if enable_jit_warmup:
                 direct_workspace.register_warmup()
