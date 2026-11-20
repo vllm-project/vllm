@@ -321,14 +321,17 @@ def _sysfs(device: str, *parts: str) -> str:
 
 
 def active_devices() -> list[str]:
-    """Names of RDMA devices whose port 1 is active."""
+    """Names of mlx5 RDMA devices (the WQEs we build are mlx5's) whose port 1
+    is active. By driver, since udev may rename devices."""
     root = "/sys/class/infiniband"
     if not os.path.isdir(root):
         return []
     return sorted(
         name
         for name in os.listdir(root)
-        if _sysfs(name, "ports", "1", "state").endswith("ACTIVE")
+        if os.path.basename(os.path.realpath(f"{root}/{name}/device/driver"))
+        == "mlx5_core"
+        and _sysfs(name, "ports", "1", "state").endswith("ACTIVE")
     )
 
 

@@ -109,6 +109,9 @@ class Request:
         self.kv_transfer_params: dict[str, Any] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
+        # P/D: M-RoPE position delta the KV producer's worker computed for the
+        # prompt, reported to the decode instance in kv_transfer_params.
+        self.mrope_position_delta: int | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -167,6 +170,8 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
+        # In-flight steps that added to num_output_placeholders.
+        self.num_output_placeholder_steps = 0
         # Tokens of output in flight when the request was preempted: delivered
         # on return, but must not mutate the reset counters.
         self.num_stale_output_tokens = 0

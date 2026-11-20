@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_offload.base import OffloadKey
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 
 class StoreCandidates(NamedTuple):
@@ -49,15 +49,7 @@ def select_store_candidates(
     if req.status is RequestStatus.FINISHED_ABORTED:
         num_tokens_after_batch = req.num_computed_tokens
     elif req.is_finished():
-        # Clamp to the GPU prefix cache's commit point. The final sampled
-        # token's slot is never committed (under spec decode it holds a
-        # rejected draft's KV), so a block ending there must not be stored.
-        # A request that finished before its prefill completed (e.g. an
-        # error) has computed only num_computed_tokens of its prompt.
-        num_tokens_after_batch = min(
-            req.num_computed_tokens,
-            max(req.num_prompt_tokens, req.num_tokens - 1),
-        )
+        num_tokens_after_batch = _committed_num_tokens(req)
     else:
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req.request_id]
         num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
@@ -109,14 +101,12 @@ def select_store_candidates(
             store_horizon_chunks = None
         if reconsider_final_swa_tail:
             assert final_swa_alignment_blocks is not None
-            horizon_blocks = num_chunks * blocks_per_chunk
-            partial_segment_start_block = (
-                horizon_blocks - horizon_blocks % final_swa_alignment_blocks
+            start_chunk_idx = min(
+                start_chunk_idx,
+                _segment_start_chunk(
+                    blocks_per_chunk, final_swa_alignment_blocks, num_chunks
+                ),
             )
-            partial_segment_start_chunk = (
-                partial_segment_start_block // blocks_per_chunk
-            )
-            start_chunk_idx = min(start_chunk_idx, partial_segment_start_chunk)
         group_store_ranges.append((start_chunk_idx, num_chunks))
 
         if group_config.requires_cow_source:
@@ -242,6 +232,60 @@ def _reachable_store_block_mask(
             else None
         ),
     )
+
+
+def final_swa_tail_start_chunk(
+    config: SchedulerOffloadConfig,
+    req_status: RequestOffloadState,
+    config_group_idx: int,
+) -> int | None:
+    """The lowest chunk that a finish-time store of the final SWA tail can read.
+
+    The final tail starts at the aligned segment of the store horizon at
+    finish. This uses a lower bound of that horizon: the tokens of a request
+    only grow, and an abort stores up to its computed tokens.
+
+    Args:
+        config: the scheduler offloading config.
+        req_status: the request.
+        config_group_idx: the index of the group in the offloading config.
+
+    Returns:
+        The first chunk of the final tail, or None if the group has no final
+        SWA tail.
+
+    """
+    group_config = config.kv_group_configs[config_group_idx]
+    alignment_blocks = _final_swa_alignment_blocks(config, group_config)
+    if alignment_blocks is None or config.retention_interval is not None:
+        return None
+    num_chunks = req_status.storable_chunks(
+        group_config,
+        req_status.group_states[config_group_idx],
+        req_status.num_offloadable_tokens(_committed_num_tokens(req_status.req)),
+        not config.num_hash_lookahead_tokens,
+    )
+    return _segment_start_chunk(config.blocks_per_chunk, alignment_blocks, num_chunks)
+
+
+def _committed_num_tokens(req: Request) -> int:
+    """The tokens of a finished request that the GPU prefix cache commits.
+
+    For a running request, this is a lower bound of the value at finish.
+    """
+    # The final sampled token's slot is never committed (under spec decode it
+    # holds a rejected draft's KV), so a block ending there must not be
+    # stored. A request that finished before its prefill completed (e.g. an
+    # error) has computed only num_computed_tokens of its prompt.
+    return min(req.num_computed_tokens, max(req.num_prompt_tokens, req.num_tokens - 1))
+
+
+def _segment_start_chunk(
+    blocks_per_chunk: int, alignment_blocks: int, num_chunks: int
+) -> int:
+    """The first chunk of the aligned segment that holds chunk num_chunks."""
+    num_blocks = num_chunks * blocks_per_chunk
+    return (num_blocks - num_blocks % alignment_blocks) // blocks_per_chunk
 
 
 def _final_swa_alignment_blocks(

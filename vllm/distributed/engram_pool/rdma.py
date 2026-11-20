@@ -957,9 +957,11 @@ class RdmaTransport:
 
     def _launch(self, kernel, grid, args: tuple, consts: dict) -> None:
         """Launch `kernel` on the current stream, compiled once per constexprs
-        and tensor alignment: Triton's per-call dispatch costs ~20 us here."""
-        aligned = tuple(a.data_ptr() % 16 == 0 for a in args if type(a) is torch.Tensor)
-        key = (kernel, *consts.values(), *aligned)
+        and tensor dtype and alignment: Triton's per-call dispatch costs ~20 us
+        here."""
+        tensors = [a for a in args if type(a) is torch.Tensor]
+        key = (kernel, *consts.values())
+        key += tuple((a.dtype, a.data_ptr() % 16 == 0) for a in tensors)
         if (compiled := self._compiled.get(key)) is None:
             compiled = kernel.warmup(*args, grid=grid, num_warps=4, **consts)
             compiled._init_handles()

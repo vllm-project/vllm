@@ -312,7 +312,7 @@ def _check_pool_tables(store_dir: str):
             for device in range(WORLD_SIZE)
         ):
             modes.append(("nvlink", True, 4))
-    if verbs.active_devices():
+    if current_platform.is_cuda() and verbs.active_devices():
         # GPUs of a node map each other's host shards; nodes of one use RDMA.
         modes += [("rdma", False, 4), ("rdma", True, 4), ("rdma", True, 1)]
     weight, scale = _full_table(sum(HEAD_SIZES))
