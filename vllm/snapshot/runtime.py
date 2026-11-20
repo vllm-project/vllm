@@ -135,7 +135,7 @@ def _close_pidfds(handles: Iterable[tuple[int, int]]) -> None:
             os.close(pidfd)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProcessInventory:
     root_pid: int
     process_tree: tuple[int, ...]
@@ -145,7 +145,7 @@ class ProcessInventory:
     generated_files: tuple[GeneratedFile, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TcpSocketRecord:
     family: str
     local_raw: str

@@ -1,23 +1,26 @@
 # Kimi-K3 specialized decode (MI355X)
 
 An opt-in decode path for Kimi-K3 at TP8 on MI355X (gfx950), following RFC #60904.
-A pure spec-verify step of at most 16 rows runs each MoE decoder layer as persistent
-FlyDSL MonoKernels (256 CTAs, all resident), in "layer mode", inside the stock
-layer loop. The TP all-reduces run in-kernel over peer memory.
+A pure uniform regular-decode or spec-verify step of at most 16 rows runs each
+MoE decoder layer as persistent FlyDSL MonoKernels (256 CTAs, all resident), in
+"layer mode", inside the stock layer loop. The TP all-reduces run in-kernel over
+peer memory.
 
-- **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, spec conv, KDA recurrence,
-  gated RMSNorm), then K2.
+- **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, causal convolution, KDA
+  recurrence, gated RMSNorm), then K2.
 - **FFN layers** (MLA, DCP1 or DCP8): M1a (AttnRes, qkv_a and g_proj, q / kv
   RMSNorm, the fp8 KV write of this rank's tokens, q_b, MXFP4 W_UK, the fp8 query
   gathered to every rank's peer memory), AITER's MLA decode on this rank's KV
   shard, then K2, which runs M1b first (the LSE combine of every rank's partials,
   MXFP4 W_UV, the sigmoid gate). At DCP1 every rank holds the whole KV and an MLA
-  layer is two launches: M1a writes its 12 heads' bf16 query, then K2 runs the
-  decode attention itself (M1c, FlyDSL) and M1b merges M1c's KV splits. No gather
-  and no AITER decode.
-- **FFN layers M1 cannot serve** (DCP8 only: another MLA backend, a KV cache that
-  is not fp8 E4M3, `VLLM_ROCM_USE_AITER_FP4BMM` unset, or MLA weights M1 does not
-  read): vLLM's AttnRes and MLA attention ops write o_proj's input, then K2.
+  layer uses AITER's MLA decode for ordinary q=1. Speculative DCP1 instead has
+  M1a write a bf16 query, then K2 runs M1c (FlyDSL) and M1b merges M1c's KV
+  splits. No gather and no AITER decode in that speculative path.
+- **FFN layers M1 cannot serve** (ordinary decode at DCP1 or DCP8, and
+  speculative decode at DCP8): vLLM's AttnRes and MLA attention ops write
+  o_proj's input, then K2. Causes include another MLA backend, a KV cache that is
+  not fp8 E4M3, `VLLM_ROCM_USE_AITER_FP4BMM` unset, or MLA weights M1 does not
+  read.
 - **K2**: o_proj + all-reduce + MLP AttnRes, then the latent MoE (router,
   top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,
   final all-reduce).
@@ -37,7 +40,7 @@ but at 32 and 64 rows they lose to vLLM's decode, so a served step is capped at 
 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
   vllm serve <Kimi-K3> -tp 8 --max-num-seqs 1 \
   [--decode-context-parallel-size 8 --dcp-comm-backend a2a] --kv-cache-dtype fp8 \
-  --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, ...}' \
+  [--speculative-config '{"method": "dspark", "num_speculative_tokens": 7, ...}'] \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
 
@@ -45,19 +48,22 @@ There are no other options. `decode_backend=auto` (the default) runs vLLM's deco
 
 ## Supported deployments
 
-TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, speculative
-decoding, AITER (`VLLM_ROCM_USE_AITER=1`: K2's MoE is AITER's SiTU MXFP4 MoE),
-BF16 conv / FP32 recurrent KDA states. `--max-num-seqs` is 1, 2, 4 or 8, with
-max_num_seqs x (num_speculative_tokens + 1) <= 16 (a full step is one launch).
-DCP1 runs M1c only: 3 or 7 speculative tokens, max_num_seqs 1 or 2. M1 assumes
-no KV cache interleave (it writes the slots vLLM maps), but at DCP8 vLLM's AITER
-MLA backend serves DSpark at interleave 1 only.
+TP8 on MI355X with all 256 CUs, ordinary decode at decode context parallel 1 or 8, or
+speculative decoding at decode context parallel 1 or 8, AITER
+(`VLLM_ROCM_USE_AITER=1`: K2's MoE is AITER's SiTU MXFP4 MoE), BF16 conv / FP32
+recurrent KDA states. For speculative decoding, `--max-num-seqs` is 1, 2, 4 or 8,
+with max_num_seqs x (num_speculative_tokens + 1) <= 16 (a full step is one
+launch). Speculative DCP1 runs M1c only: 3 or 7 speculative tokens,
+max_num_seqs 1 or 2. M1 assumes no KV cache interleave (it writes the slots
+vLLM maps), but at DCP8 vLLM's AITER MLA backend serves DSpark at interleave 1
+only.
 
 M1 also needs the `ROCM_AITER_MLA` attention backend (it reads AITER MLA's decode
 metadata), an fp8 E4M3 KV cache (`fp8` or `fp8_e4m3`) and MLA's W_UK / W_UV as
 AITER MXFP4 bmms (`VLLM_ROCM_USE_AITER_FP4BMM=1`). Without them the MLA layers
-run vLLM's attention ops, then K2, and startup logs why; DCP1 runs only with M1
-and is refused. The KDA layers run K1 and K2 either way.
+run vLLM's attention ops, then K2, and startup logs why. That fallback supports
+ordinary decode at DCP1 or DCP8 and speculative decode at DCP8; speculative
+DCP1 requires M1. The KDA layers run K1 and K2 either way.
 
 KV transfer support is limited to built-in MoRIIO READ and WRITE consumers and
 the built-in Mooncake consumer.
@@ -69,13 +75,14 @@ If you request the specialized decode for anything else, startup fails with one
 - **Config, in the model's `__init__`:** pipeline, data, expert or prefill
   context parallelism, EPLB, DBO, LoRA, AITER off, unsupported KV connectors,
   routed-expert capture, sleep mode, CPU weight offload, weight updates,
-  no speculative decoding, an unserved max_num_seqs / speculative tokens / DCP,
+  an unserved max_num_seqs / speculative tokens / DCP,
   adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
   `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
 - **Loaded weights, when the model state builds the executor:** each kernel
   layer's weight shapes and dtypes and the MoE backend (`AITER_MXFP4_BF16`, K3
   SiTU). Each MLA layer's attention backend, shapes, gate, DCP setup, fp8 E4M3
-  cache and bmm weights decide M1 or vLLM's ops (not a refusal at DCP8).
+  cache and bmm weights decide M1 or vLLM's ops (not a refusal for ordinary
+  decode or at DCP8).
 - **KV caches, at every bind:** the KDA state dtypes and layout, and with M1 the
   MLA cache's fp8 dense rows.
 
@@ -83,12 +90,16 @@ Every TP rank agrees on each verdict before anything collective runs.
 
 ## Steps
 
-`plan()` runs once per step. It picks the kernels for a pure spec-verify step of
-whole uniform requests whose width is one of the built widths: every multiple of
-`num_speculative_tokens + 1` up to `max_num_seqs` requests (at most 16 rows).
-With M1 the MLA layers' metadata must agree (pure decode, the same width, AITER's
-non-Gluon decode). Every other step runs vLLM's layers: prefill, mixed, wider and
-PIECEWISE steps.
+`plan()` runs once per step. It picks the kernels for a pure uniform
+regular-decode or spec-verify step whose width is one of the built widths:
+without speculation, every request count through `min(max_num_seqs, 16)`; with
+speculation, every multiple of `num_speculative_tokens + 1` up to
+`max_num_seqs` requests (also at most 16 rows). With M1 the MLA layers' metadata
+must agree (pure decode, the same width, AITER's non-Gluon decode). Every other
+step runs vLLM's layers: prefill, mixed, wider and PIECEWISE steps. A
+regular-decode step in a deployment configured for speculation also runs vLLM's
+layers, because its kernels were built for the configured speculative width
+rather than one row per request.
 
 Under FULL graphs the plan is baked in at capture. vLLM's capture sizes are not
 changed. A replay with fewer requests than its graph pads whole requests. Those
