@@ -34,7 +34,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.hy_v4.dfly_config import HYV4DFlySpeculatorConfig
-from vllm.models.hy_v4_flash.amd.swa import FlashPackedSparseBackend
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
@@ -44,6 +43,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 
+from .aiter_mla_sparse import HYV4AiterMLASparseBackend
 from .attention import HYV4MLAAttention
 from .base_model import HYV4DecoderLayer
 from .moe import HYV4FeedForward
@@ -178,7 +178,7 @@ class HYV4DFlyFeedForward(HYV4FeedForward):
 
 
 class HYV4DFlyAttention(HYV4MLAAttention):
-    """Draft attention on `FlashPackedSparseBackend`.
+    """Draft attention on `HYV4AiterMLASparseBackend`.
 
     Draft top-k rows are not front-packed, which the stock AITER sparse path
     requires.
@@ -194,7 +194,7 @@ class HYV4DFlyAttention(HYV4MLAAttention):
                 "HYV4 DFly on ROCm requires the ROCM_AITER_MLA_SPARSE draft "
                 f"backend, got {name}"
             )
-        return FlashPackedSparseBackend
+        return HYV4AiterMLASparseBackend
 
 
 class HYV4DFlyDecoderLayer(HYV4DecoderLayer):
@@ -276,7 +276,7 @@ class HYV4DFlyModel(nn.Module):
             attn = layer.self_attn
             if (
                 not attn.learnable_sink
-                or attn.mla_attn.get_attn_backend() is not FlashPackedSparseBackend
+                or attn.mla_attn.get_attn_backend() is not HYV4AiterMLASparseBackend
             ):
                 raise ValueError("DFly requires a backend that applies learnable sinks")
             attn.use_hpc_gated_mla = False
@@ -364,6 +364,9 @@ class HYV4DFlyForCausalLM(nn.Module):
         super().__init__()
         if not current_platform.is_rocm():
             raise NotImplementedError("The HYV4 DFly AMD implementation requires ROCm")
+        # The ROCm fp8_ds_mla sparse path cannot apply the learnable sink.
+        if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
+            raise ValueError("HYV4 DFly on ROCm requires BF16 KV storage")
         self.model = HYV4DFlyModel(vllm_config, maybe_prefix(prefix, "model"))
         self.config = self.model.config
         self.has_own_embed_tokens = False
