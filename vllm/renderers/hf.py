@@ -973,13 +973,10 @@ def rebuild_mm_uuids_from_mm_data(
         "Expected all vision_chunk items to be dicts"
     )
     vision_chunks = cast(list[dict[str, Any]], vision_chunks)
-    vision_chunk_uuids = [
-        uuid_val for item in vision_chunks if (uuid_val := item.get("uuid")) is not None
-    ]
 
-    if vision_chunk_uuids:
-        mm_uuids = dict(mm_uuids)
-        mm_uuids["vision_chunk"] = vision_chunk_uuids
+    # One entry per item; None means the item is hashed by content.
+    mm_uuids = dict(mm_uuids)
+    mm_uuids["vision_chunk"] = [item.get("uuid") for item in vision_chunks]
 
     return mm_uuids
 
