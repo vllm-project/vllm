@@ -1284,7 +1284,7 @@ async fn generative_scoring_rejects_invalid_requests_before_submission() {
     }
     expect_test::expect![[r#"
         [
-            "{\"model\":\"missing\"} -> 404 Not Found: \"The model `missing` does not exist.\"",
+            "{\"model\":\"missing\"} -> 404 Not Found: \"The model `missing` does not exist. Valid aliases: Qwen/Qwen1.5-0.5B-Chat.\"",
             "{\"label_token_ids\":[]} -> 400 Bad Request: \"label_token_ids must contain at least one token ID.\"",
             "{\"items\":[]} -> 400 Bad Request: \"items must contain at least one item.\"",
             "{\"label_token_ids\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]} -> 400 Bad Request: \"requested logprobs of 21, which is greater than max allowed: 20\"",
@@ -3877,6 +3877,29 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["data"][1]["id"], "adapter-a");
 
+    // A loaded adapter is selectable but not listed among the valid aliases.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "missing",
+                        "prompt": "hello",
+                        "max_tokens": 2
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    expect_test::expect![[r#"{"error":{"message":"The model `missing` does not exist. Valid aliases: Qwen/Qwen1.5-0.5B-Chat.","type":"NotFoundError","param":"model","code":404}}"#]].assert_eq(std::str::from_utf8(&body).expect("utf-8 body"));
+
     let response = app
         .call(
             Request::builder()
@@ -3986,6 +4009,22 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
         .await
         .expect("call app");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Unloading an adapter that is not loaded reports the adapter, not a model.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/unload_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"lora_name": "adapter-a"}).to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    expect_test::expect![[r#"{"error":{"message":"LoRA adapter `adapter-a` is not loaded","type":"NotFoundError","param":null,"code":404}}"#]].assert_eq(std::str::from_utf8(&body).expect("utf-8 body"));
 
     drop(app);
     engine_task.finish().await;
@@ -13727,7 +13766,7 @@ async fn error_log_lines(log_error_stack: bool) -> Vec<String> {
 async fn log_error_stack_logs_error_responses() {
     expect_test::expect![[r#"
         [
-            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=404 error_type=\"NotFoundError\" error=\"The model `missing` does not exist.\"",
+            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=404 error_type=\"NotFoundError\" error=\"The model `missing` does not exist. Valid aliases: test-model.\"",
             "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=400 error_type=\"Bad Request\" error=\"Failed to parse the request body as JSON: key must be a string at line 1 column 2\"",
         ]
     "#]].assert_debug_eq(&error_log_lines(true).await);
