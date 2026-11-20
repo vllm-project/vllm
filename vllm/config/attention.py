@@ -36,12 +36,12 @@ class HiSparseConfig:
     rows are always mirrored during the forward."""
 
     host_pool_gib: float | None = Field(default=None, gt=0)
-    """Enable HiSparse with this host memory budget, without writing a KV
-    transfer config. vLLM adds `HiSparseConnector` and, when prefix caching is
-    enabled, an `OffloadingConnector` for the indexer cache, and splits the
-    budget so both hold the same tokens: a prefix hit needs both. With an
-    explicit `--kv-transfer-config`, set `host_pool_gib` on `HiSparseConnector`
-    instead; that config is used as written."""
+    """Enable HiSparse with this host memory budget. vLLM adds
+    `HiSparseConnector` and, when prefix caching is enabled, an
+    `OffloadingConnector` for the indexer cache, and splits the budget so both
+    hold the same tokens: a prefix hit needs both. Any connector in
+    `--kv-transfer-config` (e.g. NIXL for P/D) is kept as written and composed
+    with them through `MultiConnector`."""
 
 
 @config

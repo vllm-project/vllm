@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Iterable
 from contextlib import contextmanager
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -1293,26 +1293,33 @@ class VllmConfig:
         self.kv_transfer_config.kv_role = "kv_both"
 
     def _build_hisparse_kv_transfer_config(self) -> None:
-        """Build HiSparse's connectors from `hisparse_config.host_pool_gib`,
-        with an indexer offload tier sharing the budget under prefix caching."""
+        """Add HiSparse's connectors for `hisparse_config.host_pool_gib`, with
+        an indexer offload tier sharing the budget under prefix caching, next
+        to any other connector (e.g. P/D) the user configured."""
         hisparse_config = self.attention_config.hisparse_config
         if hisparse_config is None or hisparse_config.host_pool_gib is None:
-            return
-        if self.kv_transfer_config is not None:
-            if (
-                hisparse_host_pool_gib(self.kv_transfer_config)
-                != hisparse_config.host_pool_gib
-            ):
-                raise ValueError(
-                    "hisparse_config.host_pool_gib configures HiSparse's KV "
-                    "connectors itself; with --kv-transfer-config, set "
-                    "host_pool_gib on HiSparseConnector there instead."
-                )
             return
         if self.cache_config.kv_offloading_size is not None:
             raise ValueError(
                 "hisparse_config.host_pool_gib cannot be combined with "
                 "--kv-offloading-size."
+            )
+        kv_transfer_config = self.kv_transfer_config
+        if hisparse_host_pool_gib(kv_transfer_config) == hisparse_config.host_pool_gib:
+            return
+        if kv_transfer_config is not None and any(
+            kv_transfer_config.has_connector(name)
+            for name in (
+                "HiSparseConnector",
+                "OffloadingConnector",
+                "MooncakeStoreConnector",
+            )
+        ):
+            raise ValueError(
+                "hisparse_config.host_pool_gib adds HiSparse's connectors "
+                "itself; remove HiSparseConnector and KV offloading connectors "
+                "from --kv-transfer-config, or configure them there without "
+                "hisparse_config.host_pool_gib."
             )
         connectors: list[dict[str, Any]] = [
             {
@@ -1327,11 +1334,28 @@ class VllmConfig:
             connectors.append(
                 {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"}
             )
-        self.kv_transfer_config = KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"connectors": connectors},
-        )
+        if kv_transfer_config is None:
+            self.kv_transfer_config = KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"connectors": connectors},
+            )
+            return
+        if kv_transfer_config.kv_connector == "MultiConnector":
+            kv_transfer_config.kv_connector_extra_config["connectors"].extend(
+                connectors
+            )
+            return
+        user_connector = {
+            f.name: getattr(kv_transfer_config, f.name)
+            for f in fields(kv_transfer_config)
+            if f.name != "engine_id"
+        }
+        kv_transfer_config.kv_connector = "MultiConnector"
+        kv_transfer_config.kv_connector_module_path = None
+        kv_transfer_config.kv_connector_extra_config = {
+            "connectors": [user_connector, *connectors]
+        }
 
     def _verify_aux_output_compatibility(self) -> None:
         """Reject configurations unsupported by enabled auxiliary outputs."""
@@ -2373,7 +2397,8 @@ class VllmConfig:
                 "its indexer cache. A prefix hit needs the indexer cache too, "
                 "and it is evicted from the GPU long before the host pool "
                 "fills. Add an OffloadingConnector, or set "
-                "hisparse_config.host_pool_gib instead of --kv-transfer-config."
+                "hisparse_config.host_pool_gib instead of configuring "
+                "HiSparseConnector in --kv-transfer-config."
             )
         if (
             self.speculative_config is not None

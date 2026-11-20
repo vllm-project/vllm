@@ -37,11 +37,20 @@ vLLM then configures the KV connectors: `HiSparseConnector`, and with prefix
 caching an `OffloadingConnector` for the indexer cache, splitting the budget
 between them (see [Indexer KV offloading](#indexer-kv-offloading)).
 
-Write an explicit `--kv-transfer-config` only when HiSparse must be composed
-with other connectors, such as NIXL for P/D, through `MultiConnector`. That
-config is used as written: set `host_pool_gib` on `HiSparseConnector`, and add
-an `OffloadingConnector` with its own `cpu_bytes_to_use` to keep prefix caching
-effective.
+For P/D, keep the NIXL `--kv-transfer-config` and add the same flag; vLLM
+composes its connectors with yours through `MultiConnector`:
+
+```bash
+vllm serve DSA_MODEL \
+    --attention-config.hisparse_config.host_pool_gib 64 \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+```
+
+A `--kv-transfer-config` that already contains `HiSparseConnector` or a KV
+offloading connector is used as written, without
+`hisparse_config.host_pool_gib`: set `host_pool_gib` on `HiSparseConnector`,
+and add an `OffloadingConnector` with its own `cpu_bytes_to_use` to keep prefix
+caching effective.
 
 `host_pool_gib` is the usable host-cache capacity per data-parallel replica,
 not a node-wide memory budget.
