@@ -254,10 +254,8 @@ class OffloadingConnectorScheduler:
         if (
             transfer_config is not None
             and transfer_config.kv_connector == "OffloadingConnector"
-            and self.config.dcp_world_size == 1
             and not any(
-                group.prefix_replay_tokens or group.host_resident
-                for group in kv_cache_config.kv_cache_groups
+                group.prefix_replay_tokens for group in kv_cache_config.kv_cache_groups
             )
         ):
             self._swa_prefix_groups = frozenset(
@@ -1289,38 +1287,13 @@ class OffloadingConnectorScheduler:
             self._chunks_being_loaded.update(keys_to_load)
         req_status.partial_tail_boundary = None
 
-    def _confirm_swa_prefixes(
-        self, scheduler_output: SchedulerOutput
-    ) -> dict[tuple[ReqId, int], int]:
-        if not self._unconfirmed_swa_prefixes:
-            return {}
-
-        new_reqs = {req.req_id: req for req in scheduler_output.scheduled_new_reqs}
-        confirmed = {}
-        for (req_id, group_idx), prefix in self._unconfirmed_swa_prefixes.items():
-            req = new_reqs.get(req_id)
-            block_size = self._group_configs_by_id[group_idx].tokens_per_block
-            if (
-                req is not None
-                and group_idx < len(req.block_ids)
-                and len(prefix) == req.num_computed_tokens // block_size
-                and prefix == req.block_ids[group_idx][: len(prefix)]
-            ):
-                confirmed[req_id, group_idx] = len(prefix)
-            else:
-                self._current_batch_allocated_block_ids.update(
-                    block_id for block_id in prefix if block_id != 0
-                )
-        self._unconfirmed_swa_prefixes.clear()
-        return confirmed
-
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
         """Update request states from the Scheduler's output."""
         # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.
         new_block_ids_end: dict[str, tuple[int, ...]] = {}
-        swa_prefixes = self._confirm_swa_prefixes(scheduler_output)
+        unconfirmed_prefixes = self._unconfirmed_swa_prefixes
 
         for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
@@ -1353,14 +1326,28 @@ class OffloadingConnectorScheduler:
                         group_idx, local_prefix_tokens
                     )
                     if is_full_table:
-                        # Skip only this request's hit. A different request's
-                        # allocation of the same ID still needs a fence.
-                        num_prefix_blocks = swa_prefixes.get(
-                            (req_id, group_idx), num_prefix_blocks
-                        )
+                        prefix_key = (req_id, group_idx)
+                        prefix = unconfirmed_prefixes.get(prefix_key)
+                        if prefix is not None:
+                            block_size = self._group_configs_by_id[
+                                group_idx
+                            ].tokens_per_block
+                            if (
+                                len(prefix)
+                                == req_status.req.num_computed_tokens // block_size
+                                and prefix == group_blocks[: len(prefix)]
+                            ):
+                                # Skip just this request's confirmed hit.
+                                num_prefix_blocks = len(prefix)
+                                del unconfirmed_prefixes[prefix_key]
                     self._current_batch_allocated_block_ids.update(
                         bid for bid in group_blocks[num_prefix_blocks:] if bid != 0
                     )
+
+        # Keep candidates for prefixes that did not match the scheduled table.
+        for prefix in unconfirmed_prefixes.values():
+            self._current_batch_allocated_block_ids.update(bid for bid in prefix if bid)
+        unconfirmed_prefixes.clear()
 
         for copy in scheduler_output.kv_cache_block_copies or ():
             self._current_batch_allocated_block_ids.add(copy.dst_block_id)
