@@ -123,6 +123,12 @@ miss or error, an invalid or incompatible bundle, or a D2D failure falls back
 to local compilation. A Store without a source cannot provide a compiled-cache
 cold start.
 
+The source scans compiled caches only when a shared Store is configured. If
+collecting or publishing the bundle fails, for example because the cache exceeds
+the 8 GiB limit, the source logs a warning and continues serving model weights.
+It advertises no compiled bundle, so targets use local compilation. Invalid
+Store configuration and Store initialization errors remain startup errors.
+
 For autotune tables, the exchange is keyed by the on-disk cache layout: a
 request names the cache by kind, configuration hash, DP rank and world rank,
 and the source resolves it to files under its cache root. Before installing,
