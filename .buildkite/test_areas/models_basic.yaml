@@ -374,6 +374,7 @@ steps:
   device: h200_35gb
   source_file_dependencies:
   - vllm/models/glm5next/
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
@@ -693,6 +694,7 @@ steps:
 
 - label: ":nvidia: (B200) Mistral Large 4"
   key: mistral-large-4-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -704,6 +706,7 @@ steps:
     --ignore=models/mistral/mistral_large4/amd_specialized_decode
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Mistral Large 4"
       dind: false
       device: mi355_1
