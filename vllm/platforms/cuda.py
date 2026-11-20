@@ -230,7 +230,7 @@ def _detect_confidential_compute() -> bool:
             "enabled" if enabled else "disabled",
         )
         return enabled
-    if not torch.cuda.is_available():
+    if _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES) == 0:
         return False
     try:
         enabled = _nvml_confidential_compute_enabled()

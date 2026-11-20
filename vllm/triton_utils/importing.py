@@ -27,11 +27,21 @@ if HAS_TRITON:
         # drivers. Triton's own driver selection skips it for the same reason
         # (see triton.runtime.driver._create_driver): CPU is only ever used
         # when explicitly selected.
-        active_drivers = [
-            x.driver
-            for name, x in backends.items()
-            if name != "cpu" and x.driver and x.driver.is_active()
-        ]
+        # For NVIDIA/AMD backends, use vLLM's stateless platform checks instead
+        # of driver.is_active(), which calls torch.cuda.is_available() and can
+        # poison fork() before workers are spawned.
+        active_drivers = []
+        for name, x in backends.items():
+            if name == "cpu" or not x.driver:
+                continue
+            if name == "nvidia":
+                if current_platform.is_cuda():
+                    active_drivers.append(x.driver)
+            elif name == "amd":
+                if current_platform.is_rocm():
+                    active_drivers.append(x.driver)
+            elif x.driver.is_active():
+                active_drivers.append(x.driver)
 
         # Check Triton CPU
         if vllm_version_matches_substr("cpu"):

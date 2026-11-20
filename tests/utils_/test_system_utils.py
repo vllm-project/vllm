@@ -129,3 +129,123 @@ raise SystemExit(1 if hung else proc.exitcode)
     env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}
     result = subprocess.run([sys.executable, "-c", script], env=env, timeout=120)
     assert result.returncode == 0
+
+
+def test_frontend_imports_do_not_call_cuda_is_available():
+    """Importing vLLM's public frontend APIs must not call
+    torch.cuda.is_available(), torch.cuda._lazy_init(), or import
+    torch.utils.cpp_extension so default 'fork' remains safe."""
+    script = """
+import sys
+import torch.cuda
+
+calls = []
+orig_is_available = torch.cuda.is_available
+orig_lazy_init = torch.cuda._lazy_init
+
+def tracked_is_available():
+    calls.append("is_available")
+    return orig_is_available()
+
+def tracked_lazy_init():
+    calls.append("_lazy_init")
+    return orig_lazy_init()
+
+torch.cuda.is_available = tracked_is_available
+torch.cuda._lazy_init = tracked_lazy_init
+
+from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine  # noqa: F401
+
+assert not calls, f"Unexpected CUDA calls during frontend import: {calls}"
+assert "torch.utils.cpp_extension" not in sys.modules
+assert "xgrammar" not in sys.modules
+assert "llguidance" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_fla_check_shared_mem_avoids_triton_driver_on_nvidia():
+    """Vendored FLA's check_shared_mem() must query CUDA properties via
+    cuda_get_device_properties on NVIDIA rather than triton.runtime.driver.active,
+    which calls torch.cuda.is_available() and poisons fork()."""
+    script = """
+import torch.cuda
+import vllm.third_party.flash_linear_attention.ops.utils as fla_utils
+
+def fail_is_available():
+    raise AssertionError("torch.cuda.is_available() should not be called")
+
+get_all_calls = []
+
+def fail_get_all():
+    get_all_calls.append("called")
+    raise AssertionError("get_all_max_shared_mem() should not be called on NVIDIA")
+
+queries = []
+def fake_cuda_get_device_properties(device, names, init_cuda=False):
+    queries.append((device, tuple(names)))
+    return (166912,)
+
+torch.cuda.is_available = fail_is_available
+fla_utils.is_amd = False
+fla_utils.is_nvidia = True
+fla_utils.get_all_max_shared_mem = fail_get_all
+fla_utils.cuda_get_device_properties = fake_cuda_get_device_properties
+fla_utils.check_shared_mem.cache_clear()
+
+result_ok = fla_utils.check_shared_mem("ampere")
+assert not get_all_calls, "get_all_max_shared_mem() was called on NVIDIA"
+assert result_ok is True
+assert queries == [(0, ("shared_memory_per_block_optin",))]
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_triton_utils_importing_avoids_cuda_driver_is_active():
+    """triton_utils.importing must determine active nvidia/amd drivers via
+    current_platform without calling driver.is_active()."""
+    pytest.importorskip("triton.backends")
+    script = """
+import importlib
+import types
+import triton.backends
+from vllm.platforms import current_platform, vllm_version_matches_substr
+
+def fail_is_active():
+    raise AssertionError("driver.is_active() should not be called for nvidia/amd")
+
+fake_driver = types.SimpleNamespace(is_active=fail_is_active)
+triton.backends.backends = {
+    "cpu": types.SimpleNamespace(driver=types.SimpleNamespace(is_active=lambda: True)),
+    "nvidia": types.SimpleNamespace(driver=fake_driver),
+    "amd": types.SimpleNamespace(driver=fake_driver),
+}
+
+import vllm.triton_utils.importing as importing
+importlib.reload(importing)
+expected = (
+    current_platform.is_cuda()
+    or current_platform.is_rocm()
+    or vllm_version_matches_substr("cpu")
+)
+assert importing.HAS_TRITON == expected
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr

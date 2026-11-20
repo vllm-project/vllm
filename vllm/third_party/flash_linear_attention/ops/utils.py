@@ -206,6 +206,12 @@ def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
             (max_shared_memory,) = cuda_get_device_properties(
                 tensor_idx, ("shared_memory_per_block",)
             )
+        elif is_nvidia:
+            # Triton's driver discovery calls torch.cuda.is_available(), which
+            # poisons fork() before EngineCore workers are started.
+            (max_shared_memory,) = cuda_get_device_properties(
+                tensor_idx, ("shared_memory_per_block_optin",)
+            )
         else:
             max_shared_memory = get_all_max_shared_mem()[tensor_idx]
         return max_shared_memory >= Backend.get_shared_memory(arch)
