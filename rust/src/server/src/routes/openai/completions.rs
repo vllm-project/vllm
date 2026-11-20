@@ -398,6 +398,7 @@ async fn completion_chunk_stream(
     // for stop strings or incomplete UTF-8 lags the tokens.
     let mut next_text_offset = 0_u32;
     let mut first_chunk = true;
+    let mut first_content_token_ts = None;
     let mut deferred_prompt_logprobs_error: Option<ApiError> = None;
     let mut continuous_usage = ContinuousUsage::default();
     // The generated text so far, for the complete line of
@@ -478,6 +479,7 @@ async fn completion_chunk_stream(
                 decoded,
                 sampled:
                     SampledDelta {
+                        timestamp,
                         token_ids,
                         logprobs,
                         ..
@@ -492,6 +494,13 @@ async fn completion_chunk_stream(
                 }
                 if let Some(error) = deferred_prompt_logprobs_error.take() {
                     return Err(error);
+                }
+                if first_content_token_ts.is_none()
+                    && !prompt_only
+                    && !delta.is_empty()
+                    && timestamp > 0.0
+                {
+                    first_content_token_ts = Some(timestamp);
                 }
                 // Prompt-only streaming already emitted the echoed prompt in the Start chunk.
                 // The one generated token is only used to drive the engine to a finished event,
@@ -537,7 +546,7 @@ async fn completion_chunk_stream(
                                 finished.timestamps,
                                 finished.usage.output_token_count,
                                 finished.spec_decode_metrics,
-                                Some(finished.timestamps.first_token_ts),
+                                first_content_token_ts,
                             );
                             y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                                 &envelope,
@@ -635,7 +644,7 @@ async fn completion_chunk_stream(
                             finished.timestamps,
                             finished.usage.output_token_count,
                             finished.spec_decode_metrics,
-                            Some(finished.timestamps.first_token_ts),
+                            first_content_token_ts,
                         );
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
@@ -784,7 +793,7 @@ mod tests {
         DecodedTextEvent::TextDelta {
             decoded: DecodedText::unattributed(text),
             sampled: SampledDelta {
-                timestamp: 0.0,
+                timestamp: finished.as_ref().map_or(0.0, |value| value.timestamps.last_token_ts),
                 token_ids,
                 logprobs,
                 sampling_mask: None,
@@ -929,7 +938,7 @@ mod tests {
 
     #[tokio::test]
     async fn completion_chunk_stream_maps_streaming_logprobs() {
-        let stream = stream::iter(vec![
+        let mut outputs = vec![
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2, 3, 4, 5].into(),
                 prompt_logprobs: None,
@@ -1009,7 +1018,12 @@ mod tests {
                     routed_experts: None,
                 }),
             )),
-        ]);
+        ];
+        // Decoding can release text later than the first generated token.
+        if let Ok(DecodedTextEvent::TextDelta { sampled, .. }) = &mut outputs[1] {
+            sampled.timestamp = 10.75;
+        }
+        let stream = stream::iter(outputs);
 
         let chunks = completion_chunk_stream(
             stream,
@@ -1089,6 +1103,7 @@ mod tests {
             CompletionSseChunk::Usage(chunk) => {
                 assert!(chunks[..3].iter().all(|chunk| chunk_response(chunk).metrics.is_none()));
                 let metrics = chunk.metrics.as_ref().expect("per-request metrics");
+                assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
                 assert!((metrics.queue_time_ms.unwrap() - 200.0).abs() < 1e-9);
                 assert!((metrics.tokens_per_second.unwrap() - 2.5).abs() < 1e-9);
                 assert_eq!(
@@ -1481,7 +1496,12 @@ mod tests {
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
-                    timestamps: Default::default(),
+                    timestamps: vllm_llm::RequestTimestamps {
+                        queued_ts: 10.0,
+                        scheduled_ts: 10.2,
+                        first_token_ts: 10.5,
+                        last_token_ts: 10.5,
+                    },
                 }),
             )),
         ]);
@@ -1493,7 +1513,10 @@ mod tests {
             "model".to_string(),
             1,
             None,
-            ApiServerOptions::default(),
+            ApiServerOptions {
+                enable_per_request_metrics: true,
+                ..Default::default()
+            },
             ResponseOptions {
                 include_usage: true,
                 prompt_only: true,
@@ -1531,6 +1554,9 @@ mod tests {
         match &chunks[2] {
             CompletionSseChunk::Usage(chunk) => {
                 let usage = chunk.usage.as_ref().expect("usage");
+                let metrics = chunk.metrics.as_ref().expect("metrics");
+                assert!(metrics.time_to_first_token_ms.is_some());
+                assert_eq!(metrics.time_to_first_content_token_ms, None);
                 assert_eq!(usage.prompt_tokens, 2);
                 assert_eq!(usage.completion_tokens, Some(1));
                 assert_eq!(usage.total_tokens, 3);

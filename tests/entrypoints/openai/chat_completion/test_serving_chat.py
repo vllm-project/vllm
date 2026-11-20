@@ -1035,6 +1035,9 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
     usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
     assert usage_chunks
     assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
+    assert usage_chunks[-1]["metrics"][
+        "time_to_first_content_token_ms"
+    ] == pytest.approx(1500.0)
 
 
 @pytest.mark.asyncio

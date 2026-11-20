@@ -50,14 +50,14 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 | Field | Description |
 | --- | --- |
 | `time_to_first_token_ms` | Time from when the request was scheduled until the first output token was generated (TTFT). |
-| `time_to_first_content_token_ms` | Streaming only: time from request scheduling to the engine output batch where the parser first emits non-empty text content, excluding reasoning and tool-call output. It equals `time_to_first_token_ms` when no response parser is active. Non-streaming requests return `null`; otherwise, the value is unset when no text content boundary is observed. |
+| `time_to_first_content_token_ms` | Streaming only: time from request scheduling to the engine output batch that first produces non-empty text content, excluding reasoning and tool-call output. It equals `time_to_first_token_ms` when the first output batch produces text. Non-streaming requests return `null`; otherwise, the value is unset when no text content is produced. |
 | `generation_time_ms` | Decode time: time from the first output token to the last output token. Excludes both queue wait and prefill/TTFT. |
 | `queue_time_ms` | Time the request spent waiting in the scheduler queue before processing began. |
 | `mean_itl_ms` | Mean inter-token latency (average time between successive output tokens) during the decode phase. `null` for single-token responses. |
 | `tokens_per_second` | Overall output token throughput: all generated tokens over the inference interval (scheduling to last output token). Unlike `generation_time_ms`, this includes the prefill phase, so it reflects end-to-end generation speed rather than pure decode speed. |
 
-All fields are `null` if the underlying timing data is not available for that
-request.
+Unavailable timing fields are `null` in full responses and Responses stream
+events. Chat Completions and Completions omit them from streaming usage chunks.
 
 ### Reasoning Models
 
@@ -158,7 +158,8 @@ a single prompt's generation.
 Per-request metrics are available on the `/v1/responses` endpoint using the
 common `metrics` object described above. Non-streaming responses include it at
 the top level. Streaming responses include it in the final response carried by
-the `response.completed` event; intermediate events do not include metrics.
+the `response.completed` or `response.incomplete` event; intermediate events do
+not include metrics.
 
 Metrics are omitted for Responses requests that perform multiple
 model-generation turns, such as built-in tool-call workflows, because the

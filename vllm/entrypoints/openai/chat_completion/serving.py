@@ -922,15 +922,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         stream_per_request_metrics = build_per_request_timing_metrics(
                             last_metrics,
                             completion_tokens,
-                            first_content_token_ts=(
-                                first_content_token_ts
-                                if self.parser_cls is not None
-                                else (
-                                    last_metrics.first_token_ts
-                                    if last_metrics is not None
-                                    else None
-                                )
-                            ),
+                            first_content_token_ts=first_content_token_ts,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:

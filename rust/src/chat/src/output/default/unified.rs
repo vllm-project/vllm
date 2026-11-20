@@ -238,7 +238,6 @@ fn push_piece_delta(
 pub(crate) async fn unified_event_stream(
     decoded_stream: impl DecodedTextEventStream,
     parser: Box<dyn UnifiedParser>,
-    has_configured_parser: bool,
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
     pin_mut!(decoded_stream);
@@ -292,11 +291,7 @@ pub(crate) async fn unified_event_stream(
                             reasoning_tokens: state.reasoning_tokens,
                         },
                         timestamps: finished.timestamps,
-                        first_content_token_ts: if has_configured_parser {
-                            first_content_token_ts
-                        } else {
-                            Some(finished.timestamps.first_token_ts)
-                        },
+                        first_content_token_ts,
                         spec_decode_metrics: finished.spec_decode_metrics.map(Box::new),
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
@@ -454,7 +449,7 @@ mod tests {
         events: Vec<vllm_text::output::DecodedTextEvent>,
     ) -> Vec<AssistantEvent> {
         let stream = stream::iter(events.into_iter().map(Ok));
-        unified_event_stream(stream, Box::new(parser), true)
+        unified_event_stream(stream, Box::new(parser))
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -546,7 +541,7 @@ mod tests {
         );
 
         let stream = stream::iter(vec![d1, d2].into_iter().map(Ok));
-        let events = unified_event_stream(stream, Box::new(parser), true)
+        let events = unified_event_stream(stream, Box::new(parser))
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -950,7 +945,7 @@ mod tests {
                 finished_delta("world<|\"|>"),
             ];
             let stream = stream::iter(events.into_iter().map(Ok));
-            let events = unified_event_stream(stream, Box::new(parser), true)
+            let events = unified_event_stream(stream, Box::new(parser))
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()
@@ -999,7 +994,7 @@ mod tests {
                 .map(|delta| Ok(decoded_delta(delta)))
                 .chain([Ok(finished_delta(last))])
                 .collect();
-            let events = unified_event_stream(stream::iter(events), Box::new(parser), true)
+            let events = unified_event_stream(stream::iter(events), Box::new(parser))
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()

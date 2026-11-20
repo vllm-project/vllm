@@ -1796,12 +1796,15 @@ async def test_responses_streaming_metrics_only_on_completed_event():
         "hello", [10, 20], metrics=_PER_REQUEST_STATS
     )
 
+    async def result_generator():
+        yield context
+
     events = [
         event
         async for event in serving.responses_stream_generator(
             request=request,
             sampling_params=SamplingParams(max_tokens=16),
-            result_generator=_empty_context_generator(),
+            result_generator=result_generator(),
             context=context,
             model_name="test-model",
             tokenizer=MagicMock(),
@@ -1809,13 +1812,15 @@ async def test_responses_streaming_metrics_only_on_completed_event():
         )
     ]
 
+    assert any(event.type == "response.output_text.delta" for event in events)
     for event in events[:-1]:
-        assert "metrics" not in event.response.model_dump(mode="json")
+        payload = event.model_dump(mode="json")
+        assert "metrics" not in payload.get("response", payload)
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
     assert events[-1].response.metrics.time_to_first_content_token_ms == pytest.approx(
-        500.0
+        1500.0
     )
 
 

@@ -38,8 +38,6 @@ use crate::{Error, Result as ChatResult};
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
     parser: Box<dyn UnifiedParser>,
-    /// Mirrors Python's configured parser, including requests without tools.
-    has_configured_parser: bool,
     max_tool_calls: Option<usize>,
     /// Request facts the initialized parser needs to build its output grammar.
     /// Absent for the plain-text-only processor, which never builds one.
@@ -100,7 +98,6 @@ impl DefaultChatOutputProcessor {
     ) -> ChatResult<Self> {
         let tool_name = tool_call_parser.resolve_tool_name(model_id);
         let reasoning_name = reasoning_parser.resolve_reasoning_name(model_id);
-        let has_configured_parser = tool_name.is_some() || reasoning_name.is_some();
         // `hf` is opt-in: `Auto` never selects it, but a usable template is worth a hint.
         let auto = [tool_call_parser, reasoning_parser]
             .iter()
@@ -141,7 +138,6 @@ impl DefaultChatOutputProcessor {
 
         Ok(Self {
             parser,
-            has_configured_parser,
             max_tool_calls: request.max_tool_calls(),
             grammar_inputs: Some(GrammarInputs {
                 tools: request.tools().to_vec(),
@@ -161,7 +157,6 @@ impl DefaultChatOutputProcessor {
     pub fn plain_text_only() -> Self {
         Self {
             parser: Box::new(CombinedParser::plain_text_only()),
-            has_configured_parser: false,
             max_tool_calls: None,
             grammar_inputs: None,
         }
@@ -302,7 +297,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// 1. [`unified_event_stream`] — reasoning and tool-call parsing
     /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
-        let parsed = unified_event_stream(decoded, self.parser, self.has_configured_parser);
+        let parsed = unified_event_stream(decoded, self.parser);
         let structured = structured_chat_event_stream(parsed, self.max_tool_calls);
 
         Ok(structured.boxed())

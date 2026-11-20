@@ -922,18 +922,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             self.enable_per_request_metrics
             and context.request_metrics_cover_all_generation_turns
         ):
-            first_content_token_ts = None
-            if request.stream:
-                first_content_token_ts = context.first_content_token_ts
-                if (
-                    context.response_parser is None
-                    and context.request_metrics is not None
-                ):
-                    first_content_token_ts = context.request_metrics.first_token_ts
             per_request_metrics = build_per_request_timing_metrics(
                 context.request_metrics,
                 num_generated_tokens,
-                first_content_token_ts=first_content_token_ts,
+                first_content_token_ts=(
+                    context.first_content_token_ts if request.stream else None
+                ),
             )
         response = ResponsesResponse.from_request(
             request,
