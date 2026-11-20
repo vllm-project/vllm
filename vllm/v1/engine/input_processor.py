@@ -5,8 +5,6 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
-import torch
-
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.utils import hash_factors
@@ -31,7 +29,11 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils import (
+    compact_mixed_prompt_embeds,
+    length_from_prompt_token_ids_or_embeds,
+    random_uuid,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
@@ -447,13 +449,11 @@ class InputProcessor:
             prompt_embeds = decoder_input["prompt_embeds"]
             prompt_token_ids = decoder_input.get("prompt_token_ids")
             prompt_is_token_ids = decoder_input.get("is_token_ids")
-            if prompt_is_token_ids is not None and len(prompt_embeds) != (
-                prompt_is_token_ids.count(False)
-            ):
-                # Mixed prompts travel compact, keep only the embeds rows.
-                prompt_embeds = prompt_embeds[
-                    ~torch.tensor(prompt_is_token_ids, dtype=torch.bool)
-                ]
+            if prompt_is_token_ids is not None:
+                # Mixed prompts travel compact, with only the embeds rows.
+                prompt_embeds = compact_mixed_prompt_embeds(
+                    prompt_embeds, prompt_is_token_ids
+                )
         else:
             prompt_token_ids = decoder_input["prompt_token_ids"]
             prompt_embeds = None
@@ -469,7 +469,7 @@ class InputProcessor:
             assert watermarking is not None
             self.apply_watermarking(sampling_params, watermarking)
             prompt_len = length_from_prompt_token_ids_or_embeds(
-                prompt_token_ids, prompt_embeds
+                prompt_token_ids, prompt_embeds, prompt_is_token_ids
             )
             if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
                 raise VLLMValidationError(
@@ -663,7 +663,9 @@ class InputProcessor:
             # positions, so they are not checked against the vocabulary.
             prompt_ids = None
             prompt_len = length_from_prompt_token_ids_or_embeds(
-                prompt_input.get("prompt_token_ids"), prompt_input["prompt_embeds"]
+                prompt_input.get("prompt_token_ids"),
+                prompt_input["prompt_embeds"],
+                prompt_input.get("is_token_ids"),
             )
         else:
             prompt_ids = prompt_input["prompt_token_ids"]

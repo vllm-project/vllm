@@ -68,6 +68,12 @@ def _expand_mixed_prompt_embeds(
     get zero rows, which the workers do not read."""
     if len(prompt_embeds) == len(is_token_ids):
         return prompt_embeds
+    num_embeds = is_token_ids.count(False)
+    if len(prompt_embeds) != num_embeds:
+        raise ValueError(
+            f"A mixed prompt with {num_embeds} embeds positions of "
+            f"{len(is_token_ids)} has {len(prompt_embeds)} prompt_embeds rows."
+        )
     # Pinned like the decoded rows, so the workers copy them to the GPU as is.
     expanded = torch.zeros(
         len(is_token_ids),
@@ -174,7 +180,7 @@ class Request:
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, prompt_embeds
+            self.prompt_token_ids, prompt_embeds, prompt_is_token_ids
         )
         self._output_token_ids: list[int] = []
         if self.prompt_token_ids is None:

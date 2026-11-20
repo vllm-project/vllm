@@ -9,6 +9,7 @@ from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers import TokenizerLike
+from vllm.utils import compact_mixed_prompt_embeds
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
@@ -566,10 +567,16 @@ class TokenizeParams:
         """Truncate the compact `prompt_embeds` of a mixed prompt, which hold
         only the rows of its embeds positions, to the rows of the embeds
         positions that survive truncation of the prompt."""
-        truncation = self._truncation_slice(tokenizer, len(is_token_ids))
+        num_positions = len(is_token_ids)
+        start, stop = 0, num_positions
+        truncation = self._truncation_slice(tokenizer, num_positions)
+        if truncation is not None:
+            start, stop, _ = truncation.indices(num_positions)
+        # Embedding inputs cannot be padded: reject padding as for one row per
+        # position of the truncated prompt.
+        self._token_padding(tokenizer, range(stop - start))
         if truncation is None:
             return embeds
-        start, stop, _ = truncation.indices(len(is_token_ids))
         first = is_token_ids[:start].count(False)
         kept = is_token_ids[start:stop].count(False)
         return embeds[first : first + kept]
@@ -622,10 +629,14 @@ class TokenizeParams:
         embeds = prompt_dict.get("prompt_embeds")
         if embeds is not None:
             is_token_ids = prompt_dict.get("prompt_is_token_ids")
-            if is_token_ids is not None and len(embeds) < len(is_token_ids):
-                embeds = self._truncate_compact_embeds(tokenizer, embeds, is_token_ids)
-            else:
+            if is_token_ids is None:
                 embeds = self._validate_tokens(tokenizer, embeds)
+            else:
+                embeds = self._truncate_compact_embeds(
+                    tokenizer,
+                    compact_mixed_prompt_embeds(embeds, is_token_ids),
+                    is_token_ids,
+                )
             prompt_dict["prompt_embeds"] = embeds
         for key in _PARALLEL_TO_PROMPT_TOKENS:
             parallel = prompt_dict.get(key)

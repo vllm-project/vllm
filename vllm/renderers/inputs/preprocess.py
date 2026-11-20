@@ -268,4 +268,5 @@ def extract_prompt_len(
     return length_from_prompt_token_ids_or_embeds(
         target_prompt.get("prompt_token_ids"),
         target_prompt.get("prompt_embeds"),
+        target_prompt.get("prompt_is_token_ids", target_prompt.get("is_token_ids")),
     )

@@ -95,6 +95,31 @@ def test_mixed_prompt_embeds_travel_compact_and_expand_in_the_engine():
     assert not request.prompt_embeds[[0, 2]].any()
 
 
+def test_mixed_prompt_embeds_with_wrong_row_count_fail_clearly():
+    """Rows that match neither the positions nor the embeds positions fail with
+    the counts, not an indexing error in the engine core."""
+    with pytest.raises(ValueError, match="2 embeds positions of 4 has 3"):
+        Request.from_engine_core_request(
+            _engine_core_request(
+                np.array([1, 2, 3, 4], dtype=np.int32),
+                prompt_embeds=torch.randn(3, 4),
+                prompt_is_token_ids=[True, False, True, False],
+            ),
+            block_hasher=None,
+        )
+
+
+def test_prompt_embeds_without_mask_need_a_row_per_token_id():
+    """Only a mixed prompt's mask allows fewer rows than token ids."""
+    with pytest.raises(ValueError, match="different lengths"):
+        Request.from_engine_core_request(
+            _engine_core_request(
+                np.array([1, 2, 3], dtype=np.int32), prompt_embeds=torch.randn(2, 4)
+            ),
+            block_hasher=None,
+        )
+
+
 def test_request_stores_token_ids_as_int32_buffers():
     """Prompts stay one int32 buffer, with no per-token Python objects."""
     request = Request("r", list(range(1024)), SamplingParams(max_tokens=4), None)

@@ -648,6 +648,24 @@ def test_build_mixed_prompt_embeds(stream):
     assert torch.equal(mixed.embeds, torch.cat(tensors))
 
 
+def test_build_mixed_prompt_embeds_casts_to_the_first_dtype():
+    """Parts of different dtypes take the first part's dtype, as when they were
+    written into one tensor of that dtype."""
+    tensors = [torch.randn(2, 8, dtype=torch.bfloat16), torch.randn(1, 8)]
+
+    mixed = _build_mixed_prompt_embeds([0, 0, 1, 0], tensors, [(0, 2), (3, 1)])
+
+    assert mixed.embeds.dtype == torch.bfloat16
+    assert torch.equal(mixed.embeds[2], tensors[1][0].bfloat16())
+
+
+def test_build_mixed_prompt_embeds_rejects_a_span_of_the_wrong_length():
+    """A span whose length differs from its tensor's rows fails where it is
+    built, not later as a row-count mismatch."""
+    with pytest.raises(ValueError, match="2 positions but 3 rows"):
+        _build_mixed_prompt_embeds([0, 0, 1], [torch.randn(3, 8)], [(0, 2)])
+
+
 # End-to-end tests: each runs both sync and async parse paths via the
 # `parse_fn` fixture.
 
@@ -808,3 +826,19 @@ def test_truncation_keeps_the_mixed_mask_aligned_with_the_prompt():
     assert result["prompt_token_ids"] == token_ids[-keep:]
     # The compact embeds keep exactly the rows of the surviving embed positions.
     assert torch.equal(result["prompt_embeds"], tensors[0][-3:])
+
+
+def test_padding_a_mixed_prompt_is_rejected(tokenizer):
+    """Embedding inputs cannot be padded: a mixed prompt fails as one with a row
+    per position would, not later with a mask-length error."""
+    token_ids = [1, 2, 0, 0, 3]
+    mixed = _build_mixed_prompt_embeds(token_ids, [torch.randn(2, 8)], [(2, 2)])
+    prompt: EmbedsPrompt = {
+        "prompt_token_ids": token_ids,
+        "prompt_embeds": mixed.embeds,
+        "prompt_is_token_ids": mixed.is_token_ids,
+    }
+    tok_params = TokenizeParams(max_total_tokens=100, pad_prompt_tokens=8)
+
+    with pytest.raises(VLLMValidationError, match="Cannot pad tokens for embedding"):
+        tok_params.apply_post_tokenization(tokenizer, prompt)

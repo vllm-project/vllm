@@ -235,9 +235,9 @@ def _build_prompt_embeds_positions(
 
 @dataclass(frozen=True, slots=True)
 class MixedPromptEmbeds:
-    """`prompt_embeds` of a mixed prompt, in the compact form the engine and
-    workers use: token-id positions get no placeholder rows, so none are
-    serialized, hashed or copied to the GPU."""
+    """`prompt_embeds` of a mixed prompt, in compact form: token-id positions
+    get no placeholder rows, so none are allocated in the API server or sent
+    to the engine core, which expands the rows back to one per position."""
 
     embeds: torch.Tensor
     """Rows of the `False` positions of `is_token_ids`, in position order."""
@@ -255,13 +255,16 @@ def _build_mixed_prompt_embeds(
     spans, given as `(start, length)` positions in `token_ids` that are
     aligned with `prompt_embeds_tensors` and hence in position order."""
     is_token_ids = [True] * len(token_ids)
-    for start, length in positions:
+    for (start, length), tensor in zip(positions, prompt_embeds_tensors, strict=True):
+        if len(tensor) != length:
+            raise ValueError(
+                f"prompt_embeds span at position {start} has {length} positions "
+                f"but {len(tensor)} rows"
+            )
         is_token_ids[start : start + length] = [False] * length
-    embeds = (
-        prompt_embeds_tensors[0]
-        if len(prompt_embeds_tensors) == 1
-        else torch.cat(list(prompt_embeds_tensors))
-    )
+    # All rows take the first tensor's dtype, as one per-position tensor would.
+    dtype = prompt_embeds_tensors[0].dtype
+    embeds = torch.cat([tensor.to(dtype) for tensor in prompt_embeds_tensors])
     return MixedPromptEmbeds(embeds=embeds, is_token_ids=is_token_ids)
 
 
