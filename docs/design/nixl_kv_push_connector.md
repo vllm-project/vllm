@@ -85,7 +85,7 @@ sequenceDiagram
     note over PSched,PWriter: P side - prefill, stage finished blocks
     PSched->>PSched: request_finished, stash blocks
     PSched->>PWorker: build_connector_meta -> meta.push_finished_blocks
-    PWorker->>PWriter: enqueue (req_id, blocks) on _finished_blocks_inbox
+    PWorker->>PWriter: enqueue (req_id, blocks) on _prefill_inbox
 
     note over PWriter: P writer matches and WRITEs
     PWriter->>PWriter: get_new_notifs returns PUSH_REG, route via _handle_push_reg_notif
