@@ -924,7 +924,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             self.index_group, self.index_group_index = (
                 index_group_builder.register_layer(
                     indexer is not None,
-                    vllm_config,
+                    vllm_config if sliding_window is None else None,
                     row_width=(
                         self.get_fp8_ds_mla_row_bytes()
                         if kv_cache_dtype == "fp8_ds_mla"
