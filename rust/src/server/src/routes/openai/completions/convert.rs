@@ -9,6 +9,7 @@ use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequ
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request, text_submit_error};
 use crate::lora::LoraModelResolution;
+use crate::render::RenderContext;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
@@ -73,17 +74,10 @@ pub(super) fn prepare_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    processor: &TextRequestProcessor,
+    state: &impl RenderContext,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
-    // Python's message; `prompt_embeds` itself is rejected above. An empty text
-    // prompt is left to tokenization, which may still yield a BOS token.
-    let Some(prompt) = request.prompt else {
-        bail_invalid_request!(
-            param = "prompt",
-            "Either prompt or prompt_embeds must be provided and non-empty."
-        );
-    };
+    let prompt = request.prompt.ok_or_else(validate::missing_prompt_error)?;
     let n = resolve_n(request.n)?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
@@ -130,7 +124,24 @@ pub(super) fn prepare_completion_request(
 
     let echo = request.echo;
     let return_token_ids = request.return_token_ids.unwrap_or(false);
-    let prompts = prompt.into_prompts();
+    let mut prompts = prompt.into_prompts();
+    if let Some(suffix) = request.suffix.as_deref() {
+        let renderer = state.chat_processor().renderer();
+        for prompt in &mut prompts {
+            let Prompt::Text(prefix) = prompt else {
+                bail_invalid_request!(
+                    param = "suffix",
+                    "suffix requires text prompt input for FIM completion rendering"
+                );
+            };
+            *prefix = renderer.render_completion_suffix(prefix, suffix).ok_or_else(|| {
+                ApiError::invalid_request(
+                    "suffix is only supported for models with FIM completion rendering",
+                    Some("suffix"),
+                )
+            })?;
+        }
+    }
     let text_request = TextRequest {
         request_id: request_id.clone(),
         // Set per prompt below.
@@ -204,7 +215,12 @@ pub(super) fn prepare_completion_request(
             if batched {
                 text_request.request_id = format!("{request_id}-{index}");
             }
-            let echo = completion_echo_text(&mut text_request, echo, return_token_ids, processor)?;
+            let echo = completion_echo_text(
+                &mut text_request,
+                echo,
+                return_token_ids,
+                state.text_processor(),
+            )?;
             Ok(PreparedPrompt { text_request, echo })
         })
         .collect::<Result<_, ApiError>>()?;
@@ -262,17 +278,11 @@ fn completion_echo_text(
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
-    use std::sync::Arc;
 
     use axum::http::HeaderMap;
     use serde_json::json;
     use validator::Validate;
-    use vllm_text::tokenizer::DynTokenizer;
-    use vllm_text::{
-        Prompt, PromptTruncation, PromptTruncationLimit, TextBackend, TextRequest,
-        TextRequestProcessor, TruncationSide,
-    };
-    use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_text::{Prompt, PromptTruncation, PromptTruncationLimit, TextRequest, TruncationSide};
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
@@ -311,21 +321,8 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct TestTextBackend;
-
-    impl TextBackend for TestTextBackend {
-        fn tokenizer(&self) -> DynTokenizer {
-            Arc::new(TestTokenizer::new())
-        }
-
-        fn model_id(&self) -> &str {
-            "Qwen/Qwen1.5-0.5B-Chat"
-        }
-    }
-
-    fn test_processor() -> TextRequestProcessor {
-        TextRequestProcessor::new(Arc::new(TestTextBackend), 64)
+    fn test_state() -> crate::render::RenderState {
+        crate::routes::tests::test_render_state(Some(64), Default::default(), Default::default())
     }
 
     fn base_request_json() -> serde_json::Value {
@@ -425,7 +422,7 @@ mod tests {
                 request,
                 &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
-                &test_processor(),
+                &test_state(),
             )
             .expect("prepare top_k");
 
@@ -445,7 +442,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare truncation");
 
@@ -506,7 +503,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -560,7 +557,7 @@ mod tests {
                 request,
                 &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
-                &test_processor(),
+                &test_state(),
             )
             .expect("prepare")
             .text_request()
@@ -594,7 +591,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -619,7 +616,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -642,7 +639,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -666,7 +663,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -691,7 +688,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -718,7 +715,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -743,7 +740,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
 
@@ -765,7 +762,7 @@ mod tests {
                 request,
                 &served(&["test-model"]),
                 ResolvedRequestContext::default(),
-                &test_processor(),
+                &test_state(),
             )
             .unwrap();
             let params = &prepared.text_request().sampling_params;
@@ -791,7 +788,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request().sampling_params.logprobs, Some(1));
@@ -815,7 +812,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare full-vocabulary logprobs");
 
@@ -838,7 +835,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request().data_parallel_rank, Some(3));
@@ -861,7 +858,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
         assert_eq!(
@@ -885,7 +882,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request().priority, -5);
@@ -905,7 +902,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
         assert_eq!(
@@ -929,7 +926,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request().session_id, None);
@@ -948,7 +945,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_processor(),
+            &test_state(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request().data_parallel_rank, None);

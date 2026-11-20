@@ -27,6 +27,10 @@ impl DeepSeekV41ChatRenderer {
 }
 
 impl ChatRenderer for DeepSeekV41ChatRenderer {
+    fn render_completion_suffix(&self, prefix: &str, suffix: &str) -> Option<String> {
+        Some(deepseek::render_completion_suffix(prefix, suffix))
+    }
+
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
         let reasoning = deepseek::resolve_reasoning(
