@@ -82,7 +82,7 @@ All enabled outputs of a block share one object, so the object count depends onl
 
 Plus one tail object per request. Bandwidth is not the constraint for R3 or top-k; at small block sizes the object rate is. A single Mooncake master's rate at this scale has not been measured.
 
-A replica queues at most `2 × max_num_seqs` batches. That bounds what a pause waits for, not how long: at the rates above the queue drains quickly, but a slow or full store delays the pause until writes land, or until the stall deadline when none does.
+A replica queues at most `2 × max_num_seqs` batches. That bounds what a pause waits for, not how long: at the rates above the queue drains quickly, but a slow or full store delays the pause until writes land, or until the stall deadline when none does, after which each queued batch gets one attempt.
 
 ## 6. Training side: reads per step
 

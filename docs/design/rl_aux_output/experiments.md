@@ -75,8 +75,8 @@ These come from earlier implementations of aux output delivery; each entry says 
 | The same key written twice | Both puts return success. Sequential writes keep the first object; concurrent writes keep one of them, not determined which, never a mix. On an SSD-first store, 1,833 puts of keys already on SSD or being offloaded all returned success and kept the first value. | immutable objects (protocol §5) |
 | Removal right after a read | Without force nothing is removed (read lease, error −706); with force everything is. | release with force (protocol §7) |
 | `remove_by_regex` during writes | Silently skips keys still being written and returns only the count it removed. Scans every key: 36–74 ms at 200K keys. | release only after a pause (protocol §7) |
-| A holder process killed | The master still lists its keys; every get returns empty; puts fail. | missing objects fail the read |
-| Master killed, or a full store, with the previous implementation | The request whose write fails gets an engine error; nothing is lost silently. | a persistent write error stops the engine (protocol §5) |
+| A holder process killed | The master still lists its keys; every get returns empty; puts fail. | missing objects fail the read; failed puts are retried, since a replaced holder takes them (protocol §5) |
+| Master killed, or a full store, with the previous implementation | The request whose write fails gets an engine error; nothing is lost silently. | historical: the writer now retries and then drops instead (protocol §5) |
 | A store that refuses writes for 90 s, then recovers | With a 180 s stall deadline the engine kept running; over 6 steps all 25,116 keys were present and matched a run without the stall bit for bit (tokens and objects). A reader with a 60 s timeout reported objects missing while writes were refused. | read timeout of 600 s, no shorter than the stall deadline (consumer contract) |
 | A client created before the engine in one process | CUDA initialization fails in the engine's workers. | consumer contract |
 | Reader after the master dies | Hangs for more than 70 s. | reads need their own timeout |
