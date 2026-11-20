@@ -108,7 +108,7 @@ class DraftDecode:
     def __init__(
         self, target: SpecializedDecode, backbone: "DSparkDeepseekV4Model"
     ) -> None:
-        if backbone.use_sequence_parallel or backbone.use_native_mega_moe:
+        if backbone.use_sequence_parallel or backbone.layers[0].ffn.use_native_mega_moe:
             raise ValueError(
                 "decode_backend=latency_specialized runs the DSpark draft without "
                 "sequence parallelism or the native mega MoE"
