@@ -92,6 +92,14 @@ class RoundingModel:
     Second-order terms in the perturbations are dropped: they are down by
     another 2^-24, and the roundings are not independent anyway, so carrying
     them would buy no honesty.
+
+    Elementwise formulas only. The bound is read off `result.sum()`, which is
+    the usual autograd trick for getting a per-element derivative in one pass,
+    and it is only that if no element of the result depends on another
+    element's rounding. A formula that reduces across the draw -- a sum, a max,
+    a matmul -- would have the sum fold those cross terms together and report
+    a bound that is not the one any element obeys. `bound` asserts the shapes
+    rather than leaving that to be remembered.
     """
 
     def __init__(self) -> None:
@@ -133,6 +141,13 @@ class RoundingModel:
         """How far `result`, built through this instance, may be from the same
         formula evaluated exactly."""
         assert self._perturbations, "the formula went through no rounding"
+        # See the class docstring: summing to a scalar gives a per-element
+        # derivative only for an elementwise formula, and every perturbation
+        # keeping the result's shape is what says the formula was one.
+        assert all(term.shape == result.shape for term, _ in self._perturbations), (
+            "elementwise formulas only: a rounding whose shape differs from "
+            "the result's means the formula reduced across elements"
+        )
         gradients = torch.autograd.grad(
             result.sum(), [term for term, _ in self._perturbations]
         )
@@ -165,6 +180,13 @@ def mfma_accumulation_bound(
     accumulating `k` products per output in fp32:
     `(k + 1) 2^-24 (|C| + |A| |B|^T)` -- one rounding per accumulate, plus the
     one that put C into the accumulator.
+
+    `2^-24` is the unit roundoff, so each accumulate is assumed to round to
+    nearest and the products themselves to be exact: an fp8 or bf16 pair
+    multiplies into a product every f32 holds exactly, so the only rounding in
+    the chain is the add. A part that truncated instead would need `2^-23`
+    here, and the term is linear in `k` rather than `sqrt(k)` because the
+    worst case is taken, not a random walk.
 
     With `block` -- an FP8 MFMA, which sums each K block of `block` products
     at the precision of the largest of them rather than at fp32 -- that is

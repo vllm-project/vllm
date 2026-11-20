@@ -71,9 +71,13 @@ def dequant_fp8(
 def dequant_mxfp4(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """fp4x2 bytes [..., K / 2] (the low nibble the lower K) with E8M0 codes
     [..., K / 32] -> float64 [..., K]."""
-    assert codes.dtype in _FP8_BYTE_DTYPES, (
-        f"`codes` holds fp4x2 bytes, got {codes.dtype}"
-    )
+    # uint8 only, not the wider byte set `quantize_e4m3` accepts: the nibble
+    # split below is `& 15` and `>> 4`, and a float8 dtype has neither, so it
+    # would raise out of torch rather than here. int8 would quietly work --
+    # its arithmetic shift lands on a negative index that wraps to the same
+    # table entry -- but it is nobody's layout for packed fp4 pairs, and
+    # accepting it would leave that coincidence load-bearing.
+    assert codes.dtype == torch.uint8, f"`codes` holds fp4x2 bytes, got {codes.dtype}"
     assert not scales.is_floating_point(), (
         f"`scales` holds E8M0 codes, got {scales.dtype}"
     )
@@ -191,13 +195,17 @@ def wave_butterfly(
 
 # ---------------------------------------------------------------- metrics
 # Mantissa bits and minimum normal exponent of the dtypes an error is measured
-# in, the two `round_float` takes for bf16 and f32.
-_FORMATS = {torch.bfloat16: (7, -126), torch.float32: (23, -126)}
+# in, in the pair `round_float` takes. Only f32 so far; a format is added here
+# when a test measures in it, so that an unsupported dtype fails the assert
+# below rather than picking up a figure nothing has checked.
+_FORMATS = {torch.float32: (23, -126)}
 
 
 def ulp(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """The `dtype` spacing at |x|, the subnormal spacing below its smallest
-    normal. `dtype` is explicit because bf16 and f32 ulps differ by 2^16."""
+    normal. `dtype` is explicit rather than read off `x` because `x` is a
+    float64 reference and the spacing wanted is that of the narrower format
+    the kernel returned -- the two differ by 2^29 for f32."""
     assert dtype in _FORMATS, f"no ulp for {dtype}"
     mantissa_bits, min_exponent = _FORMATS[dtype]
     exponent = torch.floor(torch.log2(x.double().abs())).clamp(min=min_exponent)

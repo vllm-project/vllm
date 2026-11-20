@@ -290,9 +290,12 @@ class _Transcendental(NamedTuple):
     measured: Callable[[torch.Tensor], torch.Tensor] | None = None
 
 
-# The log-uniform half of a mixed draw: 2^-30 reaches a sigmoid's and a
-# score's flat regions and the transcendentals' flush to zero, 2^6 is already
-# past where either saturates.
+# The log-uniform half of a mixed draw: it covers the binades near zero, down
+# to 2^-30, which a uniform draw over a range of hundreds reaches essentially
+# never, and stops at 2^6, already past where a sigmoid or a score saturates.
+# It does not reach any transcendental's flush to zero -- exp2 of a magnitude
+# at most 2^6 is a normal float32 either way. Only `hw_exp2`'s uniform range
+# below -126 gets there.
 _SMALL = (-30.0, 6.0)
 _TRANSCENDENTALS: dict[str, _Transcendental] = {
     "hw_exp2": _Transcendental(
@@ -383,10 +386,16 @@ def _transcendental_error(lib: str, name: str, seed: int, count: int) -> float:
     formula_gap = (modelled.detach() - reference).abs()
     # That second term is the one that could quietly absorb a wrong rounding
     # model, so it is held to a thousandth of the first rather than trusted.
-    # Measured on gfx950 it is ~2e-9 of it for both modelled helpers.
-    assert formula_gap.max() <= 1e-3 * rounding_bound.max(), (
-        f"{name}: the modelled formula is {formula_gap.max():.3g} from the "
-        f"reference, against a rounding bound of {rounding_bound.max():.3g}"
+    # Elementwise, not max against max: a helper is drawn over ranges where
+    # the bound varies by orders of magnitude, and the element with the
+    # largest gap need not be the element with the largest bound, so comparing
+    # the two maxima would let a gap pass on the strength of a different
+    # input's headroom. Measured on gfx950 the worst element is ~2e-9 of its
+    # own bound for both modelled helpers.
+    worst = (formula_gap / rounding_bound).nan_to_num().max()
+    assert worst <= 1e-3, (
+        f"{name}: the modelled formula is {worst:.3g} of the rounding bound "
+        f"from the reference, which is too much of it to stay negligible"
     )
     bound = formula_gap + rounding_bound
     # An exact hit is an exact hit even where the bound itself underflows to
@@ -419,8 +428,12 @@ def test_div_rn(lib: str) -> None:
     # One draw split in two: two draws of one seed would be x == d.
     drawn = I.log_uniform(2 * count, -60, 60, seed=3)
     numerator, denominator = drawn[:count], drawn[count:]
-    # In f32 throughout: the helper is handed RN(1 / d), and rounding f64 to
-    # f32 is a second rounding that lands on a different float for some d.
+    # In f32 throughout, because that is what a caller has, not because it
+    # differs from the f64 route. Over this domain it does not: binary64
+    # carries 53 >= 2 * 24 + 2 bits, so rounding an f64 quotient on to f32 is
+    # an innocuous double rounding (Figueroa), and the draw above reaches
+    # 2^-60 at the smallest, nowhere near where the underflow caveat bites.
+    # The f32 form is preferred for having one rounding to reason about.
     reciprocal = 1 / denominator
     got = _run(
         f"div_{lib}",
@@ -650,8 +663,12 @@ def _scaled_mfma_error(
     a = scaled(operands.a_values, 0)
     b = scaled(operands.b_values, 1)
     # Every product of one K block is summed at the precision of the largest
-    # of them, which only costs anything where the operands within a block
-    # span more than the 2^14 an FP4 pair ever can.
+    # of them, which only costs anything where the products within a block
+    # span more than an FP4 pair ever can. E2M1 has seven nonzero magnitudes,
+    # 0.5 to 6, a ratio of 12, so two FP4 products are within 12^2 = 144 of
+    # each other -- 2^7.2, which an fp32 accumulator absorbs with 16 bits to
+    # spare. A block term for FP4 would be describing a drop that cannot
+    # happen, so there is none.
     block = None if formats == (I.MX_FP4, I.MX_FP4) else 32
     acc = operands.acc.double()
     error = _mfma_error(got, a, b, acc, 128, block)
@@ -684,12 +701,15 @@ def test_mfma_scaled(
     if formats != (I.MX_FP4, I.MX_FP4):
         # The block term is not free headroom: an fp32 sum of the separate
         # products does not explain what this instruction returns, and misses
-        # by more than an order of magnitude (~31x on gfx950). If a part ever
+        # by more than an order of magnitude (25-49x across these cases on
+        # gfx950, the spread being the formats and selectors). If a part ever
         # does accumulate a block in fp32, this fails and the 2^-14 envelope
         # above it should go rather than be inherited by the next model.
         assert fp32_only > 10, (
-            f"{fp32_only:.3g} of the fp32-only bound: the block term is no "
-            f"longer doing anything, so it is no longer justified"
+            f"the error is only {fp32_only:.3g}x an fp32-only accumulation "
+            f"bound, so this instruction may now be accumulating a K block in "
+            f"fp32; if so the 2^-14 block envelope is no longer justified and "
+            f"`B._FP8_BLOCK_PRECISION` should go rather than be loosened"
         )
 
 

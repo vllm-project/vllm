@@ -80,8 +80,8 @@ def mixed_floats(
 
     The uniform half covers the range a helper is actually used over; the
     log-uniform half covers the binades near zero, which a uniform draw over a
-    range of hundreds reaches essentially never and where a transcendental's
-    flush to zero lives.
+    range of hundreds reaches essentially never and where a helper's flat
+    regions and cancellations live.
     """
     g = _gen(seed)
     uniform = torch.empty(count // 2, device=DEV).uniform_(low, high, generator=g)
