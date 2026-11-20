@@ -82,6 +82,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -573,7 +574,7 @@ def should_skip_indexer_scoring(
     prefill = getattr(mla_metadata, "prefill", None)
     return (
         cudagraph_runtime_mode != CUDAGraphMode.FULL
-        and getattr(prefill, "use_dense_mha", False)
+        and getattr(prefill, "route", None) is SparseMLAPrefillRoute.DENSE_MHA
         and getattr(mla_metadata, "num_decode_tokens", -1) == 0
         and not torch.cuda.is_current_stream_capturing()
     )
@@ -1745,6 +1746,8 @@ def init_indexer_wk_weights_proj(
     hidden_size: int,
     quant_config: QuantizationConfig | None,
     prefix: str,
+    *,
+    fused_linear_cls: type[MergedColumnParallelLinear] = MergedColumnParallelLinear,
 ) -> None:
     """Build the indexer's checkpoint layers `wk` (BF16, or FP8 as the
     checkpoint stores it and run in BF16: `bf16_linear`) and
@@ -1768,7 +1771,7 @@ def init_indexer_wk_weights_proj(
     indexer.weights_proj = ReplicatedLinear(
         hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
     )
-    fused = MergedColumnParallelLinear(
+    fused = fused_linear_cls(
         hidden_size,
         [indexer.head_dim, indexer.n_head],
         bias=False,

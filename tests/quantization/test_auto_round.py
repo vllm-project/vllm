@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
     INCXPULinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 MODELS = [
@@ -421,6 +422,73 @@ def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> 
     method = config.get_quant_method(DummyLayer(), "unknown")
 
     assert method is None
+
+
+def _patch_safetensors_metadata(monkeypatch, metadata) -> None:
+    def fake_metadata(model_name, revision=None):
+        if isinstance(metadata, Exception):
+            raise metadata
+        return metadata
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.config.get_safetensors_params_metadata",
+        fake_metadata,
+    )
+
+
+def test_inc_maybe_update_config_detects_unquantized_checkpoint_modules(
+    monkeypatch,
+) -> None:
+    """A linear module stored as a float `weight` resolves to
+    UnquantizedLinearMethod even inside a quantized block, while a module
+    stored as `qweight` keeps the INC path."""
+    _patch_safetensors_metadata(
+        monkeypatch,
+        {
+            "model.layers.0.mlp.gate.weight": {"dtype": "BF16"},
+            "model.layers.1.mlp.gate.qweight": {"dtype": "I32"},
+            "model.layers.1.mlp.gate.qzeros": {"dtype": "I32"},
+            "model.layers.1.mlp.gate.scales": {"dtype": "F16"},
+            "model.norm.weight": {"dtype": "BF16"},
+        },
+    )
+    config = make_config(block_name_to_quantize="model.layers")
+    config.maybe_update_config("dummy-model")
+
+    assert config.checkpoint_unquantized_modules == {
+        "model.layers.0.mlp.gate",
+        "model.norm",
+    }
+    layer = object.__new__(LinearBase)
+    method = config.get_quant_method(layer, "model.layers.0.mlp.gate")
+    assert isinstance(method, UnquantizedLinearMethod)
+    assert not config._is_checkpoint_unquantized("model.layers.1.mlp.gate")
+
+
+def test_inc_checkpoint_unquantized_modules_follow_vllm_mapper(monkeypatch) -> None:
+    _patch_safetensors_metadata(
+        monkeypatch,
+        {"model.language_model.layers.0.mlp.gate.weight": {"dtype": "BF16"}},
+    )
+    config = make_config()
+    config.maybe_update_config("dummy-model")
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={"model.language_model.": "language_model.model."}
+        )
+    )
+
+    layer = object.__new__(LinearBase)
+    method = config.get_quant_method(layer, "language_model.model.layers.0.mlp.gate")
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_maybe_update_config_ignores_unreadable_metadata(monkeypatch) -> None:
+    _patch_safetensors_metadata(monkeypatch, OSError("no safetensors"))
+    config = make_config()
+    config.maybe_update_config("dummy-model")
+
+    assert config.checkpoint_unquantized_modules == set()
 
 
 def test_inc_config_parser_regex_match() -> None:
