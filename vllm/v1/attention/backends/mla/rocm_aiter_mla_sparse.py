@@ -705,6 +705,9 @@ class ROCMAiterMLASparseMetadata(SparseMLACommonMetadata):
 
     # Per-token page ids, cached on first use by the DCP score-only path.
     _dcp_token_pages: torch.Tensor | None = None
+    # Cache slots of this rank's rows of the DCP KV-gather prefill requests,
+    # built by the group's first layer (sparse_dcp_prefill_kvgather).
+    dcp_kvgather_slots: torch.Tensor | None = None
 
     # Source buffer and index_epoch of paged_kv_indices; -1 before any remap.
     remapped_buf: object = None
@@ -1573,7 +1576,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         # Cache slots of this rank's rows of each prefill request, padded to
         # local_rows per request. Shared by the group's layers: built once per
         # metadata object.
-        slots = getattr(md, "_dcp_kvgather_slots", None)
+        slots = md.dcp_kvgather_slots
         if slots is None:
             seq = cast(torch.Tensor, md.seq_lens)[d0 : d0 + n_req]
             local_len = get_dcp_local_seq_lens(seq, w, me, il)
@@ -1584,7 +1587,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             ).to(torch.int64)
             slots = blk * stride_rows + lp % bs
             slots = torch.where(lp[None, :] < local_len[:, None], slots, 0).flatten()
-            md._dcp_kvgather_slots = slots  # type: ignore[attr-defined]
+            md.dcp_kvgather_slots = slots
         local = rows_u8.index_select(0, slots)
         gathered = get_dcp_group().all_gather(local, dim=0)  # [w*n_req*local_rows, B]
 

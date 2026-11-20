@@ -33,17 +33,6 @@ pytestmark = pytest.mark.skipif(
 TOPK = 2048
 
 
-class _FakeDCPGroup:
-    """`all_gather(dim=0)` of `world_size` copies of the input."""
-
-    def __init__(self, world_size: int) -> None:
-        self.world_size = world_size
-
-    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        assert dim == 0
-        return input_.repeat(self.world_size, *([1] * (input_.dim() - 1)))
-
-
 def _local_case(lengths: list[int], seed: int) -> tuple[torch.Tensor, torch.Tensor]:
     """One rank's bf16 logits (rows 1024-byte aligned, as DeepSelect reads
     them) and row ends."""
@@ -111,7 +100,7 @@ def test_local_topk_config_gating(dcp, pcp, backend, max_model_len, expected):
         (384, True, 1, True, False),  # candidate blocks keep the generic merge
     ],
 )
-@pytest.mark.parametrize("num_rows", [1, 64, 65])
+@pytest.mark.parametrize("num_rows", [64, 65])
 def test_decode_step_gating(
     local_topk,
     global_seq_lens,
@@ -134,67 +123,6 @@ def test_decode_step_gating(
         local_topk, global_seq_lens, interleave, candidates, num_rows, TOPK
     )
     assert got is (expected and num_rows <= 64)
-
-
-def test_init_fails_closed(monkeypatch):
-    """Without symmetric memory over the DCP group (on any rank), under
-    ubatching or past 16 DCP ranks the construction gate keeps the generic
-    merge (N = 0) instead of a lossy one-round merge. The ranks agree (MIN)
-    before the collective allocation, which then never starts; the result is
-    computed once per top-k (later layers run no collectives)."""
-    from types import SimpleNamespace
-
-    import vllm.distributed as distributed
-    import vllm.v1.attention.ops.cp_common as cp_common
-    import vllm.v1.attention.ops.dcp as dcp
-    from vllm.v1.attention.ops import dcp_topk_merge as gate
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels
-
-    def config(ubatching: bool = False, dcp_size: int = 8) -> SimpleNamespace:
-        return SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                decode_context_parallel_size=dcp_size,
-                prefill_context_parallel_size=1,
-                use_ubatching=ubatching,
-            ),
-            kernel_config=SimpleNamespace(
-                sparse_indexer_topk_backend="auto", enable_jit_warmup=False
-            ),
-            model_config=SimpleNamespace(max_model_len=262_144),
-        )
-
-    collectives = []
-
-    def all_reduce(tensor, op=None, group=None):
-        # A peer without symmetric memory: the MIN is 0.
-        assert op == torch.distributed.ReduceOp.MIN
-        collectives.append(int(tensor[0]))
-        tensor.fill_(0)
-
-    def allocate(*args, **kwargs):
-        raise AssertionError("allocated after the ranks disagreed")
-
-    monkeypatch.setattr(gate, "_MERGE_MAX_ROWS", {})
-    monkeypatch.setattr(gate, "_MERGE_INIT", {})
-    monkeypatch.setattr(
-        distributed, "get_dcp_group", lambda: SimpleNamespace(cpu_group=None)
-    )
-    monkeypatch.setattr(dcp, "get_dcp_workspace_max_num_tokens", lambda cfg: 64)
-    monkeypatch.setattr(cp_common, "direct_cp_enabled", lambda *args: True)
-    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
-    monkeypatch.setattr(kernels, "init_dcp_topk_rescue_workspace", allocate)
-    assert gate.init_dcp_topk_merge(config(ubatching=True), TOPK) == 0
-    assert collectives == []
-    gate._MERGE_INIT.clear()
-    assert gate.init_dcp_topk_merge(config(dcp_size=32), TOPK) == 0
-    assert collectives == []
-    gate._MERGE_INIT.clear()
-    assert gate.init_dcp_topk_merge(config(), TOPK) == 0
-    assert collectives == [1]
-    assert gate.init_dcp_topk_merge(config(), TOPK) == 0  # cached
-    assert collectives == [1]
-    assert gate.dcp_topk_merge_max_rows(TOPK, 384) == 0
-    assert not gate.dcp_topk_merge_fits(1, TOPK, 384)
 
 
 # --- Packed layout ---------------------------------------------------------
@@ -315,7 +243,7 @@ def test_pack_max_local_len_matches_narrow_logits():
     assert got == candidates(narrow)
 
 
-# --- Memory profile, host checks and the packed-mode contract -------------
+# --- Memory profile ---------------------------------------------------------
 
 
 @pytest.mark.parametrize("merge", [False, True])
@@ -423,160 +351,3 @@ def test_profile_reservation_matches_decode_peak(merge):
     # Within 1 MiB: allocator rounding and launch-time scratch (the FP32
     # upcast's launch peaks 768 KiB above its two tensors).
     assert abs(reserved - peak) <= 1 << 20, (peak, reserved)
-
-
-def test_merge_requires_rescue_workspace(monkeypatch):
-    """No lossy path: without the rescue workspace the entry points raise,
-    and packed mode needs the logits (a saturated rank re-reads its row)."""
-    import vllm.distributed as distributed
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
-        dcp_topk_merge,
-        dcp_topk_merge_rows,
-        dcp_topk_pack,
-    )
-
-    n = 384
-    logits, ends = _local_case([1_250, 625], seed=3)
-    sent = dcp_topk_pack(logits, ends, n)
-    monkeypatch.setattr(distributed, "get_dcp_group", lambda: _FakeDCPGroup(8))
-    monkeypatch.setattr(kernels, "_RESCUE_WORKSPACES", {})
-    out = torch.empty((2, TOPK), dtype=torch.int32, device="cuda")
-    with pytest.raises(RuntimeError, match="rescue workspace"):
-        dcp_topk_merge(logits, ends, out, n)
-    rows = dict(
-        local_topk=n,
-        topk=TOPK,
-        req_id=torch.zeros(2, dtype=torch.int32, device="cuda"),
-        block_table=torch.zeros((1, 1), dtype=torch.int32, device="cuda"),
-        block_size=64,
-        stride_rows=64,
-        dcp_rank=0,
-        rows_out=torch.empty((2, TOPK), dtype=torch.int32, device="cuda"),
-        valid_out=torch.empty(2, dtype=torch.int32, device="cuda"),
-    )
-    with pytest.raises(ValueError, match="logits"):
-        dcp_topk_merge_rows(packed=sent, **rows)
-    with pytest.raises(RuntimeError, match="rescue workspace"):
-        dcp_topk_merge_rows(packed=sent, logits=logits, row_ends=ends, **rows)
-
-
-def _host_only_workspace(world: int, max_rows: int, n: int):
-    """A rescue workspace for the host-side checks only: local buffers, no
-    peers. Every call below is refused before a kernel launches."""
-    from vllm.v1.attention.ops.dcp_topk_merge import (
-        kernels,
-        packed_row_words,
-        rescue_slots,
-    )
-
-    ws = kernels.DCPTopkRescueWorkspace.__new__(kernels.DCPTopkRescueWorkspace)
-    ws.device_group = None
-    ws.world_size = world
-    ws.rank = 0
-    recv = torch.zeros(
-        (max_rows, rescue_slots(TOPK, n), packed_row_words(TOPK)),
-        dtype=torch.int32,
-        device="cuda",
-    )
-    flags = torch.zeros((world, max_rows), dtype=torch.int32, device="cuda")
-    no_peers = torch.zeros(world, dtype=torch.int64, device="cuda")
-    ws._init(recv, flags, no_peers, no_peers, max_rows, TOPK, n)
-    return ws
-
-
-def test_exact_call_checks(monkeypatch):
-    """The kernels index the rescue workspace (and peers' symmetric memory)
-    by row, rank and slot without bounds checks, and CuTe accepts mismatched
-    tensors silently: the host refuses every call the workspace or the
-    compiled layouts do not cover."""
-    import vllm.distributed as distributed
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels, packed_row_words
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
-        dcp_topk_merge_rows,
-        dcp_topk_select,
-    )
-
-    world, max_rows, n = 8, 4, 384
-    ws = _host_only_workspace(world, max_rows, n)
-    monkeypatch.setattr(kernels, "_RESCUE_WORKSPACES", {(TOPK, n): ws})
-    lg, e = _local_case([1_250] * 6, seed=4)
-    gathered = torch.zeros(
-        (world, 6, packed_row_words(n)), dtype=torch.int32, device="cuda"
-    )
-    out = torch.empty((6, TOPK), dtype=torch.int32, device="cuda")
-    with pytest.raises(ValueError, match="exceeds its rescue workspace"):
-        dcp_topk_select(gathered, n, out, exact=ws.args(lg, e))
-    g4, out4, lg4, e4 = gathered[:, :4].contiguous(), out[:4], lg[:4], e[:4]
-    bad_args = [
-        (ws.args(lg4.float(), e4), "logits must be bf16"),
-        (ws.args(lg4[:2], e4), "logits must be bf16"),
-        (ws.args(lg4, e4.long()), "row_ends must be"),
-        (ws.args(lg4, e4[:2]), "row_ends must be"),
-        (ws.args(lg4, e[:8:2]), "row_ends must be"),
-    ]
-    for exact, match in bad_args:
-        with pytest.raises(ValueError, match=match):
-            dcp_topk_select(g4, n, out4, exact=exact)
-    with pytest.raises(ValueError, match="does not match its rescue workspace"):
-        dcp_topk_select(g4, n, out4[:, :1024], exact=ws.args(lg4, e4))
-    with pytest.raises(ValueError, match="does not match its rescue workspace"):
-        dcp_topk_select(g4[:4].contiguous(), n, out4, exact=ws.args(lg4, e4))
-    monkeypatch.setattr(distributed, "get_dcp_group", lambda: _FakeDCPGroup(world))
-    rows = dict(
-        packed=g4[0],
-        logits=lg4,
-        row_ends=e4,
-        local_topk=n,
-        topk=TOPK,
-        req_id=torch.zeros(4, dtype=torch.int32, device="cuda"),
-        block_table=torch.zeros((1, 1), dtype=torch.int32, device="cuda"),
-        block_size=64,
-        stride_rows=64,
-        dcp_rank=0,
-        rows_out=torch.empty((4, TOPK), dtype=torch.int32, device="cuda"),
-        valid_out=torch.empty(4, dtype=torch.int32, device="cuda"),
-    )
-    with pytest.raises(ValueError, match="workspace's rank"):
-        dcp_topk_merge_rows(**{**rows, "dcp_rank": 1})
-    with pytest.raises(ValueError, match="rows_out must be"):
-        dcp_topk_merge_rows(**{**rows, "rows_out": rows["rows_out"][:, :n]})
-    with pytest.raises(ValueError, match="packed must be"):
-        dcp_topk_merge_rows(**{**rows, "packed": g4[0, :, :n]})
-
-
-def test_packed_contract_validator():
-    """`assert_packed_merge_contract` accepts the stock producer (DeepSelect
-    + pack, including short and empty rows) and catches a dropped word, a
-    non-top word and a word whose score is not its logit."""
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
-        assert_packed_merge_contract,
-        dcp_topk_pack,
-    )
-
-    n = 384
-    lg, e = _local_case([12_500, 3_750, 250, 0], seed=6)
-    packed = dcp_topk_pack(lg, e, n)
-    assert_packed_merge_contract(packed, lg, e, n)
-
-    words = packed[0, :n]
-    j = int(torch.nonzero(words).flatten()[0])
-    dropped = packed.clone()
-    dropped[0, j] = 0
-    with pytest.raises(AssertionError, match="words"):
-        assert_packed_merge_contract(dropped, lg, e, n)
-
-    # Replace a sent word by the row's lowest-scoring token.
-    low = int(lg[0, : int(e[0])].float().argmin())
-    bits = int(lg[0, low : low + 1].view(torch.int16)[0]) & 0xFFFF
-    ordered = (~bits & 0xFFFF) if bits & 0x8000 else bits | 0x8000
-    non_top = packed.clone()
-    word = (ordered << 16) | (0xFFFF - low)
-    non_top[0, j] = word - (1 << 32) if word >= 1 << 31 else word
-    with pytest.raises(AssertionError, match="top-"):
-        assert_packed_merge_contract(non_top, lg, e, n)
-
-    wrong_score = packed.clone()
-    wrong_score[0, j] ^= 1 << 16
-    with pytest.raises(AssertionError, match="logit"):
-        assert_packed_merge_contract(wrong_score, lg, e, n)

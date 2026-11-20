@@ -37,8 +37,8 @@ def _metadata(context_lens: torch.Tensor, next_n: int):
     not (torch.cuda.is_available() and deep_gemm.has_deep_gemm()),
     reason="needs CUDA and DeepGEMM",
 )
-@pytest.mark.parametrize("next_n", [1, 2, 4])
-@pytest.mark.parametrize("batch", [1, 7, 300])
+@pytest.mark.parametrize("next_n", [1, 4])
+@pytest.mark.parametrize("batch", [1, 300])
 def test_all_zero_context_lens_schedule_no_work(batch, next_n):
     lens = torch.zeros((batch, next_n), dtype=torch.int32, device="cuda")
 

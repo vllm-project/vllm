@@ -19,6 +19,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonBaseImpl,
     MLACommonDecodeMetadata,
     MLACommonMetadata,
@@ -281,8 +282,6 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     prefill_max_seq_len: int = 0
     prefill: SparseMLAPrefillMetadata | None = None
     cp_kv_cache_interleave_size: int = 1
-    # Set on token-sharded TP prefill steps (see vllm.v1.attention.ops.shardq).
-    shardq: ShardQMetadata | None = None
     # Index of the first query token's top-k in the top-k buffer.
     topk_start: int = 0
     # The KV cache holds every DCP rank's rows (a DCP ShardQ step's gathered
@@ -433,15 +432,18 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         # Under DCP, ShardQ steps attend a gathered copy of their context.
         self.dcp_shardq: DcpShardQPlanner | None = None
         if self.use_shardq and self.dcp_world_size > 1:
+            # Only MLAAttention layers set use_shardq.
+            mla_layer = layers[layer_names[0]]
+            assert isinstance(mla_layer, MLAAttention)
             self.use_shardq = self._init_dcp_shardq(
-                kv_cache_spec, vllm_config, layers[layer_names[0]]
+                kv_cache_spec, vllm_config, mla_layer
             )
 
     def _init_dcp_shardq(
         self,
         kv_cache_spec: "AttentionSpec",
         vllm_config: "VllmConfig",
-        attention_layer: Any,
+        attention_layer: MLAAttention,
     ) -> bool:
         """Whether DCP ShardQ steps can gather this layer's caches
         (vllm.v1.attention.ops.dcp_shardq)."""
@@ -453,9 +455,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             register_warmup,
         )
 
-        layout = ContextLayout.from_layer(
-            kv_cache_spec, getattr(attention_layer, "indexer", None)
-        )
+        layout = ContextLayout.from_layer(kv_cache_spec, attention_layer.indexer)
         if layout is None:
             logger.warning_once(
                 "DCP ShardQ needs a packed MLA cache format in blocks of "

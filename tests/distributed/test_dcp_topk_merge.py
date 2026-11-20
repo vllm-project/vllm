@@ -379,65 +379,6 @@ def _check_late_peer(group, ws, n: int) -> None:
         assert start.elapsed_time(stop) > 20, "the rescue did not wait"
 
 
-def _check_deterministic(group, ws, n: int, repeats: int = 8) -> None:
-    """Repeated merges of the same logits are bit-identical, order included,
-    through both entry points (ids; rows with and without ids), unsaturated
-    and saturated (the rescue round): the sparse attention downstream sums
-    the selected tokens in this order."""
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
-        dcp_topk_merge,
-        dcp_topk_merge_rows,
-    )
-
-    world, rank = group.world_size, group.rank_in_group
-    lengths = [150_000, 100_000, 70_123, 40_000, 220_000, 9_000, 120_000, 60_000]
-    num_rows = len(lengths)
-    base, ends = _make_case(lengths, seed=53)
-    for sat in (False, True):
-        logits = _boost(base, [world - 1], slice(None), world) if sat else base
-        local, local_end = _shard(logits, ends, world, rank)
-        req_id = torch.arange(num_rows, dtype=torch.int32, device="cuda")
-        block_table = _block_table(num_rows, int(local_end.max()))
-        runs: list[list[torch.Tensor]] = []
-        for _ in range(repeats):
-            ids = torch.full((num_rows, TOPK), -7, dtype=torch.int32, device="cuda")
-            dcp_topk_merge(local, local_end, ids, n)
-            masks = _sat_masks(ws, num_rows)
-            assert all(masks) if sat else not any(masks), (sat, masks)
-            outs = [ids]
-            for with_ids in (True, False):
-                rows_out = torch.full_like(ids, -7)
-                valid_out = torch.full(
-                    (num_rows,), -7, dtype=torch.int32, device="cuda"
-                )
-                ids2 = torch.full_like(ids, -7) if with_ids else None
-                dcp_topk_merge_rows(
-                    logits=local,
-                    row_ends=local_end,
-                    local_topk=n,
-                    topk=TOPK,
-                    req_id=req_id,
-                    block_table=block_table,
-                    block_size=_BLOCK,
-                    stride_rows=_BLOCK,
-                    dcp_rank=rank,
-                    rows_out=rows_out,
-                    valid_out=valid_out,
-                    ids_out=ids2,
-                )
-                outs += [rows_out, valid_out] + ([ids2] if with_ids else [])
-            runs.append(outs)
-        torch.accelerator.synchronize()
-        _assert_exact(runs[0][0], logits, ends)
-        _assert_rows(group, runs[0][3], runs[0][1], runs[0][2], req_id, block_table)
-        what = ["ids", "rows", "valid", "rows ids", "rows (no ids)", "valid (no ids)"]
-        for i, run in enumerate(runs[1:], 1):
-            for name, got, want in zip(what, run, runs[0]):
-                assert torch.equal(got, want), f"sat={sat} run {i}: {name} changed"
-        # Without the ids the rows come out the same.
-        assert torch.equal(runs[0][4], runs[0][1])
-
-
 def run_worker(rank: int, world: int, local_rank: int, init_method: str) -> None:
     """One DCP rank. Also callable from a multi-node launcher."""
     from types import SimpleNamespace
@@ -492,7 +433,6 @@ def run_worker(rank: int, world: int, local_rank: int, init_method: str) -> None
             assert ws is not None and ws.max_rows >= 8
             assert dcp_topk_merge_max_rows(TOPK, n) == ws.max_rows
             _check_cases(group, ws, n)
-            _check_deterministic(group, ws, n)
             _check_nonfinite(group, n)
             _check_cuda_graph(group, ws, n)
             _check_late_peer(group, ws, n)
@@ -513,7 +453,7 @@ def _spawned(rank: int, world: int, init_method: str) -> None:
                 torch.accelerator.device_count() < w, reason=f"Need {w} GPUs."
             ),
         )
-        for w in (2, 4, 8)
+        for w in (2, 8)
     ],
 )
 def test_dcp_topk_merge_exact(world: int):

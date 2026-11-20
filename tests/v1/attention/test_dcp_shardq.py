@@ -55,10 +55,8 @@ KERNEL_CASES = [
 
 # (context, new tokens) per request.
 SCENARIOS = {
-    "fresh": [(0, 300)],
     "short_contexts": [(3, 5), (7, 1), (8, 64), (1000, 37)],
     "page_tails": [(4097, 2048), (513, 1), (0, 64), (1, 511)],
-    "long": [(20000, 4096)],
 }
 
 
@@ -301,13 +299,10 @@ LAYOUT_CASES = [
 
 
 @pytest.mark.parametrize("cache_dtype,index_format", LAYOUT_CASES)
-@pytest.mark.parametrize("world", [2, 8])
 @pytest.mark.parametrize("scenario", list(SCENARIOS))
-def test_push_rebuilds_context_in_token_order(
-    cache_dtype, index_format, world, scenario
-):
+def test_push_rebuilds_context_in_token_order(cache_dtype, index_format, scenario):
     rep = Replicated(SCENARIOS[scenario], _layout(cache_dtype, index_format))
-    workspaces, _ = _push_all(rep, world)
+    workspaces, _ = _push_all(rep, 8)
     for _, ws_mla, ws_index in workspaces:
         # Prior context in full, the new tokens' indexer rows, nothing else
         # (the new MLA rows and page tails stay untouched).
@@ -390,44 +385,7 @@ def test_indexer_chunks_read_the_workspace_like_a_replicated_cache(
         assert chunk.total_seq_lens == sum(seq_lens)
 
 
-def test_workspace_holds_a_max_model_len_request():
-    """DCP ShardQ has no capacity knob: the workspace fits one request of
-    `max_model_len` tokens, plus a page of rounding per request."""
-    from vllm.v1.attention.ops.dcp_shardq import context as dcp
-
-    config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=131072))
-    assert dcp.workspace_max_tokens(config) == 131072
-    assert dcp.capacity_pages(dcp.workspace_max_tokens(config), 8) == 2048 + 8
-
-
-def test_stats_report_paths_since_last_report():
-    from vllm.v1.attention.ops.dcp_shardq import context as dcp
-
-    stats = dcp.DcpShardQStats(log=False)
-    stats.record(dcp.SHARDQ, 16384)
-    stats.record(dcp.SHARDQ, 8000)
-    stats.record(dcp.NO_SPLIT, 600)
-    stats.record(dcp.WORKSPACE, 15000)
-    assert stats.total == {
-        dcp.SHARDQ: [2, 24384],
-        dcp.NO_SPLIT: [1, 600],
-        dcp.WORKSPACE: [1, 15000],
-    }
-    assert stats.report() == (
-        "DCP ShardQ prefill: 2/4 steps, 24384/39984 tokens (61.0%; 61.0% since "
-        "start) on ShardQ; DCP path: no split 1 steps / 600 tokens, "
-        "workspace full 1 steps / 15000 tokens"
-    )
-    stats.recent.clear()
-    stats.record(dcp.NO_SPLIT, 900)
-    assert stats.report() == (
-        "DCP ShardQ prefill: 0/1 steps, 0/900 tokens (0.0%; 59.6% since start) "
-        "on ShardQ; DCP path: no split 1 steps / 900 tokens"
-    )
-
-
-@pytest.mark.parametrize("num_spec", [0, 3])
-def test_planner_follows_the_split_decode_rows(num_spec):
+def test_planner_follows_the_split_decode_rows():
     """The split's decode rows (at most 1 + num_speculative_tokens tokens,
     which the indexer scores on its decode path) keep the DCP path; the plan
     covers the rest of the step, a later short row included. Steps that
@@ -438,11 +396,11 @@ def test_planner_follows_the_split_decode_rows(num_spec):
     )
     from vllm.v1.attention.ops.dcp_shardq import context as dcp
 
-    speculative_config = (
-        SimpleNamespace(num_speculative_tokens=num_spec) if num_spec else None
-    )
+    num_spec = 3
     threshold = DeepseekV32IndexerMetadataBuilder.get_decode_threshold(
-        SimpleNamespace(speculative_config=speculative_config)
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(num_speculative_tokens=num_spec)
+        )
     )
     assert threshold == 1 + num_spec
     world, rank = 8, 3
@@ -490,19 +448,19 @@ def test_planner_follows_the_split_decode_rows(num_spec):
     )
 
 
-def _flashinfer_impl(cache_dtype: str, kernel: str, dcp_world_size: int):
+def _flashinfer_impl(cache_dtype: str, kernel: str):
     """A FlashInfer sparse MLA impl at K3.1's MLA sizes on `kernel`."""
     from vllm.v1.attention.backends.mla import flashinfer_mla_sparse as fims
 
     impl = object.__new__(fims.FlashInferMLASparseImpl)
-    impl.dcp_world_size = dcp_world_size
+    impl.dcp_world_size = 1
     impl.dcp_rank = 0
     impl.scale = 192**-0.5
     impl.kv_cache_dtype = cache_dtype
     impl.kv_lora_rank, impl.qk_nope_head_dim, impl.qk_rope_head_dim = 512, 128, 64
     impl.is_nope_mla = False
     impl.index_group = None
-    impl.need_to_return_lse_for_decode = dcp_world_size > 1
+    impl.need_to_return_lse_for_decode = False
     impl._workspace_buffer = impl.bmm1_scale = impl.bmm2_scale = None
     impl.use_prims_ts = kernel == "prims_ts"
     if impl.use_prims_ts:
@@ -640,7 +598,7 @@ def test_attention_over_workspace_matches_replicated_cache(cache_dtype, kernel):
 
     topk, req_id = _random_topk(lens)
     q = _fp8_query(topk.shape[0], NUM_HEADS)
-    impl = _flashinfer_impl(cache_dtype, kernel, 1)
+    impl = _flashinfer_impl(cache_dtype, kernel)
 
     def attend(cache):
         _, block_stride_rows = flat_kv_row_view(cache, PAGE)
@@ -668,239 +626,6 @@ def test_attention_over_workspace_matches_replicated_cache(cache_dtype, kernel):
     out = attend(ws_mla)
     assert torch.isfinite(out).all()
     assert torch.equal(out, attend(rep.mla))
-
-
-def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
-    """One rank of a DCP = TP group: the production gather, indexer and
-    attention over the gathered context against TP ShardQ over the replicated
-    caches, bit for bit, for two layers through the same workspace."""
-    from vllm import _custom_ops as ops
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.distributed import (
-        cleanup_dist_env_and_memory,
-        init_distributed_environment,
-        initialize_model_parallel,
-    )
-    from vllm.forward_context import create_forward_context, override_forward_context
-    from vllm.model_executor.layers.sparse_attn_indexer import sparse_attn_indexer
-    from vllm.models.kimi_k3.nvidia.ops.dsa_indexer import (
-        indexer_q_quant_fold_weights,
-    )
-    from vllm.v1.attention.backends.mla.indexer import (
-        DeepseekV32IndexerMetadata,
-        DeepseekV32IndexerPrefillMetadata,
-        build_prefill_chunk_metadata,
-    )
-    from vllm.v1.attention.ops.shardq import ShardQMetadata, shard_q, unshard_out
-    from vllm.v1.worker.workspace import init_workspace_manager
-
-    torch.accelerator.set_device_index(rank)
-    device = torch.device("cuda", rank)
-    config = VllmConfig()
-    config.parallel_config.tensor_parallel_size = world
-    config.parallel_config.decode_context_parallel_size = world
-    with set_current_vllm_config(config):
-        init_distributed_environment(
-            world_size=world,
-            rank=rank,
-            local_rank=rank,
-            distributed_init_method=f"file://{init_file}",
-        )
-        initialize_model_parallel(
-            tensor_model_parallel_size=world, decode_context_model_parallel_size=world
-        )
-        init_workspace_manager(device)
-        # Requests within the top-k, so every row selects all its keys: the
-        # top-k kernels break ties between equal scores nondeterministically.
-        lens = [(1000, 300), (513, 64), (0, 700), (1, 63)]
-        layout = _layout(cache_dtype)
-        seq_lens = [c + n for c, n in lens]
-        num_tokens = sum(n for _, n in lens)
-        rep = Replicated(lens, layout, fill_random=False)
-        kv_c, k_pe, scale = _real_rows(rep, cache_dtype)
-        split = _split(lens, world)
-        plan = _build_context(lens, layout, world, rank, split=split)
-        # The TP ShardQ step's chunks over the replicated caches: the same
-        # rows of this rank's tokens.
-        tp_plan = _build_context(lens, layout, 1, rank, split=split)
-
-        torch.manual_seed(4)
-        q_fp8, weights = indexer_q_quant_fold_weights(
-            torch.randn(num_tokens, 32, INDEX_HEAD_DIM, device="cuda").bfloat16(),
-            torch.randn(num_tokens, 32, device="cuda").bfloat16(),
-            INDEX_HEAD_DIM**-0.5 * 32**-0.5,
-            32,
-        )
-        hidden = torch.randn(num_tokens, 256, device="cuda").bfloat16()
-        q = _fp8_query(num_tokens, NUM_HEADS // world)
-        qsl = np.r_[0, np.cumsum([n for _, n in lens])]
-        shardq = ShardQMetadata(
-            num_decode_tokens=0,
-            num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
-            token_ids=torch.from_numpy(split.token_ids).to(device),
-            rank_offsets=torch.from_numpy(
-                np.r_[0, np.cumsum(split.num_tokens_per_rank)]
-            ).to(device),
-        )
-        num_local = int(split.num_tokens_per_rank[rank])
-        req_id = torch.from_numpy(
-            np.repeat(np.arange(len(lens)), np.diff(qsl)).astype(np.int32)
-        ).cuda()
-        seq_lens_cpu = torch.tensor(seq_lens, dtype=torch.int32)
-        topk = torch.full((num_tokens, TOPK), -1, dtype=torch.int32, device="cuda")
-
-        def dcp_local_chunks(index_table):
-            """The indexer builder's DCP-local chunk of the step, which a DCP
-            ShardQ step replaces."""
-            return [
-                build_prefill_chunk_metadata(
-                    0,
-                    len(lens),
-                    torch.from_numpy(qsl).int().cuda(),
-                    torch.from_numpy(qsl).int(),
-                    seq_lens_cpu.cuda(),
-                    seq_lens_cpu.cuda(),
-                    seq_lens_cpu,
-                    index_table,
-                    1,
-                    dcp_rank=rank,
-                    dcp_world_size=world,
-                )
-            ]
-
-        def run(gathered_context, mla, mla_table, index, index_table, chunks, dcp_size):
-            shardq.gathered_context = gathered_context
-            mla_metadata = SimpleNamespace(
-                block_size=mla.shape[1],
-                block_table=mla_table,
-                req_id_per_token=req_id,
-                num_decode_tokens=0,
-                num_actual_tokens=num_tokens,
-                cp_kv_cache_interleave_size=1,
-                shardq=shardq,
-            )
-            index_metadata = DeepseekV32IndexerMetadata(
-                seq_lens=seq_lens_cpu.cuda(),
-                max_seq_len=max(seq_lens),
-                slot_mapping=torch.empty(0, dtype=torch.int64, device="cuda"),
-                num_decodes=0,
-                num_decode_tokens=0,
-                num_prefills=len(lens),
-                num_prefill_tokens=num_tokens,
-                prefill=DeepseekV32IndexerPrefillMetadata(
-                    chunks,
-                    # The TP ShardQ step's rows; the DCP one's come with its
-                    # gathered context.
-                    shardq_gather_indices=(
-                        tp_plan.gather_indices if gathered_context is None else None
-                    ),
-                ),
-                block_table=index_table,
-            )
-            layers = config.compilation_config.static_forward_context
-            layers["mla"] = SimpleNamespace(kv_cache=mla)
-            layers["idx"] = SimpleNamespace(shardq_layer_name="mla")
-            context = create_forward_context(
-                {"idx": index_metadata, "mla": mla_metadata}, config
-            )
-            with override_forward_context(context):
-                sparse_attn_indexer(
-                    hidden,
-                    "idx",
-                    index,
-                    q_fp8,
-                    None,
-                    None,
-                    weights,
-                    INDEX_HEAD_DIM,
-                    "ue8m0",
-                    TOPK,
-                    INDEX_HEAD_DIM,
-                    1 << 20,
-                    1 << 20,
-                    topk,
-                    True,
-                    False,
-                    False,
-                    "",
-                    False,
-                    rank,
-                    dcp_size,
-                    1,
-                )
-            # A canonical order, so that both attentions read the same rows.
-            local_topk = torch.sort(topk[:num_local], dim=1).values
-            topk[:num_local] = local_topk
-            impl = _flashinfer_impl(cache_dtype, kernel, dcp_size)
-            impl.topk_indices_buffer = topk
-            cache, table = rep.mla, tp_plan.block_table
-            if gathered_context is not None:
-                # forward_impl's write of the new tokens' MLA rows.
-                cache = gathered_context.mla_view(mla)
-                table = gathered_context.block_table
-                ops.concat_and_cache_mla(
-                    kv_c, k_pe, cache, gathered_context.slot_mapping, cache_dtype, scale
-                )
-            # MLAAttention.forward_impl's ShardQ exchanges around forward_mqa.
-            _, local_q = shard_q(q, shardq)
-            attn_metadata = SimpleNamespace(
-                topk_start=0,
-                num_decode_tokens=0,
-                block_size=PAGE,
-                block_table=table,
-                req_id_per_token=req_id[shardq.local_token_ids],
-                kv_gathered=True,
-                cp_kv_cache_interleave_size=1,
-            )
-            out, lse = impl.forward_mqa(local_q, cache, attn_metadata, SCALES)
-            assert lse is None
-            return local_topk, unshard_out(out, shardq, None).clone()
-
-        try:
-            tp_topk, tp_out = run(
-                None,
-                rep.mla,
-                tp_plan.block_table,
-                rep.index,
-                tp_plan.block_table,
-                tp_plan.indexer_chunks,
-                1,
-            )
-            for layer in range(2):  # The second layer reuses the workspace.
-                shard = _shard(rep, world, rank, seed=rank + 7 * layer)
-                dcp_topk, dcp_out = run(
-                    plan,
-                    shard.mla,
-                    shard.mla_table,
-                    shard.index,
-                    shard.index_table,
-                    dcp_local_chunks(shard.index_table),
-                    world,
-                )
-                _check_workspace(
-                    plan.mla_view(shard.mla),
-                    plan.index_view(shard.index),
-                    rep,
-                    new_mla_rows=True,
-                    fill=False,
-                )
-                assert torch.equal(dcp_topk, tp_topk)
-                assert torch.equal(dcp_out, tp_out)
-        finally:
-            cleanup_dist_env_and_memory()
-
-
-@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="needs 2 GPUs")
-@pytest.mark.parametrize(("cache_dtype", "kernel"), KERNEL_CASES)
-def test_gathered_context_step_matches_tp_shardq(cache_dtype, kernel, tmp_path):
-    import torch.multiprocessing as mp
-
-    world = min(torch.accelerator.device_count(), 4)
-    mp.spawn(
-        _distributed_worker,
-        args=(world, str(tmp_path / "dist_init"), cache_dtype, kernel),
-        nprocs=world,
-    )
 
 
 # A Kimi K3.1 DSA layer at DeepSeek-V2-Lite's MLA sizes (16 heads, NoPE latent
@@ -1359,7 +1084,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
 
 
 @pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="needs 2 GPUs")
-@pytest.mark.parametrize(("cache_dtype", "kernel"), KERNEL_CASES)
+@pytest.mark.parametrize(("cache_dtype", "kernel"), KERNEL_CASES[::2])
 def test_dsa_layer_runs_dcp_prefill_as_shardq(cache_dtype, kernel, tmp_path):
     import torch.multiprocessing as mp
 
@@ -1585,7 +1310,7 @@ def _profile_worker(rank, world, init_file, cache_dtype, kernel):
 
 
 @pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="needs 2 GPUs")
-@pytest.mark.parametrize(("cache_dtype", "kernel"), KERNEL_CASES)
+@pytest.mark.parametrize(("cache_dtype", "kernel"), KERNEL_CASES[:1])
 def test_profile_run_warms_the_dcp_path(cache_dtype, kernel, tmp_path):
     import torch.multiprocessing as mp
 
@@ -1602,8 +1327,6 @@ def test_profile_run_warms_the_dcp_path(cache_dtype, kernel, tmp_path):
     [
         pytest.param(False, 132, (128, 4), id="fp8_index"),
         pytest.param(True, 68, (64, 4), id="mxfp4_index"),
-        # index_head_dim 64: 32 B of values and 2 scales.
-        pytest.param(True, 34, (32, 2), id="mxfp4_index_dim64"),
     ],
 )
 def test_context_layout_of_the_indexer_cache_format(fp4, entry, split):

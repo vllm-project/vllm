@@ -569,7 +569,7 @@ class BuildPrefillChunkMetadataKernel(
         dcp_cases = [dict(DCP_RANK=dcp_rank, DCP_WORLD=dcp_world)]
         if dcp_world > 1 and (
             parallel_config.prefill_context_parallel_size > 1
-            or getattr(vllm_config.attention_config, "sparse_mla_shard_q", False)
+            or vllm_config.attention_config.sparse_mla_shard_q
         ):
             # PCP+DCP prefill constructs a global PCP chunk plan and therefore
             # dispatches this kernel with already-localized row starts, and a

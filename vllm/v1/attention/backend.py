@@ -1094,6 +1094,23 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         that is otherwise reserved after profiling."""
         return
 
+    def use_dcp_prefill_kvgather(self, attn_metadata: T, num_tokens: int) -> bool:
+        """Whether this step's sparse MQA prefill rows run
+        `sparse_dcp_prefill_kvgather` under DCP: gather the KV instead of every
+        rank's queries."""
+        return False
+
+    def sparse_dcp_prefill_kvgather(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        row0: int,
+    ) -> torch.Tensor:
+        """Sparse MLA of the prefill rows `q` (from token `row0` on) over the
+        DCP group's gathered KV, with this rank's heads."""
+        raise NotImplementedError
+
     def decode_query_padded_num_heads(self, attn_metadata: T) -> int | None:
         """Head count forward_mqa pads this step's query to by repeating each
         head, so the caller may hand it the padded query directly; None when

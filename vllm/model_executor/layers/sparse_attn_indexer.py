@@ -40,6 +40,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     SparseIndexerTopk,
@@ -639,8 +640,9 @@ def dcp_shardq_context(
     mla_layer_name = getattr(k_cache, "shardq_layer_name", "")
     if not mla_layer_name:
         return None
-    shardq = getattr(forward_context.attn_metadata.get(mla_layer_name), "shardq", None)
-    gathered_context = getattr(shardq, "gathered_context", None)
+    mla_metadata = forward_context.attn_metadata[mla_layer_name]
+    assert isinstance(mla_metadata, MLACommonMetadata)
+    gathered_context = mla_metadata.dcp_gathered_context
     if gathered_context is None:
         return None
     return mla_layer_name, gathered_context

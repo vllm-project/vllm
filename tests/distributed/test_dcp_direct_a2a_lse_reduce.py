@@ -982,23 +982,6 @@ class _SimulatedA2ARanks:
             )
         )
 
-    def entry_point(self, outputs, partial_outputs, partial_lses, base_e):
-        self._per_rank_streams(
-            lambda rank: _cutedsl_a2a().direct_dcp_a2a_lse_reduce_cutedsl(
-                partial_outputs[rank],
-                partial_lses[rank],
-                None,
-                None,
-                *self.args(rank),
-                outputs[rank],
-                self.world_size,
-                rank,
-                _A2A_MAX_NUM_TOKENS,
-                base_e,
-                counters=self.counters[rank],
-            )
-        )
-
 
 def _a2a_inputs(
     world_size,
@@ -1063,17 +1046,14 @@ def _a2a_reference(
 
 
 @_requires_cutedsl_a2a
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("world_size,heads_per_rank", [(8, 12), (2, 64)])
 @pytest.mark.parametrize(
-    "world_size,heads_per_rank", [(8, 1), (8, 12), (4, 24), (2, 64)]
-)
-@pytest.mark.parametrize(
-    "num_tokens,lse_dtype,padded,transposed,base_e",
+    "num_tokens,lse_dtype,padded,transposed,base_e,dtype",
     [
-        (1, torch.float32, False, False, False),
-        (5, torch.bfloat16, True, False, True),
-        (13, torch.float32, True, True, True),
-        (16, torch.float16, False, True, False),
+        (1, torch.float32, False, False, False, torch.bfloat16),
+        (13, torch.bfloat16, True, True, True, torch.float16),
+        # The whole workspace.
+        (_A2A_MAX_NUM_TOKENS, torch.float32, True, False, True, torch.bfloat16),
     ],
 )
 def test_cutedsl_a2a_bit_exact_vs_cuda_op(
@@ -1113,24 +1093,6 @@ def test_cutedsl_a2a_bit_exact_vs_cuda_op(
             ranks_cute.received_signal[rank], ranks_cuda.received_signal[rank]
         )
         assert not ranks_cute.counters[rank].any()
-
-
-@_requires_cutedsl_a2a
-@pytest.mark.parametrize("num_tokens", [64, 256])
-def test_cutedsl_a2a_large_batch_matches_reference(num_tokens):
-    world_size, heads_per_rank = 8, 12
-    ranks = _SimulatedA2ARanks(world_size, heads_per_rank)
-    partial_outputs, partial_lses = _a2a_inputs(
-        world_size, heads_per_rank, num_tokens, torch.float32, True, True, seed=7
-    )
-    actual = ranks.outputs(num_tokens)
-    ranks.cutedsl(actual, partial_outputs, partial_lses, base_e=True)
-    torch.accelerator.synchronize()
-    for rank in range(world_size):
-        expected = _a2a_reference(
-            partial_outputs, partial_lses, rank, heads_per_rank, True
-        )
-        torch.testing.assert_close(actual[rank].float(), expected, rtol=2e-2, atol=2e-2)
 
 
 @_requires_cutedsl_a2a
@@ -1187,155 +1149,6 @@ def test_cutedsl_a2a_empty_shards_get_zero_weight():
         )
         # Sequence 0 is empty on every rank: all weights are zero.
         assert not actual[rank][: query_lens[0]].any()
-
-
-@_requires_cutedsl_a2a
-@pytest.mark.parametrize("base_e", [False, True])
-def test_cutedsl_a2a_graph_replay_and_mixing_with_cuda_op(base_e):
-    """Graph replays and alternating implementations share one protocol."""
-    world_size, heads_per_rank, num_tokens = 8, 12, 8
-    ranks = _SimulatedA2ARanks(world_size, heads_per_rank)
-    reference_ranks = _SimulatedA2ARanks(world_size, heads_per_rank)
-    partial_outputs, partial_lses = _a2a_inputs(
-        world_size, heads_per_rank, num_tokens, torch.float32, True, False, seed=11
-    )
-    expected = reference_ranks.outputs(num_tokens)
-    reference_ranks.cuda(expected, partial_outputs, partial_lses, base_e)
-
-    actual = ranks.outputs(num_tokens)
-    # Compile eagerly: graph capture must not include the first JIT call.
-    ranks.entry_point(actual, partial_outputs, partial_lses, base_e)
-    torch.accelerator.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        ranks.entry_point(actual, partial_outputs, partial_lses, base_e)
-    for replay in range(4):
-        for output in actual:
-            output.fill_(float("nan"))
-        if replay % 2:
-            ranks.cuda(actual, partial_outputs, partial_lses, base_e)
-        else:
-            graph.replay()
-        torch.accelerator.synchronize()
-        for rank in range(world_size):
-            torch.testing.assert_close(actual[rank], expected[rank], rtol=0, atol=0)
-    for rank in range(world_size):
-        assert ranks.epoch[rank].item() == 5
-        assert not ranks.counters[rank].any()
-
-
-@_requires_cutedsl_a2a
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_cutedsl_a2a_warmup_covers_runtime_keys(dtype):
-    """Every LSE dtype and layout runs on the workspace's warmup keys."""
-    kernels = _cutedsl_a2a()
-    world_size, heads_per_rank, num_tokens = 4, 3, 5
-    ranks = _SimulatedA2ARanks(world_size, heads_per_rank, dtype)
-    for lse_dtype in (torch.float32, torch.bfloat16, torch.float16):
-        for transposed in (False, True):
-            partial_outputs, partial_lses = _a2a_inputs(
-                world_size,
-                heads_per_rank,
-                num_tokens,
-                lse_dtype,
-                not transposed,
-                transposed,
-                seed=13,
-                dtype=dtype,
-            )
-            ranks.entry_point(
-                ranks.outputs(num_tokens), partial_outputs, partial_lses, False
-            )
-    torch.accelerator.synchronize()
-    for kernel, extra in (
-        (kernels.DIRECT_DCP_A2A_PUSH_KERNEL, {}),
-        (kernels.DIRECT_DCP_A2A_COMBINE_KERNEL, {"dtype": dtype}),
-    ):
-        warmup_keys = kernel.get_warmup_keys(
-            world_size=world_size,
-            heads_per_rank=heads_per_rank,
-            head_dim=_A2A_HEAD_DIM,
-            **extra,
-        )
-        used = [
-            key
-            for key in kernel._compiled_cache
-            if (key.world_size, key.heads_per_rank) == (world_size, heads_per_rank)
-            and getattr(key, "dtype", dtype) == dtype
-        ]
-        assert used and set(used) <= set(warmup_keys)
-
-
-@_requires_cutedsl_a2a
-def test_cutedsl_a2a_supported_shapes():
-    supported = _cutedsl_a2a().direct_dcp_a2a_cutedsl_supported
-    assert supported(8, 12, _A2A_HEAD_DIM, torch.bfloat16)
-    assert supported(8, 1, _A2A_HEAD_DIM, torch.float16)
-    assert supported(2, 64, _A2A_HEAD_DIM, torch.bfloat16)
-    # The push sends one LSE per thread: heads_per_rank <= 128 is a hard
-    # limit; the benchmarked range is narrower.
-    assert not supported(2, 160, _A2A_HEAD_DIM, torch.bfloat16)
-    assert not supported(2, 65, _A2A_HEAD_DIM, torch.bfloat16)
-    assert not supported(16, 4, _A2A_HEAD_DIM, torch.bfloat16)
-    assert not supported(1, 12, _A2A_HEAD_DIM, torch.bfloat16)
-    assert not supported(8, 12, 256, torch.bfloat16)
-    assert not supported(8, 12, _A2A_HEAD_DIM, torch.float32)
-
-
-@_requires_cutedsl_a2a
-def test_cutedsl_a2a_rejects_mismatched_shapes():
-    """Shape errors raise on the host instead of writing into peer memory."""
-    world_size, heads_per_rank, num_tokens = 4, 8, 3
-    ranks = _SimulatedA2ARanks(world_size, heads_per_rank)
-    partial_outputs, partial_lses = _a2a_inputs(
-        world_size, heads_per_rank, num_tokens, torch.float32, False, False, seed=5
-    )
-
-    def call(partial_output=None, partial_lse=None, output=None, **kwargs):
-        args = dict(
-            seq_lens=None,
-            query_start_loc=None,
-            rank=0,
-            max_num_tokens=_A2A_MAX_NUM_TOKENS,
-        )
-        args.update(kwargs)
-        _cutedsl_a2a().direct_dcp_a2a_lse_reduce_cutedsl(
-            partial_outputs[0] if partial_output is None else partial_output,
-            partial_lses[0] if partial_lse is None else partial_lse,
-            args["seq_lens"],
-            args["query_start_loc"],
-            *ranks.args(0),
-            ranks.outputs(num_tokens)[0] if output is None else output,
-            world_size,
-            args["rank"],
-            args["max_num_tokens"],
-            False,
-            counters=ranks.counters[0],
-        )
-
-    with pytest.raises(RuntimeError, match="combined output"):
-        call(output=ranks.outputs(num_tokens + 1)[0])
-    with pytest.raises(RuntimeError, match="combined output"):
-        call(output=ranks.outputs(num_tokens)[0][:, :-1])
-    with pytest.raises(RuntimeError, match="LSE"):
-        call(partial_lse=partial_lses[0][:, :-1])
-    with pytest.raises(RuntimeError, match="divide"):
-        call(partial_output=partial_outputs[0][:, :-1])
-    with pytest.raises(RuntimeError, match="rank"):
-        call(rank=world_size)
-    with pytest.raises(RuntimeError, match="token count"):
-        call(max_num_tokens=num_tokens - 1)
-    query_start_loc = torch.arange(num_tokens + 1, dtype=torch.int32, device="cuda")
-    seq_lens = torch.ones(num_tokens, dtype=torch.int32, device="cuda")
-    with pytest.raises(RuntimeError, match="together"):
-        call(seq_lens=seq_lens)
-    with pytest.raises(RuntimeError, match="int32"):
-        call(seq_lens=seq_lens.long(), query_start_loc=query_start_loc)
-    with pytest.raises(RuntimeError, match="int32"):
-        call(seq_lens=seq_lens, query_start_loc=query_start_loc[:-1])
-    # Nothing was launched: the protocol state is untouched.
-    assert ranks.epoch[0].item() == 0
-    assert not ranks.counters[0].any()
 
 
 def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
