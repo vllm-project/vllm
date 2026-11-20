@@ -90,6 +90,7 @@ steps:
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_mono.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
+  - tests/kernels/models/amd/test_dsv41_flydsl_mhc.py
   - tests/models/test_muse_spark_rocm_drafter.py
   commands:
     - >-
@@ -112,6 +113,7 @@ steps:
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_mono.py
       kernels/models/amd/test_muse_spark_fused_markov.py
+      kernels/models/amd/test_dsv41_flydsl_mhc.py
       models/test_muse_spark_rocm_drafter.py
   mirror:
     amd:
@@ -153,6 +155,7 @@ steps:
       - tests/models/test_muse_spark_rocm_shared_rope.py
       - tests/models/test_muse_spark_rocm_mono.py
       - tests/kernels/models/amd/test_muse_spark_fused_markov.py
+      - tests/kernels/models/amd/test_dsv41_flydsl_mhc.py
       - tests/models/test_muse_spark_rocm_drafter.py
       commands:
       - >-
@@ -179,6 +182,7 @@ steps:
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_mono.py
         kernels/models/amd/test_muse_spark_fused_markov.py
+        kernels/models/amd/test_dsv41_flydsl_mhc.py
         models/test_muse_spark_rocm_drafter.py
         models/test_utils.py::test_merge_multimodal_embeddings_no_sync
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
