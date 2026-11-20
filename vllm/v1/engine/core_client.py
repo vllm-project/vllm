@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from dataclasses import dataclass
 from multiprocessing.queues import Queue
 from threading import Thread
@@ -1191,8 +1191,19 @@ class SyncMPClient(MPClient):
 
     def wait_for_sent_outputs(self) -> None:
         """A utility reply follows the outputs the engine sent before it."""
-        if not self.resources.engine_dead:
-            self.get_weight_version()
+        if self.resources.engine_dead:
+            return
+        call_id = uuid.uuid1().int >> 64
+        future: Future[Any] = Future()
+        self.utility_results[call_id] = future
+        self._send_input(
+            EngineCoreRequestType.UTILITY, (0, call_id, "get_weight_version", ())
+        )
+        while (
+            not (future.done() or self.resources.engine_dead)
+            and self.output_queue_thread.is_alive()
+        ):
+            wait([future], timeout=1)
 
     def get_weight_version(self) -> str:
         return self.call_utility("get_weight_version")
