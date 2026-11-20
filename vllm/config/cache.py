@@ -174,7 +174,6 @@ def is_known_kv_cache_dtype(name: str) -> bool:
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
-MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -324,11 +323,10 @@ class CacheConfig:
       i * block_size.
     """
     enable_mamba_shared_prefix_checkpoint: bool = False
-    """Also register a Mamba "align" checkpoint at the shared-prefix junction --
-    where an EAGLE/MTP sibling was observed to resume -- instead of only at the
-    prompt tail. Off by default; only takes effect with prefix caching enabled,
-    EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
-    block size."""
+    """Also register a Mamba checkpoint at the shared-prefix junction --
+    where a sibling request was observed to resume -- instead of only at the
+    prompt tail. Off by default; only takes effect with prefix caching enabled
+    and a prefix match unit smaller than the Mamba block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton standard decode
     uses B physical rows; FlashInfer and Triton speculative decoding use B+T,
@@ -337,7 +335,7 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
-    Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
+    Triton and FlashInfer support Mamba prefix caching on and off.
     Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
     supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""

@@ -3,9 +3,9 @@
 """Weight cache daemon for fast engine restarts.
 
 One daemon process per GPU holds the post-quantized, TP-sharded weights of its
-rank in GPU memory and serves CUDA IPC handles to vLLM engines over a Unix
-domain socket. Restarting engines map the weights via zero-copy IPC instead of
-reloading from disk.
+rank in GPU memory and serves shared storage handles to vLLM engines over a Unix
+domain socket. Restarting engines map the weights zero-copy instead of reloading
+from disk.
 
 Launch one daemon per TP rank with a single command:
 
@@ -20,7 +20,7 @@ Engines then load from the daemons with:
 Tensor, expert, data and pipeline parallelism are supported.
 
 For multi-node tensor parallelism, run one launcher per node with a shared
-rendezvous so the global TP group forms across nodes (CUDA IPC handles are
+rendezvous so the global TP group forms across nodes (weight sharing is
 node-local, so each node serves only its local GPUs' shards). Reuse the same
 `--nnodes`/`--node-rank`/`--master-addr` flags you pass the engine, plus a
 `--weight-cache-master-port` distinct from the engine's `--master-port`:
@@ -91,7 +91,7 @@ import os
 import select
 import signal
 import socket
-import threading
+import time
 from collections.abc import Callable, Iterable
 
 import torch
@@ -116,18 +116,19 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import StorageEntry
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
+    recv_msg,
+    send_msg,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    TensorEntry,
-    TensorKind,
     WeightCacheKey,
+    WeightCacheState,
     WeightCacheUnavailableError,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
-    hash_rope_parameters,
-    recv_msg,
-    send_msg,
     verify_peer_is_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.transport import (
@@ -138,7 +139,6 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     DaemonRole,
     build_weight_cache_key,
     collect_tensors,
-    export_entries,
     export_model_attrs,
     exported_weight_bytes,
     format_daemon_role,
@@ -151,11 +151,15 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import 
 from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
     FlashInferWarmupCache,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed import (
-    WeightShardSeed,
-)
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+    WEIGHT_COPY_LEASE_TIMEOUT_S,
+    WeightShardSeed,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    build_manifest,
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -166,7 +170,7 @@ logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 
 class WeightCacheDaemon:
-    """Per-GPU process that loads one TP/PP shard and serves CUDA IPC handles."""
+    """Per-GPU process that loads one shard and serves its shared storage handles."""
 
     def __init__(
         self,
@@ -181,15 +185,17 @@ class WeightCacheDaemon:
         seed_config: SeedConfig | None = None,
         device_index: int | None = None,
         warmup_cache_stores: Iterable[str] = (),
+        weight_cache_backend: str = "torch_ipc",
     ):
+        from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
+            IPC_BACKENDS,
+        )
+
+        self.backend_name = weight_cache_backend
+        self.backend = IPC_BACKENDS[weight_cache_backend]()
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        # Seed peers are served on their own thread; this serializes their
-        # reads of the state with the local socket's requests. Reentrant
-        # because the local "seed" command re-enters it through
-        # WeightShardSeed.resolve.
-        self._state_lock = threading.RLock()
         self.seed_config = seed_config or SeedConfig()
         warmup_cache_stores = tuple(warmup_cache_stores)
         self.warmup_caches: list[WarmupCache] = [
@@ -238,7 +244,7 @@ class WeightCacheDaemon:
         self.dp_rank = dp_rank
         self.world_size = self.dp_size * self.pp_size * self.tp_size
         self.local_rank = local_rank
-        # A peer's CUDA IPC handle names its device by index, so a same-host
+        # A peer's local weight handle names its device by index, so a same-host
         # mirror keeps every device visible and places its own ranks on the
         # GPUs the source does not use; the launcher infers the placement
         # from the source's GPU UUIDs and passes it explicitly.
@@ -249,6 +255,7 @@ class WeightCacheDaemon:
         self.role = format_daemon_role(is_draft)
         self.serves_model = daemon_serves_model(is_draft, self.pp_rank, self.pp_size)
         self.model: torch.nn.Module | None = None
+        self.state: WeightCacheState | None = None
         # Engine watch connections, held open for the daemon's lifetime.
         self._watchers: list[socket.socket] = []
         # Fingerprint before loading: process_weights_after_loading may
@@ -257,9 +264,6 @@ class WeightCacheDaemon:
         self.cache_key = build_weight_cache_key(
             vllm_config, self.model_config, is_draft=is_draft
         )
-        if is_draft:
-            # The engine builds the draft as the only pipeline stage.
-            self.cache_key = replace(self.cache_key, pp_size=1, pp_rank=0)
 
     def warmup(self) -> None:
         """Run each warmup cache's pass (adopting remote caches via D2D)."""
@@ -289,8 +293,6 @@ class WeightCacheDaemon:
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             with single_pp_stage() if self.is_draft else contextlib.nullcontext():
                 self.model = self.get_model()
-        # In-place reloads use configs already normalized by model construction.
-        self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
         # allocator; return them so engines sharing the GPU can use them.
         gc.collect()
@@ -304,10 +306,34 @@ class WeightCacheDaemon:
             format_gib(torch.accelerator.memory_reserved()),
         )
 
+    def capture_state(self) -> None:
+        """Materialize canonical post-warmup storages and drop the model."""
+        assert self.model is not None
+        tensors, kinds, aliases = collect_tensors(self.model)
+        manifest, source_storages = build_manifest(tensors, kinds)
+        attrs = export_model_attrs(self.model)
+        from vllm.compilation.wrapper import remove_bytecode_hooks
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+        remove_bytecode_hooks(self.model)
+        self.model = None
+        self.vllm_config.compilation_config.static_forward_context.clear()
+        _ROPE_DICT.clear()
+        del tensors, kinds
+        gc.collect()
+        torch.accelerator.empty_cache()
+        storages = self.backend.materialize(source_storages)
+        self.state = WeightCacheState(
+            storages=storages,
+            manifest=manifest,
+            aliases=aliases,
+            attrs=attrs,
+        )
+
     def release_distributed(self) -> None:
         """Release process groups and BLAS workspaces after loading and warmup.
 
-        Serving only exports CUDA IPC handles, so the communicators (NCCL,
+        Serving only exports shared storage handles, so the communicators (NCCL,
         custom all-reduce and FlashInfer workspaces) and cached BLAS scratch
         would otherwise pin GPU memory for the daemon's lifetime.
         """
@@ -419,9 +445,7 @@ class WeightCacheDaemon:
                 conn, _ = server.accept()
                 self._serve_connection(conn)
         finally:
-            release_error = self._shutdown(server, socket_path, lock_fd)
-            if release_error:
-                raise release_error[0]
+            self._shutdown(server, socket_path, lock_fd)
 
     def _serve_connection(self, conn: socket.socket) -> None:
         with conn:
@@ -437,50 +461,24 @@ class WeightCacheDaemon:
                 with contextlib.suppress(OSError):
                     send_msg(conn, {"status": "error", "message": str(e)})
 
-    def _release_weights_on_shutdown(self, release_error: list[Exception]) -> None:
-        try:
-            self.weight_seed.release()
-        except Exception as e:
-            release_error.append(e)
-            logger.exception("Error releasing weight cache during shutdown")
-
-    def _drain_shutdown_clients(
-        self, server: socket.socket, release_thread: threading.Thread
-    ) -> None:
-        shutdown_clients = []
+    def _drain_shutdown_clients(self, server: socket.socket) -> None:
+        self.weight_seed.start_release()
+        deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
         # Keep accepting local lease acknowledgements until the source
         # registrations and weights are safe to tear down.
-        while release_thread.is_alive():
+        while self.weight_seed.active_copies and time.monotonic() < deadline:
             try:
                 conn, _ = server.accept()
             except TimeoutError:
                 continue
             conn.settimeout(5.0)
-            client_thread = threading.Thread(
-                target=self._serve_connection,
-                args=(conn,),
-                name="vllm-weight-cache-shutdown-client",
-                daemon=True,
-            )
-            shutdown_clients.append(client_thread)
-            client_thread.start()
-        release_thread.join()
-        for client_thread in shutdown_clients:
-            client_thread.join(timeout=5.0)
+            self._serve_connection(conn)
+        self.weight_seed.finish_release()
 
-    def _shutdown(
-        self, server: socket.socket, socket_path: str, lock_fd: int
-    ) -> list[Exception]:
-        release_error: list[Exception] = []
-        release_thread = threading.Thread(
-            target=self._release_weights_on_shutdown,
-            args=(release_error,),
-            name="vllm-weight-cache-shutdown-release",
-        )
-        release_thread.start()
+    def _shutdown(self, server: socket.socket, socket_path: str, lock_fd: int) -> None:
         server.settimeout(0.5)
         try:
-            self._drain_shutdown_clients(server, release_thread)
+            self._drain_shutdown_clients(server)
         finally:
             server.close()
             for watcher in self._watchers:
@@ -489,7 +487,6 @@ class WeightCacheDaemon:
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
-        return release_error
 
     def _acquire_gpu_lock(self, socket_path: str) -> int:
         """Take an exclusive lock guarding this GPU's socket path.
@@ -517,57 +514,44 @@ class WeightCacheDaemon:
             is_draft=self.is_draft,
         )
 
-    @property
-    def has_weights(self) -> bool:
-        return self.model is not None
-
-    def _export_state(self) -> tuple[dict[str, TensorEntry], dict[str, str], dict]:
-        """Export this rank's tensors, aliases and flags for one client."""
-        assert self.model is not None
-        entries, aliases = export_entries(self.model)
-        return entries, aliases, export_model_attrs(self.model)
-
-    def _seed_state(
+    def _export_state(
         self,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, TensorKind], dict[str, str], dict]:
-        """This rank's canonical tensors, their kinds, aliases and flags."""
-        assert self.model is not None
-        tensors, kinds, aliases = collect_tensors(self.model)
-        return tensors, kinds, aliases, export_model_attrs(self.model)
+    ) -> tuple[list[StorageEntry], dict, dict[str, str], dict[str, bool]]:
+        """Export this rank's storage handles, manifest, aliases and flags."""
+        assert self.state is not None
+        state = self.state
+        return (
+            [self.backend.export_storage(record) for record in state.storages],
+            state.manifest,
+            state.aliases,
+            state.attrs,
+        )
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
         cmd = request.get("cmd")
         if cmd == "get_state":
-            with self._state_lock:
-                self._handle_get_state(conn, request)
+            self._handle_get_state(conn, request)
         elif cmd == "get_memory":
-            with self._state_lock:
-                send_msg(
-                    conn,
-                    {
-                        "status": "ok",
-                        "memory_bytes": exported_weight_bytes(self.model),
-                        # The launcher maps source GPUs to local device indices
-                        # when it places a same-host mirror.
-                        "gpu_uuid": get_current_device_uuid(),
-                    },
-                )
+            state = self.state
+            send_msg(
+                conn,
+                {
+                    "status": "ok",
+                    "memory_bytes": exported_weight_bytes(
+                        None if state is None else state.storages
+                    ),
+                    # The launcher maps source GPUs to local device indices
+                    # when it places a same-host mirror.
+                    "gpu_uuid": get_current_device_uuid(),
+                },
+            )
         elif cmd == "seed":
             # A same-host peer's D2D request; the pickle plane can carry the
-            # peer_ipc seed's CUDA IPC handles, which JSON cannot.
+            # peer_ipc seed's local sharing handles, which JSON cannot.
             send_msg(conn, self.d2d.handle_request(request))
-        elif cmd == "release":
-            release_conn = conn.dup()
-            threading.Thread(
-                target=self._handle_release,
-                args=(release_conn,),
-                name="vllm-weight-cache-release",
-                daemon=True,
-            ).start()
         elif cmd == "watch":
-            with self._state_lock:
-                self._handle_watch(conn)
+            self._handle_watch(conn)
         else:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
 
@@ -577,35 +561,28 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Missing cache_key"})
             return
         mismatched = self.cache_key.mismatched_fields(client_key)
-        if (
-            request.get("is_reload", False)
-            and "rope_parameters_hash" in mismatched
-            and client_key.rope_parameters_hash == self.loaded_rope_parameters_hash
-        ):
-            mismatched.remove("rope_parameters_hash")
         if mismatched:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
-        if not self.has_weights:
-            send_msg(conn, {"status": "error", "message": "Weights were released"})
-            return
-        entries, aliases, attrs = self._export_state()
+        storages, manifest, aliases, attrs = self._export_state()
         send_msg(
             conn,
             {
                 "status": "ok",
-                "entries": entries,
+                "backend": self.backend_name,
+                "storages": storages,
+                "manifest": manifest,
                 "aliases": aliases,
                 "attrs": attrs,
                 "gpu_uuid": get_current_device_uuid(),
             },
         )
         logger.info_once(
-            "Weight cache %s daemon rank %d sent %d tensors (+%d aliases) to engine",
+            "Weight cache %s daemon rank %d sent %d storages (+%d aliases) to engine",
             self.role,
             self.global_rank,
-            len(entries),
+            len(storages),
             len(aliases),
         )
 
@@ -633,25 +610,6 @@ class WeightCacheDaemon:
                 alive.append(watcher)
         self._watchers = alive
 
-    def _handle_release(self, conn: socket.socket) -> None:
-        with conn:
-            try:
-                # Unregister from the NIC before the memory returns to the driver.
-                self.weight_seed.release()
-                with self._state_lock:
-                    self.model = None
-                    torch.accelerator.empty_cache()
-                logger.info(
-                    "Weight cache %s daemon rank %d released cached weights",
-                    self.role,
-                    self.global_rank,
-                )
-                send_msg(conn, {"status": "ok"})
-            except Exception as e:
-                logger.exception("Error releasing weight cache")
-                with contextlib.suppress(OSError):
-                    send_msg(conn, {"status": "error", "message": str(e)})
-
 
 def _run_daemon(
     global_rank: int,
@@ -666,6 +624,7 @@ def _run_daemon(
     seed_config: SeedConfig | None = None,
     device_index: int | None = None,
     warmup_cache_stores: Iterable[str] = (),
+    weight_cache_backend: str = "torch_ipc",
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -682,12 +641,14 @@ def _run_daemon(
         seed_config=seed_config,
         device_index=device_index,
         warmup_cache_stores=warmup_cache_stores,
+        weight_cache_backend=weight_cache_backend,
     )
     daemon.load_model()
     if not daemon.serves_model:
         daemon.release_distributed()
         return
     daemon.warmup()
+    daemon.capture_state()
     # FlashInfer warmup has populated the compiler caches before the source
     # listener becomes available to target daemons.
     daemon.d2d.start_listener()

@@ -12,10 +12,12 @@ the DeepGEMM kernel (FP8 activations and FP4 weights, power-of-two scales per
 bit.
 
 On SM107 the CuTeDSL kernel instead takes checkpoint-format NVFP4 experts and
-the epilogue calibrated from their activation scales, again exactly.
+the epilogue calibrated from their activation scales, and checkpoint-format
+MXFP4 experts with MXFP8 activations, again exactly.
 
-On Hopper the same exact forward runs the SM90 FP8 megakernel on block-FP8
-weights (power-of-two scales per 128x128 block, FP8 activations per 1x128).
+On Hopper the same exact forward runs the SM90 megakernels on block-FP8
+weights (power-of-two scales per 128x128 block, FP8 activations per 1x128)
+and on packed MXFP4 weights (unit E8M0 scales, FP8 activations per token).
 
 Tests that need no GPU also check the adapter's kwargs against the installed
 FlashInfer's config types, so config drift fails on any CI runner with
@@ -54,7 +56,12 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     FlashInferMoeEpEpilogue,
     FlashInferMoeEpWeights,
     apply_topk_in_fc1,
+    mxfp4_moe_ep_weights,
     sm90_fp8_block_moe_ep_weights,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    make_mxfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
     PassThroughPrepareAndFinalize,
@@ -92,8 +99,9 @@ GEOMETRIES = (
 )
 BACKENDS = (FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM)
 # Routed-expert geometries of recent MoE models (Kimi-K3 at its 3584-wide
-# latent), run with synthetic block-FP8 weights on the Hopper megakernel.
-BLOCK_FP8_GEOMETRIES = (
+# latent), run with synthetic block-FP8 or MXFP4 weights on the Hopper
+# megakernels.
+SM90_GEOMETRIES = (
     Geometry("glm-5.3-flash", 4096, 2048, 288, 8),
     Geometry("deepseek-v4.1-flash", 5120, 2304, 384, 6),
     Geometry("kimi-k3", 3584, 3072, 896, 16),
@@ -136,6 +144,32 @@ SM107_CASES = (
     (GEOMETRIES[1], RoutingMethodType.Default),
 )
 
+# The SM107 MXFP4 test feeds checkpoint-format MXFP4 experts (E2M1 codes, E8M0
+# scales per 32) that dequantize to gate 12 and up 0.5. Against x = 2 the
+# kernel's sigmoid(24) is exactly 1 in fp32, so h = 24 with no rounding, while
+# swapped halves give 24 * sigmoid(1), which requantizes to 18.
+SM107_MX_GATE = 12.0
+SM107_MX_UP = 0.5
+# E8M0 exponent of every scale that only meets zero codes, so a scale read from
+# the wrong expert, row or block shows in the output.
+SM107_MX_BACKGROUND_EXPONENT = 4
+# Token t's intermediate channel. An MXFP8 scale block spans two epilogue warps,
+# and 48 and 304 sit in the half whose scale the other warp stores; 160 and 304
+# are in later 16-row gate/up groups and tiles.
+SM107_MX_CHANNELS = (0, 48, 160, 304)
+# DeepSeek-V4.1's SwiGLU limit clamps the gate to 10, and h = 10 * sigmoid(10)
+# requantizes to 10; without the clamp h stays 24, swapped halves give 7.5.
+SM107_MX_CLAMP = 10.0
+SM107_MX_CASES = (
+    *((geometry, routing, None) for geometry, routing in SM107_CASES),
+    # The MTP draft layers of DeepSeek-V4.1-Flash-NVFP4 are MXFP4.
+    (
+        Geometry("dsv4.1-flash-mtp", 5120, 2304, 128, 3),
+        RoutingMethodType.DeepseekV4,
+        SM107_MX_CLAMP,
+    ),
+)
+
 
 def _expert_out(expert: int) -> float:
     return E2M1_CODES[expert % len(E2M1_CODES)]
@@ -147,8 +181,9 @@ def _topk_weights(top_k: int) -> tuple[float, ...]:
     return tuple(2.0 ** -(k + 1) for k in range(top_k))
 
 
-def _routing_method(backend: str) -> RoutingMethodType:
-    if backend == FLASHINFER_MOE_EP_DEEP_GEMM:
+def _routing_method(backend: str, sm90_format: str | None = None) -> RoutingMethodType:
+    # DeepSeek-V4 models are the MXFP4 checkpoints Hopper serves.
+    if backend == FLASHINFER_MOE_EP_DEEP_GEMM or sm90_format == "mxfp4":
         return RoutingMethodType.DeepseekV4
     return RoutingMethodType.Default
 
@@ -241,6 +276,36 @@ def _local_block_fp8_expert_weights(
     return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
 
 
+def _mxfp4(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack E2M1 grid weights with unit E8M0 scales."""
+    magnitudes = torch.tensor((0.0, *E2M1_CODES), device=weight.device)
+    experts, rows, cols = weight.shape
+    packed = torch.empty(
+        experts, rows, cols // 2, dtype=torch.uint8, device=weight.device
+    )
+    # Bound the float32 values and int64 codes to one expert.
+    for expert in range(experts):
+        values = weight[expert].float()
+        codes = torch.searchsorted(magnitudes, values)
+        assert torch.equal(magnitudes[codes], values)
+        packed[expert] = codes[:, 0::2] | (codes[:, 1::2] << 4)
+    # E8M0 127 encodes 2**0.
+    scale = torch.full(
+        (experts, rows, cols // 32), 127, dtype=torch.uint8, device=weight.device
+    )
+    return packed, scale
+
+
+def _local_mxfp4_expert_weights(
+    geometry: Geometry, rank: int, num_local_experts: int, device: torch.device
+) -> FlashInferMoeEpWeights:
+    """The grid weights as an MXFP4 checkpoint stores them."""
+    weights = _local_expert_weights(geometry, rank, num_local_experts, device)
+    w13, w13_scale = _mxfp4(weights.w13)
+    w2, w2_scale = _mxfp4(weights.w2)
+    return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
+
+
 def _expected_output(
     geometry: Geometry,
     topk_ids: torch.Tensor,
@@ -325,6 +390,66 @@ def _local_expert_nvfp4_weights(
     return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale), g1, g2
 
 
+def _e8m0_byte(exponent: int) -> int:
+    return 127 + exponent
+
+
+def _local_expert_mxfp4_weights(
+    geometry: Geometry, rank: int, num_local_experts: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Checkpoint-format MXFP4 experts, as `Mxfp4MoEMethod` stores them.
+
+    uint8 E2M1 `w13 [E, 2I, H/2]` and `w2 [E, H, I/2]` (even columns are
+    the low nibbles) and uint8 E8M0 scale bytes `[E, 2I, H/32]` and
+    `[E, H, I/32]`. Token t reaches only gate row c and up row I + c, with
+    c = SM107_MX_CHANNELS[t]. With j = e % 3, expert e's gate rows hold code
+    6 / 2**j at scale 2**(j + 1) and its up rows code 4 / 2**j at scale
+    2**(j - 3): every expert dequantizes to the same w13, but a scale read from
+    another expert or the other half, or a value cast of the scale bytes,
+    breaks exactness. Expert e writes E2M1_CODES[e % 7] * 2**-j into output
+    channel e.
+    """
+    hidden, intermediate = geometry.hidden_size, geometry.intermediate_size
+    background = _e8m0_byte(SM107_MX_BACKGROUND_EXPONENT)
+    w13 = torch.zeros(
+        num_local_experts,
+        2 * intermediate,
+        hidden // 2,
+        dtype=torch.uint8,
+        device=device,
+    )
+    w2 = torch.zeros(
+        num_local_experts, hidden, intermediate // 2, dtype=torch.uint8, device=device
+    )
+    w13_scale = torch.full(
+        (num_local_experts, 2 * intermediate, hidden // 32),
+        background,
+        dtype=torch.uint8,
+        device=device,
+    )
+    w2_scale = torch.full(
+        (num_local_experts, hidden, intermediate // 32),
+        background,
+        dtype=torch.uint8,
+        device=device,
+    )
+    for local in range(num_local_experts):
+        expert = rank * num_local_experts + local
+        j = expert % 3
+        gate_code = _e2m1_code(SM107_MX_GATE / 2 ** (j + 1))
+        up_code = _e2m1_code(SM107_MX_UP / 2 ** (j - 3))
+        for t, channel in enumerate(SM107_MX_CHANNELS):
+            column = 16 * t
+            w13[local, channel, column // 2] = gate_code
+            w13[local, intermediate + channel, column // 2] = up_code
+            w13_scale[local, channel, column // 32] = _e8m0_byte(j + 1)
+            w13_scale[local, intermediate + channel, column // 32] = _e8m0_byte(j - 3)
+            w2[local, expert, channel // 2] = _e2m1_code(_expert_out(expert))
+            w2_scale[local, expert, channel // 32] = _e8m0_byte(-j)
+        w2[local, expert, 1] = _e2m1_code(W2_SENTINEL)
+    return w13, w2, w13_scale, w2_scale
+
+
 def _moe_config(
     vllm_config: VllmConfig,
     geometry: Geometry,
@@ -332,6 +457,9 @@ def _moe_config(
     device: torch.device,
     backend: str,
     routing_method: RoutingMethodType | None = None,
+    swiglu_limit: float | None = None,
+    *,
+    sm90_format: str | None = None,
 ) -> FusedMoEConfig:
     parallel = FusedMoEParallelConfig.make(
         tp_size_=1,
@@ -350,12 +478,15 @@ def _moe_config(
         activation=MoEActivation.SILU,
         device=device,
         routing_method=(
-            _routing_method(backend) if routing_method is None else routing_method
+            _routing_method(backend, sm90_format)
+            if routing_method is None
+            else routing_method
         ),
         moe_parallel_config=parallel,
         in_dtype=torch.bfloat16,
         moe_backend=backend,
         max_num_tokens=MAX_TOKENS_PER_RANK,
+        swiglu_limit=swiglu_limit,
     )
 
 
@@ -396,14 +527,15 @@ def _check_expert_views_alias_kernel_memory(
     assert torch.equal(output, expected)
 
 
-def _check_block_fp8_modular_kernel(
+def _check_sm90_modular_kernel(
     vllm_config: VllmConfig,
     geometry: Geometry,
     moe: FusedMoEConfig,
     rank: int,
     device: torch.device,
+    sm90_format: str,
 ) -> None:
-    """Block FP8 through the loading hook and `FusedMoEKernel`.
+    """Hopper weights through the loading hook and `FusedMoEKernel`.
 
     Rank 1 has no tokens, but the other ranks route to its experts and it owns
     part of the collective, so it must still enter the megakernel. A full batch
@@ -412,9 +544,25 @@ def _check_block_fp8_modular_kernel(
     workspace.
     """
     init_workspace_manager(device)
-    weights = _local_block_fp8_expert_weights(
-        geometry, rank, moe.num_local_experts, device
-    )
+    if sm90_format == "fp8_block":
+        weights = _local_block_fp8_expert_weights(
+            geometry, rank, moe.num_local_experts, device
+        )
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=weights.w13_scale,
+            w2_scale=weights.w2_scale,
+            block_shape=[128, 128],
+        )
+        kernel_dtype = torch.float8_e4m3fn
+    else:
+        assert sm90_format == "mxfp4"
+        weights = _local_mxfp4_expert_weights(
+            geometry, rank, moe.num_local_experts, device
+        )
+        quant_config = make_mxfp4_moe_quant_config(
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, w1_scale=None, w2_scale=None
+        )
+        kernel_dtype = torch.uint8
     layer = torch.nn.Module()
     for name, tensor in zip(
         ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
@@ -423,13 +571,15 @@ def _check_block_fp8_modular_kernel(
         layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
     layer.apply_router_weight_on_input = False
     layer.expert_map_manager = SimpleNamespace(placement_strategy="linear")
-    quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=weights.w13_scale, w2_scale=weights.w2_scale, block_shape=[128, 128]
-    )
     experts = FlashInferMoeEpExperts(moe, quant_config)
     experts.process_weights_after_loading(layer)
     experts.keep_constants(layer)
-    assert layer.w13_weight.dtype == torch.float8_e4m3fn
+    assert layer.w13_weight.dtype == kernel_dtype
+    # The layer's scales are the kernel's block scales: one per block as
+    # loaded, not the per-expert factor MXFP4 adds.
+    for name, loaded in (("w13", weights.w13_scale), ("w2", weights.w2_scale)):
+        scale = getattr(layer, f"{name}_weight_scale")
+        assert loaded is not None and scale.numel() == loaded.numel()
     kernel = mk.FusedMoEKernel(PassThroughPrepareAndFinalize(), experts)
 
     topk_ids, topk_weights = _routing(geometry, rank, device)
@@ -486,14 +636,14 @@ def _init_warmup_forward(
     world_size: int,
     geometry: Geometry,
     backend: str,
-    block_fp8: bool = False,
+    sm90_format: str | None = None,
 ) -> None:
     set_env_vars_and_device(env)
     vllm_config = VllmConfig()
     vllm_config.parallel_config.data_parallel_size = world_size
     vllm_config.parallel_config.enable_expert_parallel = True
     vllm_config.kernel_config.moe_backend = backend
-    if block_fp8:
+    if sm90_format is not None:
         # What KernelConfig binds for megakernel backends.
         vllm_config.parallel_config.all2all_backend = "passthrough"
         vllm_config.parallel_config.data_parallel_rank = int(env["RANK"])
@@ -504,13 +654,19 @@ def _init_warmup_forward(
         )
         rank = torch.distributed.get_rank()
         device = torch.device(f"cuda:{rank}")
-        moe = _moe_config(vllm_config, geometry, world_size, device, backend)
-        if block_fp8:
+        moe = _moe_config(
+            vllm_config, geometry, world_size, device, backend, sm90_format=sm90_format
+        )
+        weight_key, activation_key = kMxfp4Static, None
+        if sm90_format == "fp8_block":
             weight_key, activation_key = kFp8Static128BlockSym, kFp8Dynamic128Sym
             make_weights = _local_block_fp8_expert_weights
             sentinel = X_SENTINEL_FP8
+        elif sm90_format == "mxfp4":
+            # The kernel scales FP8 activations per token: 448 pins it to 1.
+            make_weights = _local_mxfp4_expert_weights
+            sentinel = X_SENTINEL_FP8
         else:
-            weight_key, activation_key = kMxfp4Static, None
             make_weights = _local_expert_weights
             sentinel = X_SENTINEL
         supported, reason = FlashInferMoeEpExperts.is_supported_config(
@@ -526,7 +682,7 @@ def _init_warmup_forward(
             moe,
             make_weights(geometry, rank, moe.num_local_experts, device),
             apply_topk_in_fc1=apply_topk_in_fc1(moe),
-            block_fp8=block_fp8,
+            weight_format="fp8_block" if sm90_format == "fp8_block" else "mxfp4",
         )
         try:
             adapter.warmup()
@@ -549,21 +705,24 @@ def _init_warmup_forward(
                 f"{[torch.nonzero(row).flatten().tolist() for row in output]}"
             )
 
-            if backend == FLASHINFER_MOE_EP_CUTEDSL:
+            # Hopper MXFP4 rejects EPLB.
+            if backend == FLASHINFER_MOE_EP_CUTEDSL and sm90_format != "mxfp4":
                 _check_expert_views_alias_kernel_memory(
                     adapter, geometry, rank, moe.num_local_experts, device, sentinel
                 )
         finally:
             adapter.destroy()
 
-        if block_fp8:
-            _check_block_fp8_modular_kernel(vllm_config, geometry, moe, rank, device)
+        if sm90_format is not None:
+            _check_sm90_modular_kernel(
+                vllm_config, geometry, moe, rank, device, sm90_format
+            )
 
 
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(107),
-    reason="The MXFP4 MoE-EP megakernels require SM100/SM103",
+    reason="The bf16 MXFP4 path and the DeepGEMM megakernel require SM100/SM103",
 )
 @pytest.mark.parametrize("geometry", GEOMETRIES, ids=[g.name for g in GEOMETRIES])
 @pytest.mark.parametrize("backend", BACKENDS, ids=("cutedsl", "deep_gemm"))
@@ -577,6 +736,45 @@ def test_init_warmup_forward_is_exact_on_grid_inputs(
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs")
     distributed_run(_init_warmup_forward, world_size, geometry, backend)
+
+
+def _check_sm107_forward_is_exact(
+    adapter: FlashInferMoeEp,
+    geometry: Geometry,
+    rank: int,
+    num_local_experts: int,
+    device: torch.device,
+    h_signal: float,
+) -> None:
+    """Warm up, compare one forward bit for bit, check the EPLB views, and
+    destroy the adapter."""
+    try:
+        adapter.warmup()
+
+        topk_ids, topk_weights = _routing(geometry, rank, device)
+        output = adapter(_hidden_states(geometry, device), topk_ids, topk_weights)
+        torch.accelerator.synchronize()
+
+        expected = _expected_output(
+            geometry, topk_ids, topk_weights, h_signal, _sm107_expert_scale
+        )
+        assert output.dtype == expected.dtype and output.shape == expected.shape
+        assert torch.equal(output, expected), (
+            f"rank {rank}: max abs diff "
+            f"{(output.float() - expected.float()).abs().max().item()}"
+        )
+
+        _check_expert_views_alias_kernel_memory(
+            adapter,
+            geometry,
+            rank,
+            num_local_experts,
+            device,
+            h_signal=h_signal,
+            expert_scale=_sm107_expert_scale,
+        )
+    finally:
+        adapter.destroy()
 
 
 def _sm107_nvfp4_init_warmup_forward(
@@ -646,35 +844,15 @@ def _sm107_nvfp4_init_warmup_forward(
         )
 
         adapter = FlashInferMoeEp(
-            moe, weights, epilogue, apply_topk_in_fc1=apply_topk_in_fc1(moe)
+            moe,
+            weights,
+            epilogue,
+            apply_topk_in_fc1=apply_topk_in_fc1(moe),
+            weight_format="nvfp4",
         )
-        try:
-            adapter.warmup()
-
-            topk_ids, topk_weights = _routing(geometry, rank, device)
-            output = adapter(_hidden_states(geometry, device), topk_ids, topk_weights)
-            torch.accelerator.synchronize()
-
-            expected = _expected_output(
-                geometry, topk_ids, topk_weights, SM107_H_SIGNAL, _sm107_expert_scale
-            )
-            assert output.dtype == expected.dtype and output.shape == expected.shape
-            assert torch.equal(output, expected), (
-                f"rank {rank}: max abs diff "
-                f"{(output.float() - expected.float()).abs().max().item()}"
-            )
-
-            _check_expert_views_alias_kernel_memory(
-                adapter,
-                geometry,
-                rank,
-                num_local_experts,
-                device,
-                h_signal=SM107_H_SIGNAL,
-                expert_scale=_sm107_expert_scale,
-            )
-        finally:
-            adapter.destroy()
+        _check_sm107_forward_is_exact(
+            adapter, geometry, rank, num_local_experts, device, SM107_H_SIGNAL
+        )
 
 
 @pytest.mark.skipif(
@@ -711,46 +889,155 @@ def test_sm107_nvfp4_init_warmup_forward_is_exact_on_grid_inputs(
 
 @pytest.mark.skipif(
     not current_platform.is_device_capability(90),
-    reason="The block-FP8 FlashInfer MoE-EP megakernel requires SM90",
+    reason="The Hopper FlashInfer MoE-EP megakernels require SM90",
 )
 @pytest.mark.parametrize(
-    "geometry", BLOCK_FP8_GEOMETRIES, ids=[g.name for g in BLOCK_FP8_GEOMETRIES]
+    "geometry", SM90_GEOMETRIES, ids=[g.name for g in SM90_GEOMETRIES]
 )
+@pytest.mark.parametrize("sm90_format", ["fp8_block", "mxfp4"])
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_block_fp8_init_warmup_forward_is_exact_on_grid_inputs(
-    world_size: int, geometry: Geometry
+def test_sm90_init_warmup_forward_is_exact_on_grid_inputs(
+    world_size: int, sm90_format: str, geometry: Geometry
 ):
     pytest.importorskip("flashinfer.moe_ep")
     pytest.importorskip("nvshmem.core")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs")
     distributed_run(
-        _init_warmup_forward, world_size, geometry, FLASHINFER_MOE_EP_CUTEDSL, True
+        _init_warmup_forward,
+        world_size,
+        geometry,
+        FLASHINFER_MOE_EP_CUTEDSL,
+        sm90_format,
+    )
+
+
+def _sm107_mxfp4_init_warmup_forward(
+    env: dict[str, str],
+    world_size: int,
+    geometry: Geometry,
+    routing_method: RoutingMethodType,
+    swiglu_limit: float | None,
+) -> None:
+    set_env_vars_and_device(env)
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.data_parallel_size = world_size
+    vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.kernel_config.moe_backend = FLASHINFER_MOE_EP_CUTEDSL
+
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+        )
+        rank = torch.distributed.get_rank()
+        device = torch.device(f"cuda:{rank}")
+        moe = _moe_config(
+            vllm_config,
+            geometry,
+            world_size,
+            device,
+            FLASHINFER_MOE_EP_CUTEDSL,
+            routing_method,
+            swiglu_limit,
+        )
+        supported, reason = FlashInferMoeEpExperts.is_supported_config(
+            FlashInferMoeEpExperts,
+            moe,
+            kMxfp4Static,
+            None,
+            mk.FusedMoEActivationFormat.Standard,
+        )
+        assert supported, reason
+
+        num_local_experts = moe.num_local_experts
+        weights = mxfp4_moe_ep_weights(
+            FLASHINFER_MOE_EP_CUTEDSL,
+            *_local_expert_mxfp4_weights(geometry, rank, num_local_experts, device),
+        )
+        adapter = FlashInferMoeEp(
+            moe,
+            weights,
+            apply_topk_in_fc1=apply_topk_in_fc1(moe),
+            weight_format="mxfp4",
+        )
+        # The up rows give 1, so the clamped gate is h.
+        h_signal = SM107_H_SIGNAL if swiglu_limit is None else swiglu_limit
+        _check_sm107_forward_is_exact(
+            adapter, geometry, rank, num_local_experts, device, h_signal
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(107),
+    reason="The SM107 MXFP4 MoE-EP megakernel requires SM107",
+)
+@pytest.mark.parametrize(
+    "geometry, routing_method, swiglu_limit",
+    SM107_MX_CASES,
+    ids=[geometry.name for geometry, _, _ in SM107_MX_CASES],
+)
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_sm107_mxfp4_init_warmup_forward_is_exact_on_grid_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    world_size: int,
+    geometry: Geometry,
+    routing_method: RoutingMethodType,
+    swiglu_limit: float | None,
+):
+    """Checkpoint MXFP4 experts on SM107's MXFP8-activation megakernel.
+
+    Covers the native weight handoff (E8M0 scale bytes reinterpreted, not
+    converted), gate/up order, per-expert and EP-local scale indexing, the
+    paired-warp scale exchange of MXFP8, the SwiGLU gate clamp, the EPLB weight
+    views and FlashInfer's owned-output forward.
+    """
+    pytest.importorskip("flashinfer.moe_ep")
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs")
+    # Spawned workers inherit it before CuTe DSL picks a target.
+    monkeypatch.setenv("CUTE_DSL_ARCH", "sm_107a")
+    distributed_run(
+        _sm107_mxfp4_init_warmup_forward,
+        world_size,
+        geometry,
+        routing_method,
+        swiglu_limit,
     )
 
 
 @pytest.mark.parametrize(
-    "backend, capability, routing",
+    "backend, capability, routing, weight_format",
     [
-        (FLASHINFER_MOE_EP_CUTEDSL, (10, 0), RoutingMethodType.Default),
-        (FLASHINFER_MOE_EP_DEEP_GEMM, (10, 0), RoutingMethodType.DeepseekV4),
-        (FLASHINFER_MOE_EP_CUTEDSL, (10, 7), RoutingMethodType.DeepseekV4),
-        (FLASHINFER_MOE_EP_CUTEDSL, (10, 7), RoutingMethodType.Default),
+        (FLASHINFER_MOE_EP_CUTEDSL, (10, 0), RoutingMethodType.Default, "nvfp4"),
+        (FLASHINFER_MOE_EP_DEEP_GEMM, (10, 0), RoutingMethodType.DeepseekV4, "mxfp4"),
+        (FLASHINFER_MOE_EP_CUTEDSL, (10, 7), RoutingMethodType.DeepseekV4, "nvfp4"),
+        (FLASHINFER_MOE_EP_CUTEDSL, (10, 7), RoutingMethodType.Default, "nvfp4"),
+        (FLASHINFER_MOE_EP_CUTEDSL, (10, 7), RoutingMethodType.DeepseekV4, "mxfp4"),
+        (FLASHINFER_MOE_EP_CUTEDSL, (10, 7), RoutingMethodType.Default, "mxfp4"),
     ],
-    ids=["cutedsl", "deep_gemm", "cutedsl-sm107", "cutedsl-sm107-default"],
+    ids=[
+        "cutedsl",
+        "deep_gemm",
+        "cutedsl-sm107",
+        "cutedsl-sm107-default",
+        "cutedsl-sm107-mxfp4",
+        "cutedsl-sm107-mxfp4-default",
+    ],
 )
 def test_adapter_kwargs_match_installed_flashinfer(
     monkeypatch: pytest.MonkeyPatch,
     backend: str,
     capability: tuple[int, int],
     routing: RoutingMethodType,
+    weight_format: str,
 ):
     """The adapter's kwargs construct the installed FlashInfer's config types.
 
     Needs no SM100 or SM107, so config kwarg drift fails in CI rather than at
     model load. Fakes only the megakernel layer (symmetric memory), the device
     capability, the EP group, the device index and the DeepGEMM import. On
-    SM107 the routing flag must reach the config.
+    SM107 the routing flag must reach the config of the expert weight format,
+    and MXFP4 scale bytes must reach FlashInfer typed as E8M0.
     """
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
     sm107 = capability == (10, 7)
@@ -761,19 +1048,29 @@ def test_adapter_kwargs_match_installed_flashinfer(
     monkeypatch.delenv(SM107_ROUTE_CHECK_ENV)
     moe = _adapter_moe(backend, GEOMETRIES[0])
     moe.routing_method = routing
-    weight = torch.zeros(1, dtype=torch.bfloat16)
+    if weight_format == "mxfp4":
+        packed = torch.zeros(1, dtype=torch.uint8)
+        scale = torch.zeros(1, dtype=torch.uint8)
+        weights = FlashInferMoeEpWeights(packed, packed, scale, scale)
+    else:
+        weight = torch.zeros(1, dtype=torch.bfloat16)
+        weights = FlashInferMoeEpWeights(w13=weight, w2=weight)
     adapter = FlashInferMoeEp(
         moe,
-        FlashInferMoeEpWeights(w13=weight, w2=weight),
+        weights,
         apply_topk_in_fc1=apply_topk_in_fc1(moe),
+        weight_format=weight_format,
     )
 
-    ((_, _, _, mega_config),) = layer_args
+    ((_, _, weight_pack, mega_config),) = layer_args
     megakernel = mega_config.megakernel
     if sm107:
-        assert isinstance(
-            megakernel, moe_ep.Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
+        expected_config = (
+            moe_ep.Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
+            if weight_format == "nvfp4"
+            else moe_ep.Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig
         )
+        assert isinstance(megakernel, expected_config)
         assert megakernel.knobs is None
         assert megakernel.apply_routing_weights_before_fc2 is (
             routing is RoutingMethodType.DeepseekV4
@@ -782,6 +1079,12 @@ def test_adapter_kwargs_match_installed_flashinfer(
         assert os.environ.get(SM107_ROUTE_CHECK_ENV) == (
             "0" if routing is RoutingMethodType.DeepseekV4 else None
         )
+        if weight_format == "mxfp4":
+            # The packed data as is, the scale bytes reinterpreted, not converted.
+            assert weight_pack.w13 is packed and weight_pack.w2 is packed
+            assert weight_pack.w13_scale.dtype == torch.float8_e8m0fnu
+            assert weight_pack.w2_scale.dtype == torch.float8_e8m0fnu
+            assert weight_pack.w13_scale.data_ptr() == scale.data_ptr()
     else:
         expected = (
             moe_ep.Nvfp4CutedslMegaMoeConfig
@@ -805,17 +1108,20 @@ def test_block_fp8_adapter_hands_kernel_ready_weights_to_flashinfer(
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
     workspace_capacities: list[int] = []
     layer_args = _fake_mega_layer(monkeypatch, moe_ep, workspace_capacities)
-    moe = _adapter_moe(FLASHINFER_MOE_EP_CUTEDSL, TINY_BLOCK_FP8)
+    moe = _adapter_moe(FLASHINFER_MOE_EP_CUTEDSL, TINY_SM90)
     weights = _tiny_block_fp8_weights()
     adapter = FlashInferMoeEp(
-        moe, weights, apply_topk_in_fc1=apply_topk_in_fc1(moe), block_fp8=True
+        moe,
+        weights,
+        apply_topk_in_fc1=apply_topk_in_fc1(moe),
+        weight_format="fp8_block",
     )
     w13, w13_scale, w2, w2_scale = adapter.kernel_weights()
     FlashInferMoeEp(
         moe,
         FlashInferMoeEpWeights(w13=w13, w2=w2, w13_scale=w13_scale, w2_scale=w2_scale),
         apply_topk_in_fc1=apply_topk_in_fc1(moe),
-        block_fp8=True,
+        weight_format="fp8_block",
     )
 
     assert [t.dtype for t in (w13, w13_scale, w2, w2_scale)] == [
@@ -835,7 +1141,7 @@ def test_block_fp8_adapter_hands_kernel_ready_weights_to_flashinfer(
     assert megakernel.fp8_scale_mode == "blockwise"
     assert megakernel.gate_up_clamp == moe.swiglu_limit
     (fc1, _, *_), (fc2, _, *_) = mega_config.transformed_weights
-    hidden, intermediate = TINY_BLOCK_FP8.hidden_size, TINY_BLOCK_FP8.intermediate_size
+    hidden, intermediate = TINY_SM90.hidden_size, TINY_SM90.intermediate_size
     # (E, K, N) views over the layer's storage, K contiguous.
     assert fc1.shape == (2, hidden, 2 * intermediate) and fc1.stride(1) == 1
     assert fc2.shape == (2, intermediate, hidden) and fc2.stride(1) == 1
@@ -854,16 +1160,16 @@ def test_block_fp8_workspace_follows_the_dp_wide_batch(
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
     used: list[object] = []
     _fake_mega_layer(monkeypatch, moe_ep, [], used)
-    moe = _adapter_moe(FLASHINFER_MOE_EP_CUTEDSL, TINY_BLOCK_FP8)
+    moe = _adapter_moe(FLASHINFER_MOE_EP_CUTEDSL, TINY_SM90)
     adapter = FlashInferMoeEp(
         moe,
         _tiny_block_fp8_weights(),
         apply_topk_in_fc1=apply_topk_in_fc1(moe),
-        block_fp8=True,
+        weight_format="fp8_block",
     )
-    hidden_states = torch.zeros(3, TINY_BLOCK_FP8.hidden_size, dtype=torch.bfloat16)
-    topk_ids = torch.zeros(3, TINY_BLOCK_FP8.top_k, dtype=torch.int32)
-    topk_weights = torch.ones(3, TINY_BLOCK_FP8.top_k)
+    hidden_states = torch.zeros(3, TINY_SM90.hidden_size, dtype=torch.bfloat16)
+    topk_ids = torch.zeros(3, TINY_SM90.top_k, dtype=torch.int32)
+    topk_weights = torch.ones(3, TINY_SM90.top_k)
 
     adapter(hidden_states, topk_ids, topk_weights)
     vllm_config = VllmConfig()
@@ -878,6 +1184,39 @@ def test_block_fp8_workspace_follows_the_dp_wide_batch(
             adapter(hidden_states, topk_ids, topk_weights)
 
     assert used == [None, ("workspace", 64), None]
+
+
+def test_sm90_mxfp4_adapter_hands_packed_weights_to_flashinfer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Pass packed E2M1/E8M0 checkpoint weights into the SM90 MXFP4 config."""
+    moe_ep = pytest.importorskip("flashinfer.moe_ep")
+    config_cls = moe_ep.Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig
+    workspace_capacities: list[int] = []
+    layer_args = _fake_mega_layer(monkeypatch, moe_ep, workspace_capacities)
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    moe = _adapter_moe(FLASHINFER_MOE_EP_CUTEDSL, TINY_SM90)
+    hidden, intermediate = TINY_SM90.hidden_size, TINY_SM90.intermediate_size
+    weights = FlashInferMoeEpWeights(
+        w13=torch.zeros(2, 2 * intermediate, hidden // 2, dtype=torch.uint8),
+        w2=torch.zeros(2, hidden, intermediate // 2, dtype=torch.uint8),
+        w13_scale=torch.zeros(2, 2 * intermediate, hidden // 32, dtype=torch.uint8),
+        w2_scale=torch.zeros(2, hidden, intermediate // 32, dtype=torch.uint8),
+    )
+    FlashInferMoeEp(
+        moe, weights, apply_topk_in_fc1=apply_topk_in_fc1(moe), weight_format="mxfp4"
+    )
+
+    ((_, _, weight_pack, mega_config),) = layer_args
+    assert isinstance(weight_pack, moe_ep.PrequantizedMoEWeights)
+    assert all(
+        getattr(weight_pack, name) is getattr(weights, name)
+        for name in ("w13", "w2", "w13_scale", "w2_scale")
+    )
+    assert mega_config.preprocess_weights
+    assert isinstance(mega_config.megakernel, config_cls)
+    assert mega_config.megakernel.gate_up_clamp == moe.swiglu_limit
+    assert workspace_capacities == [64]
 
 
 def _quantize_block_fp8(real: torch.Tensor, power_of_two: bool):
@@ -927,17 +1266,26 @@ def test_sm90_fp8_block_weights_keep_checkpoint_values(power_of_two: bool):
         assert (error.norm() / expected.norm()).item() < 0.03
 
 
-def test_block_fp8_megakernel_rejects_input_side_router_weights():
-    """The SM90 kernel weights the activation before fc2, which is not the same
+@pytest.mark.parametrize("sm90_format", ["fp8_block", "mxfp4"])
+def test_sm90_megakernels_reject_input_side_router_weights(
+    monkeypatch: pytest.MonkeyPatch, sm90_format: str
+):
+    """The SM90 kernels weight the activation before fc2, which is not the same
     as weighting the expert input (apply_router_weight_on_input)."""
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
     moe = make_dummy_moe_config(
         num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=128
     )
-    quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=torch.ones(8, 2, 2),
-        w2_scale=torch.ones(8, 2, 1),
-        block_shape=[128, 128],
-    )
+    if sm90_format == "fp8_block":
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=torch.ones(8, 2, 2),
+            w2_scale=torch.ones(8, 2, 1),
+            block_shape=[128, 128],
+        )
+    else:
+        quant_config = make_mxfp4_moe_quant_config(
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, w1_scale=None, w2_scale=None
+        )
     layer = SimpleNamespace(
         expert_map_manager=SimpleNamespace(placement_strategy="linear"),
         apply_router_weight_on_input=True,
@@ -946,11 +1294,11 @@ def test_block_fp8_megakernel_rejects_input_side_router_weights():
         FlashInferMoeEpExperts(moe, quant_config).process_weights_after_loading(layer)
 
 
-TINY_BLOCK_FP8 = Geometry("tiny", 256, 128, 4, 2)
+TINY_SM90 = Geometry("tiny", 256, 128, 4, 2)
 
 
 def _tiny_block_fp8_weights() -> FlashInferMoeEpWeights:
-    hidden, intermediate = TINY_BLOCK_FP8.hidden_size, TINY_BLOCK_FP8.intermediate_size
+    hidden, intermediate = TINY_SM90.hidden_size, TINY_SM90.intermediate_size
     return FlashInferMoeEpWeights(
         w13=torch.zeros(2, 2 * intermediate, hidden, dtype=torch.float8_e4m3fn),
         w2=torch.zeros(2, hidden, intermediate, dtype=torch.float8_e4m3fn),

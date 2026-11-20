@@ -58,6 +58,8 @@ parser.add_argument("--num-gpus", type=int, default=1)
 parser.add_argument("--packed", action="store_true")
 parser.add_argument("--packed-buffer-size-bytes", type=int, default=512 << 20)
 args = parser.parse_args()
+if args.packed_buffer_size_bytes < 16:
+    parser.error("--packed-buffer-size-bytes must be at least 16")
 
 
 def post(path: str, body: dict | None = None) -> dict:
@@ -82,7 +84,8 @@ def update_weights(
     weights: Weights,
     names: list[str],
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
-    tensor_sizes: list[int] | None = None,
+    chunk_capacity: int | None = None,
+    last: bool = False,
 ) -> None:
     w = next(iter(weights.values()))
     update_info = {
@@ -90,9 +93,9 @@ def update_weights(
         "dtype_names": [str(w[n].dtype).removeprefix("torch.") for n in names],
         "shapes": [list(w[n].shape) for n in names],
         "ipc_handles_pickled": base64.b64encode(pickle.dumps(ipc_handles)).decode(),
+        "chunk_capacity": chunk_capacity,
+        "last": last,
     }
-    if tensor_sizes is not None:
-        update_info["tensor_sizes"] = tensor_sizes
     post("/update_weights", {"update_info": update_info})
 
 
@@ -105,35 +108,53 @@ def send_unpacked(weights: Weights, names: list[str]) -> list[torch.Tensor]:
 
 
 def send_packed(weights: Weights, names: list[str], cap: int) -> list[torch.Tensor]:
-    """One /update_weights call per chunk; one {uuid: args} dict per chunk."""
+    """One /update_weights call per chunk of the 16-byte aligned byte stream;
+    only the first carries the chunk size and the buffer's handles, only the
+    last `last`."""
+    cap -= cap % 16
+    total = 0  # the stream's length
+    for n in names:
+        total = (total + 15) // 16 * 16 + next(iter(weights.values()))[n].nbytes
+    size = min(cap, (total + 15) // 16 * 16)  # smaller when one chunk holds all
     buffers = {
-        u: torch.empty(cap, dtype=torch.uint8, device=w[names[0]].device)
+        u: torch.empty(size, dtype=torch.uint8, device=w[names[0]].device)
         for u, w in weights.items()
     }
     handle = {u: reduce_tensor(b)[1] for u, b in buffers.items()}  # export once
-    chunk: list[str] = []
-    sizes: list[int] = []
+    first = [True]
+    started: list[str] = []  # the tensors starting in the current chunk
+    used = 0  # bytes of the current chunk taken
 
-    def flush() -> None:
+    def flush(last: bool) -> None:
         for b in buffers.values():
             torch.accelerator.synchronize(b.device)  # copies must land before the read
-        update_weights(weights, chunk, handle, sizes)
-        chunk.clear()
-        sizes.clear()
+        if first[0]:
+            update_weights(weights, started, handle, cap, last)
+        else:
+            update_weights(weights, started, {}, last=last)
+        first[0] = False
+        started.clear()
 
     for n in names:
-        nbytes = next(iter(weights.values()))[n].nbytes
-        assert nbytes <= cap, f"{n} ({nbytes} B) exceeds the buffer"
-        if chunk and sum(sizes) + nbytes > cap:  # close *before* overflowing
-            flush()
-        offset = sum(sizes)
-        for u, w in weights.items():
-            flat = w[n].contiguous().view(-1).view(torch.uint8)
-            buffers[u][offset : offset + nbytes].copy_(flat)
-        chunk.append(n)
-        sizes.append(nbytes)
-    if chunk:
-        flush()
+        used = (used + 15) // 16 * 16
+        started.append(n)
+        flats = {
+            u: w[n].contiguous().view(-1).view(torch.uint8) for u, w in weights.items()
+        }
+        nbytes, start = next(iter(flats.values())).numel(), 0
+        while True:
+            end = min(nbytes, start + cap - used)
+            for u, flat in flats.items():
+                buffers[u][used : used + end - start].copy_(flat[start:end])
+            used += end - start
+            start = end
+            if (used + 15) // 16 * 16 == cap:  # full: send it
+                flush(last=n == names[-1] and start == nbytes)
+                used = 0
+            if start == nbytes:
+                break
+    if started or used:
+        flush(last=True)
     return list(buffers.values())
 
 

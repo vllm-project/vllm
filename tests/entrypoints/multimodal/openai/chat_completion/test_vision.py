@@ -536,6 +536,19 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_chat_rejects_icns_image(client: openai.AsyncOpenAI, model_name: str):
+    image = Image.new("RGB", (128, 128), "blue")
+    url = encode_image_url(image, format="ICNS")
+    with pytest.raises(openai.BadRequestError, match="Failed to load image"):
+        await client.chat.completions.create(
+            model=model_name,
+            messages=dummy_messages_from_image_url(url),
+            max_completion_tokens=1,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_chat_streaming_image(
     client: openai.AsyncOpenAI, model_name: str, image_url: str
