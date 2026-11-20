@@ -1523,7 +1523,6 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
                     head_size=1,
                     dtype=torch.float32,
                 ),
-                is_eagle_group=True,
             ),
             make_kv_cache_group(
                 ["mamba"],
@@ -1664,13 +1663,13 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
         )
     store_connector = connector.sub_connectors[0]
     coord = store_connector.connector_scheduler._store_coord
-    assert coord.num_hash_lookahead_tokens == (num_lookahead if all_supported else 0)
+    # An unsupported sibling only warns; the lookahead stays.
+    assert coord.num_hash_lookahead_tokens == num_lookahead
     hashes = [bytes([i]) for i in range(4)]
     cached = ExternalCachedBlockPool(16, {(0, h) for h in hashes})
     _, hit = coord.find_longest_cache_hit(hashes, 64, cached)
-    assert hit == (64 if all_supported else 48)
-    # Even with the legacy protocol, applying the load mask must not drop again.
-    assert coord.load_mask(hashes, hit) == ([True] * (hit // 16),)
+    assert hit == 64
+    assert coord.load_mask(hashes, hit) == ([True] * 4,)
 
 
 @pytest.mark.cpu_test
