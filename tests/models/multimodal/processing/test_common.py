@@ -106,7 +106,7 @@ _XPU_EXCLUDED_MODEL_IDS = {
 _CPU_EXCLUDED_MODEL_IDS = {
     # DeepSeek-V4 vision variant is only supported on NVIDIA GPUs for now.
     "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
-    # HY4 VL requires CUDA or ROCm; CPU uses a placeholder class.
+    # HY4 requires CUDA.
     "tencent/Hy4",
 }
 
