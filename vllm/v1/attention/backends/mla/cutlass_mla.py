@@ -257,7 +257,8 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         if layer._q_scale_float != 1.0 or layer._k_scale_float != 1.0:
             raise NotImplementedError(
-                "CutlassMLAImpl does not support scaling for q and kv_latent yet"
+                "CUTLASS_MLA does not support FP8 KV-cache q/k scales other than "
+                "1.0; use --attention-backend FLASHINFER_MLA."
             )
 
         if type(q) is tuple:

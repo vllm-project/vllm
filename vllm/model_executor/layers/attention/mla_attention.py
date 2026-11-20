@@ -3246,8 +3246,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if use_fp8_prefill:
-                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
-                k_pe = k_pe.to(prefill_metadata.q_data_type)
+                # The gather copied raw cache values, still divided by k_scale.
+                scale = k_scale.to(kv_nope.dtype)
+                kv_nope = (kv_nope * scale).to(prefill_metadata.q_data_type)
+                k_pe = (k_pe.to(scale.dtype) * scale).to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
