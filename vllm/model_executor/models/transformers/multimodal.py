@@ -59,6 +59,7 @@ from vllm.multimodal.processing.processor import (
     MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
 )
+from vllm.multimodal.utils import get_load_audio_from_video
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
@@ -87,14 +88,6 @@ _MAX_FRAMES_PER_VIDEO = 16
 _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
-
-
-def _get_load_audio_from_video(kwargs: Mapping[str, object]) -> object | None:
-    """Fused audio-in-video setting, preferring `load_audio_from_video`."""
-    if (value := kwargs.get("load_audio_from_video")) is not None:
-        return value
-    # TODO: Drop once the minimum Transformers version no longer accepts it
-    return kwargs.get("use_audio_in_video")
 
 
 def _get_embed_token_id(
@@ -185,7 +178,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def _fuses_audio_into_video(self) -> bool:
-        return bool(_get_load_audio_from_video(self.ctx.get_merged_mm_kwargs({})))
+        return bool(get_load_audio_from_video(self.ctx.get_merged_mm_kwargs({})))
 
     def _get_placeholder_ids(self, modality: str) -> list[int]:
         token = getattr(self.get_hf_processor(), f"{modality}_token")
@@ -968,8 +961,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         assert isinstance(prompt_text, str)
 
         fuses_audio_into_video = self.info._fuses_audio_into_video
-        override = _get_load_audio_from_video(hf_kwargs)
-        if override is not None and bool(override) != fuses_audio_into_video:
+        override = get_load_audio_from_video(hf_kwargs)
+        if override is not None and override != fuses_audio_into_video:
             raise ValueError(
                 "load_audio_from_video is a server-level setting and cannot be "
                 "overridden per request; pass it in --mm-processor-kwargs instead."
