@@ -146,7 +146,8 @@ def _make_builder(max_num_batched_tokens: int = 8):
 
     builder.device = torch.device("cpu")
     builder.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
     builder.kv_cache_spec = SimpleNamespace(block_size=1)
     builder.model_dtype = torch.bfloat16

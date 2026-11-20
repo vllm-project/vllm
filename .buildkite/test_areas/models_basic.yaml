@@ -461,6 +461,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/models/qwen4_exp/amd/hyperconnection.py
       - vllm/models/qwen4_exp/amd/ops/hc.py
@@ -478,6 +479,7 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
@@ -487,6 +489,7 @@ steps:
   - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
+  - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
