@@ -201,8 +201,6 @@ pub(crate) enum UnloadLoraError {
         #[source]
         source: vllm_engine_core_client::Error,
     },
-    #[error("engine rejected removal of LoRA adapter `{lora_name}` with id {lora_int_id}")]
-    NotRemoved { lora_name: String, lora_int_id: u64 },
 }
 
 /// Check an adapter's name and path, and that its name does not shadow a
@@ -303,7 +301,7 @@ impl LoraManager {
         media_modalities: impl IntoIterator<Item = MmModality>,
     ) -> LoraModelResolution {
         let adapters = self.adapters.read().await;
-        let model_names = base_model_names.with_names(adapters.keys().cloned());
+        let model_names = base_model_names.with_adapter_names(adapters.keys().cloned());
         let lora_request = model_name
             .and_then(|name| adapters.get(name))
             .or_else(|| {
@@ -431,19 +429,15 @@ impl LoraManager {
             });
         }
 
-        let removed =
-            engine_core_client.remove_lora(adapter.lora_int_id).await.map_err(|source| {
-                UnloadLoraError::Engine {
-                    lora_name: adapter.lora_name.clone(),
-                    source,
-                }
-            })?;
-        if !removed {
-            return Err(UnloadLoraError::NotRemoved {
-                lora_name: adapter.lora_name,
-                lora_int_id: adapter.lora_int_id,
-            });
-        }
+        // Engines only cache adapters: a generate request carries the adapter path, and an
+        // engine loads it on demand. `false` means an engine no longer has it cached (e.g. its
+        // LRU cache evicted it), which is the state unloading wants, so only errors fail here.
+        engine_core_client.remove_lora(adapter.lora_int_id).await.map_err(|source| {
+            UnloadLoraError::Engine {
+                lora_name: adapter.lora_name.clone(),
+                source,
+            }
+        })?;
 
         Ok(self.adapters.write().await.shift_remove(lora_name).unwrap_or(adapter))
     }

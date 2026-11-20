@@ -37,13 +37,18 @@ from vllm.model_executor.model_loader.reload.direct import track_loaded_params
 from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    _BYTE_CONTAINERS,
+    copy_weight_,
+    replace_parameter,
+)
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
 )
 _CPU = torch.device("cpu")
 BF16 = torch.bfloat16
+U8, E8M0, E4M3 = torch.uint8, torch.float8_e8m0fnu, torch.float8_e4m3fn
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +94,9 @@ class _Toy(torch.nn.Module):
 def _checkpoint(shapes: dict, seed: int) -> dict[str, torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
     return {
-        name: torch.randn(shape, generator=gen).to(dtype)
+        name: torch.randint(256, shape, generator=gen, dtype=U8).view(dtype)
+        if dtype in _BYTE_CONTAINERS
+        else torch.randn(shape, generator=gen).to(dtype)
         for name, (shape, dtype) in shapes.items()
     }
 
@@ -304,7 +311,7 @@ _TOY_SHAPES = {
     "embed.weight": ((10, 4), BF16),
     "lm_head.weight": ((10, 4), BF16),  # tied: the loader skips it
     "proj.weight": ((4, 6), BF16),  # transposing loader, transposing PWAL
-    "router.bias": ((5,), BF16),  # FP32 parameter: a cast
+    "router.bias": ((5,), BF16),  # FP32 parameter: a direct cast
     "strided.weight": ((8, 3), BF16),  # every other row
 }
 
@@ -357,9 +364,9 @@ def test_toy_loaders():
     assert plan.get_boxes("lm_head.weight") is None
     assert plan.get_dest("lm_head.weight") == []
 
-    assert plan.get_dest("router.bias") is None
-    assert "casts torch.bfloat16 to torch.float32" in entries["router.bias"].reason
-    assert plan.get_boxes("router.bias") == (((0, 5),),)
+    ((box, dest),) = plan.get_dest("router.bias")
+    assert box == ((0, 5),)
+    assert dest.dtype == torch.float32
 
     assert plan.get_dest("strided.weight") is None
     assert "step" in entries["strided.weight"].reason
@@ -442,6 +449,10 @@ def test_fused_experts_under_expert_tp(tp_rank):
 # ------------------------------------------------------------ fallbacks
 
 
+def _raw_copy(param, loaded):
+    param.copy_(loaded)
+
+
 def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     def make():
         model = _Toy()
@@ -457,6 +468,7 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     [
         (lambda p, w: p.copy_(w * 2), "applies"),
         (lambda p, w: p.copy_(w.to(torch.float32).to(BF16)), "applies"),
+        (lambda p, w: p.copy_(w.view(torch.int16)), "a view of the torch.bfloat16"),
         (lambda p, w: p.copy_(w if bool(w.sum() > 0) else -w), "reads tensor values"),
         (lambda p, w: p.__setitem__([0, 2], w[:2]), "index_put_"),
         (lambda p, w: p.__setitem__(True, w), "applies view"),
@@ -468,6 +480,7 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     ids=[
         "arith",
         "cast-roundtrip",
+        "view-cast",
         "value-read",
         "setitem-list",
         "setitem-bool",
@@ -605,6 +618,30 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
     make, shapes = _single(loader, shape=shape, param_shape=param_shape)
     _, plan = _check_plan_equals_cold_start(make, shapes)
     assert plan.get_dest("layer.weight") is not None
+
+
+@pytest.mark.parametrize(
+    "loader,sent,held,cast",
+    [
+        (copy_weight_, E8M0, U8, None),  # byte containers copy as bytes
+        (copy_weight_, U8, E8M0, None),
+        (copy_weight_, torch.float4_e2m1fn_x2, U8, None),
+        (_raw_copy, torch.int8, U8, None),  # same-width integer casts keep bits
+        (_raw_copy, U8, torch.int8, None),
+        (copy_weight_, BF16, E4M3, E4M3),  # value casts replay by value
+        (copy_weight_, E4M3, BF16, BF16),
+        (copy_weight_, torch.float8_e5m2, E4M3, E4M3),
+    ],
+    ids=lambda v: getattr(v, "__name__", str(v)),
+)
+def test_copy_time_dtype_change_stays_direct(loader, sent, held, cast):
+    """`cast` is the write's dtype; `None` is a byte copy in the sent dtype."""
+    make, _ = _single(loader, shape=(8,), dtype=held)
+    _, plan = _check_plan_equals_cold_start(make, {"layer.weight": ((8,), sent)})
+    (write,) = plan.entries["layer.weight"].writes
+    assert write.dtype == cast
+    ((_, dest),) = plan.get_dest("layer.weight")
+    assert dest.dtype == (cast or sent)
 
 
 def test_tensors_sharing_one_storage():
@@ -862,10 +899,10 @@ def test_load_planned_retries_a_failed_batch_pair_by_pair(monkeypatch):
 
 
 def test_layerwise_mode_is_refused(monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     make, shapes = _single(None)
     model = _cold_start(make, _checkpoint(shapes, 0))
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
+    with pytest.raises(RuntimeError, match="reloads layerwise"):
         plan_loads(model, _metadata(shapes))
 
 
