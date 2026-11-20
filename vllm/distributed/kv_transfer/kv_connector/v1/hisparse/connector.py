@@ -115,12 +115,10 @@ class HiSparseConnectorScheduler:
         assert self.coordinator is None
         self.coordinator = coordinator
 
-    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
-        self.bind_coordinator(
-            get_hisparse_coordinator(
-                kv_cache_manager, import_step_tokens=self.import_step_tokens
-            )
-        )
+    def bind_kv_cache_manager(
+        self, kv_cache_manager: KVCacheManager, coordinator: HiSparseCoordinator
+    ) -> None:
+        self.bind_coordinator(coordinator)
         self.kv_cache_manager = kv_cache_manager
 
     def _inflight_prefill_reserved_blocks(self) -> int:
@@ -338,7 +336,14 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
+        self.connector_scheduler.bind_kv_cache_manager(
+            kv_cache_manager,
+            get_hisparse_coordinator(
+                kv_cache_manager,
+                import_step_tokens=self.connector_scheduler.import_step_tokens,
+                num_reprefillable_tokens=self._vllm_config.num_reprefillable_tokens,
+            ),
+        )
 
     @property
     def requires_kv_delivery(self) -> bool:

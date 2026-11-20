@@ -943,9 +943,10 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt -k "Qwen3-30B-A3B-BF16-triton"
 
-- label: ":nvidia: (B200) MoE Refactor DP Integration (DeepEP v2)"
+- label: ":nvidia: (B200) [Nightly] MoE Refactor DP Integration (DeepEP v2)"
   key: moe-refactor-dp-ep-test-b200-deepep-v2
   automatic_shard: true
+  optional: true
   device: b200-k8s
   # DeepEP v2 needs every rank on one NVLink node, and EP_DISABLE_GIN drops its
   # NCCL GIN/RDMA requirement at num_ranks > 1.

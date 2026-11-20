@@ -553,6 +553,7 @@ class EngineCoreReadyResponse:
     enable_expert_parallel: bool = False
     supports_prompt_logprobs: bool = True
     allow_missing_mm_embeddings: bool = False
+    max_mm_embeds_per_request: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -604,6 +605,7 @@ ready_response = EngineCoreReadyResponse(
     enable_expert_parallel=True,
     supports_prompt_logprobs=False,
     allow_missing_mm_embeddings=True,
+    max_mm_embeds_per_request=16384,
 )
 
 nixl_stats = {
