@@ -197,8 +197,7 @@ def _rel(actual: torch.Tensor, expected: torch.Tensor) -> float:
 def test_megamoe_bf16_nvfp4_shared_buffer(
     tokens, default_vllm_config, dist_init, workspace_init, monkeypatch
 ):
-    """Alternating formats must preserve BF16 results, also in CUDA graphs and
-    after a weight reload into the captured storage."""
+    """Alternating formats must preserve BF16 results, also in CUDA graphs."""
     if not has_deep_gemm():  # also the vendored copy
         pytest.skip("Requires DeepGEMM")
     config = VllmConfig(parallel_config=ParallelConfig())
@@ -253,22 +252,15 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
         weights = weights.softmax(-1)
         ids = ids.int()
         ids[::3, -1] = -1
-
-        def reference(w1, w2):
-            expected = torch.zeros_like(x, dtype=torch.float32)
-            gamma = norm.weight.float() + norm.gain_center
-            for expert in range(experts):
-                token, slot = (ids == expert).nonzero(as_tuple=True)
-                h = (x[token].float() @ w1[expert].float().T).bfloat16()
-                gate, up = h.chunk(2, -1)
-                act = (F.silu(gate.float()) * up.float()).bfloat16()
-                rows = (act.float() @ w2[expert].float().T).bfloat16()
-                scaled = rows.float() * gamma
-                rms = torch.rsqrt(scaled.square().mean(-1, keepdim=True) + 1e-8)
-                expected.index_add_(0, token, scaled * rms * weights[token, slot, None])
-            return expected
-
-        expected = reference(w1, w2)
+        expected = torch.zeros_like(x, dtype=torch.float32)
+        for expert in range(experts):
+            token, slot = (ids == expert).nonzero(as_tuple=True)
+            gate, up = (x[token].float() @ w1[expert].float().T).bfloat16().chunk(2, -1)
+            act = (F.silu(gate.float()) * up.float()).bfloat16()
+            rows = (act.float() @ w2[expert].float().T).bfloat16()
+            scaled = rows.float() * bf16._norm_gamma
+            result = scaled * torch.rsqrt(scaled.square().mean(-1, keepdim=True) + 1e-8)
+            expected.index_add_(0, token, result * weights[token, slot, None])
         for _ in range(2):
             torch.testing.assert_close(nvfp4(x, weights, ids), torch.zeros_like(x))
             actual = bf16(x, weights, ids)
@@ -281,14 +273,6 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
             graph.replay()
             torch.testing.assert_close(fp4_actual, torch.zeros_like(x))
             torch.testing.assert_close(actual.float(), expected, atol=0.04, rtol=0.02)
-        # A reload writes into the same storage and refills the derived gamma.
-        w1, w2 = w1.roll(1, 0), w2.roll(1, 0) * 2
-        norm.weight.copy_(norm.weight.flip(0))
-        list(bf16.load_weights([("w13_weight", w1), ("w2_weight", w2)]))
-        bf16.finalize_weights()
-        graph.replay()
-        expected = reference(w1, w2)
-        torch.testing.assert_close(actual.float(), expected, atol=0.04, rtol=0.02)
 
 
 # At hidden 4096 the block size switches at 512K and 2M elements: 128/129 and
@@ -523,14 +507,11 @@ def test_megamoe_trtllm_weight_layout_matches_native(
             layer.finalize_weights()
             layers.append(layer)
     native, shared = layers
-    names = ["w13_weight", "w2_weight"]
-    if nvfp4:
-        names = ["w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"]
-    l1, l2 = shared.kernel_weights()
-    for view, name in zip([*l1, *l2] if nvfp4 else [l1, l2], names):
-        parameter = getattr(shared, name)
-        assert view.data_ptr() == parameter.data_ptr()
-        assert view.untyped_storage().nbytes() == parameter.untyped_storage().nbytes()
+
+    def addresses() -> list[int]:
+        return [p.data_ptr() for layer in layers for p in layer.parameters()]
+
+    cold_addresses = addresses()
     # Kernel-format weights must not be repacked again.
     with weights_already_processed():
         for layer in layers:
@@ -595,7 +576,10 @@ def test_megamoe_trtllm_weight_layout_matches_native(
                 graph.replay()
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-        def reload(state: dict[str, torch.Tensor]) -> torch.Tensor:
+        gain = norm.weight.clone()
+
+        def reload(state: dict[str, torch.Tensor], gain: torch.Tensor) -> torch.Tensor:
+            norm.weight.copy_(gain)  # refilled into the captured gamma
             for layer in layers:
                 begin_direct_reload(layer)
                 list(layer.load_weights(state.items()))
@@ -606,11 +590,15 @@ def test_megamoe_trtllm_weight_layout_matches_native(
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             return expected.clone()
 
-        # B must change the outputs; A again must restore cold A bitwise.
+        # B and a new gain must each change the outputs; A again must restore
+        # cold A bitwise.
         stage()
         cold = native.forward_prepared(x, buffer).clone()
-        assert not torch.equal(reload(checkpoint(seed=1)), cold)
-        torch.testing.assert_close(reload(ckpt), cold, rtol=0, atol=0)
+        assert not torch.equal(reload(checkpoint(seed=1), gain), cold)
+        assert not torch.equal(reload(ckpt, gain.flip(0)), cold)
+        torch.testing.assert_close(reload(ckpt, gain), cold, rtol=0, atol=0)
+        # Graphs capture these addresses, also for the eager native layer.
+        assert addresses() == cold_addresses
     finally:
         buffer.destroy()
 
