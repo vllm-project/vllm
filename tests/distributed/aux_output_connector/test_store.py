@@ -3288,6 +3288,9 @@ def test_session_object_writer_drain_drops_the_puts_queued_behind_a_hung_put():
         writer.add_tail("job/s/tail/1", rows, {})
         assert _run_within(writer.drain) is None
         release.set()
+        deadline = time.monotonic() + 10
+        while writer._busy_since is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
         writer.add_tail("job/s/tail/2", rows, {})
         assert _run_within(writer.drain) is None
     finally:
