@@ -123,7 +123,7 @@ from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.platforms.rocm import on_gfx1100
+from vllm.platforms.rocm import on_gfx1100, on_gfx1201
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -227,7 +227,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=reduce_results,
-                fuse_in_proj_qkvzba=on_gfx1100(),
+                fuse_in_proj_qkvzba=on_gfx1100() or on_gfx1201(),
                 # Recover the inductor gated-norm fusion (z read strided
                 # from packed qkvz).
                 fused_gdn_gated_rms_norm=_fused_gdn_gated_rms_norm,
