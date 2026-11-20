@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer autotune cache helpers."""
 
+import json
 import os
 import tempfile
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import torch
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, MultiModalConfig, VllmConfig, replace
@@ -14,6 +18,9 @@ from vllm.config.utils import hash_config, hash_factors, normalize_value
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from flashinfer.autotuner import AutoTuner
+    from torch import nn
+
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -62,9 +69,17 @@ def get_flashinfer_mm_encoder_autotune_config(
 
 
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
+    # The weight cache may request the key before the runner has a model.
+    return _flashinfer_autotune_cache_hash(
+        runner.vllm_config, lambda: runner.get_model()
+    )
+
+
+def _flashinfer_autotune_cache_hash(
+    vllm_config: VllmConfig, get_model: Callable[[], "nn.Module"] | None = None
+) -> str:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
-    vllm_config: VllmConfig = runner.vllm_config
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
@@ -84,12 +99,13 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
         vllm_config.parallel_config.data_parallel_size > 1
         and envs.VLLM_MOE_SKIP_PADDING
         and not envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
-        and any(
-            isinstance(m, RoutedExperts) and m.supports_precomputed_routing
-            for m in runner.get_model().modules()
-        )
     ):
-        factors = {**factors, "moe_routed": True}
+        assert get_model is not None, "DP MoE autotune key requires a model"
+        if any(
+            isinstance(m, RoutedExperts) and m.supports_precomputed_routing
+            for m in get_model().modules()
+        ):
+            factors = {**factors, "moe_routed": True}
     return hash_factors(factors)
 
 
@@ -114,21 +130,173 @@ def flashinfer_autotune_filename(dp_rank: int, rank: int) -> str:
     return f"autotune_configs_dp{dp_rank}_rank{rank}.json"
 
 
-def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
-    output_dir = flashinfer_autotune_root() / flashinfer_autotune_cache_hash(runner)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / "autotune_configs.json"
+def resolve_flashinfer_autotune_file(
+    runner: "GPUModelRunner", *, per_rank: bool = False
+) -> Path:
+    path = _flashinfer_autotune_path(
+        runner.vllm_config, flashinfer_autotune_cache_hash(runner), per_rank=per_rank
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def resolve_rank_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
     """The per-rank variant of `resolve_flashinfer_autotune_file`."""
-    from vllm.distributed.parallel_state import get_world_group
+    return resolve_flashinfer_autotune_file(runner, per_rank=True)
 
-    path = resolve_flashinfer_autotune_file(runner)
-    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
-    return path.with_name(
-        flashinfer_autotune_filename(dp_rank, get_world_group().rank_in_group)
+
+def _flashinfer_autotune_path(
+    vllm_config: VllmConfig, config_hash: str, *, per_rank: bool
+) -> Path:
+    filename = "autotune_configs.json"
+    if per_rank:
+        from vllm.distributed.parallel_state import get_world_group
+
+        filename = flashinfer_autotune_filename(
+            vllm_config.parallel_config.data_parallel_rank,
+            get_world_group().rank_in_group,
+        )
+    return flashinfer_autotune_root() / config_hash / filename
+
+
+def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
+    """Identify a saved autotune file by its FlashInfer metadata and size."""
+    try:
+        configs = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(configs, dict):
+        return None
+    metadata = configs.pop("_metadata", None)
+    return json.dumps(metadata, sort_keys=True), len(configs)
+
+
+def _all_ranks_accept_autotune_cache(accepted: bool, group: "GroupCoordinator") -> bool:
+    if group.world_size == 1:
+        return accepted
+    gathered = [False] * group.world_size
+    torch.distributed.all_gather_object(gathered, accepted, group=group.cpu_group)
+    return all(gathered)
+
+
+def _rank_tables_match(cache_path: Path | None, group: "GroupCoordinator") -> bool:
+    fingerprint = _autotune_cache_fingerprint(cache_path) if cache_path else None
+    if group.world_size > 1:
+        gathered: list[tuple[str, int] | None] = [None] * group.world_size
+        torch.distributed.all_gather_object(
+            gathered, fingerprint, group=group.cpu_group
+        )
+        if any(other != fingerprint for other in gathered):
+            return False
+    return fingerprint is not None
+
+
+def _load_rank_autotune_file(cache_path: Path, tuner: "AutoTuner") -> bool:
+    try:
+        return tuner.load_configs(str(cache_path))
+    except (
+        AttributeError,
+        IndexError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        # FlashInfer can reject a malformed file or race a writer after the
+        # fingerprint check. Every rank must still enter the load vote.
+        logger.warning(
+            "Could not load FlashInfer autotune cache %s: %s", cache_path, exc
+        )
+        return False
+
+
+def load_shared_autotune_cache(
+    cache_path: Path,
+    tuner: "AutoTuner",
+    group: "GroupCoordinator",
+    *,
+    preloaded_path: Path | None = None,
+) -> bool:
+    """Reuse a unanimous preload, or load the mutually compatible late files."""
+    if preloaded_path is not None:
+        if _all_ranks_accept_autotune_cache(preloaded_path == cache_path, group):
+            return True
+        # FlashInfer's per-op keys do not include the vLLM config hash.
+        tuner.clear_cache()
+        raise RuntimeError(
+            "FlashInfer autotune cache key changed on at least one rank "
+            "after specialized decode warmup. "
+            f"This rank preloaded {preloaded_path} and resolved {cache_path}."
+        )
+    if not _rank_tables_match(cache_path, group):
+        return False
+    loaded = _all_ranks_accept_autotune_cache(
+        _load_rank_autotune_file(cache_path, tuner), group
     )
+    if not loaded:
+        tuner.clear_cache()
+    return loaded
+
+
+def _autotune_file_stamp(path: Path) -> tuple[int, ...] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def preload_shared_autotune_cache(
+    vllm_config: VllmConfig | None, tuner: "AutoTuner", group: "GroupCoordinator"
+) -> Path | None:
+    """Try the legacy table before TP-only warmup. A None config votes to skip."""
+    from flashinfer.autotuner import AutoTuner
+
+    path = None
+    stamp = None
+    # Protect live legacy winners and namespaces that load_configs can replace.
+    if vllm_config is not None and not (
+        tuner._dirty
+        or tuner.profiling_cache
+        or tuner._file_configs
+        or tuner._namespaced_records
+    ):
+        path = _flashinfer_autotune_path(
+            vllm_config, _flashinfer_autotune_cache_hash(vllm_config), per_rank=True
+        )
+        stamp = _autotune_file_stamp(path)
+    if not _rank_tables_match(path if stamp is not None else None, group):
+        return None
+    assert path is not None
+
+    # FlashInfer's loader can mutate file state even on rejection. Validate
+    # against a private tuner before any rank touches its live tuner.
+    try:
+        validated = _load_rank_autotune_file(path, AutoTuner())
+    except Exception:
+        logger.exception("Could not validate FlashInfer autotune cache %s", path)
+        validated = False
+    if not _all_ranks_accept_autotune_cache(
+        validated and _autotune_file_stamp(path) == stamp, group
+    ):
+        return None
+
+    # Use the canonical path so FlashInfer remembers the observed generation
+    # for later saves. Once any rank installs, a group fallback would need
+    # a rollback API. Stop before tuning if files change during installation.
+    try:
+        installed = _load_rank_autotune_file(path, tuner)
+    except Exception:
+        logger.exception("Could not install FlashInfer autotune cache %s", path)
+        installed = False
+    if not _all_ranks_accept_autotune_cache(
+        installed and _autotune_file_stamp(path) == stamp, group
+    ):
+        raise RuntimeError(
+            "FlashInfer autotune cache changed or rejected on at least one rank "
+            f"during early installation. This rank resolved {path}."
+        )
+    return path
 
 
 def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:

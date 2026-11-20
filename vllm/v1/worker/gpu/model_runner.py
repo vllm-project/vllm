@@ -30,10 +30,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import (
-    BreakableCUDAGraphWrapper,
-    is_breakable_cudagraph_enabled,
-)
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import (
@@ -121,7 +118,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
-    has_compiled_submodule,
+    is_piecewise_cudagraph_available,
     make_cudagraph_stats,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -799,9 +796,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             use_replayssm=self.cache_config.use_replayssm,
         )
-        piecewise_capture_available = bool(
-            is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
-            or has_compiled_submodule(self.model)
+        piecewise_capture_available = is_piecewise_cudagraph_available(
+            self.vllm_config.compilation_config, self.model
         )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
