@@ -971,7 +971,7 @@ def fake_remote_layer_meta_tensors(worker, meta, regions, remote_tp_size: int) -
     if isinstance(worker.transfer_topo, TransferTopology):
         ratio = worker.transfer_topo.block_size_ratio(meta.block_size)
     heads = getattr(worker, "_fake_remote_kv_heads", {}).get(meta.engine_id, {})
-    for local, group, _ in regions:
+    for local, group in regions:
         name = worker.region_members[local][0]
         own_spec = worker._layer_specs[name]
         block_len = worker.block_len_per_layer[local]

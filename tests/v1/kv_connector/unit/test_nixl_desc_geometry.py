@@ -14,6 +14,7 @@ mid-decode (silent corruption of an unrelated request).
 import contextlib
 import math
 from collections import defaultdict
+from dataclasses import replace
 from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -29,7 +30,10 @@ from tests.v1.kv_connector.unit.utils import (
     remote_stage,
 )
 from vllm.config import ParallelConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    KVOutputAggregator,
+    serialize_layer_meta_tensors,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
@@ -1450,9 +1454,9 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
 
 @pytest.mark.cpu_test
 def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
-    """The MLA per-token page is TP-independent, so kernel block lengths
-    differing by anything other than the block-size ratio must fail the
-    handshake loudly rather than transfer at mismatched geometry."""
+    """The MLA per-token page is TP-independent, so a remote whose page is
+    another size must fail the handshake loudly rather than transfer at
+    mismatched geometry."""
     worker = _make_mla_hybrid_worker(
         local_block_size=12, kernel_block_size=4, num_logical_blocks=8
     )
@@ -1464,7 +1468,17 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
     )
     # Equal kernel block sizes (ratio 1), but a half-sized per-token page.
     meta_r.block_lens = [x // 2 for x in worker.block_len_per_layer]
-    with pytest.raises(ValueError, match="blocks of"):
+    layout = KVCacheLayout[meta_r.kv_cache_layout].layer_view_order
+    for (name, *_), block_len in zip(worker.region_members, meta_r.block_lens):
+        spec = worker._layer_specs[name]
+        if isinstance(spec, MLAAttentionSpec):
+            half = replace(spec, head_size=spec.head_size // 2)
+            group = worker.kv_cache_config.transfer_group_index_by_layer[name]
+            block = worker._transfer_block(half, group, block_len, layout)
+            meta_r.layer_meta_tensors[name] = serialize_layer_meta_tensors(
+                half.slice_for_tp_transfer(block)
+            )
+    with pytest.raises(NotImplementedError, match="do not shard this layer"):
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
 
 
@@ -1677,7 +1691,7 @@ def test_csa_linear_ple_moves_whole_from_one_rank(ple_page_size):
     # `fake_remote_layer_meta_tensors` supplies.
     metadata.layer_meta_tensors = {}
     pairs = worker._pair_regions(metadata)
-    regions = list(zip(pairs.local, pairs.group, pairs.remote))
+    regions = list(zip(pairs.local, pairs.group))
     ranges = dict(
         zip(pairs.group, worker._tp_byte_ranges(metadata, regions, 2, 1, True))
     )

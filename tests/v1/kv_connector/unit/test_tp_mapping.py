@@ -175,7 +175,7 @@ def _map(
     stage.pairs = pairs = region_pairs_by_index(num_layers, range(num_layers))
     stage.byte_ranges = ranges = worker._tp_byte_ranges(
         _remote_meta(worker, remote_tp_size, 4 // block_size_ratio),
-        list(zip(pairs.local, pairs.group, pairs.remote)),
+        list(zip(pairs.local, pairs.group)),
         remote_tp_size,
         remote_dcp_size,
         receiving=worker._TRANSFER_MODE == "pull",
@@ -496,7 +496,7 @@ def test_smaller_remote_blocks_fill_a_rank_with_fewer_heads():
     sub-blocks of its own, as on main."""
     worker = _worker(1, 2, _GQA)
     meta = _remote_meta(worker, 1, block_size=2)
-    ranges = worker._tp_byte_ranges(meta, [(0, 0, 0)], 1, 1, receiving=True)
+    ranges = worker._tp_byte_ranges(meta, [(0, 0)], 1, 1, receiving=True)
     sub_block = worker.block_len_per_layer[0] // 2
     assert ranges == [{0: [(0, sub_block, sub_block)]}]
 

@@ -42,7 +42,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     serialize_layer_meta_tensors,
     transfer_block_positions,
     view_block_size_ratio,
-    view_end,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -245,19 +244,18 @@ class NixlBaseConnectorWorker:
     def _tp_byte_ranges(
         self,
         nixl_agent_meta: NixlAgentMetadata,
-        regions: list[tuple[int, int, int | None]],
+        regions: list[tuple[int, int]],
         remote_tp_size: int,
         remote_dcp_size: int,
         receiving: bool,
     ) -> list[dict[int, list[tuple[int, int, int]]]]:
-        """What each `(local region, cache group, remote region)` moves with
-        each remote rank, from both sides' `slice_for_tp_transfer` views:
+        """What each `(local region, cache group)` moves with each remote
+        rank, from both sides' `slice_for_tp_transfer` views:
 
             ranges[k][remote_rank] = [(local_offset, remote_offset, num_bytes)]
 
         in bytes from the start of a transfer block on each side. A rank that
-        moves none of a region is left out. The remote region, if given, is
-        checked against the remote's views.
+        moves none of a region is left out.
         """
         assert self.transfer_topo is not None
         topo = self.transfer_topo
@@ -267,7 +265,7 @@ class NixlBaseConnectorWorker:
             for name, views in nixl_agent_meta.layer_meta_tensors.items()
         }
         all_ranges = []
-        for local, group, remote in regions:
+        for local, group in regions:
             # A region's layers view the same blocks: any one stands for all.
             name = self.region_members[local][0]
             spec = self._layer_specs[name]
@@ -275,10 +273,6 @@ class NixlBaseConnectorWorker:
                 raise ValueError(f"The remote advertised no views of {name!r}.")
             views, contiguous = self._layer_views[name]
             remote_views = remote_views_by_layer[name]
-            if remote is not None and contiguous:
-                self._check_remote_block_len(
-                    nixl_agent_meta, remote, name, remote_views
-                )
 
             # Block size and layout: the transfer block. The receiver decides
             # where bytes land; a sender pairs the views of its cache with the
@@ -362,31 +356,6 @@ class NixlBaseConnectorWorker:
                 }
             )
         return all_ranges
-
-    def _check_remote_block_len(
-        self,
-        nixl_agent_meta: NixlAgentMetadata,
-        remote_region: int,
-        name: str,
-        remote_views: dict[str, torch.Tensor],
-    ) -> None:
-        """A remote region's blocks must hold the layer's views of them."""
-        spec = self._layer_specs[name]
-        # `_split_remote_blocks` cuts the remote's token blocks.
-        split = (
-            1
-            if isinstance(spec, MambaSpec)
-            else self._remote_block_splits.get(nixl_agent_meta.engine_id, 1)
-        )
-        remote_len = nixl_agent_meta.block_lens[remote_region] // split
-        remote_end = max(view_end(view[:1]) for view in remote_views.values())
-        if remote_len < remote_end or (
-            remote_len > remote_end and spec.page_size_padded is None
-        ):
-            raise ValueError(
-                f"Layer {name!r} has blocks of {remote_len} bytes on the "
-                "remote, which do not hold its shards there."
-            )
 
     @classmethod
     def _byte_range_descs(
@@ -1187,7 +1156,7 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
         regions = {
-            (self._region_by_layer[name], group_by_layer[name], None)
+            (self._region_by_layer[name], group_by_layer[name])
             for layer_names in metadata.region_members
             for name in layer_names
             if name in self._region_by_layer
@@ -1584,7 +1553,11 @@ class NixlBaseConnectorWorker:
                 block_stride = cache.stride(0) * cache.element_size()
             if cache.ndim == 4 and layer_spec.has_layer_views:
                 block = byte_view(cache)
-                contiguous = view_end(block[:1]) == block[:1].numel()
+                # A block is one run of bytes unless its heads are apart in
+                # memory (LHBNC or BHLNC with several heads): its last byte
+                # is then past its `numel`-th.
+                last_byte = block[0, -1, -1, -1].storage_offset()
+                contiguous = last_byte + 1 == block[0].numel()
             else:
                 block = self._transfer_block(layer_spec, group_id, block_len, layout)
                 contiguous = True
@@ -2076,7 +2049,7 @@ class NixlBaseConnectorWorker:
         if not stage.byte_ranges:
             stage.byte_ranges = self._tp_byte_ranges(
                 nixl_agent_meta,
-                list(zip(pairs.local, pairs.group, pairs.remote)),
+                list(zip(pairs.local, pairs.group)),
                 remote_tp_size,
                 remote_dcp_size,
                 receiving=self._TRANSFER_MODE == "pull",

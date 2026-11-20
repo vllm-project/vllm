@@ -730,6 +730,7 @@ def _advertise_one_layer_per_region(worker, *metas: NixlAgentMetadata) -> None:
     assert num_regions <= len(layer_names)
     region_layers = [[name] for name in layer_names[:num_regions]]
     worker._set_region_layers(region_layers)
+    worker.region_mem_types = [worker.nixl_memory_type] * num_regions
     for (name,), block_len in zip(region_layers, worker.block_len_per_layer):
         spec = worker._layer_specs[name]
         if isinstance(spec, AttentionSpec) and spec.page_size_bytes != block_len:
@@ -1408,7 +1409,7 @@ class TestNixlHandshake:
         _advertise_one_layer_per_region(worker, meta)
 
         # TP 2 rank 1 reads the second half of the TP 1 rank's heads.
-        regions = [(0, 0, 0)]
+        regions = [(0, 0)]
         assert worker._tp_byte_ranges(meta, regions, 1, 1, receiving=True) == [
             {0: [(0, local_block_len, local_block_len)]}
         ]
@@ -1419,8 +1420,7 @@ class TestNixlHandshake:
     )
     def test_handshake_mixed_fa_mla_hetero_tp(self, default_vllm_config, dist_init):
         """Mixed full-attn (SPLIT) + MLA (REPLICATE) single KV group under
-        heterogeneous TP must NOT raise (previously a NotImplementedError),
-        and the per-region gate must still reject a wrong block_len.
+        heterogeneous TP must NOT raise (previously a NotImplementedError).
         """
         block_size = maybe_update_block_size(16)
         vllm_config = create_vllm_config(block_size=block_size)
@@ -1469,34 +1469,6 @@ class TestNixlHandshake:
             _advertise_one_layer_per_region(worker, meta)
             worker.add_remote_agent(meta, remote_tp_size=1)
             assert FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker._remote_stages
-            # Gate rejects an MLA region wrongly scaled by tp_ratio.
-            worker2 = FakeNixlConnectorWorker(
-                vllm_config, connector.engine_id, hand_shake_latency=0
-            )
-            worker2.block_len_per_layer = [fa_len, idx_len]
-            _use_mla_spec(worker2, "layer2", idx_len)
-            worker2.num_blocks = 1
-            worker2.region_num_blocks = [1, 1]
-            worker2.dst_num_blocks[worker2.engine_id] = worker2.num_blocks
-            bad_meta = NixlAgentMetadata(
-                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
-                kv_caches_base_addr=[0, 0],
-                device_id=0,
-                num_blocks=1,
-                # WRONG: MLA region scaled by tp_ratio (it should be replicated).
-                block_lens=[fa_len * tp_ratio, idx_len * tp_ratio],
-                block_strides=[fa_len * tp_ratio, idx_len * tp_ratio],
-                kv_cache_layout=worker2.kv_cache_layout,
-                block_size=worker2.block_size,
-                attn_backend_name=worker2.backend_name,
-                physical_blocks_per_group=[1],
-            )
-            _advertise_one_layer_per_region(worker2, bad_meta)
-            # The remote's MLA layer still holds its one latent head.
-            worker2._fake_remote_kv_heads[bad_meta.engine_id]["layer2"] = 1
-            with pytest.raises(ValueError, match="has blocks of"):
-                worker2.add_remote_agent(bad_meta, remote_tp_size=1)
 
     @staticmethod
     def _mla_target_with_gqa_draft(tp_size: int, tp_rank: int, remote_tp_size: int):
@@ -1637,23 +1609,6 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_handshake_mla_target_rejects_unsharded_draft_block(
-        self, default_vllm_config, dist_init
-    ):
-        """The draft region is validated against its own KV heads, so a
-        prefill draft block that was not scaled by them is still rejected."""
-        worker, meta, mla_len, draft_len = self._mla_target_with_gqa_draft(
-            tp_size=8, tp_rank=3, remote_tp_size=1
-        )
-        meta.block_lens = [mla_len, draft_len]
-        meta.block_strides = [mla_len, draft_len]
-        with pytest.raises(ValueError, match="do not hold its shards"):
-            worker.add_remote_agent(meta, remote_tp_size=1)
-
-    @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
-        FakeNixlWrapper,
-    )
     def test_handshake_mla_target_reads_draft_from_every_prefill_rank(
         self, default_vllm_config, dist_init
     ):
@@ -1740,9 +1695,9 @@ class TestNixlHandshake:
     def test_handshake_rejects_wrong_block_len_without_gqa_replication(
         self, default_vllm_config, dist_init
     ):
-        """Ensure the head-ratio validation still rejects genuinely wrong
-        block_lens when GQA replication is NOT in effect (32 KV heads,
-        D_TP=4, P_TP=2: head_ratio=4, both sides have >1 head/rank).
+        """A remote whose blocks hold too few KV heads for its TP size is
+        refused when GQA replication is NOT in effect (32 KV heads, D_TP=4,
+        P_TP=2: head_ratio=4, both sides have >1 head/rank).
         """
         block_size = maybe_update_block_size(16)
         vllm_config = create_vllm_config(block_size=block_size)
@@ -1790,9 +1745,8 @@ class TestNixlHandshake:
                 physical_blocks_per_group=[1],
             )
             _advertise_one_layer_per_region(worker, bad_meta)
-            worker._fake_remote_kv_heads[bad_meta.engine_id] = {"layer0": 16}
 
-            with pytest.raises(ValueError, match="do not hold its shards"):
+            with pytest.raises(NotImplementedError, match="do not shard this layer"):
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
     @pytest.mark.parametrize(

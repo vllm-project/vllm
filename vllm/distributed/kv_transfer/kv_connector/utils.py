@@ -484,12 +484,6 @@ def byte_view(cache: torch.Tensor) -> torch.Tensor:
     )
 
 
-def view_end(view: torch.Tensor) -> int:
-    """The offset after the last byte of a byte view in its storage."""
-    extent = sum((n - 1) * s for n, s in zip(view.shape, view.stride()))
-    return view.storage_offset() + extent + 1
-
-
 # Dims of a `KVCacheSpec.slice_for_tp_transfer` view: its blocks, what TP
 # shards (a rank holds a run of it, or a copy of all of it) and its states.
 _VIEW_DIM_B, _VIEW_DIM_TP, _VIEW_DIM_N = 0, 1, 2
