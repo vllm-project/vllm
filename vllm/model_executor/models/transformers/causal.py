@@ -57,6 +57,7 @@ logger = init_logger(__name__)
 OUTPUT_HEAD_ATTR = "output_head"
 """Attribute in which to store the output head."""
 
+
 class _OutputEmbeddings:
     """Calls `project` in place of the output embeddings, or is the identity until
     `project` is set. Not an `nn.Module`, so that the weights stay registered only

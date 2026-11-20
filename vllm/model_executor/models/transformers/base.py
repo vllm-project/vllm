@@ -626,7 +626,7 @@ class Base(
 
             if (
                 isinstance(fuser, AttentionFuser)
-                and (index := fuser.layer_index(module)) is not None
+                and (index := fuser.layer_index(module, prefix)) is not None
             ):
                 if index in self.attention_fusers:
                     other, _ = self.attention_fusers[index]
@@ -842,7 +842,11 @@ class Base(
 
                 # Handle interleaved sliding window attention
                 if layer_types and layer_types[i] == "sliding_attention":
-                    kwargs["per_layer_sliding_window"] = text_config.sliding_window
+                    sliding_window = text_config.sliding_window
+                    # Transformers' bidirectional window includes both boundaries
+                    if attn_cls is EncoderOnlyAttention:
+                        sliding_window += 1
+                    kwargs["per_layer_sliding_window"] = sliding_window
                 # Handle attention sinks
                 if (sinks := attn_fuser.sinks(attn_module)) is not None:
                     kwargs["sinks"] = sinks
