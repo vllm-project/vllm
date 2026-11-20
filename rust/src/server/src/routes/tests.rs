@@ -4514,6 +4514,23 @@ async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_rejects_invalid_response_format() {
+    let (mut app, _engine_task) = test_app().await;
+    let (status, body) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {"type": "not-a-format"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], 400);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn invalid_request_returns_openai_error() {
     let (mut app, _engine_task) = test_app().await;
     let response = app
