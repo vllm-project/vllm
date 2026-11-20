@@ -22,7 +22,7 @@ from ...utils import check_logprobs_close
 from .vlm_utils import model_utils
 
 pytestmark = pytest.mark.skipif(
-    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    Version(transformers.__version__) < Version("5.23.0"),
     reason="Requires Omni token counting and text replacement offsets",
 )
 
