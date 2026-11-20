@@ -115,7 +115,7 @@ def make_full_mamba_manager(
             dtypes=(torch.float32,),
         ),
         MambaManager.config(
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
             num_speculative_blocks=num_speculative_blocks,
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=(
@@ -395,7 +395,7 @@ def test_hybrid_mamba_align_partial_hash_hit():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -470,7 +470,7 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1050,7 +1050,7 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1123,7 +1123,7 @@ def test_boundary_state_offloads_returns_cow_target():
                     dtypes=(torch.float32,),
                 ),
                 MambaManager.config(
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                     num_prefill_checkpoint_blocks=1,
                 ),
             ),
@@ -1201,7 +1201,7 @@ def test_finished_partial_tail_uses_table_source_once():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1310,7 +1310,7 @@ def test_boundary_state_offload_dropped_when_request_freed_before_drain():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1357,7 +1357,7 @@ def test_boundary_state_offloads_block_aligned_prompt():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1410,7 +1410,7 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1465,7 +1465,7 @@ def test_truncate_computed_blocks_allows_short_mamba_group_only():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1528,7 +1528,7 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1608,7 +1608,7 @@ def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1667,7 +1667,7 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1741,7 +1741,7 @@ def test_hybrid_partial_hit_cow_target_starts_uncached():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1824,7 +1824,7 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1898,7 +1898,7 @@ def test_cow_retained_blocks_returned_for_release():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -2075,7 +2075,7 @@ def test_mamba_partial_tail_hits_hash_ready_boundary():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -2137,7 +2137,7 @@ def test_mamba_coarse_checkpoint_retained_at_hash_ready_boundary():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
         prefix_cache_retention_interval=0,
@@ -2200,7 +2200,7 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
             new_kv_cache_group(
                 ["swa_draft"],
@@ -2269,7 +2269,7 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
             ),
-            MambaManager.config(mamba_cache_mode="align"),
+            MambaManager.config(enable_prefix_caching=True),
         ),
     ]
     if with_sliding_window:
@@ -2334,7 +2334,7 @@ def test_opted_out_scratch_group_keeps_partial_hash_hits():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
             new_kv_cache_group(
                 ["tail"],
@@ -2392,7 +2392,7 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
             new_kv_cache_group(
                 ["tail"],
@@ -2577,7 +2577,7 @@ def _snapshot_offload_kv_cache_config(
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -2701,7 +2701,7 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
                             shapes=(1, 1),
                             dtypes=(torch.float32,),
                         ),
-                        MambaManager.config(mamba_cache_mode="align"),
+                        MambaManager.config(enable_prefix_caching=True),
                     )
                     for i in range(num_mamba_groups)
                 ),
