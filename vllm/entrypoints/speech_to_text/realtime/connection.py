@@ -202,7 +202,8 @@ class RealtimeConnection:
         2. Passes the streaming input generator to engine.generate()
         3. Streams transcription.delta events as text is generated
         4. Sends final transcription.done event with usage stats
-        5. Feeds generated token IDs back to input_stream for next iteration
+        5. Feeds generated token IDs back to input_stream for next iteration,
+           unless the model keeps them in the engine
         6. Cleans up the audio queue
         """
         request_id = f"rt-{self.connection_id}-{uuid4()}"
@@ -241,8 +242,9 @@ class RealtimeConnection:
                     delta = output.outputs[0].text
                     full_text += delta
 
-                    # append output to input
-                    input_stream.put_nowait(list(output.outputs[0].token_ids))
+                    if not self.serving.model_cls.realtime_keep_last_output_token:
+                        # append output to input
+                        input_stream.put_nowait(list(output.outputs[0].token_ids))
                     await self.send(TranscriptionDelta(delta=delta))
 
                     completion_tokens_len += len(output.outputs[0].token_ids)

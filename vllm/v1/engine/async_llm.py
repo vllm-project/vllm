@@ -679,6 +679,11 @@ class AsyncLLM(EngineClient):
                         raise VLLMValidationError(
                             "prompt_embeds not supported for streaming inputs"
                         )
+                    if not any_added and not req.prompt_token_ids:
+                        # Only continuations have a sampled token to build on.
+                        raise VLLMValidationError(
+                            "The first streaming input chunk cannot be empty"
+                        )
                     prompt_text, _, _ = extract_prompt_components(
                         self.model_config, input_chunk.prompt
                     )

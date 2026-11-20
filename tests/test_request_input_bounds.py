@@ -99,6 +99,24 @@ def test_prompt_embeds_valid_inputs_preserved(prompt_embeds_processor, token_ids
     assert request.prompt_is_token_ids == mask
 
 
+@pytest.mark.parametrize("resumable", [True, False])
+def test_empty_prompt_only_for_streaming_chunks(prompt_embeds_processor, resumable):
+    """A streaming chunk may be empty: it continues from the last sample."""
+    params = SamplingParams(max_tokens=1)
+    prompt = {"type": "token", "prompt_token_ids": []}
+
+    def process():
+        return prompt_embeds_processor.process_inputs(
+            "req", prompt, params, ("generate",), resumable=resumable
+        )
+
+    if resumable:
+        assert process().prompt_token_ids == []
+    else:
+        with pytest.raises(VLLMValidationError, match="prompt cannot be empty"):
+            process()
+
+
 @pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
 def test_routed_experts_offset_validated_before_engine_submission(offset):
     """Reject invalid offsets even when routed-expert output is disabled."""

@@ -34,6 +34,10 @@ class StreamingInput:
 
     This is used with generate() to support multi-turn streaming sessions
     where inputs are provided via an async generator.
+
+    Each input discards the token sampled for the previous one, unless it has
+    no prompt tokens: it then continues from that token, and its multimodal
+    data is placed at that token. The first input must have prompt tokens.
     """
 
     prompt: PromptType | EngineInput

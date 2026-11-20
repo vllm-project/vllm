@@ -198,6 +198,8 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
+        # Number of leading `mm_features` the workers have received.
+        self.num_sent_mm_features = 0
 
         # Read-only views
         # Prevent directly appending to these lists since

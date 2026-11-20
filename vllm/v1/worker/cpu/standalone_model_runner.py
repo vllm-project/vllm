@@ -687,6 +687,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
+        if self.encoder_cache is not None:
+            for req_id, new_mm_features in reqs.new_mm_features.items():
+                self.encoder_cache.mm_features[req_id].extend(new_mm_features)
 
         # Update CPU num_computed_prefill_tokens.
         np.minimum(

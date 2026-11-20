@@ -12,7 +12,7 @@ from vllm.engine.protocol import StreamingInput
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import STREAM_FINISHED, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.async_llm import AsyncLLM, InputStreamError
 from vllm.v1.engine.output_processor import RequestOutputCollector
 
 
@@ -249,7 +249,7 @@ def _make_streaming_llm(
     return llm, reqs
 
 
-async def _stream_chunks(llm: AsyncLLM, num_chunks: int) -> None:
+async def _stream_chunks(llm: AsyncLLM, num_chunks: int) -> RequestOutputCollector:
     async def chunks():
         for i in range(num_chunks):
             yield StreamingInput(prompt=f"frame-{i}")
@@ -264,6 +264,7 @@ async def _stream_chunks(llm: AsyncLLM, num_chunks: int) -> None:
         task = queue._input_stream_task
         assert task is not None
         await task
+    return queue
 
 
 @pytest.mark.asyncio
@@ -280,3 +281,23 @@ async def test_handle_inputs_stops_after_session_finished(
     sent = [call.args[0] for call in llm._add_request.await_args_list]
     # Both chunks then the final request, or only the first chunk.
     assert sent == ([reqs[1], reqs[2], reqs[0]] if session_live else [reqs[1]])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_chunk", [0, 1])
+async def test_only_continuation_chunks_may_be_empty(
+    empty_chunk: int, monkeypatch: pytest.MonkeyPatch
+):
+    """A chunk without tokens builds on the previous chunk's kept sample, which
+    the first chunk does not have."""
+    llm, reqs = _make_streaming_llm(monkeypatch, num_chunks=2)
+    reqs[1 + empty_chunk].prompt_token_ids = []
+    queue = await _stream_chunks(llm, num_chunks=2)
+
+    sent = [call.args[0] for call in llm._add_request.await_args_list]
+    if empty_chunk == 0:
+        assert sent == []
+        with pytest.raises(InputStreamError, match="first streaming input chunk"):
+            queue.get_nowait()
+    else:
+        assert sent == [reqs[1], reqs[2], reqs[0]]
