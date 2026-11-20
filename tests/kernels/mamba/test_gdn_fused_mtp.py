@@ -89,7 +89,7 @@ def _make_vllm_config():
     config.additional_config = {
         "gdn_prefill_backend": "triton" if current_platform.is_rocm() else "cutedsl"
     }
-    config.cache_config.mamba_cache_mode = "none"
+    config.cache_config.enable_prefix_caching = False
     config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=NUM_SPEC
     )
