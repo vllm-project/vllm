@@ -711,8 +711,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             return MultiModalFieldConfig.batched("video")
         if rows == total:
             return MultiModalFieldConfig.flat_from_sizes("video", sizes, dim=dim)
-        # Gemma 4 concatenates every video's frames along one axis, so a per-frame
-        # field has one row per frame rather than per patch
         num_frames = hf_inputs.get("num_frames_per_video")
         if num_frames is not None and rows == int(num_frames.sum()):
             return MultiModalFieldConfig.flat_from_sizes("video", num_frames, dim=dim)
@@ -730,11 +728,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         )
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        if self.info._fuses_audio_into_video:
-            mm_counts = {
-                **mm_counts,
-                "audio": mm_counts.get("audio", 0) - mm_counts.get("video", 0),
-            }
+        if self.info._fuses_audio_into_video and mm_counts.get("video"):
+            mm_counts = {**mm_counts, "audio": 0}
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _unpad_audios(
