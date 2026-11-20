@@ -123,6 +123,7 @@ class Base(
     hf_to_vllm_mapper: WeightsMapper
     supports_aux_hidden_states_over_pp = True
     _tower_model_names: tuple[str, ...] = ()
+    """Read by `recursive_replace`, so text-only models need this empty default."""
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
@@ -587,15 +588,13 @@ class Base(
         fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
 
         def _materialise(module: nn.Module, prefix: str) -> nn.Module:
-            """Mimic what `__init__` does to the whole model, for a module offloaded
-            early."""
+            """Initialise `module` as `__init__` would, so it can be offloaded early."""
             self.init_parameters(module)
             self.keep_in_fp32(module, prefix.removeprefix("model."))
             return module
 
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
-            """Build this rank's decoder layers one at a time and offload each as
-            soon as it is built, as `make_layers` does."""
+            """Replace this rank's decoder layers, offloading each as it is built."""
             # Record the layers for Eagle3
             for name, _ in layers.named_children():
                 self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
@@ -612,8 +611,6 @@ class Base(
             )
 
             def build_layers():
-                """Must mimic what `__init__` does to the whole model's parameters,
-                because each layer is offloaded as soon as it is yielded."""
                 for i in range(*self._pp_indices()):
                     layer_prefix = f"{prefix}.{i}"
                     self._pre_decoder_layer_replace(layers[i], layer_prefix)
@@ -624,8 +621,7 @@ class Base(
             offloader.wrap_modules(build_layers())
 
         def _replace_tower(tower: nn.Module, prefix: str):
-            """Offload a tower as soon as it is built, as `_mark_tower_model` does for
-            native models."""
+            """Replace a tower, offloading it whole once it is built."""
             for child_name, child_module in tower.named_children():
                 _replace_child(tower, child_name, child_module, prefix)
             if offloader.supports_tower_offload:
