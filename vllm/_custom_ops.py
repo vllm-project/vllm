@@ -197,6 +197,21 @@ def rotary_embedding(
         )
 
 
+def rotary_embedding_out(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor | None,
+    query_out: torch.Tensor,
+    key_out: torch.Tensor | None,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    torch.ops._C.rotary_embedding_out(
+        positions, query, key, query_out, key_out, head_size, cos_sin_cache, is_neox
+    )
+
+
 # layer norm ops
 def rms_norm(
     out: torch.Tensor,
@@ -703,6 +718,36 @@ def moe_gptq_gemm_rdna3(
         block_size_m,
         mul_topk_weight,
         output_topk,
+    )
+
+
+def moe_w4a8_decode_rdna3(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    workspace: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_zp: torch.Tensor | None,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_zp: torch.Tensor | None,
+) -> None:
+    torch.ops._rocm_C.moe_w4a8_decode_rdna3(
+        out,
+        x,
+        topk_ids,
+        topk_weights,
+        expert_map,
+        workspace,
+        w13,
+        w13_scale,
+        w13_zp,
+        w2,
+        w2_scale,
+        w2_zp,
     )
 
 
@@ -2062,6 +2107,16 @@ def wvSplitKQ(
     out = torch.empty((b.shape[0], a.shape[0]), dtype=out_dtype, device=b.device)
     torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out
+
+
+def swmmac_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    logical_m: int,
+    cu_count: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.swmmacGEMM(a, b, bias, logical_m, cu_count)
 
 
 # moe

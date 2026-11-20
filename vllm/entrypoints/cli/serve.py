@@ -313,6 +313,10 @@ def run_multi_api_server(args: argparse.Namespace):
     propagate_flash_late_interaction(args, engine_args)
     engine_args._api_process_count = num_api_servers
     engine_args._api_process_rank = -1
+    if rust_frontend_path:
+        # vllm-rs has no multimodal processor cache yet, so the engine's
+        # receiver cache would never be hit.
+        engine_args.mm_processor_cache_gb = 0
 
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)

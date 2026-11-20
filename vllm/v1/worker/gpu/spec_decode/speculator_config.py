@@ -11,12 +11,15 @@ they're used in every process. Custom speculators are registered with
 `register_speculative_method`.
 """
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, final, get_args
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
+    from transformers import PreTrainedConfig
+
     from vllm.config import ParallelConfig, SpeculativeConfig
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
@@ -42,6 +45,8 @@ class SpeculatorConfig:
 
     # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
+    # The drafter's own KV at a position depends on the tokens it reads ahead.
+    draft_kv_depends_on_lookahead: ClassVar[bool] = False
     # Drafts in its own workspace lane.
     uses_separate_workspace_lane: ClassVar[bool] = False
     # For performance, prefers requests' full token history on the GPU instead of
@@ -136,6 +141,15 @@ class SpeculatorConfig:
         return 1 if self.uses_target_hidden_states else 0
 
     @property
+    @final
+    def num_hash_lookahead_tokens(self) -> int:
+        """Next tokens the drafter's own KV at a position depends on, which
+        prefix-cache block hashes must cover."""
+        if self.draft_kv_depends_on_lookahead:
+            return self.num_prefill_lookahead_tokens
+        return 0
+
+    @property
     def max_num_new_slots_for_drafting(self) -> int:
         """See `SpeculativeConfig.max_num_new_slots_for_drafting`."""
         return 0
@@ -201,11 +215,7 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             return
 
         target = spec.target_model_config
-        # Callable target hf_overrides also apply to the draft; rope-relevant
-        # dict keys (YaRN / RoPE) do too. Other dict patches stay target-only.
-        draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-            target.hf_overrides, cls.transformers_backend_hf_overrides(spec)
-        )
+        draft_hf_overrides = cls.draft_hf_overrides(spec)
         spec.draft_model_config = ModelConfig(
             model=spec.model,
             runner="draft",
@@ -271,6 +281,18 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         )
 
     @classmethod
+    def draft_hf_overrides(
+        cls, spec: "SpeculativeConfig"
+    ) -> Callable[["PreTrainedConfig"], "PreTrainedConfig"]:
+        """Build the picklable transform applied before draft architecture parsing."""
+        from vllm.config import SpeculativeConfig
+
+        return SpeculativeConfig.compose_draft_hf_overrides(
+            spec.target_model_config.hf_overrides,
+            cls.transformers_backend_hf_overrides(spec),
+        )
+
+    @classmethod
     def transformers_backend_hf_overrides(
         cls, spec: "SpeculativeConfig"
     ) -> dict[str, Any] | None:
@@ -326,6 +348,18 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
     "dflash": _builtin("dflash.config", "DFlashSpeculatorConfig"),
     "dspark": _builtin("dspark.config", "DSparkSpeculatorConfig"),
+    "dfly": _builtin("dfly.config", "DFlySpeculatorConfig"),
+}
+
+# Combined checkpoints need a model-specific transform before the draft's
+# architecture can be inspected. Keys use the target's text model type.
+_CONFIG_BY_TARGET_MODEL_TYPE: dict[str, dict[str, str]] = {
+    "dfly": {
+        "hy_v4": "vllm.models.hy_v4.dfly_config.HYV4DFlySpeculatorConfig",
+        "hy_v4_flash": (
+            "vllm.models.hy_v4_flash.dfly_config.HYV4FlashDFlySpeculatorConfig"
+        ),
+    },
 }
 
 # Custom speculative methods' configs (or their qualified names), by name.
@@ -378,8 +412,7 @@ def get_custom_speculator_config_class(
 
 
 def get_method_config_class(spec_config: "SpeculativeConfig") -> type[SpeculatorConfig]:
-    """The config class for `spec_config.method`, regardless of the draft
-    checkpoint (for setting up `spec_config`)."""
+    """Select method and target-family configuration before loading the draft."""
     if spec_config.custom_method is not None:
         custom_cls = get_custom_speculator_config_class(spec_config.custom_method)
         assert custom_cls is not None
@@ -390,7 +423,26 @@ def get_method_config_class(spec_config: "SpeculativeConfig") -> type[Speculator
         method = "draft_model"
     if method not in _CONFIG_BY_METHOD:
         raise ValueError(f"Unsupported speculative method: '{method}'")
-    return resolve_obj_by_qualname(_CONFIG_BY_METHOD[method])
+    config_cls = resolve_obj_by_qualname(_CONFIG_BY_METHOD[method])
+    target_configs = _CONFIG_BY_TARGET_MODEL_TYPE.get(method)
+    if target_configs is None:
+        return config_cls
+    target = spec_config.target_model_config
+    if target is not None:
+        model_type = target.hf_text_config.model_type
+        if qualname := target_configs.get(model_type):
+            target_config_cls = resolve_obj_by_qualname(qualname)
+            if not (
+                isinstance(target_config_cls, type)
+                and issubclass(target_config_cls, SpeculatorConfig)
+                and issubclass(target_config_cls, config_cls)
+                and target_config_cls.base_method == method
+            ):
+                raise TypeError(
+                    f"Target config {qualname!r} must specialize method {method!r}"
+                )
+            return target_config_cls
+    return config_cls
 
 
 def get_speculator_config_class(

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -26,14 +27,13 @@ from vllm.model_executor.kernels.mhc.torch import (
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC,
-    HAS_AITER_MHC_FUSED,
-    HAS_AITER_MHC_FUSED_NORM,
     HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
-    HAS_AITER_MHC_PRE_NORM,
     HAS_TILELANG_MHC,
     MHCFusedPostPreOp,
     MHCPreDelayedOp,
     MHCPreOp,
+    _aiter_mhc_op_accepts_norm,
+    _has_aiter_mhc_fused,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
@@ -84,6 +84,15 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    # The TP4 fusion is SM100's; SM90 at TP8 is in the model's own tests.
+    monkeypatch.setattr(
+        mhc,
+        "current_platform",
+        SimpleNamespace(
+            is_device_capability=lambda capability: False,
+            is_device_capability_family=lambda family: family == 100,
+        ),
+    )
     assert mhc.supports_mhc_all_reduce(config) is expected
 
 
@@ -175,6 +184,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     draft = SimpleNamespace(
         use_mega_gate=False,
         use_sequence_parallel=False,
+        fuse_mhc_all_reduce=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
     )
@@ -574,6 +584,9 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.fuse_mhc_all_reduce = False
     decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
+    # The stock mHC boundaries, not the SM80/SM90 CuTe DSL ones.
+    decoder.ampere_mhc = False
+    decoder.mhc_overlap_max_tokens = MHC_OVERLAP_MAX_TOKENS
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
 
@@ -707,6 +720,8 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     inputs -- and Engram must not be folded into it, since the injection
     happens after the aux consumers read the stream.
     """
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
+
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -719,6 +734,9 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.fuse_mhc_all_reduce = False
     decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
+    # The stock mHC boundaries, not the SM80/SM90 CuTe DSL ones.
+    decoder.ampere_mhc = False
+    decoder.mhc_overlap_max_tokens = MHC_OVERLAP_MAX_TOKENS
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
 
@@ -1279,7 +1297,7 @@ def _rocm_mhc_inputs(num_tokens=2, hidden_size=256, hc_mult=4):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch):
+def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch, default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs()
     rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
@@ -1300,10 +1318,11 @@ def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch):
         ref[2], (ref[2].shape[-1],), norm_weight, norm_eps
     )
     monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC", True)
-    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_PRE_NORM", False)
     monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+    op = MHCPreOp()
+    op._aiter_supports_norm = False
 
-    out = object.__new__(MHCPreOp).forward_hip(
+    out = op.forward_hip(
         residual,
         fn,
         hc_scale,
@@ -1323,7 +1342,7 @@ def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
+def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch, default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs()
     x = torch.randn((2, 256), dtype=torch.bfloat16, device=DEVICE)
@@ -1347,10 +1366,11 @@ def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
     expected_layer_input = F.rms_norm(
         pre_ref[2], (pre_ref[2].shape[-1],), norm_weight, norm_eps
     )
-    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_FUSED", False)
     monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+    op = MHCFusedPostPreOp()
+    op._use_aiter = False
 
-    out = object.__new__(MHCFusedPostPreOp).forward_hip(
+    out = op.forward_hip(
         x,
         residual,
         post_layer_mix,
@@ -1517,10 +1537,27 @@ def _on_cdna4() -> bool:
     return get_cdna_version() == 4
 
 
+def _on_cdna3() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() == 3
+
+
 requires_rocm_mhc_overlap = pytest.mark.skipif(
     not (_on_cdna4() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
     reason="gfx950 with AITER's fused delayed-seam kernel required",
 )
+
+
+def _stub_sublayers(decoder, attn, ffn):
+    """Stand plain callables in for the decoder's attention and FFN. Neither
+    has a first GEMM that reads the seam's MXFP8 layer input."""
+    attn.fused_wqa_wkv = nn.Identity()
+    ffn.use_mega_moe, ffn.shared_experts = False, None
+    decoder.attn, decoder.ffn = attn, ffn
+    decoder.attn_seam_mxfp8 = decoder.ffn_seam_mxfp8 = False
 
 
 def _mega_mhc_inputs(num_tokens, hidden_size=5120):
@@ -1674,10 +1711,13 @@ def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
     nn.Module.__init__(layer)
     layer.mono = None
     layer.use_mega_mhc = True
+    layer.use_sequence_parallel = False
     layer.hidden_size = hidden_size
+    _stub_sublayers(layer, lambda x: x, lambda x: x)
     layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_ffn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_attn_fn_packed = layer.hc_ffn_fn_packed = None
+    layer.mhc_seam = None
     layer.mhc_overlap = MHCOverlapStream()
     with set_default_torch_dtype(torch.bfloat16):
         layer.process_weights_after_loading()
@@ -1827,6 +1867,7 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     decoder.fuse_seam_norm = True
     decoder.use_mega_mhc = seam_kernel == "mega"
     decoder.hc_attn_fn_packed = decoder.hc_ffn_fn_packed = None
+    decoder.mhc_seam = None
     decoder.hidden_size = hidden_size
     decoder.hc_mult = 4
     decoder.hc_sinkhorn_iters = 20
@@ -1838,8 +1879,11 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    _stub_sublayers(
+        decoder,
+        lambda positions, x, _: x * 0.5,
+        lambda x, input_ids: x * 0.25,
+    )
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02
@@ -2028,6 +2072,7 @@ def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_
     decoder.use_sequence_parallel = False
     decoder.fuse_seam_norm = False
     decoder.hc_attn_fn_packed = decoder.hc_ffn_fn_packed = None
+    decoder.mhc_seam = None
     decoder.hc_mult = 4
     decoder.hc_sinkhorn_iters = 20
     decoder.hc_eps = 1e-6
@@ -2037,8 +2082,11 @@ def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    _stub_sublayers(
+        decoder,
+        lambda positions, x, _: x * 0.5,
+        lambda x, input_ids: x * 0.25,
+    )
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02
@@ -2080,10 +2128,10 @@ def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_rocm() and HAS_AITER_MHC and HAS_AITER_MHC_PRE_NORM),
+    not (current_platform.is_rocm() and _aiter_mhc_op_accepts_norm("mhc_pre")),
     reason="AITER mHC with fused RMSNorm required",
 )
-def test_mhc_pre_rocm_aiter_fuses_norm():
+def test_mhc_pre_rocm_aiter_fuses_norm(default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
         num_tokens=2, hidden_size=7168
@@ -2106,7 +2154,7 @@ def test_mhc_pre_rocm_aiter_fuses_norm():
         ref[2], (ref[2].shape[-1],), norm_weight, norm_eps
     )
 
-    out = object.__new__(MHCPreOp).forward_hip(
+    out = MHCPreOp().forward_hip(
         residual,
         fn,
         hc_scale,
@@ -2127,11 +2175,13 @@ def test_mhc_pre_rocm_aiter_fuses_norm():
 
 @pytest.mark.skipif(
     not (
-        current_platform.is_rocm() and HAS_AITER_MHC_FUSED and HAS_AITER_MHC_FUSED_NORM
+        current_platform.is_rocm()
+        and _has_aiter_mhc_fused()
+        and _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
     ),
     reason="AITER fused mHC with RMSNorm required",
 )
-def test_mhc_fused_rocm_aiter_fuses_norm():
+def test_mhc_fused_rocm_aiter_fuses_norm(default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
         num_tokens=2, hidden_size=7168
@@ -2158,7 +2208,7 @@ def test_mhc_fused_rocm_aiter_fuses_norm():
         pre_ref[2], (pre_ref[2].shape[-1],), norm_weight, norm_eps
     )
 
-    out = object.__new__(MHCFusedPostPreOp).forward_hip(
+    out = MHCFusedPostPreOp().forward_hip(
         x,
         residual,
         post_layer_mix,
@@ -2372,7 +2422,9 @@ def test_mhc_fused_post_pre_delayed_rocm_aiter(
     """Folding the post into the pre projection must match doing them apart.
 
     The residual is bfloat16, so the two accumulation orders are allowed to
-    land a rounding step apart; the tolerance here is one bfloat16 ULP.
+    land a rounding step apart; the tolerance here is one bfloat16 ULP. AITER's
+    bfloat16 rounding of the residual depends on the arch, so the pre is checked
+    against the residual the op wrote.
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -2395,11 +2447,6 @@ def test_mhc_fused_post_pre_delayed_rocm_aiter(
     rms_eps = hc_pre_eps = hc_sinkhorn_eps = 1e-6
     pre_args = (fn, hc_scale, hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps, 1.0, 20)
 
-    next_residual = mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
-    expected = (
-        next_residual,
-        *mhc_pre_delayed_torch(next_residual, *pre_args, pre_mix=pre_mix),
-    )
     actual = MHCPreDelayedOp().forward_hip(
         residual,
         *pre_args,
@@ -2409,6 +2456,10 @@ def test_mhc_fused_post_pre_delayed_rocm_aiter(
         comb_res_mix=comb_res_mix,
     )
 
+    expected = (
+        mhc_post_torch(x, residual, post_layer_mix, comb_res_mix),
+        *mhc_pre_delayed_torch(actual[0], *pre_args, pre_mix=pre_mix),
+    )
     for got, want in zip(actual, expected, strict=True):
         torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)
 
@@ -2456,3 +2507,204 @@ def test_hc_expand_preserves_bits_in_eager_and_graph(
     x.copy_(torch.randn_like(x))
     graph.replay()
     check(captured)
+
+
+# The gfx942 delayed mHC seam of the DeepSeek-V4.1 AMD decoder.
+
+requires_cdna3 = pytest.mark.skipif(not _on_cdna3(), reason="CDNA 3 only")
+SEAM_HC, SEAM_HIDDEN = 4, 5120
+
+
+@requires_cdna3
+def test_deepseek_v41_gfx942_seam_supported():
+    """On CDNA 3 the seam tests run instead of skipping."""
+    from vllm.models.deepseek_v41.amd import mhc as amd_mhc
+
+    assert amd_mhc.supports_mhc_seam(SEAM_HIDDEN, SEAM_HC)
+
+
+def _seam_args(num_tokens):
+    """A seam as the decoder sends it: contiguous residual, carried pre gate."""
+    hc, hidden = SEAM_HC, SEAM_HIDDEN
+    residual = torch.randn(num_tokens, hc, hidden, dtype=torch.bfloat16, device=DEVICE)
+    mix_hc = 2 * hc + hc * hc
+    fn = torch.randn(mix_hc, hc * hidden, dtype=torch.float32, device=DEVICE) * 1e-4
+    scale = torch.randn(3, dtype=torch.float32, device=DEVICE) * 0.1
+    base = torch.randn(mix_hc, dtype=torch.float32, device=DEVICE) * 0.1
+    x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=DEVICE)
+    post = torch.rand(num_tokens, hc, 1, dtype=torch.float32, device=DEVICE) + 0.5
+    comb = torch.rand(num_tokens, hc, hc, dtype=torch.float32, device=DEVICE) + 0.2
+    pre_mix = torch.rand(num_tokens, hc, dtype=torch.float32, device=DEVICE) + 0.5
+    return residual, fn, scale, base, x, post, comb, pre_mix
+
+
+def _seam_spy(monkeypatch):
+    """Count the calls `mhc_pre_delayed_seam` makes to AITER's seam."""
+    from aiter.ops.mhc import mhc_fused_post_pre_delayed as fused
+
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return fused(*args, **kwargs)
+
+    monkeypatch.setattr("aiter.ops.mhc.mhc_fused_post_pre_delayed", spy)
+    return fused, calls
+
+
+@requires_cdna3
+@pytest.mark.parametrize("num_tokens", [63, 64])
+def test_deepseek_v41_gfx942_seam_dispatch(
+    num_tokens, default_vllm_config, monkeypatch
+):
+    """The seam runs from 64 tokens and matches post then pre.
+
+    63 stays on `MHCPreDelayedOp`.
+    """
+    from vllm.models.deepseek_v41.amd import mhc as amd_mhc
+
+    set_random_seed(0)
+    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(num_tokens)
+    pre_args = (fn, scale, base, 1e-2, 1e-3, 1e-4, 2.0, 20)
+    _, calls = _seam_spy(monkeypatch)
+    actual = amd_mhc.mhc_pre_delayed_seam(
+        MHCPreDelayedOp(),
+        residual,
+        *pre_args,
+        pre_mix=pre_mix,
+        sublayer_out=x,
+        post_layer_mix=post,
+        comb_res_mix=comb,
+    )
+
+    assert len(calls) == (num_tokens >= amd_mhc.MHC_SEAM_MIN_TOKENS)
+    next_residual = mhc_post_torch(x, residual, post, comb)
+    torch.testing.assert_close(actual[0], next_residual, atol=2e-2, rtol=8e-3)
+    # The pre reference runs on the kernel's own bf16 residual: a one-ulp
+    # post difference otherwise shows up in the collapsed layer input.
+    expected = mhc_pre_delayed_torch(actual[0], *pre_args, pre_mix=pre_mix)
+    for got, want in zip(actual[1:], expected, strict=True):
+        torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)
+
+
+@requires_cdna3
+def test_deepseek_v41_gfx942_write_kv_takes_seam(default_vllm_config, monkeypatch):
+    """The replay KV write runs the seam from 64 tokens and hands its layer
+    input to `forward_kv`."""
+    from vllm.models.deepseek_v41.amd import mhc as amd_mhc
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
+
+    set_random_seed(0)
+    num_tokens = amd_mhc.MHC_SEAM_MIN_TOKENS
+    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(num_tokens)
+    fused, calls = _seam_spy(monkeypatch)
+    written: dict[str, torch.Tensor] = {}
+    attn_norm = nn.Identity()
+    attn_norm.variance_epsilon = 1e-6
+    layer = SimpleNamespace(
+        engram=None,
+        use_sequence_parallel=False,
+        fuse_seam_norm=False,
+        attn_seam_mxfp8=False,
+        mhc_seam=partial(amd_mhc.mhc_pre_delayed_seam, MHCPreDelayedOp()),
+        mhc_pre_delayed=None,
+        hc_attn_fn=fn,
+        hc_attn_fn_packed=None,
+        hc_attn_scale=scale,
+        hc_attn_base=base,
+        rms_norm_eps=1e-2,
+        hc_eps=1e-3,
+        hc_post_alpha=2.0,
+        hc_sinkhorn_iters=20,
+        attn_norm=attn_norm,
+        attn=SimpleNamespace(forward_kv=lambda positions, h: written.update(x=h)),
+    )
+    positions = torch.arange(num_tokens, device=DEVICE)
+    DeepseekV4DecoderLayer.write_kv(
+        layer, x, positions, None, pre_mix, post, comb, residual
+    )
+
+    assert calls == [1]
+    expected = fused(
+        residual, fn, scale, base, 1e-2, 1e-3, 1e-3, 2.0, 20, pre_mix, x, post, comb
+    )
+    torch.testing.assert_close(written["x"], expected[3])
+
+
+@requires_cdna3
+def test_deepseek_v41_gfx942_seam_graph_replay(default_vllm_config):
+    """After one eager call, as vLLM makes before capture, the seam captures
+    in a CUDA graph and its replay on new inputs matches the eager call."""
+    from vllm.models.deepseek_v41.amd import mhc as amd_mhc
+
+    set_random_seed(0)
+    num_tokens = amd_mhc.MHC_SEAM_MIN_TOKENS
+    static = _seam_args(num_tokens)
+    residual, fn, scale, base, x, post, comb, pre_mix = static
+    pre_delayed = MHCPreDelayedOp()
+
+    def seam():
+        return amd_mhc.mhc_pre_delayed_seam(
+            pre_delayed,
+            residual,
+            fn,
+            scale,
+            base,
+            1e-2,
+            1e-3,
+            1e-4,
+            2.0,
+            20,
+            pre_mix=pre_mix,
+            sublayer_out=x,
+            post_layer_mix=post,
+            comb_res_mix=comb,
+        )
+
+    seam()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = seam()
+
+    for buf, new in zip(static, _seam_args(num_tokens), strict=True):
+        buf.copy_(new)
+    graph.replay()
+    torch.accelerator.synchronize()
+    for got, want in zip(captured, seam(), strict=True):
+        torch.testing.assert_close(got, want, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+@pytest.mark.parametrize("seam", ["no_post", "packed_fn"])
+def test_deepseek_v41_gfx942_seam_keeps_pre_delayed(seam, monkeypatch):
+    """A seam without a post block (Engram) or with a packed `fn` (Mega-MHC)
+    never calls the AITER seam, whatever the token count, and `pre_delayed`
+    gets its arguments."""
+    from vllm.models.deepseek_v41.amd import mhc as amd_mhc
+
+    def no_seam(*args, **kwargs):
+        raise AssertionError("AITER seam called")
+
+    monkeypatch.setattr("aiter.ops.mhc.mhc_fused_post_pre_delayed", no_seam)
+    seen = {}
+
+    def pre_delayed(*args, **kwargs):
+        seen.update(kwargs)
+        return "pre_delayed"
+
+    n = 4 * amd_mhc.MHC_SEAM_MIN_TOKENS
+    residual = torch.empty(n, SEAM_HC, SEAM_HIDDEN, dtype=torch.bfloat16, device=DEVICE)
+    t = torch.empty(1, device=DEVICE)
+    kwargs = (
+        {}
+        if seam == "no_post"
+        else dict(sublayer_out=t, post_layer_mix=t, comb_res_mix=t, fn_packed=t)
+    )
+    out = amd_mhc.mhc_pre_delayed_seam(
+        pre_delayed, residual, t, t, t, 1e-6, 1e-6, 1e-6, 2.0, 20, pre_mix=t, **kwargs
+    )
+    assert out == "pre_delayed"
+    assert seen["pre_mix"] is t
+    for name in ("sublayer_out", "post_layer_mix", "comb_res_mix", "fn_packed"):
+        assert seen[name] is kwargs.get(name)
