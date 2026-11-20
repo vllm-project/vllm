@@ -8,7 +8,9 @@ service credit. Memory feasibility remains the KV manager's responsibility.
 """
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
+from statistics import median
 
 
 @dataclass
@@ -29,8 +31,8 @@ class PrefillBudget:
         unit_ms = self.token_ms * (1.0 + context / 8192)
         available = max(0.0, self.limit_ms - self.used_ms)
         if self.force_progress and not self.costs and available < unit_ms:
-            # One aged token may exceed the soft time target. Never issue this
-            # escape quantum while an earlier batch is still outstanding.
+            # One aged token may exceed the soft time target; the controller
+            # bounds the number of outstanding steps that can use this escape.
             return min(tokens, self.max_tokens, 1)
         if self.request_limit_ms is not None:
             # A long running prompt must leave admission room for other prompts.
@@ -82,6 +84,11 @@ class AdaptivePrefillController:
         self.min_share = min_share
         self.max_wait_ms = max_wait_ms
         self.decode_ms = 1.0
+        self.step_ms = 0.0
+        self._has_step_baseline = False
+        self._decode_timings: deque[tuple[int, float]] = deque(maxlen=32)
+        self._prefill_costs: deque[float] = deque(maxlen=5)
+        self._prefill_sample: tuple[float, float] | None = None
         self.scale = 1.0
         self.credit_ms = 0.0
         self.last_progress: dict[str, float] = {}
@@ -100,23 +107,33 @@ class AdaptivePrefillController:
                 self.target_ms, self.credit_ms + self.target_ms * self.min_share
             )
         inflight = sum(step.reserved_ms for step in self.pending.values())
-        allowance = max(
-            0.0, self.target_ms * self.scale - self.decode_ms * decode_reqs - inflight
+        step_allowance = max(
+            0.0,
+            self.target_ms * self.scale - self.step_ms - self.decode_ms * decode_reqs,
         )
+        allowance = max(0.0, step_allowance - inflight)
         aged = any(
             (now - t) * 1000 >= self.max_wait_ms for t in self.last_progress.values()
         )
         if aged or decode_reqs == 0:
             # Already-issued work must finish before spending the same reserve.
             allowance = max(allowance, max(0, self.credit_ms - inflight))
-        if decode_reqs == 0 and not self.pending:
-            allowance = max(allowance, self.target_ms)
+        if (
+            decode_reqs == 0
+            and not any(step.decode_reqs for step in self.pending.values())
+            and len(self.pending) < 2
+        ):
+            # With no decode in the pipeline, allow the next prefill step its
+            # own time budget instead of repeatedly splitting one queued budget.
+            allowance = max(allowance, step_allowance)
+        if len(self.pending) >= 2:
+            allowance = 0.0
         return PrefillBudget(
             allowance,
             self.token_ms,
             max_tokens,
             allowance / max(1, len(prefill_ids)),
-            force_progress=aged and not self.pending,
+            force_progress=aged and len(self.pending) < 2,
         )
 
     def commit(
@@ -148,10 +165,52 @@ class AdaptivePrefillController:
         elif device_ms < self.target_ms * 0.8:
             self.scale = min(1.0, self.scale + 0.02)
         if step.units:
-            residual = max(0.001, device_ms - self.decode_ms * step.decode_reqs)
-            measured = residual / step.units
-            # React quickly to underestimation; decay estimates slowly.
-            weight = 0.5 if measured > self.token_ms else 0.05
-            self.token_ms = max(1e-6, (1 - weight) * self.token_ms + weight * measured)
+            if not step.decode_reqs:
+                if self._has_step_baseline:
+                    self.step_ms = min(self.step_ms, device_ms)
+                elif self._prefill_sample is not None:
+                    units, elapsed = self._prefill_sample
+                    delta = step.units - units
+                    if abs(delta) >= 1:
+                        slope = (device_ms - elapsed) / delta
+                        overhead = device_ms - slope * step.units
+                        if slope > 0 and overhead >= 0:
+                            self.step_ms = overhead
+                            self._has_step_baseline = True
+                self._prefill_sample = (step.units, device_ms)
+            # One timing cannot distinguish fixed overhead from per-token cost.
+            # Keep the bootstrap until a decode baseline or varying prefill sizes
+            # identify overhead, and use a short median to reject isolated spikes.
+            if self._has_step_baseline:
+                residual = device_ms - self.step_ms - self.decode_ms * step.decode_reqs
+                if residual > 0:
+                    self._prefill_costs.append(residual / step.units)
+                if len(self._prefill_costs) >= 3:
+                    measured = median(self._prefill_costs)
+                    weight = 0.5 if measured > self.token_ms else 0.05
+                    self.token_ms = max(
+                        1e-6, (1 - weight) * self.token_ms + weight * measured
+                    )
         elif step.decode_reqs:
-            self.decode_ms = 0.9 * self.decode_ms + 0.1 * device_ms / step.decode_reqs
+            self._decode_timings.append((step.decode_reqs, device_ms))
+            timings: dict[int, float] = {}
+            for count, elapsed in self._decode_timings:
+                timings[count] = min(timings.get(count, elapsed), elapsed)
+            mean_count = sum(timings) / len(timings)
+            mean_ms = sum(timings.values()) / len(timings)
+            variance = sum((count - mean_count) ** 2 for count in timings)
+            self.decode_ms = (
+                max(
+                    0.0,
+                    sum(
+                        (count - mean_count) * (elapsed - mean_ms)
+                        for count, elapsed in timings.items()
+                    )
+                    / variance,
+                )
+                if variance
+                else 0.0
+            )
+            # A single decode population identifies only the whole batch cost.
+            self.step_ms = max(0.0, mean_ms - self.decode_ms * mean_count)
+            self._has_step_baseline = True

@@ -18,17 +18,32 @@ not a new per-step device synchronization. Outstanding prompt work is reserved
 until its corresponding output arrives. Existing KV allocation, cache watermark,
 token and context constraints still apply. Preempted allocations are refunded.
 
-The cost model is a bootstrap heuristic, not a calibrated latency guarantee.
-Mixed-step residual estimates are conservative approximations. Timing currently
+The cost model separates fixed step overhead, marginal decode population cost
+and context-weighted prefill cost. Decode-only samples fit the first two terms;
+one observed population identifies only a whole-batch baseline, not a per-request
+cost. Without decode samples, differing prefill sizes can identify overhead.
+The bootstrap remains in use until overhead is identified. Three valid residual
+samples are needed before updating prefill cost, with a five-sample median to
+reduce sensitivity to isolated compilation/timing spikes.
+
+This is still a bootstrap heuristic, not a calibrated latency guarantee.
+Mixed-step residual estimates are approximations. Timing currently
 excludes input preparation, output transfer, postprocessing and CPU queueing.
 The policy does not directly control request-level p99; measure it externally.
 It does not learn a separate hardware/backend model or reserve additional CUDA
 workspace. Fairness is request-level, not tenant-level.
 
-After aging, one token can exceed the soft time allowance if no earlier batch is
-outstanding. This prevents a cost estimate from permanently reducing progress to
-zero; it cannot guarantee deadlines or bounded waiting under overload or exhausted
-KV capacity. Decode and minimum prefill service cannot both be hard guarantees.
+With no decode currently running or outstanding, a prefill-only pipeline may
+issue two steps, each with its own time allowance. This avoids sharing a single
+shrinking allowance indefinitely across consecutive async steps. Per-request
+fair shares remain in place to leave room for waiting prompts.
+
+After aging, one token may exceed the soft allowance with at most one earlier
+step outstanding. No additional prefill is admitted with two outstanding steps.
+This bounds the escape without requiring an async pipeline to become empty. It
+may increase queued latency and cannot guarantee deadlines or bounded waiting
+under overload or exhausted KV capacity. Decode and minimum prefill service
+cannot both be hard guarantees.
 
 Initial supported scope: text generation, chunked prefill, FCFS, one KV group,
 PP=DP=CP=1, no microbatching, speculation or KV connector. TP is permitted because a centralized
@@ -89,13 +104,17 @@ Use Python 3.11 or newer for this source snapshot. CPU scheduler tests instantia
 the real scheduler and KV managers with synthetic worker outputs, not a live
 model runner. They need model configuration metadata but not model weights.
 After the metadata is cached, `HF_HUB_OFFLINE=1` avoids repeated network lookups.
-The four `adaptive_prefill` cases cover enabled/disabled policy and sync/async
-scheduling. The remaining scheduler cases exercise the default disabled policy;
+The scheduler tests cover enabled/disabled policy, sync/async scheduling, and
+fixed-overhead feedback with a delayed result: three long prompts with a late
+short arrival, and four long prompts without decode work. These use the declared
+synthetic timing `14.76 + 0.53 * decode_requests + 0.07 * weighted_prefill_tokens`
+milliseconds, not measured GPU performance. The remaining cases exercise the default disabled policy;
 their success is not evidence that every existing mode supports the controller.
 
 No CUDA kernels, event timing, model inference, tensor-parallel collectives or
 GPU latency/throughput are validated by these CPU commands. In particular,
-`test_scheduler_e2e.py` launches a model and is not included in this CPU-only gate.
+`test_scheduler_e2e.py` launches a model, exercises baseline/adaptive modes and
+mixed-length prompt completion, and is not included in this CPU-only gate.
 
 `simulate.py` executes a declared synthetic cost model and no GPU kernels. Its
 numbers MUST NOT be described as vLLM GPU benchmark results. It exposes the
