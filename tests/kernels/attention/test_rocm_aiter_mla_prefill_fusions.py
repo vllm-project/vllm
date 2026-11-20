@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the ROCm AITER MLA prefill fusions.
 
-The fused chunked-context gather (``gather_kv_b_proj`` fed with the per-token
-KV indices the metadata builder expands) and the fused ``[k_nope | k_pe]``
-concat are each checked against the unfused ``MLACommonImpl`` path, using the
-production builder and a bare ``AiterMLAImpl``.
+The fused chunked-context gather (`gather_kv_b_proj` fed with the per-token
+KV indices the metadata builder expands) and the fused `[k_nope | k_pe]`
+concat are each checked against the unfused `MLACommonImpl` path, using the
+production builder and a bare `AiterMLAImpl`.
 """
 
 import math

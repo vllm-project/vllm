@@ -56,7 +56,7 @@ _PARTIAL_DELIM_SUFFIXES = tuple(
 
 
 def _strip_partial_delim(value: str) -> str:
-    """Strip a trailing partial ``STRING_DELIM`` prefix from *value*.
+    """Strip a trailing partial `STRING_DELIM` prefix from *value*.
 
     Prevents partial delimiters from leaking into the streamed JSON diff.
     """
@@ -89,8 +89,8 @@ def _parse_gemma4_fields(
             omitted because they may be incomplete and type-unstable
             (e.g. partial boolean parsed as bare string).
 
-    Returns a dict ready for ``json.dumps()`` and the key of the trailing
-    top-level ``STRING_DELIM`` value left unterminated, if any.
+    Returns a dict ready for `json.dumps()` and the key of the trailing
+    top-level `STRING_DELIM` value left unterminated, if any.
 
     """
     if not args_str or not args_str.strip():
@@ -294,7 +294,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
 
 
 def _drop_call_closer(text: str, paren_excess: bool) -> str:
-    """Drop a trailing ``}`` or, with more ``)`` than ``(``, a trailing ``)``.
+    """Drop a trailing `}` or, with more `)` than `(`, a trailing `)`.
 
     The closer of the call body is dropped before parsing, so a value that
     itself ends in one loses that character until more text arrives.
@@ -313,12 +313,12 @@ def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 def _gemma4_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
-    """Extend the open top-level ``STRING_DELIM`` value at the end of
+    """Extend the open top-level `STRING_DELIM` value at the end of
     *raw_args*, if it is the last value in the converted JSON.
 
-    The extender streams exactly what ``_gemma4_arg_converter`` would, so it
+    The extender streams exactly what `_gemma4_arg_converter` would, so it
     holds back the same tail: trailing whitespace, a dropped closer and a
-    partial ``STRING_DELIM``. ``STRING_DELIM`` is a special token but not a
+    partial `STRING_DELIM`. `STRING_DELIM` is a special token but not a
     lexer terminal, so unlike a tag it may reach the extender split across
     deltas; the held tail doubles as the window that detects the close.
     """
@@ -466,12 +466,12 @@ _GEMMA4_THOUGHT_TOKEN = "thought"
 
 
 class Gemma4Parser(ParserEngine):
-    """Gemma4 parser: ``<|channel>`` reasoning + ``<|tool_call>``
+    """Gemma4 parser: `<|channel>` reasoning + `<|tool_call>`
     tool calls in a single engine.
 
-    - Strips the ``thought\\n`` prefix from reasoning content
-    - Sets ``skip_special_tokens=False`` so boundary tokens are visible
-    - Detects ``<|tool_call>`` token as implicit reasoning end
+    - Strips the `thought\\n` prefix from reasoning content
+    - Sets `skip_special_tokens=False` so boundary tokens are visible
+    - Detects `<|tool_call>` token as implicit reasoning end
     """
 
     def __init__(
@@ -533,9 +533,9 @@ class Gemma4Parser(ParserEngine):
         return delta_text, delta_token_ids
 
     def _prompt_ends_in_open_reasoning(self, prompt_token_ids: Sequence[int]) -> bool:
-        """Whether the prompt tail is inside an open ``<|channel>`` block.
+        """Whether the prompt tail is inside an open `<|channel>` block.
 
-        Scans backwards: a ``<|channel>`` start token seen before any
+        Scans backwards: a `<|channel>` start token seen before any
         closing or turn-boundary token means the block is still open.
         """
         start_id = self._reasoning_start_token_id
@@ -559,18 +559,18 @@ class Gemma4Parser(ParserEngine):
         return False
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        """Pre-initialise the engine to ``REASONING`` when the prompt ends
-        inside an open ``<|channel>`` block.
+        r"""Pre-initialise the engine to `REASONING` when the prompt ends
+        inside an open `<|channel>` block.
 
         This covers the post-tool-response continuation case where the chat
-        template leaves the prompt ending with ``<|channel>thought\n``
+        template leaves the prompt ending with `<|channel>thought\n`
         (issue #45834). A prompt that merely starts a new model turn must
         not pre-initialise reasoning: the model may answer directly without
         emitting any channel markers, and the non-streaming path classifies
         such output as content (issue #48217). When the model does open its
-        own ``<|channel>``, the ``(CONTENT, THINK_START)`` transition
-        handles it, and the ``thought\n`` prefix in the first reasoning
-        chunk is stripped by ``_events_to_delta`` as in the default flow.
+        own `<|channel>`, the `(CONTENT, THINK_START)` transition
+        handles it, and the `thought\n` prefix in the first reasoning
+        chunk is stripped by `_events_to_delta` as in the default flow.
         """
         if not self._prompt_ends_in_open_reasoning(prompt_token_ids):
             return

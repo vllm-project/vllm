@@ -294,7 +294,6 @@ def test_fused_model_path_matches_reference(
             block_size=BLOCK_SIZE,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            num_speculative_blocks=NUM_SPEC,
         ),
         layer_names=[PREFIX],
         vllm_config=vllm_config,
@@ -399,7 +398,8 @@ def test_fused_model_path_matches_reference(
         output_gate_activation,
     )
     context.no_compile_layers = {PREFIX: fused_layer}
-    fused_out = torch.zeros_like(output_gate)
+    # Poison: the packed entrypoint writes every actual row, so no NaN survives.
+    fused_out = torch.full_like(output_gate, torch.nan)
     fused_mock = MagicMock(wraps=qwen_gdn_linear_attn.fused_mtp_decode_impl())
     with (
         patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=context),

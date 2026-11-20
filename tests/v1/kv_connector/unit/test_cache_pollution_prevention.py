@@ -147,13 +147,9 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     cached_blocks = (
         fail_scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
     )
-    cached_block_ids = {
-        b.block_id
-        for blocks_val in cached_blocks._cache.values()
-        for b in (
-            [blocks_val] if not isinstance(blocks_val, dict) else blocks_val.values()
-        )
-    }
+    cached_block_ids = set(cached_blocks._cache.values()).union(
+        *cached_blocks._dup_ids.values()
+    )
 
     for idx in range(invalid_block_idx, len(req_block_ids)):
         block_id = req_block_ids[idx]
