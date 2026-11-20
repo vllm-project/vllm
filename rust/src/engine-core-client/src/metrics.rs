@@ -94,6 +94,7 @@ struct SchedulerStatsHandles {
     // Prefix-cache counters, including the connector-backed external cache path.
     prefix_cache_queries: U64Counter,
     prefix_cache_hits: U64Counter,
+    prefix_cache_sparse_retention_misses: U64Counter,
     external_prefix_cache_queries: U64Counter,
     external_prefix_cache_hits: U64Counter,
     /// One handle per `CachedTokensBySource::SOURCES` entry.
@@ -272,6 +273,9 @@ fn resolve_scheduler_stats_handles(
         }),
         prefix_cache_queries: metrics.prefix_cache_queries.get_or_create_owned(&labels),
         prefix_cache_hits: metrics.prefix_cache_hits.get_or_create_owned(&labels),
+        prefix_cache_sparse_retention_misses: metrics
+            .prefix_cache_sparse_retention_misses
+            .get_or_create_owned(&labels),
         external_prefix_cache_queries: metrics
             .external_prefix_cache_queries
             .get_or_create_owned(&labels),
@@ -379,6 +383,9 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
     // Prefix-cache counters, including the connector-backed external cache path.
     handles.prefix_cache_queries.inc_by(stats.prefix_cache_stats.base.queries);
     handles.prefix_cache_hits.inc_by(stats.prefix_cache_stats.base.hits);
+    handles
+        .prefix_cache_sparse_retention_misses
+        .inc_by(stats.prefix_cache_stats.sparse_retention_misses);
     // Local prefix-cache hits are the `device` tier.
     handles.prompt_tokens_cached_by_source[0].inc_by(stats.prefix_cache_stats.base.hits);
 

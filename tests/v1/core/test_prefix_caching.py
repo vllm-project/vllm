@@ -4,6 +4,7 @@
 
 import copy
 import gc
+import logging
 import weakref
 from collections.abc import Callable
 from dataclasses import replace
@@ -6877,6 +6878,145 @@ def test_swa_reachable_block_mask_final_partial_segment():
     assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
 
 
+def _lookup_and_record(manager, request, num_preemptions=0):
+    """Look up `request` and record its prefix-cache stats as admission does."""
+    request.num_preemptions = num_preemptions
+    _, num_hits, _ = manager.get_computed_blocks(request)
+    manager.record_prefix_cache_stats(request, num_hits)
+    assert manager.prefix_cache_stats is not None
+    return num_hits, manager.prefix_cache_stats
+
+
+@pytest.mark.parametrize("num_preemptions", [0, 1])
+def test_sparse_retention_misses_report_vetoed_shared_prefix(num_preemptions):
+    """A Mamba group with no state at a shared-prefix junction vetoes the
+    attention group's match. Report the lost tokens, or the loss looks like
+    "no shared prefix". Preempted re-admissions stay out, as they do for `hits`."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"]),
+        max_model_len=8192,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    shared = [7] * (2 * block_size)
+    # Attention caches the shared prefix; align-mode Mamba keeps only the tail.
+    seed = make_request("seed", shared + [50] * (2 * block_size), block_size, sha256)
+    assert manager.allocate_slots(seed, seed.num_tokens) is not None
+
+    request = make_request("req", shared + [60] * (2 * block_size), block_size, sha256)
+    num_hits, stats = _lookup_and_record(manager, request, num_preemptions)
+    assert num_hits == 0
+    assert stats.sparse_retention_misses == (0 if num_preemptions else 2 * block_size)
+
+
+@pytest.mark.parametrize(
+    "draft_is_eagle,with_mamba,expected_hits,expected_misses",
+    [(True, False, 48, 0), (False, True, 0, 32)],
+)
+def test_sparse_retention_misses_exclude_dense_group_losses(
+    draft_is_eagle, with_mamba, expected_hits, expected_misses
+):
+    """A dense draft group's EAGLE drop or eviction is not a sparse-state loss."""
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(
+        block_size, 200, ["full", "full"] + (["mamba"] if with_mamba else [])
+    )
+    config.kv_cache_groups[1] = new_kv_cache_group(
+        ["draft"],
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=2, head_size=1, dtype=torch.float32
+        ),
+        is_eagle_group=draft_is_eagle,
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        hash_block_size=block_size,
+        use_eagle=draft_is_eagle,
+        log_stats=True,
+    )
+    shared = [7] * (4 * block_size)
+    seed = make_request("seed", shared + [50] * block_size, block_size, sha256)
+    allocated = manager.allocate_slots(seed, seed.num_tokens)
+    assert allocated is not None
+    manager.free(seed)
+    if not draft_is_eagle:
+        manager.block_pool.evict_blocks({allocated.blocks[1][2].block_id})
+
+    request = make_request("req", shared + [60] * block_size, block_size, sha256)
+    num_hits, stats = _lookup_and_record(manager, request)
+    assert num_hits == expected_hits
+    assert stats.sparse_retention_misses == expected_misses
+
+
+@pytest.mark.parametrize("full_block_size", [16, 32])
+@pytest.mark.parametrize("evict,expected_misses", [(False, 0), (True, 32)])
+def test_sparse_retention_misses_exclude_eagle_drop(
+    full_block_size, evict, expected_misses
+):
+    """An EAGLE sliding-window group gives up its last block by design; only
+    state missing below that counts, here after an eviction under dense retention."""
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"])
+    _replace_group(config, 0, block_size=full_block_size)
+    config.kv_cache_groups[1].is_eagle_group = True
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        hash_block_size=block_size,
+        use_eagle=True,
+        retention_interval=None,
+        log_stats=True,
+    )
+    shared = [7] * (4 * block_size)
+    seed = make_request("seed", shared + [50] * block_size, block_size, sha256)
+    allocated = manager.allocate_slots(seed, seed.num_tokens)
+    assert allocated is not None
+    manager.free(seed)
+    if evict:
+        manager.block_pool.evict_blocks({allocated.blocks[1][2].block_id})
+
+    request = make_request("req", shared + [60] * block_size, block_size, sha256)
+    num_hits, stats = _lookup_and_record(manager, request)
+    assert num_hits < len(shared)
+    assert stats.sparse_retention_misses == expected_misses
+
+
+@pytest.mark.parametrize(
+    "retention_interval,expected_hits,expected_misses", [(None, 64, 0), (0, 0, 64)]
+)
+def test_sparse_retention_misses_count_whole_mamba_blocks(
+    retention_interval, expected_hits, expected_misses
+):
+    """Attention matches 80 shared tokens at hash granularity, but Mamba state
+    exists only on its 64-token block boundaries. The 16-token remainder is lost
+    under any retention setting, so it is not reported as a missing state."""
+    hash_block_size, mamba_block_size = 16, 64
+    config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
+    _replace_group(config, 1, block_size=mamba_block_size)
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        hash_block_size=hash_block_size,
+        retention_interval=retention_interval,
+        log_stats=True,
+    )
+    shared = [7] * 80
+    seed = make_request("seed", shared + [50] * 120, hash_block_size, sha256)
+    for chunk_end in (mamba_block_size, seed.num_tokens):
+        new_tokens = chunk_end - seed.num_computed_tokens
+        assert manager.allocate_slots(seed, new_tokens) is not None
+        seed.num_computed_tokens = chunk_end
+        manager.new_step_starts()
+    manager.free(seed)
+
+    request = make_request("req", shared + [60] * 120, hash_block_size, sha256)
+    num_hits, stats = _lookup_and_record(manager, request)
+    assert num_hits == expected_hits
+    assert stats.sparse_retention_misses == expected_misses
+
+
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     `need`-block sliding-window tail ending on that boundary (not a single
@@ -7186,6 +7326,38 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_zero_retention_is_announced_on_sparse_models(caplog):
+    """The default retains only semantic checkpoints, which is silent otherwise.
+
+    A sparse group files a state at every boundary it crosses and only the
+    semantic ones are hashed, so the rest can never serve a hit -- while the
+    prefix-cache hit-rate metric still reports non-zero. Nothing in the log said
+    so, and the neighbouring derived default (`mamba_cache_mode='align'`) is
+    announced, so this pins the missing half of that pair.
+    """
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 32, ["full", "mamba"])
+
+    def log_for(retention_interval, enable_caching=True):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="vllm.v1.core.kv_cache_coordinator"):
+            make_kv_cache_manager(
+                config,
+                max_model_len=8192,
+                enable_caching=enable_caching,
+                hash_block_size=block_size,
+                retention_interval=retention_interval,
+            )
+        return "retain only semantic checkpoints" in caplog.text
+
+    # The default, on a model that actually has a sparse group.
+    assert log_for(0)
+    # Not noise: a periodic interval retains those states, and with caching off
+    # retention cannot affect anything.
+    assert not log_for(block_size)
+    assert not log_for(0, enable_caching=False)
 
 
 def test_full_report_with_dcp_uses_effective_block_size():

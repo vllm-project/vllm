@@ -135,12 +135,18 @@ class PrefixCacheStats(BaseCacheStats):
     hits_by_source: dict[CacheHitSource, int] = field(default_factory=dict)
     """`hits` split by the cache tier that supplied them (connector stats only)."""
 
+    sparse_retention_misses: int = 0
+    """Shared-prefix tokens another group matched but a Mamba / sliding-window
+    group could not reuse because it held no state there (sparse retention or
+    eviction). Whole blocks only, and like `hits` not for preempted requests."""
+
     def record(
         self,
         num_tokens: int,
         num_hits: int,
         preempted: bool,
         hits_by_source: dict[CacheHitSource, int] | None = None,
+        sparse_retention_misses: int = 0,
     ) -> None:
         """Aggregate request information into the stats."""
         if preempted:
@@ -153,6 +159,7 @@ class PrefixCacheStats(BaseCacheStats):
         self.requests += 1
         self.queries += num_tokens
         self.hits += num_hits
+        self.sparse_retention_misses += sparse_retention_misses
         if hits_by_source is None:
             return
         if sum(hits_by_source.values()) != num_hits:
