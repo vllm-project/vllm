@@ -258,12 +258,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     Set internally by `MultiModalRegistry.register_processor`.
     """
 
-    _language_model_names: list[str] = []
+    _language_model_names: tuple[str, ...] = ()
     """
     Set internally by `_mark_language_model`.
     """
 
-    _tower_model_names: list[str] = []
+    _tower_model_names: tuple[str, ...] = ()
     """
     Set internally by `_mark_tower_model`.
     """
@@ -377,7 +377,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             ):
                 yield
 
-        self._language_model_names = children_names
+        self._language_model_names = tuple(children_names)
 
     @contextmanager
     def _mark_tower_model(
@@ -434,8 +434,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             ):
                 yield
 
-        # Not `+=`, which would mutate the class-level default
-        self._tower_model_names = self._tower_model_names + children_names
+        self._tower_model_names += tuple(children_names)
 
         # Towers are constructed directly, so `make_layers` never routes them
         # through the offloader. Do it here, at the same construction stage,
