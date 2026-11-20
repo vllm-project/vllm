@@ -4,7 +4,7 @@
 import argparse
 import asyncio
 import json
-import os
+import math
 import stat
 import sys
 from dataclasses import dataclass
@@ -13,14 +13,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from vllm.logger import init_logger
+from vllm.snapshot.engine import SnapshotSession
 from vllm.snapshot.manifest import ReleaseMarker, _validation_path, _write_json_atomic
-from vllm.snapshot.types import Oracle, oracles_match
+from vllm.snapshot.process import detach_snapshot_streams
+from vllm.snapshot.types import Oracle
 
-_CANARY_PROMPT = "The capital of France is"
-
-
-class SnapshotCanaryError(RuntimeError):
-    """The initialized engine did not produce a valid snapshot oracle."""
+logger = init_logger(__name__)
 
 
 class SnapshotBarrierError(RuntimeError):
@@ -75,10 +74,12 @@ def parse_control_args(argv: list[str]) -> tuple[ControlArgs, list[str]]:
     parser.add_argument("--release-file", type=Path, required=True)
     parser.add_argument("--release-timeout-s", type=float, default=900.0)
     control_args, remaining = parser.parse_known_args(argv)
+    if not math.isfinite(control_args.release_timeout_s) or (
+        control_args.release_timeout_s <= 0
+    ):
+        raise ValueError("release timeout must be positive and finite")
     if remaining and remaining[0] == "--":
         remaining = remaining[1:]
-    if control_args.release_timeout_s <= 0:
-        raise ValueError("release timeout must be positive")
     return (
         ControlArgs(
             ready_file=control_args.ready_file,
@@ -89,82 +90,16 @@ def parse_control_args(argv: list[str]) -> tuple[ControlArgs, list[str]]:
     )
 
 
-async def _release_reloadable_state(engine: Any) -> None:
-    """Discard model and KV state before the process image is captured."""
-    await engine.sleep(level=2)
-
-
-async def _restore_reloadable_state(engine: Any) -> None:
-    """Rebuild state discarded by `_release_reloadable_state`."""
-    await engine.wake_up(tags=["weights"])
-    await engine.collective_rpc("reload_weights")
-    await engine.wake_up(tags=["kv_cache"])
-
-
-def oracle_from_request_output(request_output: Any) -> Oracle:
-    try:
-        candidate = request_output.outputs[0]
-        token_ids = tuple(candidate.token_ids)
-        (sampled_token_id,) = token_ids
-        return Oracle(
-            token_ids=token_ids,
-            text=candidate.text,
-            sampled_token_logprob=candidate.logprobs[0][sampled_token_id].logprob,
-        )
-    except ValueError as error:
-        raise SnapshotCanaryError(
-            "snapshot canary must produce exactly one finite token logprob"
-        ) from error
-    except (AttributeError, IndexError, KeyError, TypeError) as error:
-        raise SnapshotCanaryError(
-            "snapshot canary did not return sampled token logprob"
-        ) from error
-
-
-async def run_engine_canary(engine: Any) -> Oracle:
-    from vllm import SamplingParams
-
-    final_output = None
-    sampling_params = SamplingParams(
-        temperature=0,
-        min_tokens=1,
-        max_tokens=1,
-        seed=0,
-        logprobs=0,
-    )
-    async for output in engine.generate(
-        _CANARY_PROMPT,
-        sampling_params,
-        request_id="vllm-snapshot-canary",
-    ):
-        final_output = output
-    if final_output is None:
-        raise SnapshotCanaryError("canary generation returned no output")
-    return oracle_from_request_output(final_output)
-
-
-def detach_snapshot_streams() -> None:
-    """Remove launch-log descriptors from the reusable process image."""
-    sys.stdout.flush()
-    sys.stderr.flush()
-    sink = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(sink, sys.stdout.fileno())
-        os.dup2(sink, sys.stderr.fileno())
-    finally:
-        os.close(sink)
-
-
 async def wait_for_release_marker(
     path: Path,
     *,
     timeout_s: float,
     poll_interval_s: float = 0.05,
 ) -> ListenerConfig:
-    if timeout_s <= 0:
-        raise ValueError("release timeout must be positive")
-    if poll_interval_s <= 0:
-        raise ValueError("release poll interval must be positive")
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("release timeout must be positive and finite")
+    if not math.isfinite(poll_interval_s) or poll_interval_s <= 0:
+        raise ValueError("release poll interval must be positive and finite")
     remaining_s = timeout_s
     while not path.exists():
         if remaining_s <= 0:
@@ -190,6 +125,8 @@ def parse_vllm_args(argv: list[str]) -> Any:
         raise ValueError("snapshot server requires the HTTP frontend")
     if args.api_server_count not in (None, 1):
         raise ValueError("snapshot server supports one API server")
+    if args.checkpoint_prepare_on_startup:
+        raise ValueError("snapshot create cannot use --checkpoint-prepare-on-startup")
     args.api_server_count = None
     validate_parsed_serve_args(args)
     return args
@@ -200,44 +137,62 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
         build_and_serve,
         build_async_engine_client,
     )
-    from vllm.entrypoints.launchers.launcher import setup_server
+    from vllm.entrypoints.launchers.launcher import (
+        bind_server_socket,
+        prepare_server_args,
+    )
 
     args.enable_sleep_mode = True
+    prepare_server_args(args)
 
     async with build_async_engine_client(args) as engine:
-        oracle = await run_engine_canary(engine)
+        session = SnapshotSession(engine, timeout_s=control.release_timeout_s)
+        error_file = control.ready_file.with_name("error.json")
+        phase = "prepare"
         try:
-            await _release_reloadable_state(engine)
-            await _restore_reloadable_state(engine)
-            rehearsal_oracle = await run_engine_canary(engine)
-            if not oracles_match(oracle, rehearsal_oracle):
-                raise SnapshotCanaryError("snapshot rehearsal changed canary output")
-            await _release_reloadable_state(engine)
-        except SnapshotCanaryError:
-            raise
-        except Exception as error:
-            raise SnapshotCanaryError("snapshot rehearsal failed") from error
-
-        detach_snapshot_streams()
-        write_ready_atomic(control.ready_file, oracle)
-        listener = await wait_for_release_marker(
-            control.release_file,
-            timeout_s=control.release_timeout_s,
-        )
-        args.host = listener.host
-        args.port = listener.port
-        await _restore_reloadable_state(engine)
-        listen_address, sock = setup_server(args, reuse_port=False)
-        try:
-            shutdown_task = await build_and_serve(
-                engine,
-                listen_address,
-                sock,
-                args,
+            oracle = await session.prepare()
+            phase = "capture barrier"
+            detach_snapshot_streams()
+            write_ready_atomic(control.ready_file, oracle)
+            listener = await wait_for_release_marker(
+                control.release_file,
+                timeout_s=control.release_timeout_s,
             )
-            await shutdown_task
-        finally:
-            sock.close()
+            args.host = listener.host
+            args.port = listener.port
+            phase = "recover"
+            error_file.unlink(missing_ok=True)
+            await session.restore()
+            phase = "serve"
+            listen_address, sock = bind_server_socket(args, reuse_port=False)
+            try:
+                shutdown_task = await build_and_serve(
+                    engine,
+                    listen_address,
+                    sock,
+                    args,
+                )
+                await shutdown_task
+            finally:
+                sock.close()
+        except BaseException as error:
+            try:
+                _write_json_atomic(
+                    error_file,
+                    {
+                        "phase": session.phase if session.state == "failed" else phase,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    },
+                )
+            except Exception:
+                logger.exception("Could not record snapshot child failure")
+            try:
+                # A cancelled RPC can still own partially released device state.
+                engine.shutdown(timeout=0)
+            except Exception:
+                logger.exception("Could not shut down failed snapshot engine")
+            raise
 
 
 def main(argv: list[str] | None = None) -> None:
