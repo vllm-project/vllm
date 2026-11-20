@@ -4,10 +4,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from openai_harmony import Message, Role
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
+    get_echo_content,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
@@ -106,3 +108,14 @@ def test_parallel_tool_calls_false_keeps_first():
 def test_include_reasoning(include_reasoning):
     fields = _assemble(_request(include_reasoning=include_reasoning))
     assert fields.reasoning == ("think" if include_reasoning else None)
+
+
+@pytest.mark.parametrize(("role", "echoed"), [("assistant", "1, 2,"), ("user", "")])
+def test_echo_content_from_harmony_conversation(role, echoed):
+    """gpt-oss conversations hold Harmony `Message` objects, not dicts."""
+    conversation = [
+        Message.from_role_and_content(Role.USER, "Count to five."),
+        Message.from_role_and_content(Role.ASSISTANT, "1, 2,").with_channel("final"),
+    ]
+
+    assert get_echo_content(conversation, role) == echoed

@@ -492,11 +492,14 @@ set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
     "csrc/cpu/sgl-kernels/fla.cpp"
     "csrc/cpu/utils.cpp"
+    "csrc/cpu/block_table.cpp"
+    "csrc/cpu/input_batch.cpp"
     "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
+    "csrc/cpu/topk_topp_sampler.cpp"
     "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
@@ -693,6 +696,7 @@ else()
         USE_SABI 3
         WITH_SOABI
     )
+    target_compile_definitions(_C PRIVATE VLLM_STANDALONE_CPU_MRV2)
     if (VLLM_OPENBLAS_LIB)
         target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
     endif()

@@ -20,7 +20,6 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -48,7 +47,7 @@ from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     _should_replicate_misaligned_shared_expert,
@@ -57,6 +56,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -143,7 +143,6 @@ def _make_alice_ai_full_attention_config(
     adapted = copy(config)
     adapted.attn_output_gate = True
     adapted.qkv_bias = False
-    adapted.dual_chunk_attention_config = None
     adapted.is_causal = True
     return cast(Qwen3NextConfig, adapted)
 
@@ -255,7 +254,7 @@ class AliceAISparseMoeBlock(nn.Module):
         ):
             self.shared_expert = None
         else:
-            self.shared_expert = Qwen2MoeMLP(
+            self.shared_expert = Qwen3MoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
@@ -500,8 +499,10 @@ class AliceAIModel(nn.Module):
             layer_fn=get_layer,
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            layers=self.layers, moe_cls=AliceAISparseMoeBlock, moe_name="mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            AliceAISparseMoeBlock,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.norm = GemmaRMSNorm(
             hidden_size=config.hidden_size, eps=config.rms_norm_eps
@@ -567,7 +568,7 @@ class AliceAIModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights=weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -717,17 +718,4 @@ class AliceAIForCausalLM(
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights=weights)
         loaded.update(manually_loaded)
-        expected_target_weights = {
-            name
-            for name, _ in self.named_parameters()
-            if ".attnres_final." in name
-            or ".attn_res_" in name
-            or ".mlp_res_" in name
-            or name.endswith(".e_score_correction_bias")
-        }
-        if missing := expected_target_weights - loaded:
-            raise ValueError(
-                "AliceAI checkpoint is missing target-specific weights: "
-                + ", ".join(sorted(missing))
-            )
         return loaded

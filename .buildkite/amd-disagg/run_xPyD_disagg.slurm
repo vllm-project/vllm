@@ -23,6 +23,7 @@ LOG_ROOT="${LOG_ROOT:-/data/${USER:-$(id -un)}/disagg_logs}"
 RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"   # bench | accuracy
 DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -> decode reads KV (read_mode)
+KV_CONNECTOR="${KV_CONNECTOR:-MoRIIOConnector}"   # MoRIIOConnector | NixlConnector | NixlPushConnector
 
 # ---- router / gateway (host-side; also forwarded into the container) --------
 # vllm-router -> external `vllm/vllm-router` container started on the rank-0 node (default)
@@ -35,9 +36,14 @@ PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"   # must equal vllm-router --vllm-di
 PROXY_PORT="${PROXY_PORT:-10001}"
 # Intra-node data-parallel size the router uses to route the MoRIIO KV-notify to
 # the right DP rank. Required for wideEP DP (else decode hangs: "remote blocks
-# never arrived"). EP -> GPUS_PER_NODE (matches --data-parallel-size-local); TP -> 1.
+# never arrived"). EP -> DP_SIZE (matches --data-parallel-size-local); TP -> 1.
+# The EP sizes are resolved here as vllm_disagg.sh does and passed into the
+# containers, so the router and the servers see the same value.
 if [[ "${WIDE_EP_MODE}" == "1" ]]; then
-    ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-${GPUS_PER_NODE}}"
+    TP_SIZE="${TP_SIZE:-1}"
+    DP_SIZE="${DP_SIZE:-$(( ${EP_SIZE:-${GPUS_PER_NODE}} / TP_SIZE ))}"
+    export TP_SIZE DP_SIZE
+    ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-${DP_SIZE}}"
 else
     ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-1}"
 fi
@@ -232,7 +238,7 @@ echo "[disagg-pd] LOG_PATH=$LOG_PATH"
 #   rank xP .. end   -> decode
 export IPADDRS
 
-export WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S DRY_RUN MORIIO_READ_MODE
+export WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S DRY_RUN MORIIO_READ_MODE KV_CONNECTOR
 export IMAGE SHARED_MOUNT CONTAINER_SCRIPTS DISAGG_SCRIPTS_DIR
 export CLUSTER_ENV="${CLUSTER_ENV_IN}"
 export DOCKER_CONT_NAME="vllm_disagg_${MODEL_NAME:-model}_${SLURM_JOB_ID}"
@@ -246,6 +252,21 @@ export ROUTER_CONT_NAME="vllm_router_${SLURM_JOB_ID}"
 export PREFILL_PORT DECODE_PORT PROXY_PORT ROUTER_METRICS_PORT
 export SERVE_PORT RPC_PORT KV_PORT LOCAL_PING_PORT
 export PREFLIGHT PREFLIGHT_MAX_VRAM_PCT PREFLIGHT_GPU_SETTLE_S
+
+# NIXL has no discovery service, so pass the worker URLs.
+ROUTER_KV_ARGS="--kv-connector moriio --vllm-discovery-address 0.0.0.0:${PROXY_PING_PORT}"
+if [[ "${KV_CONNECTOR}" == Nixl* ]]; then
+    nixl_startup_timeout=1800
+    [[ "${WIDE_EP_MODE}" == "1" && "${xP}" -gt 1 ]] && nixl_startup_timeout=7200
+    ROUTER_KV_ARGS="--kv-connector nixl --worker-startup-timeout-secs ${nixl_startup_timeout}"
+    if [[ "${WIDE_EP_MODE}" == "1" ]]; then
+        ROUTER_KV_ARGS+=" --prefill http://${IPS[0]}:${SERVE_PORT} --decode http://${IPS[$xP]}:${SERVE_PORT}"
+    else
+        for ((i = 0; i < xP; i++)); do ROUTER_KV_ARGS+=" --prefill http://${IPS[$i]}:${PREFILL_PORT}"; done
+        for ((i = xP; i < xP + yD; i++)); do ROUTER_KV_ARGS+=" --decode http://${IPS[$i]}:${DECODE_PORT}"; done
+    fi
+fi
+export ROUTER_KV_ARGS
 
 echo "[disagg-pd] IPADDRS=${IPADDRS}"
 echo "[disagg-pd] launching ${NUM_NODES} containers (1/node) -> vllm_disagg.sh node"
@@ -479,7 +500,7 @@ run_node_container() {
                 -e USER="$(id -un)" \
                 -e LOGNAME="$(id -un)" \
                 "$VLLM_ROUTER_IMAGE" \
-                bash -lc "exec vllm-router --vllm-pd-disaggregation --kv-connector moriio --vllm-discovery-address 0.0.0.0:$PROXY_PING_PORT --port $ROUTER_PORT --host 0.0.0.0 --intra-node-data-parallel-size $ROUTER_DP_LOCAL --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info >> $LOG_PATH/vllm_router.log 2>&1" \
+                bash -lc "exec vllm-router --vllm-pd-disaggregation $ROUTER_KV_ARGS --port $ROUTER_PORT --host 0.0.0.0 --intra-node-data-parallel-size $ROUTER_DP_LOCAL --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info >> $LOG_PATH/vllm_router.log 2>&1" \
               && echo "vllm-router container started ok" \
               || echo "WARN: failed to start vllm-router container on $(hostname)"
         } 2>&1 | tee -a "$LOG_PATH/vllm_router_start.log"
@@ -520,6 +541,7 @@ run_node_container() {
         -e WIDE_EP_MODE="$WIDE_EP_MODE" \
         -e xP="$xP" -e yD="$yD" \
         -e GPUS_PER_NODE="$GPUS_PER_NODE" \
+        -e ACCURACY_NUM_CONCURRENT -e TP_SIZE -e DP_SIZE -e EP_SIZE \
         -e CLUSTER_ENV="$CLUSTER_ENV" \
         -e MODEL_NAME="${MODEL_NAME:-}" \
         -e MODEL_DIR="${MODEL_DIR:-}" \
@@ -528,6 +550,7 @@ run_node_container() {
         -e HEALTH_TIMEOUT_S="$HEALTH_TIMEOUT_S" \
         -e DRY_RUN="$DRY_RUN" \
         -e MORIIO_READ_MODE="$MORIIO_READ_MODE" \
+        -e KV_CONNECTOR="$KV_CONNECTOR" \
         -e ROUTER_TYPE="$ROUTER_TYPE" \
         -e ROUTER_PORT="$ROUTER_PORT" \
         -e ROUTER_POLICY="$ROUTER_POLICY" \

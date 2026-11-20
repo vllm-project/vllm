@@ -157,9 +157,17 @@ impl ResponsesStream {
         };
 
         match event.event_type.as_deref() {
-            // Reasoning deltas count toward TTFT and ITL because the server is
-            // already decoding. Only output text is collected.
-            Some(kind @ ("response.output_text.delta" | "response.reasoning_text.delta")) => {
+            // Reasoning and tool call deltas count toward TTFT and ITL because
+            // the server is already decoding; a response that only calls a tool
+            // emits nothing else. Only output text is collected.
+            Some(
+                kind @ ("response.output_text.delta"
+                | "response.reasoning_text.delta"
+                | "response.function_call_arguments.delta"
+                | "response.custom_tool_call_input.delta"
+                | "response.mcp_call_arguments.delta"
+                | "response.code_interpreter_call_code.delta"),
+            ) => {
                 if self.first_token_received {
                     self.output
                         .itl
@@ -291,6 +299,48 @@ mod tests {
         assert_eq!(output.latency, 0.03);
         assert_eq!(output.generated_text, "Hi there");
         assert_eq!(output.output_tokens, 3);
+    }
+
+    /// A forced tool call streams only argument deltas. They are generated
+    /// tokens, as `tool_calls` deltas are on `openai-chat`.
+    #[test]
+    fn test_tool_call_only_response_is_timed_and_counted() {
+        let args = |delta: &str| {
+            event(
+                "response.function_call_arguments.delta",
+                &format!(",\"delta\":\"{delta}\""),
+            )
+        };
+        let output = run(&[
+            event("response.output_item.added", ""),
+            args("{\\\"city\\\": "),
+            args("\\\"Paris\\\"}"),
+            event("response.function_call_arguments.done", ""),
+            completed(6),
+        ]);
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.ttft, 0.02);
+        assert_eq!(output.itl, vec![0.01]);
+        assert_eq!(output.latency, 0.03);
+        // Tool arguments are not output text.
+        assert_eq!(output.generated_text, "");
+        assert_eq!(output.output_tokens, 6);
+    }
+
+    #[test]
+    fn test_every_tool_delta_event_starts_the_clock() {
+        for kind in [
+            "response.function_call_arguments.delta",
+            "response.custom_tool_call_input.delta",
+            "response.mcp_call_arguments.delta",
+            "response.code_interpreter_call_code.delta",
+        ] {
+            let delta = event(kind, ",\"delta\":\"x\"");
+            let output = run(&[delta.clone(), delta, completed(2)]);
+            assert!(output.success, "{kind}: {}", output.error);
+            assert_eq!(output.itl.len(), 1, "{kind}");
+        }
     }
 
     #[test]

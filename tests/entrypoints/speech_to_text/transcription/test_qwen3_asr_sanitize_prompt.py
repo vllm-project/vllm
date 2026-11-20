@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``Qwen3ASR``'s user-text sanitizer.
+"""Unit tests for `Qwen3ASR`'s user-text sanitizer.
 
 The sanitizer is the security boundary between user-supplied transcription
-fields (``prompt`` / ``response_prefix``) and the structured ChatML prompt
-template. It must strip both ``<|...|>`` control tokens and the
-``<asr_text>`` assistant-prefix delimiter, and it must do so to a fixpoint
+fields (`prompt` / `response_prefix`) and the structured ChatML prompt
+template. It must strip both `<|...|>` control tokens and the
+`<asr_text>` assistant-prefix delimiter, and it must do so to a fixpoint
 so nested payloads cannot reconstruct a valid token after a single pass.
 """
 

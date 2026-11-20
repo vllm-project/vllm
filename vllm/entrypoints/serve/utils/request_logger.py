@@ -7,8 +7,8 @@ from collections.abc import Sequence
 import torch
 
 from vllm import envs
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest
-from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.pooling.types import AnyPoolingRequest
+from vllm.entrypoints.serve.engine.types import AnyRequest
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams

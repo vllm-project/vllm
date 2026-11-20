@@ -36,7 +36,7 @@ def _make_eep_experts(
         "moe_config": moe_config,
         "quant_config": quant_method.moe_quant_config,
     }
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts_kwargs.update(
@@ -47,6 +47,12 @@ def _make_eep_experts(
     # Expert kernels with extra init params need explicit EEP support.
     generic_arg_names = set(signature(mk.FusedMoEExperts.__init__).parameters)
     ctor_arg_names = set(signature(experts_cls.__init__).parameters)
+    if "activation_key" in ctor_arg_names:
+        # Static INT8 Triton experts must be rebuilt with their activation key.
+        experts_kwargs["activation_key"] = getattr(
+            source_experts, "activation_key", None
+        )
+        generic_arg_names.add("activation_key")
     unsupported_args = ctor_arg_names - generic_arg_names
     missing_args = set(experts_kwargs) - ctor_arg_names
     if unsupported_args or missing_args:
@@ -69,11 +75,9 @@ def make_eep_staged_quant_method(
     if getattr(quant_method, "wraps_legacy_quant_method", False):
         return None
 
-    old_batched_format = (
-        module.moe_config.moe_parallel_config.use_batched_activation_format
-    )
-    new_batched_format = moe_config.moe_parallel_config.use_batched_activation_format
-    assert old_batched_format == new_batched_format
+    old_format = module.moe_config.activation_format
+    new_format = moe_config.activation_format
+    assert new_format == old_format
 
     moe_kernel = quant_method.moe_kernel
     if moe_kernel is None:

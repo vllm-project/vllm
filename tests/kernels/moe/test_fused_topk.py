@@ -8,6 +8,7 @@ Run `pytest tests/kernels/moe/test_fused_topk.py`.
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -42,6 +43,48 @@ def torch_topk(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights, topk_ids
+
+
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("indices_type", [torch.int32, torch.int64])
+def test_fused_topk_empty_input(scoring_func: str, indices_type: torch.dtype):
+    """Idle ranks return empty routing tensors before participating in dispatch."""
+    device = current_platform.device_type
+    hidden_states = torch.empty((0, 128), dtype=torch.bfloat16, device=device)
+    gating_output = torch.empty((0, 2), dtype=torch.bfloat16, device=device)
+
+    topk_weights, topk_ids, token_expert_indices = fused_topk(
+        hidden_states,
+        gating_output,
+        topk=1,
+        renormalize=True,
+        indices_type=indices_type,
+        scoring_func=scoring_func,
+    )
+
+    for tensor, dtype in (
+        (topk_weights, torch.float32),
+        (topk_ids, indices_type),
+        (token_expert_indices, torch.int32),
+    ):
+        assert tensor.shape == (0, 1)
+        assert tensor.numel() == 0
+        assert tensor.dtype == dtype
+        assert tensor.device == hidden_states.device
+
+
+def test_fused_topk_empty_input_rejects_unsupported_scoring():
+    device = current_platform.device_type
+    hidden_states = torch.empty((0, 128), device=device)
+    gating_output = torch.empty((0, 2), device=device)
+    with pytest.raises(ValueError, match="Unsupported scoring function"):
+        fused_topk(
+            hidden_states,
+            gating_output,
+            topk=1,
+            renormalize=True,
+            scoring_func="unsupported",
+        )
 
 
 @pytest.mark.skipif(
@@ -80,6 +123,60 @@ def test_fused_topk(
         gating_output=gating_output,
         topk=topk,
         renormalize=renormalize,
+        scoring_func=scoring_func,
+    )
+
+    torch.testing.assert_close(
+        topk_weights_ref.to(torch.float32), topk_weights, atol=1e-2, rtol=1e-2
+    )
+    torch.testing.assert_close(topk_ids_ref.to(torch.int32), topk_ids, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("num_experts,padded_num_experts", [(60, 64), (64, 72)])
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+def test_fused_topk_padded_row_stride(
+    num_experts: int,
+    padded_num_experts: int,
+    scoring_func: str,
+):
+    """Regression test for row-padded router logits produced by Inductor."""
+    torch.manual_seed(0)
+    num_tokens = 33
+    hidden_size = 128
+    topk = 4
+    dtype = torch.bfloat16
+
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    storage = torch.full(
+        (num_tokens, padded_num_experts),
+        1e4,
+        dtype=dtype,
+        device="cuda",
+    )
+    gating_output = storage[:, :num_experts]
+    gating_output.copy_(
+        torch.linspace(-4, 4, num_experts, dtype=dtype, device="cuda").expand(
+            num_tokens, -1
+        )
+    )
+    assert gating_output.stride() == (padded_num_experts, 1)
+    assert not gating_output.is_contiguous()
+
+    topk_weights_ref, topk_ids_ref = torch_topk(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        scoring_func=scoring_func,
+    )
+    topk_weights, topk_ids, _ = fused_topk(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
         scoring_func=scoring_func,
     )
 
@@ -274,4 +371,99 @@ def test_fused_topk_bias_nan_inf_clamp(
         assert torch.isfinite(topk_weights[row]).all(), (
             f"Row {row} has non-finite weights {topk_weights[row].tolist()} "
             f"(bad_value={bad_value}, scoring_func={scoring_func})"
+        )
+
+
+def _tie_heavy_logits(
+    num_tokens: int, num_experts: int, dtype: torch.dtype
+) -> torch.Tensor:
+    """Small integer logits, so most scores tie exactly with other experts.
+
+    Row 0 is constant (every expert ties). With enough rows, row 1 is NaN and
+    row 2 is +Inf, so the NaN/Inf clamp or a constant sigmoid makes every
+    score tie.
+    """
+    logits = torch.randint(-2, 3, (num_tokens, num_experts), device="cuda").to(dtype)
+    logits[0] = 1.0
+    if num_tokens > 2:
+        logits[1] = float("nan")
+        logits[2] = float("inf")
+    return logits
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 2047])
+@pytest.mark.parametrize("num_experts", [128, 352, 384, 512, 576])
+@pytest.mark.parametrize("topk", [1, 10, 32])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
+@pytest.mark.parametrize("ties", [False, True])
+def test_topk_without_bias_matches_zero_bias(
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+    scoring_func: str,
+    dtype: torch.dtype,
+    ties: bool,
+):
+    """Without a correction bias, rows that one full warp owns select with
+    redux.sync on SM80+. An all-zero bias gives the same choice scores but
+    keeps the original selection loop, so both launches must match bit for
+    bit: weights, expert ids and token_expert_indices, including the
+    lowest-index tie rule, NaN/Inf rows, padding rows and the scaling.
+    """
+    torch.manual_seed(0)
+    if ties:
+        gating_output = _tie_heavy_logits(num_tokens, num_experts, dtype)
+    else:
+        gating_output = torch.randn(
+            (num_tokens, num_experts), dtype=dtype, device="cuda"
+        )
+    is_padding = torch.arange(num_tokens, device="cuda") % 5 == 4
+    zero_bias = torch.zeros(num_experts, dtype=torch.float32, device="cuda")
+    extra_args = {"routed_scaling_factor": 2.5} if scoring_func == "sigmoid" else {}
+    topk_func = ops.topk_softmax if scoring_func == "softmax" else ops.topk_sigmoid
+
+    outputs = []
+    for bias in (None, zero_bias):
+        topk_weights = torch.empty(
+            (num_tokens, topk), dtype=torch.float32, device="cuda"
+        )
+        topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device="cuda")
+        token_expert_indices = torch.empty_like(topk_ids)
+        topk_func(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize=renormalize,
+            e_score_correction_bias=bias,
+            is_padding=is_padding,
+            **extra_args,
+        )
+        outputs.append((topk_weights.view(torch.int32), topk_ids, token_expert_indices))
+
+    for out, ref in zip(*outputs):
+        torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+    if ties:
+        # Equal logits give equal scores, so a stable sort fixes the tie order.
+        scores = (
+            torch.softmax(gating_output.float(), dim=-1)
+            if scoring_func == "softmax"
+            else torch.sigmoid(gating_output.float())
+        )
+        scores = torch.nan_to_num(scores, nan=0.0, posinf=0.0)
+        expected_ids = torch.sort(scores, dim=-1, descending=True, stable=True)[1]
+        topk_ids = outputs[0][1]
+        torch.testing.assert_close(
+            topk_ids[~is_padding],
+            expected_ids[~is_padding, :topk].to(torch.int32),
+            atol=0,
+            rtol=0,
         )

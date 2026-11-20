@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import set_triton_ptr_range
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -48,6 +49,12 @@ def _kv_connector_enabled() -> bool:
 
 
 class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
+    # Step-dependent fields reference persistent input buffers directly.
+    supports_draft_decode_metadata_update = True
+
+    def update_draft_decode_metadata(self, _metadata: RocmAttentionMetadata) -> None:
+        pass
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> RocmAttentionMetadata:
@@ -86,6 +93,12 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
         return head_size >= 32
+
+    @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        # The cache is split with `split(head_size)` over a 2*head_size page, so
+        # V can be narrower than K but not wider.
+        return head_size_v <= head_size
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
@@ -332,6 +345,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 unified_attention as triton_unified_attention,
             )
 
+            set_triton_ptr_range(kv_cache, key_cache, value_cache)
             descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
             triton_unified_attention(
                 q=query[:num_actual_tokens],
@@ -509,8 +523,13 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            if query_out is not None and key_out is not None:
+                query_out.copy_(query)
+                key_out.copy_(key)
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
@@ -539,4 +558,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             layer._v_scale,
             flash_layout,
             is_fp8_kv_cache,
+            query_out=query_out,
+            key_out=key_out,
         )
