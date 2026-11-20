@@ -194,11 +194,8 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
     "LongcatFlashNgramForCausalLM": "longcat_flash",
 }
 
-# Composite checkpoints that vLLM serves as their thinker
-_THINKER_ARCHITECTURES: dict[str, str] = {
-    "qwen2_5_omni": "Qwen2_5OmniThinkerForConditionalGeneration",
-    "qwen3_omni_moe": "Qwen3OmniMoeThinkerForConditionalGeneration",
-}
+# Checkpoints whose served model is nested in `thinker_config`
+_THINKER_MODEL_TYPES: set[str] = {"qwen3_asr", "qwen2_5_omni", "qwen3_omni_moe"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
@@ -425,33 +422,34 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
-        elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
-            from transformers import Qwen3ASRConfig
-
-            # Original checkpoints nest their fields in `thinker_config`
+        elif model_type in _THINKER_MODEL_TYPES and "thinker_config" in config_dict:
             thinker_config = config_dict.pop("thinker_config")
-            audio_config = thinker_config["audio_config"]
-            audio_config["model_type"] = "qwen3_asr_encoder"
-            config_dict = {**thinker_config, **config_dict}
-            if thinker_config["model_type"] == "qwen3_forced_aligner":
-                config_dict["architectures"] = [
-                    "Qwen3ASRForcedAlignerForTokenClassification"
-                ]
-                config_dict["num_labels"] = config_dict.pop("classify_num")
             kwargs.setdefault("name_or_path", str(model))
-            config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
-        elif model_type in _THINKER_ARCHITECTURES:
-            from transformers import CONFIG_MAPPING
+            if model_type == "qwen3_asr":
+                from transformers import Qwen3ASRConfig
 
-            thinker_dict = config_dict["thinker_config"]
-            top_level = ("quantization_config", "torch_dtype", "dtype")
-            thinker_dict |= {
-                k: v for k in top_level if (v := config_dict.get(k)) is not None
-            }
-            thinker_dict["architectures"] = [_THINKER_ARCHITECTURES[model_type]]
-            thinker_cls = CONFIG_MAPPING[thinker_dict["model_type"]]
-            kwargs.setdefault("name_or_path", str(model))
-            config = thinker_cls.from_dict(thinker_dict, **kwargs)
+                # Original checkpoints nest their fields in `thinker_config`
+                audio_config = thinker_config["audio_config"]
+                audio_config["model_type"] = "qwen3_asr_encoder"
+                config_dict = {**thinker_config, **config_dict}
+                if thinker_config["model_type"] == "qwen3_forced_aligner":
+                    config_dict["architectures"] = [
+                        "Qwen3ASRForcedAlignerForTokenClassification"
+                    ]
+                    config_dict["num_labels"] = config_dict.pop("classify_num")
+                config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+            else:
+                from transformers import CONFIG_MAPPING
+
+                # Only the thinker of an omni model runs a forward pass
+                top_level = ("quantization_config", "torch_dtype", "dtype")
+                thinker_config |= {
+                    k: v for k in top_level if (v := config_dict.get(k)) is not None
+                }
+                thinker_cls = CONFIG_MAPPING[thinker_config["model_type"]]
+                name = thinker_cls.__name__.removesuffix("Config")
+                thinker_config["architectures"] = [f"{name}ForConditionalGeneration"]
+                config = thinker_cls.from_dict(thinker_config, **kwargs)
         elif (
             model_type == "moss_transcribe_diarize"
             and config_dict["audio_config"]["model_type"] == "whisper"
