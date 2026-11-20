@@ -131,17 +131,13 @@ def _run(layout, prompt_chunks, expected_hit_tokens):
 
             step_requests = [request] if is_scheduled else []
 
-            # simulate request loop and drive offloading mechanics.
-            jobs = set()
-            finished_recving = set()
+            # There is no worker. Once load_jobs are reported, fake all jobs
+            # complete; async loads therefore report finished_recving now.
             meta = output.kv_connector_metadata
-            if isinstance(meta, OffloadingConnectorMetadata):
-                jobs = set(meta.load_jobs) | set(meta.store_jobs)
-                # Async loads unblock their request via finished_recving,
-                # as the worker's get_finished() would report.
-                finished_recving = {
-                    e.req_id for e in meta.load_jobs.values() if not e.sync
-                }
+            assert isinstance(meta, OffloadingConnectorMetadata)
+            jobs = set(meta.load_jobs) | set(meta.store_jobs)
+            finished_recving = {e.req_id for e in meta.load_jobs.values() if not e.sync}
+
             scheduler.update_from_output(
                 output,
                 create_model_runner_output(
