@@ -142,7 +142,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         use_sequence_parallel = (
             self.use_sequence_parallel or hidden_states.shape[0] < full_num_tokens
         )
-        decode = self._decode
+        decode = getattr(self, "_decode", None)
         use_decode = decode is not None and is_decode_step(
             full_num_tokens, decode.config
         )
