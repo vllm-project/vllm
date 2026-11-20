@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run CPU EPLB planning over a trusted, inherited pipe to a child interpreter."""
+"""Run CPU EPLB planning over a trusted, inherited socket to a child interpreter."""
 
 import os
+import socket
+import struct
 import subprocess
 import sys
+import threading
+import time
 import traceback
 import weakref
-from multiprocessing import Pipe
-from multiprocessing.connection import Connection
+from contextlib import suppress
 
 import cloudpickle
 import torch
@@ -20,7 +23,12 @@ class EplbPolicyProcessError(RuntimeError):
     """A planner failure that must be reported by every inference rank."""
 
 
-def _shutdown(connection: Connection, process: subprocess.Popen) -> None:
+def _shutdown(
+    connection: socket.socket, process: subprocess.Popen, death_writer: int
+) -> None:
+    os.close(death_writer)
+    with suppress(OSError):
+        connection.shutdown(socket.SHUT_RDWR)
     connection.close()
     try:
         process.wait(timeout=1)
@@ -33,48 +41,92 @@ def _shutdown(connection: Connection, process: subprocess.Popen) -> None:
             process.wait()
 
 
+def _send(connection: socket.socket, payload: bytes, deadline: float | None) -> None:
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("EPLB policy process timed out")
+    connection.settimeout(remaining)
+    connection.sendall(struct.pack("!Q", len(payload)) + payload)
+
+
+def _receive(connection: socket.socket, deadline: float | None) -> bytes:
+    def receive_exactly(size: int) -> bytes:
+        result = bytearray()
+        while len(result) < size:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("EPLB policy process timed out")
+            connection.settimeout(remaining)
+            chunk = connection.recv(min(size - len(result), 1024 * 1024))
+            if not chunk:
+                raise EOFError("EPLB policy process disconnected")
+            result.extend(chunk)
+        return bytes(result)
+
+    size = struct.unpack("!Q", receive_exactly(8))[0]
+    return receive_exactly(size)
+
+
 class EplbPolicyProcess:
     """Own one CPU policy process, called serially by the async EPLB thread."""
 
     def __init__(self, policy: AbstractEplbPolicy, timeout: float = 60):
+        try:
+            payload = cloudpickle.dumps(policy)
+        except Exception as exc:
+            raise TypeError(
+                f"Async EPLB policy {type(policy).__qualname__} must be serializable. "
+                "Use __getstate__/__setstate__ or __reduce__ to recreate private "
+                "resources in the policy subprocess."
+            ) from exc
         self._timeout = timeout
-        self._connection, child = Pipe()
+        self._connection, child = socket.socketpair()
+        death_reader, death_writer = os.pipe()
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join(sys.path)
+        env["VLLM_PLUGINS"] = ""
+        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
         for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             env[name] = "1"
         try:
             # Executor workers are daemonic multiprocessing processes.
             self._process = subprocess.Popen(
-                [sys.executable, "-m", __name__, str(child.fileno())],
-                pass_fds=(child.fileno(),),
+                [
+                    sys.executable,
+                    "-m",
+                    __name__,
+                    str(child.fileno()),
+                    str(death_reader),
+                ],
+                pass_fds=(child.fileno(), death_reader),
                 env=env,
             )
         except BaseException:
             self._connection.close()
+            os.close(death_writer)
             raise
         finally:
             child.close()
+            os.close(death_reader)
         self._finalizer = weakref.finalize(
-            self, _shutdown, self._connection, self._process
+            self, _shutdown, self._connection, self._process, death_writer
         )
         try:
-            self._connection.send_bytes(cloudpickle.dumps(policy))
-            self._receive()
+            self._request(payload)
         except BaseException:
             self.close()
             raise
 
-    def _receive(self):
+    def _request(self, payload: bytes):
+        deadline = time.monotonic() + self._timeout
         try:
-            if not self._connection.poll(self._timeout):
-                raise TimeoutError("EPLB policy process timed out")
-            result, error = cloudpickle.loads(self._connection.recv_bytes())
+            _send(self._connection, payload, deadline)
+            result, error = cloudpickle.loads(_receive(self._connection, deadline))
             if error is not None:
                 raise RuntimeError(f"EPLB policy process failed:\n{error}")
             return result
-        except TimeoutError:
-            raise
+        except TimeoutError as exc:
+            raise TimeoutError("EPLB policy process timed out") from exc
         except (EOFError, OSError) as exc:
             raise RuntimeError("EPLB policy process disconnected") from exc
 
@@ -85,10 +137,7 @@ class EplbPolicyProcess:
     ) -> torch.Tensor:
         """Return the CPU placement for this immutable planning snapshot."""
         try:
-            self._connection.send_bytes(
-                cloudpickle.dumps((stats, old_global_expert_indices))
-            )
-            return self._receive()
+            return self._request(cloudpickle.dumps((stats, old_global_expert_indices)))
         except Exception as exc:
             self.close()
             raise EplbPolicyProcessError(str(exc)) from exc
@@ -98,24 +147,29 @@ class EplbPolicyProcess:
         self._finalizer()
 
 
-def _main(fd: int) -> None:
+def _main(fd: int, death_reader: int) -> None:
+    def monitor_parent() -> None:
+        os.read(death_reader, 1)
+        os._exit(0)
+
+    threading.Thread(target=monitor_parent, daemon=True).start()
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
-    with Connection(fd) as connection:
+    with socket.socket(fileno=fd) as connection:
         try:
-            policy = cloudpickle.loads(connection.recv_bytes())
-            connection.send_bytes(cloudpickle.dumps((None, None)))
+            policy = cloudpickle.loads(_receive(connection, None))
+            _send(connection, cloudpickle.dumps((None, None)), None)
             while True:
-                stats, old_map = cloudpickle.loads(connection.recv_bytes())
+                stats, old_map = cloudpickle.loads(_receive(connection, None))
                 result = policy.rebalance_experts(stats, old_map)
                 if result.device.type != "cpu":
                     raise ValueError("EPLB policy must return a CPU tensor")
-                connection.send_bytes(cloudpickle.dumps((result, None)))
+                _send(connection, cloudpickle.dumps((result, None)), None)
         except (EOFError, BrokenPipeError):
             return
         except Exception:
-            connection.send_bytes(cloudpickle.dumps((None, traceback.format_exc())))
+            _send(connection, cloudpickle.dumps((None, traceback.format_exc())), None)
 
 
 if __name__ == "__main__":
-    _main(int(sys.argv[1]))
+    _main(int(sys.argv[1]), int(sys.argv[2]))

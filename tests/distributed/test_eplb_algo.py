@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import signal
+import socket
+import struct
 import threading
-from contextlib import closing
+import time
+from contextlib import closing, suppress
 from multiprocessing import get_context
 
 import numpy as np
@@ -56,6 +60,160 @@ class _CountingPolicy(DefaultEplbPolicy):
     def rebalance_experts(self, stats, old_global_expert_indices=None):
         self.calls += 1
         return torch.tensor([os.getpid(), self.calls, torch.get_num_threads()])
+
+
+class _LockedPolicy(_CountingPolicy):
+    def __init__(self, calls=7):
+        self.calls = calls
+        self.lock = threading.Lock()
+
+    def __getstate__(self):
+        return self.calls
+
+    def __setstate__(self, calls):
+        self.calls = calls
+        self.lock = threading.Lock()
+
+    def rebalance_experts(self, stats, old_global_expert_indices=None):
+        with self.lock:
+            return super().rebalance_experts(stats, old_global_expert_indices)
+
+
+def test_policy_process_recreates_private_resources_and_preserves_state():
+    """A custom policy recreates its lock without losing its initial CPU state."""
+    policy = _LockedPolicy()
+    stats = EplbStats(torch.ones(1, 4), 4, 1, 1, 1)
+    with closing(EplbPolicyProcess(policy)) as process:
+        first = process.rebalance_experts(stats).tolist()
+        second = process.rebalance_experts(stats).tolist()
+        assert first == [second[0], 8, 1]
+        assert second == [first[0], 9, 1]
+        assert first[0] != os.getpid()
+    assert policy.calls == 7
+    assert not psutil.pid_exists(first[0])
+
+
+def test_policy_process_does_not_initialize_accelerators_or_distributed():
+    """CPU planning must not create an inference device context or process group."""
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            return torch.tensor(
+                [
+                    torch.cuda.is_initialized(),
+                    torch.xpu.is_initialized(),
+                    torch.distributed.is_initialized(),
+                ]
+            )
+
+    with closing(EplbPolicyProcess(Policy())) as process:
+        result = process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
+    assert not result.any()
+
+
+def test_policy_process_explains_incompatible_policy_before_starting_child():
+    policy = _CountingPolicy()
+    policy.lock = threading.Lock()
+    children = {child.pid for child in psutil.Process().children()}
+    with pytest.raises(TypeError, match="__getstate__/__setstate__ or __reduce__"):
+        EplbPolicyProcess(policy)
+    assert {child.pid for child in psutil.Process().children()} == children
+
+
+def test_policy_process_timeout_includes_blocked_request_send():
+    """A stopped child cannot leave a large snapshot blocked in send forever."""
+    with closing(EplbPolicyProcess(_CountingPolicy(), timeout=10)) as process:
+        stats = EplbStats(torch.ones(1, 4), 4, 1, 1, 1)
+        pid = process.rebalance_experts(stats)[0].item()
+        os.kill(pid, signal.SIGSTOP)
+        finished = threading.Event()
+        errors = []
+
+        def request():
+            try:
+                process.rebalance_experts(
+                    EplbStats(torch.ones(1, 1024 * 1024), 4, 1, 1, 1)
+                )
+            except EplbPolicyProcessError as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        try:
+            assert finished.wait(15), "request remained blocked past its IPC budget"
+            assert len(errors) == 1 and "timed out" in str(errors[0])
+        finally:
+            if psutil.pid_exists(pid):
+                os.kill(pid, signal.SIGCONT)
+            worker.join(timeout=15)
+        assert not worker.is_alive()
+        assert not psutil.pid_exists(pid)
+
+
+def test_policy_process_timeout_includes_partial_response():
+    """Read readiness does not imply that the entire response has arrived."""
+    from vllm.distributed.eplb.policy_process import _receive
+
+    reader, writer = socket.socketpair()
+    with reader, writer:
+        writer.sendall(struct.pack("!Q", 1024) + b"partial")
+        with pytest.raises(TimeoutError):
+            _receive(reader, time.monotonic() + 0.1)
+
+
+class _OwnerDeathPolicy(DefaultEplbPolicy):
+    def __init__(self, endpoint):
+        self.endpoint = endpoint
+
+    def rebalance_experts(self, stats, old_global_expert_indices=None):
+        with socket.create_connection(self.endpoint, timeout=20) as connection:
+            connection.sendall(struct.pack("!Q", os.getpid()))
+            threading.Event().wait()
+
+
+def _plan_until_owner_exits(endpoint):
+    with closing(EplbPolicyProcess(_OwnerDeathPolicy(endpoint))) as process:
+        process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
+
+
+def test_policy_process_exits_if_owner_is_killed_during_planning():
+    """A forced executor shutdown must not leave an orphaned, blocked policy."""
+    child = None
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(30)
+        owner = get_context("spawn").Process(
+            target=_plan_until_owner_exits, args=(listener.getsockname(),), daemon=True
+        )
+        owner.start()
+        try:
+            with listener.accept()[0] as connection:
+                connection.settimeout(10)
+                payload = bytearray()
+                while len(payload) < 8:
+                    chunk = connection.recv(8 - len(payload))
+                    assert chunk, "planner closed before publishing its PID"
+                    payload.extend(chunk)
+                child = psutil.Process(struct.unpack("!Q", payload)[0])
+                owner.kill()
+                owner.join(timeout=5)
+                assert owner.exitcode is not None
+                try:
+                    child.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    assert child.status() == psutil.STATUS_ZOMBIE
+        finally:
+            if owner.is_alive():
+                owner.kill()
+                owner.join(timeout=5)
+            if child is not None:
+                with suppress(psutil.NoSuchProcess):
+                    if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                        child.kill()
+                        child.wait(timeout=5)
 
 
 def _plan_from_daemon(connection):

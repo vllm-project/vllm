@@ -1878,6 +1878,11 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         gc.unfreeze()
 
+        if (model_runner := getattr(self, "model_runner", None)) is not None and (
+            eplb_state := getattr(model_runner, "eplb_state", None)
+        ) is not None:
+            eplb_state.stop_async_loop()
+
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()

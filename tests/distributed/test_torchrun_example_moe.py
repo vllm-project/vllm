@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # unit test for `examples/features/torchrun/torchrun_example_offline.py`
+import gc
 import os
 import random
 
@@ -10,6 +11,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.config.parallel import EPLBConfig
 from vllm.distributed.parallel_state import get_tp_group, get_world_group
 
 # By default, let PyTorch choose the WORLD backend for the current device
@@ -40,21 +42,69 @@ if dp_size > 1:
     # distribute the prompts across the data parallel ranks
     prompts = [prompt for idx, prompt in enumerate(prompts) if idx % dp_size == dp_rank]
 
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+test_eplb = os.getenv("ENABLE_EPLB", "0") == "1"
+sampling_params = SamplingParams(
+    temperature=0 if test_eplb else 0.8, top_p=0.95, ignore_eos=test_eplb
+)
+
 
 # set different `gpu_memory_utilization` for different ranks,
 # to test if all ranks agree on the same kv cache configuration.
-llm = LLM(
-    model="microsoft/Phi-mini-MoE-instruct",
-    tensor_parallel_size=int(os.getenv("TP_SIZE", "1")),
-    # Pipeline parallelism with external_launcher is no longer supported with MRV2.
-    enable_expert_parallel=int(os.getenv("ENABLE_EP", "0")) == 1,
-    distributed_executor_backend="external_launcher",
-    gpu_memory_utilization=random.uniform(0.8, 0.92),
-    seed=0,
-    max_model_len=1024,
-    max_num_seqs=16,
-)
+def create_llm():
+    kwargs = {}
+    if test_eplb:
+        kwargs = dict(
+            enable_eplb=True,
+            enforce_eager=True,
+            eplb_config=EPLBConfig(
+                window_size=2,
+                step_interval=4,
+                num_redundant_experts=2,
+                communicator="torch_gloo",
+            ),
+        )
+    return LLM(
+        model=(
+            os.getenv(
+                "EPLB_TEST_MODEL", "vllm-project/tiny-random-DeepseekV2ForCausalLM"
+            )
+            if test_eplb
+            else "microsoft/Phi-mini-MoE-instruct"
+        ),
+        tensor_parallel_size=int(os.getenv("TP_SIZE", "1")),
+        # Pipeline parallelism with external_launcher is not supported with MRV2.
+        enable_expert_parallel=int(os.getenv("ENABLE_EP", "0")) == 1,
+        distributed_executor_backend="external_launcher",
+        gpu_memory_utilization=random.uniform(0.8, 0.92),
+        seed=0,
+        max_model_len=1024,
+        max_num_seqs=16,
+        **kwargs,
+    )
+
+
+def shutdown_and_check_planner(engine):
+    state = (
+        engine.llm_engine.model_executor.driver_worker.worker.model_runner.eplb_state
+    )
+    assert state is not None and state.policy_process is not None
+    worker = state.async_worker
+    process = state.policy_process._process
+    assert worker is not None and worker.is_alive()
+    assert process.poll() is None
+    engine.llm_engine.engine_core.shutdown()
+    assert not worker.is_alive()
+    assert process.poll() is not None
+    dist.barrier()
+
+
+llm = create_llm()
+if test_eplb:
+    # The host process stays alive across an idle shutdown and a fresh engine.
+    shutdown_and_check_planner(llm)
+    del llm
+    gc.collect()
+    llm = create_llm()
 
 outputs = llm.generate(prompts, sampling_params)
 
@@ -89,3 +139,8 @@ for output in outputs:
     test_consistent_across_ranks(prompt)
     test_consistent_across_ranks(generated_text)
     print(f"Rank {group_rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+if test_eplb:
+    state = llm.llm_engine.model_executor.driver_worker.worker.model_runner.eplb_state
+    assert all(model.eplb_stats is not None for model in state.model_states.values())
+    shutdown_and_check_planner(llm)
