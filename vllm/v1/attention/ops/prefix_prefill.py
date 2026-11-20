@@ -990,6 +990,12 @@ def context_attention_fwd(
     BLOCK_M = 128
     BLOCK_N = 64
     TRITON_BLOCK_SIZE = 32
+    num_unroll_cache = 4
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_rdna
+
+        if on_rdna():
+            BLOCK_M, BLOCK_N, TRITON_BLOCK_SIZE, num_unroll_cache = 64, 32, 16, 1
 
     grid_fn = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
     _fwd_kernel[grid_fn](
@@ -1042,7 +1048,7 @@ def context_attention_fwd(
         USE_FP8=fp8_out_scale is not None,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        num_unroll_cache=4,
+        num_unroll_cache=num_unroll_cache,
         num_unroll_request=1,
         num_warps=4,
         num_stages=1,
