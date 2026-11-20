@@ -18,7 +18,8 @@ use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
-    BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
+    BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, UnsupportedArgs,
+    parse_int_flag,
 };
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
@@ -3198,6 +3199,7 @@ fn unsupported_env_switches_fail_startup() {
             "--enable-responses-api-store",
             "VLLM_ENABLE_RESPONSES_API_STORE",
         ),
+        ("--max-tokenize-tokens", "VLLM_MAX_TOKENIZE_TOKENS"),
     ] {
         // Like any `Unsupported` argument, every value is refused, including
         // the off value `0`.
@@ -3222,15 +3224,19 @@ fn unsupported_env_switches_fail_startup() {
         Remove this argument, or unset the environment variable bound to it, to continue."#]].assert_eq(&args_json("VLLM_ENABLE_COHERE_API", "0").unwrap_err());
 }
 
-/// Every hidden flag bound to an environment variable takes effect on the
-/// `--args-json` path exactly as on the `serve` path: starting from the same
-/// arguments, setting the variable on one path and passing the flag on the
-/// other give equal arguments.
+/// Every hidden flag and unsupported argument bound to an environment variable
+/// takes effect on the `--args-json` path exactly as on the `serve` path:
+/// starting from the same arguments, setting the variable on one path and
+/// passing the flag on the other give equal arguments.
 #[test]
-fn args_json_applies_every_hidden_env_flag_like_serve() {
+fn args_json_applies_hidden_and_unsupported_env_flags_like_serve() {
     // A value per variable that changes the parsed arguments, or that an
-    // unsupported switch refuses.
-    let unsupported = ["VLLM_ENABLE_COHERE_API", "VLLM_ENABLE_RESPONSES_API_STORE"];
+    // unsupported argument refuses.
+    let unsupported = [
+        "VLLM_ENABLE_COHERE_API",
+        "VLLM_ENABLE_RESPONSES_API_STORE",
+        "VLLM_MAX_TOKENIZE_TOKENS",
+    ];
     let samples = [
         ("VLLM_LOG_STATS_INTERVAL", "2.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
@@ -3242,21 +3248,26 @@ fn args_json_applies_every_hidden_env_flag_like_serve() {
         ("VLLM_MAX_N_SEQUENCES", "8"),
         ("VLLM_ENABLE_COHERE_API", "0"),
         ("VLLM_ENABLE_RESPONSES_API_STORE", "0"),
+        ("VLLM_MAX_TOKENIZE_TOKENS", "4096"),
     ];
 
     let cmd = SharedRuntimeArgs::augment_args(clap::Command::new("vllm-rs"));
-    let hidden_env_flags = cmd
+    let unsupported_cmd = UnsupportedArgs::augment_args(clap::Command::new("unsupported"));
+    let env_flags = cmd
         .get_arguments()
-        .filter(|arg| arg.is_hide_set())
+        .filter(|arg| {
+            arg.is_hide_set()
+                || (unsupported_cmd.get_arguments()).any(|other| other.get_id() == arg.get_id())
+        })
         .filter_map(|arg| Some((arg.get_env()?.to_str()?, arg.get_long()?)))
         .collect::<HashMap<_, _>>();
     let mut sampled = samples.map(|(name, _)| name);
-    let mut hidden = hidden_env_flags.keys().copied().collect::<Vec<_>>();
+    let mut bound = env_flags.keys().copied().collect::<Vec<_>>();
     sampled.sort_unstable();
-    hidden.sort_unstable();
+    bound.sort_unstable();
     assert_eq!(
         sampled.as_slice(),
-        hidden.as_slice(),
+        bound.as_slice(),
         "add a sample for each new flag"
     );
 
@@ -3271,7 +3282,7 @@ fn args_json_applies_every_hidden_env_flag_like_serve() {
     };
     let base = parse(&[]).unwrap();
     for (name, sample) in samples {
-        let flag = &hidden_env_flags[name];
+        let flag = &env_flags[name];
         let serve = parse(&[format!("--{flag}={sample}")]);
         if unsupported.contains(&name) {
             assert!(serve.is_err(), "{name}={sample} should be refused");
@@ -3297,7 +3308,8 @@ fn args_json_applies_every_hidden_env_flag_like_serve() {
 }
 
 /// Applying the environment on the `--args-json` path changes only the hidden
-/// flags bound to set variables. It keeps every value deserialized from the
+/// flags bound to set variables, as unsupported arguments refuse any value. It
+/// keeps every value deserialized from the
 /// JSON, including flags that clap gives defaults or an implicit `false`, and
 /// visible flags bound to environment variables, whose JSON value wins.
 #[test]

@@ -989,12 +989,14 @@ impl SharedRuntimeArgs {
     /// read the environment, on the `--args-json` path, where serde rather than
     /// clap parses the arguments.
     ///
-    /// Each set variable bound to a hidden flag is passed to clap as that flag,
-    /// and the parsed value is written over the deserialized arguments, so both
-    /// launch paths share one binding and one parser per variable. Python has
-    /// no CLI flag for these settings, so the JSON never carries them. A visible
-    /// flag bound to a variable, such as `--api-key`, is a Python CLI flag whose
-    /// JSON value takes precedence.
+    /// Each set variable bound to a hidden flag or to an unsupported argument is
+    /// passed to clap as that flag, and the parsed value is written over the
+    /// deserialized arguments, so both launch paths share one binding and one
+    /// parser per variable. Python has no CLI flag for the hidden settings, so
+    /// the JSON never carries them. An unsupported argument refuses any value,
+    /// so it fails startup whether its value comes from the JSON or the
+    /// variable. Any other visible flag bound to a variable, such as
+    /// `--api-key`, is a Python CLI flag whose JSON value takes precedence.
     fn apply_env_fallbacks(
         &mut self,
         lookup: impl Fn(&str) -> Option<String>,
@@ -1005,13 +1007,17 @@ impl SharedRuntimeArgs {
             self.api_key.push(api_key);
         }
 
+        let unsupported = UnsupportedArgs::augment_args(clap::Command::new("unsupported"));
         let mut env_args = Vec::new();
         let cmd = Self::augment_args(
             clap::Command::new("vllm-rs").no_binary_name(true).disable_help_flag(true),
         )
         .mut_args(|arg| {
             let env = (arg.get_env())
-                .filter(|_| arg.is_hide_set())
+                .filter(|_| {
+                    arg.is_hide_set()
+                        || (unsupported.get_arguments()).any(|other| other.get_id() == arg.get_id())
+                })
                 .map(|env| env.to_string_lossy().into_owned());
             // Only the arguments passed below may reach the matches, or
             // `update_from_arg_matches` would overwrite the deserialized
