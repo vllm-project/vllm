@@ -58,16 +58,16 @@ def _kitty_decode_stage1(
     Grid is (request r, KV head h, split). The request's num_chunks 128-token
     chunks are divided evenly across NUM_SPLITS programs; programs with no
     chunks return without writing. The G query heads sharing KV head h are
-    processed together as a [G_PAD, D] tile so the scores use ``tl.dot``.
+    processed together as a [G_PAD, D] tile so the scores use `tl.dot`.
 
     Each chunk's K/V is read from the packed page when the block is sealed
-    and from the residual otherwise (see ``kitty_load_k_tile``). Positions at
+    and from the residual otherwise (see `kitty_load_k_tile`). Positions at
     or beyond old_len are masked out. The split that owns chunk 0 also seeds
     its online softmax with the step's own K/V, which is not yet in the cache.
 
     For each query head, writes the normalized partial output to
     mid_o[r, head, split, :D] and its log-sum-exp to mid_o[r, head, split, D],
-    the layout ``_fwd_kernel_stage2`` reduces over.
+    the layout `_fwd_kernel_stage2` reduces over.
     """
     r = tl.program_id(0)
     h = tl.program_id(1)
@@ -155,9 +155,9 @@ def kitty_decode_attention(
 
     Each request attends to cache positions [0, old_len) plus its own new
     token, whose K/V are passed in directly because they are written to the
-    cache only after attention. Runs ``_kitty_decode_stage1`` to compute
+    cache only after attention. Runs `_kitty_decode_stage1` to compute
     NUM_SPLITS partial results per (request, query head), then the shared
-    Triton ``_fwd_kernel_stage2`` to merge them into ``output``.
+    Triton `_fwd_kernel_stage2` to merge them into `output`.
 
     Args:
         query: [B, H_Q, D] queries of the decode tokens.
@@ -165,8 +165,8 @@ def kitty_decode_attention(
         value: [B, H_KV, D] values of the decode tokens.
         output: [B, H_Q, D] attention output, written in place.
         packed_cache: [num_blocks, H_KV, 128, C] uint8 packed pages, with
-            C = ``kitty_state_content_bytes(D, DB)``. Each (block, KV head)
-            slice is one page, laid out as described in ``tiles``.
+            C = `kitty_state_content_bytes(D, DB)`. Each (block, KV head)
+            slice is one page, laid out as described in `tiles`.
         residual: [num_res_blocks, H_KV, 640, D] unquantized sink and tail
             rows in the model dtype.
         residual_block_ids: [B] residual block index of each request.
@@ -258,7 +258,7 @@ def _kitty_dequant_context_kernel(
     D: tl.constexpr,
     DB: tl.constexpr,
 ):
-    """Dequantize one 128-token block of one KV head of request ``req``.
+    """Dequantize one 128-token block of one KV head of request `req`.
 
     Grid is (block b, KV head h). Loads block b's K and V from the packed page
     if sealed, else from the residual, and writes rows [128 * b, 128 * b + 128)
@@ -281,8 +281,10 @@ def _kitty_dequant_context_kernel(
     tl.store(k_out_ptr + rows[None, :] + offs_d[:, None], k, mask=valid[None, :])
     tl.store(v_out_ptr + rows[:, None] + offs_d[None, :], v, mask=valid[:, None])
 
-# TODO: `kitty_dequant_context` is only used by continuation prefills, and materalizes the entire cache in HBM
-# A fused prefill kernel that dequantizes on the fly is better. Also, batched continuation prefills are needed.
+
+# TODO: `kitty_dequant_context` is only used by continuation prefills, and
+# materializes the entire cache in HBM. A fused prefill kernel that dequantizes
+# on the fly is better. Also, batched continuation prefills are needed.
 def kitty_dequant_context(
     packed_cache: torch.Tensor,
     residual: torch.Tensor,
@@ -297,14 +299,14 @@ def kitty_dequant_context(
     """Materialize a request's cached K/V as dense tensors.
 
     Used only for continuation prefills, which run flash attention over the
-    dequantized context followed by the step's own tokens. Sealed blocks are 
-    dequantized from their packed pages; the sink and tails are copied from 
+    dequantized context followed by the step's own tokens. Sealed blocks are
+    dequantized from their packed pages; the sink and tails are copied from
     the residual. Does nothing if old_len is 0.
 
     Args:
         packed_cache: [num_blocks, H_KV, 128, C] uint8 packed pages, with
-            C = ``kitty_state_content_bytes(D, DB)``. Each (block, KV head)
-            slice is one page, laid out as described in ``tiles``.
+            C = `kitty_state_content_bytes(D, DB)`. Each (block, KV head)
+            slice is one page, laid out as described in `tiles`.
         residual: [num_res_blocks, H_KV, 640, D] unquantized sink and tail
             rows in the model dtype.
         residual_block_ids: [num_reqs] residual block index of each request.

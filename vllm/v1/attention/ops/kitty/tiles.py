@@ -37,7 +37,7 @@ def kitty_d_boost(head_size: int, boost_ratio: float) -> int:
 
     DB = floor(D * boost_ratio), with 0 <= boost_ratio <= 1, so 0 <= DB <= D.
     For example, D = 128 and ratio 0.25 give DB = 32. The DB channels with the
-    largest mean |K| in a page are boosted (see ``kitty_boost_ranks``).
+    largest mean |K| in a page are boosted (see `kitty_boost_ranks`).
     """
     return int(head_size * boost_ratio)
 
@@ -90,7 +90,7 @@ def kitty_first_unsealed_k(n):
 def kitty_first_unsealed_v(n):
     """S_v(n): first V block not sealed at cache length n (int or ndarray).
 
-    Like ``kitty_first_unsealed_k``, except that V seals one page later. A
+    Like `kitty_first_unsealed_k`, except that V seals one page later. A
     block b >= 1 is sealed only when n >= 128 * (b + 2), so the most recent full
     block stays unquantized. The sealed blocks are 1, ..., floor(n / 128) - 2,
     so

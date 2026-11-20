@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kitty write path: seal completed pages and write the fp16 residual.
 
-The quantize-and-pack kernels are ports of Kitty's ``quantize_pack_k_kernel``
-and ``quantize_pack_v_kernel`` (https://github.com/Summer-Summer/Kitty), with
+The quantize-and-pack kernels are ports of Kitty's `quantize_pack_k_kernel`
+and `quantize_pack_v_kernel` (https://github.com/Summer-Summer/Kitty), with
 one program per (seal job, KV head) and the scale/min stored inside the page.
 """
 
@@ -22,6 +22,7 @@ from vllm.v1.attention.ops.kitty.tiles import (
     kitty_first_unsealed_v,
 )
 
+
 @dataclass
 class KittyStepPlan:
     """Per-step write-path plan, computed on the CPU from exact lengths."""
@@ -33,6 +34,7 @@ class KittyStepPlan:
     # [3, n] (token row, request, residual row) per residual K / V write.
     k_writes: np.ndarray
     v_writes: np.ndarray
+
 
 def _block_ranges(starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
     """All (request, block) pairs with block in [starts[r], ends[r])."""
@@ -47,21 +49,25 @@ def _block_ranges(starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
 def plan_kitty_step(query_start_loc: np.ndarray, seq_lens: np.ndarray) -> KittyStepPlan:
     """Seal jobs and residual writes for one step, from the query start
     offsets and the cache lengths after the step."""
-    qsl = query_start_loc.astype(np.int64)              # query start offsets, per request
-    new = seq_lens.astype(np.int64)                     # cached tokens per request AFTER this step
-    query_lens = np.diff(qsl)                           # number of query tokens per request
-    old = new - query_lens                              # cached tokens per request BEFORE this step
+    qsl = query_start_loc.astype(np.int64)  # query start offsets, per request
+    new = seq_lens.astype(np.int64)  # cached tokens per request AFTER this step
+    query_lens = np.diff(qsl)  # number of query tokens per request
+    old = new - query_lens  # cached tokens per request BEFORE this step
 
-    k_jobs = _block_ranges(kitty_first_unsealed_k(old), kitty_first_unsealed_k(new))        # K blocks to seal per job, after this step
-    v_jobs = _block_ranges(kitty_first_unsealed_v(old), kitty_first_unsealed_v(new))        # V blocks to seal per job, after this step
+    # K and V blocks to seal per job, after this step
+    k_jobs = _block_ranges(kitty_first_unsealed_k(old), kitty_first_unsealed_k(new))
+    v_jobs = _block_ranges(kitty_first_unsealed_v(old), kitty_first_unsealed_v(new))
 
-    num_tokens = int(qsl[-1])                                           # total number of tokens to process in this step
-    tok = np.arange(num_tokens, dtype=np.int64)                         # token ID for this step
-    req = np.repeat(np.arange(len(new), dtype=np.int64), query_lens)    # request IDs that each token belongs to
-    pos = old[req] + tok - qsl[req]                                     # the actual position of the tokens, per each request
-    sink = pos < KITTY_PAGE_SIZE                                        # mask to get sink tokens
+    num_tokens = int(qsl[-1])  # total number of tokens to process in this step
+    tok = np.arange(num_tokens, dtype=np.int64)  # token ID for this step
+    # request IDs that each token belongs to
+    req = np.repeat(np.arange(len(new), dtype=np.int64), query_lens)
+    # the actual position of the tokens, per each request
+    pos = old[req] + tok - qsl[req]
+    sink = pos < KITTY_PAGE_SIZE  # mask to get sink tokens
 
-    # identify keys and values to keep in the residual, and their corresponding rows in the residual cache
+    # identify keys and values to keep in the residual, and their corresponding
+    # rows in the residual cache
     k_keep = sink | (pos >= KITTY_PAGE_SIZE * kitty_first_unsealed_k(new[req]))
     k_rows = np.where(sink, pos, K_TAIL_ROW + pos % KITTY_PAGE_SIZE)
     v_keep = sink | (pos >= KITTY_PAGE_SIZE * kitty_first_unsealed_v(new[req]))
@@ -89,7 +95,7 @@ def kitty_gather_blocks(
     """The 128 fp16 tokens of each job's block as [J, H, 128, D].
 
     Positions below the request's old length come from its residual tail ring
-    (row ``tail_row + p % ring``), the rest from this step's ``src`` [N, H, D].
+    (row `tail_row + p % ring`), the rest from this step's `src` [N, H, D].
     """
     reqs = jobs[:, 0].long()
     pos = jobs[:, 1].long()[:, None] * KITTY_PAGE_SIZE + torch.arange(
@@ -310,7 +316,7 @@ def kitty_write_residual(
     v_writes: torch.Tensor,
 ) -> None:
     """Copy the new tokens that stay fp16 (sink, K tail, V tail) into the
-    residual. ``k_writes``/``v_writes`` are [3, n] (token, request, row)."""
+    residual. `k_writes`/`v_writes` are [3, n] (token, request, row)."""
     for src, writes in ((key, k_writes), (value, v_writes)):
         if writes.shape[1] == 0:
             continue
