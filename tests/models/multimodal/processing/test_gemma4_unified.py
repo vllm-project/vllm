@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Mapping
 from types import SimpleNamespace
 
@@ -547,3 +548,76 @@ def test_cuda_execution_with_gpu_sync_allowed():
     assert len(out) == 2
     assert out[0].device.type == "cuda"
     assert out[0].dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize(
+    "residue",
+    # residues 1..160 are exactly where the tower-based mel/conv formula
+    # undercounts ceil(L / 640) by one
+    [0, 1, 160, 161, 639],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_UNIFIED_MODEL_ID])
+def test_audio_repl_token_count_matches_hf_processor(model_id: str, residue: int):
+    """Unified audio placeholder count must equal the HF processor's
+    per-audio valid frame count, ceil(L / 640)."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    audio_len = 640 * 5 + residue
+    assert isinstance(processor.info, Gemma4UnifiedProcessingInfo)
+    repl = processor.info.get_audio_repl(
+        audio_len=audio_len,
+        processor=hf_processor,
+    )
+    num_repl_tokens = repl.full.count(hf_processor.audio_token_id)
+
+    hf_features = hf_processor.feature_extractor(
+        [np.zeros(audio_len, dtype=np.float32)]
+    )
+    num_hf_tokens = int(hf_features["input_features_mask"][0].sum())
+
+    assert num_hf_tokens == math.ceil(audio_len / 640)
+    assert num_repl_tokens == num_hf_tokens
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_UNIFIED_MODEL_ID])
+def test_multi_audio_apply_different_lengths(model_id: str):
+    """Two audios of different lengths must produce self-contained
+    unpadded per-item features whose frame counts match the placeholders."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 2},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    sr = hf_processor.feature_extractor.sampling_rate
+    audios = [
+        (np.zeros(640 * 3, dtype=np.float32), sr),
+        (np.zeros(640 * 5 + 100, dtype=np.float32), sr),
+    ]
+    expected_frames = [3, 6]
+
+    prompt = hf_processor.audio_token * 2
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
+
+    audio_placeholders = processed_inputs["mm_placeholders"]["audio"]
+    assert [p.get_num_embeds() for p in audio_placeholders] == expected_frames
+
+    mm_items = processed_inputs["mm_kwargs"]["audio"]
+    for item, num_frames in zip(mm_items, expected_frames, strict=True):
+        assert item is not None
+        features = item["input_features_padded"].data
+        mask = item["input_features_mask"].data
+        assert isinstance(features, torch.Tensor)
+        assert isinstance(mask, torch.Tensor)
+        assert features.shape == torch.Size([num_frames, 640])
+        assert int(mask.sum()) == num_frames

@@ -55,6 +55,18 @@ does not query any secondary tier.
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
 
+## Hybrid attention and recurrent models
+
+With prefix caching enabled, the CPU tier can
+restore retained prompt-tail checkpoints between full-attention block
+boundaries, including with decode context parallelism (DCP). Use
+`blocks_per_chunk: 1` and a `prefix_match_unit` supported by the model's KV
+cache groups. Under DCP, each recurrent block must divide the full-attention
+block, and the hash unit must be divisible by the DCP size.
+
+Partial-tail reuse follows the hit alignment and the EAGLE/MTP hash lookahead
+resolved by the core prefix cache.
+
 ## Single-Tier Setup (CPU Only)
 
 ```bash
@@ -109,6 +121,8 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
+| `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU buffer in the background; the engine serves without offloading until every worker is ready. CUDA only. |
+| `async_init_pin_pace` | no | `2.0` | single-tier | Pause after each background pin call, as a multiple of its duration. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
@@ -433,7 +447,7 @@ A transfer completion or abort acknowledgement already received when the
 connection closes still settles its load. Disconnect suppresses messages that
 would start new work; it does not discard these buffered terminal confirmations.
 
-In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so before the initial nonempty fetch is submitted, every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. After that submission, subsequent PD-tier lookups return MISS. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ### Out-of-Tree Secondary Tiers
 
@@ -547,6 +561,14 @@ For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
 end at an attention-chunk boundary for every chunked-local cache group. Otherwise,
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
+
+## Core dumps
+
+On Linux, `SimpleCPUOffloadConnector` and `OffloadingConnector` leave their CPU
+KV caches out of core dumps (`MADV_DONTDUMP`). A crashing worker still writes a
+core file, but it no longer grows with `cpu_bytes_to_use`. The exception is the
+single-tier `OffloadingConnector` on platforms other than CUDA and XPU, where
+the CPU tier is a plain pinned tensor.
 
 ## Further Reading
 

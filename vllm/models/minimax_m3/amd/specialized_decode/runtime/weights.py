@@ -77,7 +77,7 @@ def _bf16_vector(
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoLayerWeights:
     input_norm: torch.Tensor
     qkv: torch.Tensor

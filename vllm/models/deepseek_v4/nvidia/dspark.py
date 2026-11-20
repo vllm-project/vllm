@@ -17,7 +17,6 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -33,6 +32,9 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -53,9 +55,11 @@ from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4ForCausalLM,
     DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
     DeepseekV4MoE,
+    _use_mega_gate,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
@@ -98,9 +102,7 @@ class DSparkDeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
-        self.use_native_mega_moe = (
-            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
-        )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.num_dspark_layers = getattr(config, "n_mtp_layers", None) or 3
@@ -139,12 +141,29 @@ class DSparkDeepseekV4Model(nn.Module):
                 for i in range(self.num_dspark_layers)
             ]
         )
+        quant_config = vllm_config.quant_config
+        ignored_layers = getattr(quant_config, "ignored_layers", None)
+        wkv_quant_config = (
+            None
+            if quant_config is not None
+            and ignored_layers
+            and hasattr(quant_config, "ignored_layers_match_mode")
+            and is_layer_skipped(
+                prefix=maybe_prefix(
+                    prefix, f"layers.{self.num_hidden_layers}.attn.wkv"
+                ),
+                ignored_layers=ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            )
+            else quant_config
+        )
         self.context_wkv_proj = MergedColumnParallelLinear(
             config.hidden_size,
             [config.head_dim] * self.num_dspark_layers,
             bias=False,
             return_bias=False,
-            quant_config=vllm_config.quant_config,
+            quant_config=wkv_quant_config,
             prefix=maybe_prefix(prefix, "context_wkv_proj"),
             disable_tp=True,
         )
@@ -241,7 +260,7 @@ class DSparkDeepseekV4Model(nn.Module):
             inputs_embeds = sp_shard(inputs_embeds)
             input_ids = sp_shard(input_ids)
         mega_gate_metadata = None
-        if self.use_native_mega_moe:
+        if self.use_mega_gate:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=False,
@@ -352,6 +371,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
+
+    packed_modules_mapping = DeepseekV4ForCausalLM.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -526,6 +547,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                     and loaded_weight.dtype == torch.float8_e8m0fnu
                 ):
                     loaded_weight = loaded_weight.view(torch.uint8)
+                # A checkpoint expert can map to multiple local physical replicas.
+                # Load every local slot or the remaining replicas stay uninitialized.
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
@@ -541,7 +564,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                     )
                     if success:
                         loaded_params.add(name_mapped)
-                        break
                 continue
 
             # Stacked rules only apply to decoder-layer weights. Head-stack params
