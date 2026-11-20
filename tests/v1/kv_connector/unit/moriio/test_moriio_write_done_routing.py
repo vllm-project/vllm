@@ -663,7 +663,6 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     worker._unmatched_write_failures = OrderedDict()
     worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
-    worker._write_recv_unreleased = set()
     worker.get_finished = lambda: (set(), set())  # type: ignore[method-assign]
 
     results = worker.get_transfer_results()

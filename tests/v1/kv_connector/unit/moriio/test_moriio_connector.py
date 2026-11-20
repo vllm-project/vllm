@@ -153,7 +153,7 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler._reqs_need_recv = {}
     scheduler.transfer_id_to_request_id = {}
     scheduler._write_recvs_in_flight = {}
-    scheduler._write_recv_timer_enabled = False
+    scheduler._write_recv_prober = None
     scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
     return scheduler
 
@@ -177,9 +177,7 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler._reqs_need_pending_save = {}
     scheduler._req_kv_params = {}
     scheduler._reqs_need_send = {}
-    scheduler._write_recv_timer_enabled = False
-    scheduler._write_recv_timed_out = set()
-    scheduler._write_recv_held = set()
+    scheduler._write_recv_prober = None
     return scheduler
 
 

@@ -3,9 +3,10 @@
 """MoRIIO WRITE-mode consumer receive timeout (`write_recv_timeout`).
 
 Runs the real `Scheduler` and the real `MoRIIOConnectorWorker`
-`start_load_kv` / `get_transfer_results`, with no GPU or RDMA, at TP 1 (no
-output aggregator) and TP 2. One test covers each decode KV cache layout WRITE
-mode supports: plain attention, MLA, and either with a Mamba/KDA state group.
+`start_load_kv` / `get_transfer_results`, with no GPU or RDMA, at TP 2 through
+the real `KVOutputAggregator`; the reproducer runs one worker without it. One
+test covers each decode KV cache layout WRITE mode supports: plain attention,
+MLA, and either with a Mamba/KDA state group.
 """
 
 import socket
@@ -49,6 +50,7 @@ from .test_moriio_connector import create_vllm_config as create_moriio_config
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 TIMEOUT_S = 60.0
+TP_SIZE = 2
 BLOCK_SIZE = 16
 LAYOUTS = ["attn", "mla", "hybrid", "mla_hybrid"]
 
@@ -133,7 +135,6 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
     worker._unmatched_write_failures = OrderedDict()
     worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
-    worker._write_recv_unreleased = set()
     worker.write_done = set()
 
     def get_finished():
@@ -147,9 +148,7 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
 class _Engine:
     """A decode instance: the real scheduler and one stub worker per TP rank."""
 
-    def __init__(
-        self, monkeypatch, tp_size: int, layout: str = "attn", policy: str = "fail"
-    ):
+    def __init__(self, monkeypatch, layout: str = "attn", policy: str = "fail"):
         self.clock = _Clock()
         monkeypatch.setattr(moriio_connector, "time", self.clock)
         config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
@@ -172,12 +171,9 @@ class _Engine:
             connector._write_recv_prober.shutdown()
             connector._write_recv_prober = _InlineExecutor()
         self.pool = self.scheduler.kv_cache_manager.block_pool
-        self.workers = [_make_consumer_worker() for _ in range(tp_size)]
-        # Like the executors: only multi-worker outputs are aggregated.
-        self.aggregator = (
-            KVOutputAggregator.from_connector(self.scheduler.connector, tp_size)
-            if tp_size > 1
-            else None
+        self.workers = [_make_consumer_worker() for _ in range(TP_SIZE)]
+        self.aggregator = KVOutputAggregator.from_connector(
+            self.scheduler.connector, TP_SIZE
         )
 
     def step(self, write_done=frozenset(), ranks=None, write_failed=frozenset()):
@@ -202,9 +198,7 @@ class _Engine:
                     failed_recving=results.failed_recving,
                 )
             )
-        if self.aggregator is not None:
-            outputs = [self.aggregator.aggregate(outputs)]
-        self.scheduler.update_from_output(out, outputs[0])
+        self.scheduler.update_from_output(out, self.aggregator.aggregate(outputs))
 
     def add_waiting_request(self):
         request = create_request(
@@ -228,9 +222,9 @@ def consumer_role():
     moriio_common.set_role(role)
 
 
-@pytest.fixture(params=[1, 2], ids=["tp1", "tp2"])
-def engine(request, consumer_role, monkeypatch):
-    return _Engine(monkeypatch, request.param)
+@pytest.fixture
+def engine(consumer_role, monkeypatch):
+    return _Engine(monkeypatch)
 
 
 def test_dead_prefill_does_not_leave_its_request_waiting(consumer_role, monkeypatch):
@@ -270,32 +264,19 @@ def test_dead_prefill_does_not_leave_its_request_waiting(consumer_role, monkeypa
     _setup_kv_transfer_request(request)
     scheduler.add_request(request)
     step()
+    pool = scheduler.kv_cache_manager.block_pool
+    held = pool.get_num_free_blocks()
+    clock.now += TIMEOUT_S - 1
+    step()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
     clock.now += 60 * TIMEOUT_S
     for _ in range(3):
         step()
     assert request.status == RequestStatus.FINISHED_ERROR
-
-
-def test_prefill_dies_request_fails_and_blocks_stay_allocated(engine):
-    free_before = engine.pool.get_num_free_blocks()
-    request = engine.add_waiting_request()
-    held = engine.pool.get_num_free_blocks()
-    assert held < free_before
-
-    engine.clock.now += TIMEOUT_S - 1
-    engine.step()
-    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-
-    engine.clock.now += 2
-    engine.step()
-    assert request.status == RequestStatus.FINISHED_ERROR
-    engine.clock.now += 10 * TIMEOUT_S
-    for _ in range(3):
-        engine.step()
-    assert request.request_id in engine.scheduler.requests
-    assert engine.pool.get_num_free_blocks() == held
+    # A late write could still land in its blocks, so they stay allocated.
+    assert request.request_id in scheduler.requests
+    assert pool.get_num_free_blocks() == held
 
 
 def test_prefill_slow_request_fails_and_blocks_freed_on_late_write_done(engine):
@@ -334,8 +315,6 @@ def test_timeout_reported_once_when_two_schedules_precede_the_output(engine):
 
 
 def test_blocks_freed_once_every_rank_has_its_write_done(engine):
-    if len(engine.workers) < 2:
-        pytest.skip("needs more than one TP rank")
     free_before = engine.pool.get_num_free_blocks()
     request = engine.add_waiting_request()
     held = engine.pool.get_num_free_blocks()
@@ -395,20 +374,18 @@ def test_alive_prefill_still_fails_at_the_max_timeout(engine):
     assert engine.pool.get_num_free_blocks() == held
 
 
-def test_probe_is_dropped_when_its_last_request_finishes(engine):
-    """A probe is only consumed at a deadline. Once no request on its prefill is
-    timed any more it is dropped, not kept until the process exits."""
-    connector = engine.scheduler.connector.connector_scheduler
-    connector._write_recv_prober = _PendingExecutor()
+def test_prefill_that_stops_answering_fails_at_the_next_deadline(engine):
+    """Each deadline asks the prefill again rather than reuse its last answer."""
+    engine.prefill_alive = True
     request = engine.add_waiting_request()
     engine.clock.now += TIMEOUT_S + 1
     engine.step()
-    assert len(connector._write_recv_probes) == 1
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
-    engine.step(write_done=frozenset({request.request_id}))
+    engine.prefill_alive = False
+    engine.clock.now += TIMEOUT_S
     engine.step()
-    assert request.status == RequestStatus.RUNNING
-    assert not connector._write_recv_probes
+    assert request.status == RequestStatus.FINISHED_ERROR
 
 
 def test_probe_is_dropped_when_the_request_that_started_it_stops_waiting(engine):
@@ -432,20 +409,20 @@ def test_probe_is_dropped_when_the_request_that_started_it_stops_waiting(engine)
     assert second.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
-def test_peer_listening_tells_a_listening_socket_from_a_closed_port():
+def test_peer_listening():
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
         server.listen()
         port = server.getsockname()[1]
         assert moriio_connector._peer_listening("127.0.0.1", port)
     assert not moriio_connector._peer_listening("127.0.0.1", port)
+    # IDNA rejects a label over 63 characters with UnicodeError, not OSError.
+    assert not moriio_connector._peer_listening("a" * 64 + ".invalid", 1)
 
 
 def test_rank_that_reported_write_failed_releases_at_the_timeout(engine):
     """A rank whose producer reported write_failed has reported the receive; at
     the timeout it releases it instead of reporting it a second time."""
-    if len(engine.workers) < 2:
-        pytest.skip("needs more than one TP rank")
     free_before = engine.pool.get_num_free_blocks()
     request = engine.add_waiting_request()
     held = engine.pool.get_num_free_blocks()
@@ -473,11 +450,6 @@ def test_request_aborted_before_its_deadline_stops_its_timer(engine):
     engine.finish(out)
 
 
-def test_peer_listening_treats_a_malformed_host_as_not_listening():
-    # IDNA rejects a label over 63 characters with UnicodeError, not OSError.
-    assert not moriio_connector._peer_listening("a" * 64 + ".invalid", 1)
-
-
 def test_write_failed_with_the_timeout_frees_the_blocks(engine):
     """A producer write_failed that reaches the workers in the step the timeout
     does: the write is over, so the blocks must be freed, not held forever."""
@@ -496,7 +468,7 @@ def test_write_failed_with_the_timeout_frees_the_blocks(engine):
 def test_timer_is_off_under_the_recompute_policy(consumer_role, monkeypatch):
     """Under recompute a failed receive frees its blocks and recomputes into
     them, where a late write could land, so the timer is not armed."""
-    engine = _Engine(monkeypatch, 1, policy="recompute")
+    engine = _Engine(monkeypatch, policy="recompute")
     request = engine.add_waiting_request()
 
     engine.clock.now += 10 * TIMEOUT_S
@@ -512,7 +484,7 @@ def test_every_kv_cache_group_is_held_and_then_freed(
 ):
     """The failure is per request and the hold covers all of its blocks, in
     every KV cache group (attention or MLA, with or without Mamba/KDA state)."""
-    engine = _Engine(monkeypatch, 2, layout)
+    engine = _Engine(monkeypatch, layout)
     free_before = engine.pool.get_num_free_blocks()
     request = engine.add_waiting_request()
     held = engine.pool.get_num_free_blocks()

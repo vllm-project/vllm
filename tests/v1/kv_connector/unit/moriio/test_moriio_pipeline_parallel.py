@@ -121,7 +121,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler.paths = {}
     scheduler.notified = []
     scheduler.released = []
-    scheduler._write_recv_timer_enabled = False
+    scheduler._write_recv_prober = None
     if not send:
         scheduler.send_notify_block = (  # type: ignore[method-assign]
             lambda **kwargs: scheduler.notified.append(kwargs)
