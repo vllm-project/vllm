@@ -23,11 +23,50 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineLinearMethod
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.linear import KimiRoutedInputLinear
 
 logger = init_logger(__name__)
+
+# The aiter atomic GEMM wins at decode M; addmm_ is faster at prefill M.
+_ATOMIC_MAX_TOKENS = 512
+
+
+def _latent_up_proj_accumulate(
+    latent: torch.Tensor,
+    up_proj_shard: torch.Tensor,
+    shared_output: torch.Tensor,
+    shard_start: int,
+) -> None:
+    hidden_shard = shared_output.narrow(-1, shard_start, up_proj_shard.shape[0])
+    # Gate at run time: the caller is traced with a symbolic batch size.
+    if rocm_aiter_ops.is_linear_enabled() and latent.shape[0] <= _ATOMIC_MAX_TOKENS:
+        from aiter.ops.triton.gemm.basic.gemm_a16w16_atomic import gemm_a16w16_atomic
+
+        gemm_a16w16_atomic(
+            latent, up_proj_shard, hidden_shard.dtype, hidden_shard, accumulate=True
+        )
+    else:
+        hidden_shard.addmm_(latent, up_proj_shard.t())
+
+
+def _latent_up_proj_accumulate_fake(
+    latent: torch.Tensor,
+    up_proj_shard: torch.Tensor,
+    shared_output: torch.Tensor,
+    shard_start: int,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="k3_latent_up_proj_accumulate",
+    op_func=_latent_up_proj_accumulate,
+    mutates_args=["shared_output"],
+    fake_impl=_latent_up_proj_accumulate_fake,
+)
 
 
 class ROCmLatentMoERunner(MoERunner):
@@ -107,11 +146,9 @@ class ROCmLatentMoERunner(MoERunner):
             if self._up_proj_preshard
             else weight.narrow(0, shard_start, shard_size)
         )
-        hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
-
-        # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
-        # beta-add epilogue so folding in the shared partial costs no kernel.
-        hidden_shard.addmm_(latent, up_proj_shard.t())
+        torch.ops.vllm.k3_latent_up_proj_accumulate(
+            latent, up_proj_shard, shared_output, shard_start
+        )
 
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
