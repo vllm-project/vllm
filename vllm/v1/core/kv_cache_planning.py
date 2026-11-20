@@ -1466,9 +1466,7 @@ def get_pipeline_stages(
 
     Args:
         vllm_config: The global VllmConfig.
-        kv_cache_configs: The KV cache config of each worker. They cover every
-            stage: the external launcher, whose engine core plans only its own
-            worker, rejects pipeline parallelism.
+        kv_cache_configs: The KV cache config of each worker.
 
     Returns:
         One `KVCacheStage` per PP rank.

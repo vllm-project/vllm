@@ -872,8 +872,7 @@ class KVCacheConfig:
 
     pipeline_stages: tuple[KVCacheStage, ...] = ()
     """The KV cache of every pipeline stage, by PP rank, resolved by the engine
-    core so that both halves of a KV connector see every stage. Empty only in
-    configs the engine core has not resolved."""
+    core so that both halves of a KV connector see every stage."""
 
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
