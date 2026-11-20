@@ -975,7 +975,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
     ),
     "HYV4VLForConditionalGeneration": _HfExamplesInfo(
-        "placeholder", is_available_online=False
+        "tencent/Hy4",
+        max_model_len=4096,
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
