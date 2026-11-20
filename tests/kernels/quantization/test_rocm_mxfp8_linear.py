@@ -298,8 +298,8 @@ def test_rocm_mxfp8_linear_wide_prefill_tile_matches_dequant_reference(name, n, 
     assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
 
 
-# Short-K shapes for the gfx950 short-K large-prefill tile (unmasked M/N loads):
-# a partial N tile with K divisible by 128 but not 256, and a whole-tile N.
+# Short-K shapes for the gfx950 short-K large-prefill tile: a partial N tile with
+# K divisible by 128 but not 256, and a whole-tile N.
 SHORT_K_SHAPES = [("partial_n_k896", 1153, 896), ("short_k512", 3584, 512)]
 
 

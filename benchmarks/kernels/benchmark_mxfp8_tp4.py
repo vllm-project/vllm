@@ -92,20 +92,7 @@ def launch(module, xq, xs, w, ws, out, config):
     bm, bn, bk, nw, ns = config
     m, k = xq.shape
     n = w.shape[0]
-    kernel = module._mxfp8_linear_kernel
-    extra = {}
-    # A baseline from before the short-K prefill tile has no UNMASKED_LOADS.
-    if "UNMASKED_LOADS" in kernel.arg_names:
-        # As in `_launch`: only that tile loads without M/N masks.
-        extra["UNMASKED_LOADS"] = (
-            module._ON_GFX950
-            and m > 1024
-            and n > 1024
-            and k <= 1024
-            and (bm, bn, bk) == (128, 128, 128)
-            and k % bk == 0
-        )
-    return kernel[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
+    return module._mxfp8_linear_kernel[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
         xq,
         xs,
         w,
@@ -128,7 +115,6 @@ def launch(module, xq, xs, w, ws, out, config):
         TINY=module._TINY,
         num_warps=nw,
         num_stages=ns,
-        **extra,
     )
 
 
