@@ -96,6 +96,8 @@ specify the `name` of one of the tools in the `tool_choice` parameter of the cha
 
 In the Responses API, `tool_choice={"type": "function", "name": "..."}` can select a function inside a namespace by its full `namespace__function` name or by its local name. Names are matched literally first, so a plain function named `other__add` never stands in for `add`. A local name defined in more than one namespace must be selected by its full name.
 
+The Responses API also accepts tools declared in the `input` list through `additional_tools` items (`{"type": "additional_tools", "role": "developer", "tools": [...]}`), as sent by clients such as Codex. vLLM appends their tools to the request's `tools` in input order, so they are offered to the model exactly like top-level tools.
+
 ## Required Function Calling
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Like named function calling, it uses structured outputs and needs a tool parser, with the same server flags and the same exceptions. Without a loaded parser, a request with `tool_choice='required'` returns HTTP 400.
