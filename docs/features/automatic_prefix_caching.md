@@ -20,9 +20,7 @@ With prefix caching enabled, Mamba state is stored only on the Mamba block grid,
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled
-- EAGLE/MTP speculative decoding on the Mamba group
 - `--prefix-match-unit` smaller than the Mamba block size
-- the model does not use multi-module MTP
 
 ```bash
 vllm serve <hybrid-model> \
@@ -62,6 +60,8 @@ FlashInfer ReplaySSM has these limits:
 - `align` requires BF16 model inputs for its replay rings. The SSM state dtype is independent. The example uses FP16 state with stochastic rounding.
 - The logical replay buffer cannot exceed 16 tokens. For speculative decoding, it must contain at least `1 + num_speculative_tokens` tokens.
 - Pipeline parallelism, microbatching, and KV connectors are not supported.
+
+With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports speculative decoding with or without prefix caching. It has the same speculative-decoding buffer requirement and parallelism limits, has no 16-token buffer cap, and does not support stochastic rounding.
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
