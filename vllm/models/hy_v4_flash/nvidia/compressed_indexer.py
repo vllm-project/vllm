@@ -3,7 +3,6 @@
 """Flash coarse-only gated IndexPool with bounded paged FP8 scoring."""
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm import envs
@@ -151,17 +150,10 @@ class FlashCompressedIndexer(nn.Module):
             query, positions[..., :tokens], self.rope_dim, self.rope_parameters
         )
         quant_q, scales_q = fwht_quantize(query.reshape(-1, 128).bfloat16())
-        heads = 32 if self.num_heads <= 32 else 64
-        quant_q = F.pad(
-            quant_q.view(torch.uint8).reshape(tokens, self.num_heads, 128),
-            (0, 0, 0, heads - self.num_heads),
-        ).view(torch.float8_e4m3fn)
+        quant_q = quant_q.reshape(tokens, self.num_heads, 128)
         weights = self.head_weight_projection(hidden_states)[0][:tokens].float()
         weights = weights * (self.num_heads**-0.5 * 128**-0.5)
-        weights = F.pad(
-            weights * scales_q.reshape(tokens, self.num_heads),
-            (0, heads - self.num_heads),
-        )
+        weights = weights * scales_q.reshape(tokens, self.num_heads)
         quant_q = quant_q[:, None]
         mx_scales, weights = mqa_logits_mx_inputs(quant_q, None, weights, torch.float32)
         max_seq_len = (
