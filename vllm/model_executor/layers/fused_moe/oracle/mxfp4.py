@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    gather_rows,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kInt4Static32,
@@ -136,10 +137,8 @@ def _swizzle_cutlass_mxfp4_scales(scale: torch.Tensor) -> torch.Tensor:
         swizzle_mxfp4_scales,
     )
 
-    n, scale_k = scale.shape[1:]
-    return torch.stack(
-        [swizzle_mxfp4_scales(s, n, scale_k * 32).reshape(n, scale_k) for s in scale]
-    )
+    e, n, scale_k = scale.shape
+    return swizzle_mxfp4_scales(scale, n, scale_k * 32).reshape(e, n, scale_k)
 
 
 class Mxfp4MoeBackend(Enum):
@@ -1056,121 +1055,44 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         w13_bias = w13_bias.data.to(torch.float32)
         w2_bias = w2_bias.data.to(torch.float32)
 
-        # Swap w1 and w3 as the definition of swiglu is different in trtllm-gen
-        def swap_every_two_rows(x, axis=-1):
-            shape = x.shape
-            if axis < 0:
-                axis = len(shape) + axis
-            new_shape = list(shape)
-            new_shape[axis] = shape[axis] // 2
-            new_shape.insert(axis + 1, 2)
-            x = x.reshape(*new_shape)
-            x = x.flip(axis + 1)
-            new_shape = list(shape)
-            return x.reshape(*new_shape)
-
-        w13_weight_scale = swap_every_two_rows(w13_weight_scale, -2)
-        w13_weight = swap_every_two_rows(w13_weight, -2)
-        w13_bias = swap_every_two_rows(w13_bias, -1)
-
-        # Shuffle weights and scaling factors for transposed mma output
-        gemm1_weights_shuffled = []
-        gemm1_scales_shuffled = []
-        gemm2_weights_shuffled = []
-        gemm2_scales_shuffled = []
-        gemm1_bias_shuffled = []
-        gemm2_bias_shuffled = []
+        # trtllm-gen's swiglu takes w3 before w1: swap every two rows of w13,
+        # then shuffle for transposed mma output. Every expert has the same
+        # shape, so one index (swap folded in) gathers all experts at once.
+        dev = w13_weight.device
         epilogue_tile_m = 128
-        for i in range(num_experts):
-            # w13 weight
-            permute_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w13_weight[i].view(torch.uint8),
-                epilogue_tile_m,
-            )
-            gemm1_weights_shuffled.append(
-                w13_weight[i]
-                .view(torch.uint8)[permute_indices.to(w13_weight.device)]
-                .contiguous()
-            )
-            # w13 scale
-            permute_sf_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w13_weight_scale[i].view(torch.uint8),
-                epilogue_tile_m,
-                num_elts_per_sf=16,
-            )
-            gemm1_scales_shuffled.append(
-                nvfp4_block_scale_interleave(
-                    w13_weight_scale[i]
-                    .view(torch.uint8)[permute_sf_indices.to(w13_weight_scale.device)]
-                    .contiguous()
-                )
-            )
-            # w13 bias
-            permute_bias_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w13_bias[i].clone().reshape(-1, 1),
-                epilogue_tile_m,
-            )
-            gemm1_bias_shuffled.append(
-                w13_bias[i]
-                .clone()
-                .reshape(-1, 1)[permute_bias_indices.to(w13_bias.device)]
-                .contiguous()
-            )
-            # w2 weight
-            permute_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w2_weight[i].view(torch.uint8),
-                epilogue_tile_m,
-            )
-            gemm2_weights_shuffled.append(
-                w2_weight[i]
-                .view(torch.uint8)[permute_indices.to(w2_weight.device)]
-                .contiguous()
-            )
-            # w2 scale
-            permute_sf_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w2_weight_scale[i].view(torch.uint8),
-                epilogue_tile_m,
-                num_elts_per_sf=16,
-            )
-            gemm2_scales_shuffled.append(
-                nvfp4_block_scale_interleave(
-                    w2_weight_scale[i]
-                    .view(torch.uint8)[permute_sf_indices.to(w2_weight_scale.device)]
-                    .contiguous()
-                )
-            )
-            # w2 bias
-            permute_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w2_bias[i].clone().reshape(-1, 1),
-                epilogue_tile_m,
-            )
-            gemm2_bias_shuffled.append(
-                w2_bias[i]
-                .clone()
-                .reshape(-1, 1)[permute_indices.to(w2_bias.device)]
-                .contiguous()
-            )
+        rows = 2 * intermediate_size
+        swap = torch.arange(rows, device=dev) ^ 1
 
-        w13_weight = torch.stack(gemm1_weights_shuffled)
+        def perm(t: torch.Tensor, **kw) -> torch.Tensor:
+            return get_w2_permute_indices_with_cache(
+                _cache_permute_indices, t, epilogue_tile_m, **kw
+            ).to(dev)
+
+        w13_perm = swap[perm(w13_weight[0].view(torch.uint8))]
+        w13_sf_perm = swap[
+            perm(w13_weight_scale[0].view(torch.uint8), num_elts_per_sf=16)
+        ]
+        w13_b_perm = swap[perm(w13_bias[0].reshape(-1, 1)).reshape(-1)]
+        w2_perm = perm(w2_weight[0].view(torch.uint8))
+        w2_sf_perm = perm(w2_weight_scale[0].view(torch.uint8), num_elts_per_sf=16)
+        w2_b_perm = perm(w2_bias[0].reshape(-1, 1)).reshape(-1)
+
+        w13_weight = gather_rows(w13_weight, w13_perm)
+        w2_weight = gather_rows(w2_weight, w2_perm)
+        w13_s = gather_rows(w13_weight_scale, w13_sf_perm)
+        w2_s = gather_rows(w2_weight_scale, w2_sf_perm)
         w13_weight_scale = (
-            torch.stack(gemm1_scales_shuffled)
+            nvfp4_block_scale_interleave(w13_s)
             .reshape(num_experts, 2 * intermediate_size, hidden_size // sf_block_size)
             .view(torch.float8_e4m3fn)
         )
-        w2_weight = torch.stack(gemm2_weights_shuffled)
         w2_weight_scale = (
-            torch.stack(gemm2_scales_shuffled)
+            nvfp4_block_scale_interleave(w2_s)
             .reshape(num_experts, hidden_size, intermediate_size // sf_block_size)
             .view(torch.float8_e4m3fn)
         )
-        w13_bias = torch.stack(gemm1_bias_shuffled).reshape(num_experts, -1)
-        w2_bias = torch.stack(gemm2_bias_shuffled).reshape(num_experts, -1)
+        w13_bias = w13_bias[:, w13_b_perm].contiguous()
+        w2_bias = w2_bias[:, w2_b_perm].contiguous()
 
         return (
             w13_weight,
@@ -1718,17 +1640,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         # Swap w1/w3 and interleave to match TRTLLM SwiGLU convention.
         # Standard loading gives contiguous [w1/gate, w3/up].
         # TRTLLM kernel expects interleaved [w3_0, w1_0, w3_1, w1_1, ...].
-        w1_weight = w13_weight[:, :intermediate_size, :]
-        w3_weight = w13_weight[:, intermediate_size:, :]
-        w13_weight = torch.stack([w3_weight, w1_weight], dim=2).reshape(
-            w13_weight.shape
-        )
-
-        w1_scale = w13_weight_scale[:, :intermediate_size, :]
-        w3_scale = w13_weight_scale[:, intermediate_size:, :]
-        w13_weight_scale = torch.stack([w3_scale, w1_scale], dim=2).reshape(
-            w13_weight_scale.shape
-        )
+        # Interleaved row 2i is w3 row i (loaded row I + i), row 2i + 1 is w1
+        # row i; folded into the shuffle below so each tensor is gathered once.
+        rows = torch.arange(intermediate_size, device=w13_weight.device)
+        interleave = torch.stack([rows + intermediate_size, rows], dim=1).reshape(-1)
 
         if w13_bias is not None:
             b1 = w13_bias[:, :intermediate_size]
@@ -1746,7 +1661,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_weight[0].view(torch.uint8),
             epilogue_tile_m,
         ).to(w13_weight.device)
-        w13_weight = w13_weight.view(torch.uint8)[:, w13_perm].contiguous()
+        w13_weight = gather_rows(w13_weight, interleave[w13_perm])
 
         # w13 scale permute + interleave
         w13_sf_perm = get_w2_permute_indices_with_cache(
@@ -1755,7 +1670,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             epilogue_tile_m,
             num_elts_per_sf=16,
         ).to(w13_weight_scale.device)
-        w13_s = w13_weight_scale.view(torch.uint8)[:, w13_sf_perm].contiguous()
+        w13_s = gather_rows(w13_weight_scale.view(torch.uint8), interleave[w13_sf_perm])
         E, N_s, K_s = w13_s.shape
         w13_weight_scale = (
             nvfp4_block_scale_interleave(w13_s.reshape(E * N_s, K_s))
@@ -1769,7 +1684,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_weight[0].view(torch.uint8),
             epilogue_tile_m,
         ).to(w2_weight.device)
-        w2_weight = w2_weight.view(torch.uint8)[:, w2_perm].contiguous()
+        w2_weight = gather_rows(w2_weight, w2_perm)
 
         # w2 scale permute + interleave
         w2_sf_perm = get_w2_permute_indices_with_cache(
@@ -1778,7 +1693,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             epilogue_tile_m,
             num_elts_per_sf=16,
         ).to(w2_weight_scale.device)
-        w2_s = w2_weight_scale.view(torch.uint8)[:, w2_sf_perm].contiguous()
+        w2_s = gather_rows(w2_weight_scale, w2_sf_perm)
         E2, N2_s, K2_s = w2_s.shape
         w2_weight_scale = (
             nvfp4_block_scale_interleave(w2_s.reshape(E2 * N2_s, K2_s))
