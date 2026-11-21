@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed.parallel_state import in_single_pp_stage
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -151,16 +151,21 @@ class EagleMistralLarge3ForCausalLM(
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        vllm_config.model_config = speculative_config.draft_model_config
         # draft model quantization config may differ from target model
-        self.quant_config = VllmConfig.get_quantization_config(
+        draft_quant_config = VllmConfig.get_quantization_config(
             speculative_config.draft_model_config, vllm_config.load_config
         )
-        vllm_config.quant_config = self.quant_config
+        draft_vllm_config = replace(
+            vllm_config,
+            model_config=speculative_config.draft_model_config,
+            quant_config=draft_quant_config,
+        )
+        self.quant_config = draft_quant_config
         self.model_cls = partial(
             EagleMistralLarge3Model, start_layer_id=target_layer_num
         )
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        with set_current_vllm_config(draft_vllm_config, prefix=prefix):
+            super().__init__(vllm_config=draft_vllm_config, prefix=prefix)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.model
