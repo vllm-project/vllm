@@ -66,14 +66,6 @@ _INDEXER_COMPILE = dict(
 
 
 @torch.compile(**_INDEXER_COMPILE)
-def _fused_indexer_k_norm(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, dim: int, eps: float
-) -> torch.Tensor:
-    # Fuse fp32 cast + layer_norm + cast-back (was 3 kernels) into one.
-    return F.layer_norm(x.float(), (dim,), weight, bias, eps).type_as(x)
-
-
-@torch.compile(**_INDEXER_COMPILE)
 def _fused_indexer_weight_scale(
     weights: torch.Tensor, q_scale: torch.Tensor, scale: float
 ) -> torch.Tensor:
@@ -345,9 +337,9 @@ class Indexer(nn.Module):
 
         k, weights = self.wk_weights_proj(hidden_states)
 
-        k = _fused_indexer_k_norm(
-            k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
-        )
+        # Replicated keys must agree across TP ranks. Inductor autotuning can
+        # select different reduction orders, changing near-tie pool selections.
+        k = self.k_norm(k)
 
         if self.rope_dim > 0:
             q_pe, q_nope = torch.split(
