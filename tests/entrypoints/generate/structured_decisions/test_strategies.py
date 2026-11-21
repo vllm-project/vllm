@@ -46,6 +46,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
     ClefFlashStrategy,
     D3Strategy,
     DiffusionGemmaCanvasStrategy,
+    GlideStrategy,
     JointSchemaStrategy,
     LiquidStrategy,
     NextTokenStrategy,
@@ -128,6 +129,8 @@ def test_strategy_selection():
     assert select_read_strategy(clef_flash, ("token_classify",)) is ClefFlashStrategy
     d3 = model("D3ForSequenceClassification", "raw_logits")
     assert select_read_strategy(d3, ("classify",)) is D3Strategy
+    glide = model("GlideForSequenceClassification", "raw_logits")
+    assert select_read_strategy(glide, ("classify",)) is GlideStrategy
 
 
 def test_route_is_registered_by_default():
@@ -938,6 +941,53 @@ async def test_d3_rejects_instructions(d3):
     assert isinstance(response, ErrorResponse)
     assert response.error.code == 400
     engine.encode.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_glide_reads_the_checkpoint_prompt(engine_and_renderer):
+    """GLiDE shares Decision 3.0's code readout but writes its own prompt: a
+    noul's true option comes first and the read is at the answer's bracket."""
+    engine, online_renderer = engine_and_renderer
+    context = ReadContext(engine, online_renderer, None, "auto", {})
+    decision = {"format_version": 1, "codes": ["A", "B", "C"], "token_ids": [0, 1, 2]}
+    engine.model_config.hf_config.decision_config = decision
+    with pytest.raises(ValueError, match="unknown decision prompt_format"):
+        GlideStrategy(context)
+    decision["prompt_format"] = "glide-v1"
+    tokenizer = online_renderer.renderer.get_tokenizer()
+
+    async def encode(prompt, params, request_id, **kwargs):
+        text = tokenizer.decode(prompt["prompt_token_ids"])
+        question = text.split("Question: ", 1)[1].split("\n", 1)[0]
+        probs = D3_PROBS.get(question, [0.1, 0.6, 0.3])
+        logits = torch.full((255,), 100.0)
+        logits[: len(probs)] = torch.tensor(probs).log()
+        yield PoolingRequestOutput(
+            request_id, PoolingOutput(logits), prompt["prompt_token_ids"], 0, True
+        )
+
+    engine.encode.side_effect = encode
+    response = await serving(engine, GlideStrategy(context)).create_decision(
+        StructuredDecisionRequest(**D3_REQUEST)
+    )
+    assert isinstance(response, StructuredDecisionResponse)
+
+    texts = [
+        tokenizer.decode(call.args[0]["prompt_token_ids"])
+        for call in engine.encode.call_args_list
+    ]
+    assert texts[0] == (
+        "<|im_start|>user\nContext:\nMy card was charged twice.\n\n"
+        "Question: Which team?\n\nOptions:\n"
+        "(A) billing: payments\n(B) shipping: deliveries\n(C) x\n\n"
+        "Think it through briefly, then answer with the option letter only."
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer: ("
+    )
+    assert "Options:\n(A) true: Yes\n(B) false: No\n\n" in texts[1]
+    assert "Options:\n(A) 0: calm\n(B) 1: annoyed\n(C) 2: furious\n\n" in texts[2]
+    assert response.answers["team"]["choice"] == "shipping"
+    assert response.answers["urgent"]["noul"] == pytest.approx(0.25)
+    assert response.answers["tone"]["score"] == pytest.approx(1.2)
 
 
 @pytest.mark.parametrize(

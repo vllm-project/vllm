@@ -1632,10 +1632,93 @@ class SlotLMStrategy(NextTokenStrategy):
         ]
 
 
+class GlideStrategy(D3Strategy):
+    """GLiDE code-readout models, read like Decision 3.0 but with the prompt
+    the checkpoint's `glide/prompt.py` writes: a user turn with the state, the
+    question and one line per option under an answer code, then an assistant
+    turn with an empty thought that stops at the answer's opening bracket."""
+
+    modalities = frozenset({"image"})
+
+    PROMPT_FORMAT = "glide-v1"
+    REASONING_EFFORT = "medium"
+    CLOSING_LINE = "Think it through briefly, then answer with the option letter only."
+    THINK = "<think>"
+    ANSWER_CUE = "\n</think>\n\nAnswer: ("
+    IMAGE = "<|vision_start|><|image_pad|><|vision_end|>"
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        decision = context.engine_client.model_config.hf_config.decision_config
+        if decision.get("prompt_format") != self.PROMPT_FORMAT:
+            raise ValueError(
+                f"unknown decision prompt_format {decision.get('prompt_format')!r}"
+            )
+
+    def render_state(self, state: Any) -> str:
+        return state_text(state)
+
+    def _options(self, q: Question) -> tuple[list[str], list[int]]:
+        if q.type.name == "noul":
+            yes, no = q.options
+            texts = [
+                f"true: {yes.description or 'Yes'}",
+                f"false: {no.description or 'No'}",
+            ]
+        elif q.type.name == "choice":
+            if any(not o.name for o in q.options):
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: option names must be non-empty"
+                )
+            texts = [
+                o.name
+                if not o.description or o.description == o.name
+                else f"{o.name}: {o.description}"
+                for o in q.options
+            ]
+        elif q.type.name == "score":
+            texts = [
+                str(level) if o.name == str(level) else f"{level}: {o.name}"
+                for level, o in enumerate(q.options)
+            ]
+        else:
+            raise StructuredDecisionError(
+                f"question {q.id!r}: this model does not answer {q.type.name!r} "
+                "questions"
+            )
+        return texts, list(range(len(texts)))
+
+    def _prompt(self, state: str, q: Question, media: Sequence[str]) -> str:
+        texts, _ = self._options(q)
+        if media:
+            state = self.IMAGE * len(media) + "\n" + state
+        lines = [f"({code}) {text}" for code, text in zip(self.codes, texts)]
+        body = (
+            (
+                f"Context:\n{state}\n\nQuestion: {q.instructions or ''}\n\nOptions:\n"
+                + "\n".join(lines)
+            ).rstrip()
+            + "\n\n"
+            + self.CLOSING_LINE
+        )
+        prompt = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": body}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+            reasoning_effort=self.REASONING_EFFORT,
+        )
+        assert isinstance(prompt, str)
+        if not prompt.rstrip().endswith(self.THINK):
+            prompt += self.THINK + "\n"
+        return prompt + self.ANSWER_CUE
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
     "D3ForSequenceClassification": D3Strategy,
+    "GlideForSequenceClassification": GlideStrategy,
     "Gemma4ForCausalLM": NextTokenStrategy,
     "Gemma4ForConditionalGeneration": NextTokenStrategy,
     "Gemma4UnifiedForConditionalGeneration": NextTokenStrategy,

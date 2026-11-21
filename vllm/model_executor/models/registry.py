@@ -340,6 +340,7 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     ),
     # [Multimodal]
     "D3ForSequenceClassification": ("d3", "D3ForSequenceClassification"),
+    "GlideForSequenceClassification": ("glide", "GlideForSequenceClassification"),
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
     "LlamaNemotronVLForSequenceClassification": (
         "nemotron_vl",
