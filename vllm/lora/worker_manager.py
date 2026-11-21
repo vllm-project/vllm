@@ -116,11 +116,18 @@ class WorkerLoRAManager:
                 if module == "experts":
                     expected_lora_lst.append(module)
             expected_lora_modules = set(expected_lora_lst)
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
-
-            peft_helper = PEFTHelper.from_local_dir(
-                lora_path, self.max_position_embeddings
-            )
+            if lora_request.lora_tensors is None:
+                lora_path = get_adapter_absolute_path(lora_request.lora_path)
+                peft_helper = PEFTHelper.from_local_dir(
+                    lora_path, self.max_position_embeddings
+                )
+            else:
+                peft_helper = PEFTHelper.from_dict(
+                    {
+                        **(lora_request.peft_config or {}),
+                        "vllm_max_position_embeddings": self.max_position_embeddings,
+                    }
+                )
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -137,19 +144,33 @@ class WorkerLoRAManager:
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
 
-            lora = self._lora_model_cls.from_local_checkpoint(
-                lora_path,
-                expected_lora_modules,
-                peft_helper=peft_helper,
-                lora_model_id=lora_request.lora_int_id,
-                device="cpu",
-                dtype=self.lora_config.lora_dtype,
-                model_vocab_size=self.vocab_size,
-                weights_mapper=hf_to_vllm_mapper,
-                skip_prefixes=lora_skip_prefixes,
-                moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
-                unsupported_lora_modules=self._adapter_manager.unsupported_lora_modules,
-            )
+            if lora_request.lora_tensors is not None:
+                lora = self._lora_model_cls.from_lora_tensors(
+                    lora_model_id=lora_request.lora_int_id,
+                    tensors=lora_request.lora_tensors,
+                    peft_helper=peft_helper,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                )
+            else:
+                lora = self._lora_model_cls.from_local_checkpoint(
+                    lora_path,
+                    expected_lora_modules,
+                    peft_helper=peft_helper,
+                    lora_model_id=lora_request.lora_int_id,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                    moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
+                    unsupported_lora_modules=(
+                        self._adapter_manager.unsupported_lora_modules
+                    ),
+                )
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.

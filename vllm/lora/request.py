@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
 
 import msgspec
 
@@ -33,6 +34,10 @@ class LoRARequest(
     tensors per expert). Only consulted when the engine is started with
     `enable_mixed_moe_lora_format=True`; otherwise it is ignored and the
     on-disk format is inferred from the base model."""
+    lora_tensors: dict[str, Any] | None = None
+    """In-memory adapter weights, loaded instead of `lora_path` by an
+    in-process `add_lora`; `peft_config` then holds the adapter config."""
+    peft_config: dict[str, Any] | None = None
 
     def __post_init__(self):
         if self.lora_int_id < 1:
