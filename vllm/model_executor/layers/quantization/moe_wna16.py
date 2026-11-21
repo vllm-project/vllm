@@ -33,6 +33,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    is_moe_layer_gptq_quantized,
+    match_dynamic_override,
     normalize_and_validate_gptq_desc_act,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -216,6 +218,14 @@ class MoeWNA16Config(QuantizationConfig):
             linear_config.packed_modules_mapping = self.packed_modules_mapping
             return linear_config.get_quant_method(layer, prefix)
         elif isinstance(layer, RoutedExperts):
+            # Honour the checkpoint's exclusions the way AutoGPTQ does.
+            dynamic = self.full_config.get("dynamic") or {}
+            if match_dynamic_override(dynamic, layer_name=prefix) is False or (
+                not is_moe_layer_gptq_quantized(
+                    prefix, self.full_config.get("modules_in_block_to_quantize") or []
+                )
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             return MoeWNA16Method(self, layer.moe_config)
         return None
 

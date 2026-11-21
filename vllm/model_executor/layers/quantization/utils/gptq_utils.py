@@ -88,7 +88,19 @@ def get_dynamic_override(
     key: str | None = None,
     default_value: int | bool | None = None,
 ) -> dict | int | bool | None:
-    for pattern, pattern_dict in config.dynamic.items():
+    return match_dynamic_override(
+        config.dynamic, layer_name, key=key, default_value=default_value
+    )
+
+
+def match_dynamic_override(
+    dynamic: Mapping[str, Any],
+    layer_name: str,
+    key: str | None = None,
+    default_value: int | bool | None = None,
+) -> dict | int | bool | None:
+    """First `-:` match excludes a layer; a positive rule listed earlier wins."""
+    for pattern, pattern_dict in dynamic.items():
         # Negative match: matched modules are excluded from quantized init
         if pattern.startswith("-:"):
             if re.match(pattern.removeprefix("-:"), layer_name):
