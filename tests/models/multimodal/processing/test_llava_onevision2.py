@@ -29,7 +29,10 @@ from vllm.model_executor.models.llava_onevision2 import (
     _validate_video_source,
     prepare_codec_video_input,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.video import VideoSourceMetadata, VideoTargetMetadata
+
+from ...utils import build_model_context
 
 
 def _model_config(local: str = "", domains=None):
@@ -300,3 +303,20 @@ def test_backend_target_fps_controls_sampling_when_below_cap():
     # fps-derived nframes (2) is below the 128 cap, so fps wins.
     assert len(idx) <= 8
     assert len(idx) % 2 == 0
+
+
+@pytest.mark.parametrize("max_model_len", [8192, 20000, 32768, 65536])
+def test_dummy_video_matches_video_budget(max_model_len: int):
+    ctx = build_model_context(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    budget = processor.info.get_mm_max_tokens_per_item(max_model_len, {"video": 1})
+    assert budget is not None
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
+
+    assert num_embeds == budget["video"]
