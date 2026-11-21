@@ -70,10 +70,59 @@ def _moe_layer(vllm_config):
     return moe
 
 
+# AITER configs a tuned row can select whose stages the decode MoE cannot launch:
+# a fused-quant stage 1 (quantized rows and scales), another stage-2 kernel, a
+# one-stage kernel and a whole-graph config.
+UNLAUNCHABLE_CONFIGS = ["fused_quant_stage1", "cktile_stage2", "one_stage", "graph"]
+
+
+def _offer_unlaunchable_config(kind: str) -> None:
+    """Make AITER's config lookup offer `kind` to the decode MoE (the lookup that
+    asks for stages over its own pre-quantized rows); other callers keep the
+    installed configs."""
+    import functools
+
+    import aiter.fused_moe as fm
+
+    lookup = fm.get_2stage_cfgs
+    name1 = "flydsl_moe1_afp4_wfp4_bf16_t32x128x256_w2"
+    name2 = "flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic_bnt2"
+    stage1 = functools.partial(fm._flydsl_stage1_wrapper, kernelName=name1)
+    stage2 = functools.partial(fm._flydsl_stage2_wrapper, kernelName=name2)
+    fused1 = functools.partial(fm._flydsl_stage1_wrapper, kernelName=f"{name1}_fp4")
+    metadata = {
+        "fused_quant_stage1": fm.MOEMetadata(fused1, stage2, 32, 0, fuse_quant="fp4"),
+        "cktile_stage2": fm.MOEMetadata(
+            stage1, functools.partial(fm.cktile_moe_stage2), 32, 0
+        ),
+        "one_stage": fm.MOEMetadata(
+            functools.partial(fm.fused_moe_1stage, kernelName="fmoe_g1u1_fp4"),
+            None,
+            32,
+            0,
+            True,
+        ),
+        "graph": fm.MOEMetadata(None, None, 32, 0),
+    }[kind]
+
+    def offer(*args, **kwargs):
+        if kwargs.get("has_activation_scales"):
+            return metadata
+        return lookup(*args, **kwargs)
+
+    fm.get_2stage_cfgs = offer
+
+
 def decode_moe_matches_the_per_route_path(
-    env: dict[str, str], world_size: int, checkpoint: str, sizes: list[int]
+    env: dict[str, str],
+    world_size: int,
+    checkpoint: str,
+    sizes: list[int],
+    config_kind: str | None = None,
 ) -> None:
     set_env_vars_and_device(env)
+    if config_kind is not None:
+        _offer_unlaunchable_config(config_kind)
     from vllm.config import set_current_vllm_config
     from vllm.distributed.parallel_state import ensure_model_parallel_initialized
     from vllm.forward_context import set_forward_context
@@ -97,7 +146,8 @@ def decode_moe_matches_the_per_route_path(
     outputs = []
     with torch.inference_mode():
         for num_tokens in sizes:
-            assert moe.decode_moe.kernels(moe, num_tokens) is not None
+            if config_kind is None:
+                assert moe.decode_moe.kernels(moe, num_tokens) is not None
             x = torch.randn(
                 MAX_TOKENS + 1, TEXT["hidden_size"], device="cuda", generator=generator
             ).to(torch.bfloat16)
@@ -117,11 +167,13 @@ def decode_moe_matches_the_per_route_path(
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("config_kind", [None, *UNLAUNCHABLE_CONFIGS])
 def test_muse_spark_decode_moe_matches_the_per_route_path(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, config_kind: str | None
 ) -> None:
     """All-reduced and token-sharded (reduce-scattered) MoE outputs of the decode
-    MoE equal the per-route path's."""
+    MoE equal the per-route path's, also when AITER offers it stages it cannot
+    launch."""
     from vllm.platforms.rocm import on_gfx950
 
     if not on_gfx950():
@@ -132,5 +184,6 @@ def test_muse_spark_decode_moe_matches_the_per_route_path(
         decode_moe_matches_the_per_route_path,
         2,
         str(tmp_path),
-        [1, 8, 37, 512, 513, 2048],
+        [1, 8, 37, 512, 513, 2048] if config_kind is None else [8, 513],
+        config_kind,
     )

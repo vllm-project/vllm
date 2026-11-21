@@ -41,7 +41,7 @@ def _truncated_reason(exc: Exception) -> str:
 
 def safe_load_prompt_embeds(
     model_config: "ModelConfig",
-    embed: bytes,
+    embed: bytes | str,
 ) -> torch.Tensor:
     if not model_config.enable_prompt_embeds:
         raise VLLMValidationError(

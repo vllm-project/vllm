@@ -628,6 +628,18 @@ def parse_chat_message_content(
             mm_processor_kwargs=mm_processor_kwargs,
         )[0]["content"]
 
+    if role == "assistant":
+        refusal = message.get("refusal")
+        if isinstance(refusal, str) and refusal:
+            if content is not None and not isinstance(content, str):
+                content = list(content)
+            if not content:
+                content = [
+                    ChatCompletionContentPartRefusalParam(
+                        type="refusal", refusal=refusal
+                    )
+                ]
+
     if content is None:
         content = []
     elif isinstance(content, str):

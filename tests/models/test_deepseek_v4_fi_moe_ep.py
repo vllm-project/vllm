@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts import flashinfer_moe_ep as fi_experts
@@ -47,9 +48,11 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     FLASHINFER_MOE_EP_MXFP4_BACKENDS,
     Mxfp4MoeBackend,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_quant_config,
     map_mxfp4_backend,
     mxfp4_round_up_hidden_size_and_intermediate_size,
+    select_deepseek_v4_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     backend_to_kernel_cls as mxfp4_backend_to_kernel_cls,
@@ -249,15 +252,26 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
     assert reason.endswith("EPLB")
 
 
-def test_sm107_admits_only_nvfp4_cutedsl(monkeypatch, megakernel_host):
-    """SM107 runs the CuTeDSL megakernel for NVFP4 checkpoints only."""
+def test_sm107_admits_cutedsl_and_refuses_deep_gemm(monkeypatch, megakernel_host):
+    """SM107 runs the CuTeDSL megakernel for NVFP4 and MXFP4 checkpoints, and
+    MXFP4 layers select it; the DeepGEMM megakernel stays on SM100/SM103."""
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
 
-    cutedsl = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+    cutedsl = _megakernel_moe(
+        FLASHINFER_MOE_EP_CUTEDSL,
+        activation_format=mk.FusedMoEActivationFormat.Standard,
+    )
     assert _is_supported(cutedsl, kNvfp4Static, kNvfp4Dynamic) == (True, "")
-    for backend in (FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM):
-        supported, reason = _is_supported(_megakernel_moe(backend), kMxfp4Static, None)
-        assert not supported and "MXFP4 weights on this GPU" in reason
+    assert select_deepseek_v4_mxfp4_moe_backend(cutedsl) == (
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
+        FlashInferMoeEpExperts,
+    )
+    deep_gemm = _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM)
+    supported, reason = _is_supported(deep_gemm, kMxfp4Static, None)
+    assert not supported and "MXFP4 weights on this GPU" in reason
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert _is_supported(deep_gemm, kMxfp4Static, None) == (True, "")
 
 
 def test_sm107_refuses_eplb(monkeypatch, megakernel_host):
@@ -266,6 +280,8 @@ def test_sm107_refuses_eplb(monkeypatch, megakernel_host):
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
     _, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
+    assert reason.endswith("EPLB on SM107")
+    _, reason = _is_supported(moe, kMxfp4Static, None)
     assert reason.endswith("EPLB on SM107")
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
@@ -339,6 +355,10 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
         FLASHINFER_MOE_EP_CUTEDSL, routing_method=RoutingMethodType.Renormalize
     )
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=None, w2_scale=None, block_shape=[128, 128]
+    )
+    assert fi_ep.sm90_weight_format(quant_config) == "fp8_block"
     assert _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym) == (
         True,
         "",
@@ -347,6 +367,7 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
     assert "NVFP4 weights on this GPU" in reason
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert fi_ep.sm90_weight_format(quant_config) is None
     _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym)
     assert "FP8_BLOCK weights on this GPU" in reason
 
@@ -358,6 +379,43 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
     _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8StaticTensorSym)
     assert "with block FP8" in reason
+
+
+def test_mxfp4_weights_run_packed_on_hopper_without_eplb(
+    megakernel_host, monkeypatch: pytest.MonkeyPatch
+):
+    """Hopper runs MXFP4 checkpoints on the CuTeDSL megakernel as loaded.
+
+    FlashInfer keeps a per-expert scale of those weights that EPLB cannot move,
+    so EPLB is rejected. FlashInfer's DeepGEMM kernel targets Blackwell.
+    """
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    cutedsl = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+    assert _is_supported(cutedsl, kMxfp4Static, None) == (True, "")
+    _, reason = _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
+    )
+    assert "FlashInfer DeepGEMM kernel on Hopper" in reason
+
+    tensors = tuple(torch.zeros(2, 2, dtype=torch.uint8) for _ in range(4))
+    weights = fi_ep.mxfp4_moe_ep_weights(FLASHINFER_MOE_EP_CUTEDSL, *tensors)
+    assert all(
+        out is src
+        for out, src in zip(
+            (weights.w13, weights.w2, weights.w13_scale, weights.w2_scale), tensors
+        )
+    )
+    quant_config = make_mxfp4_moe_quant_config(
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, w1_scale=None, w2_scale=None
+    )
+    assert fi_ep.sm90_weight_format(quant_config) == "mxfp4"
+
+    megakernel_host.parallel_config.enable_eplb = True
+    _, reason = _is_supported(cutedsl, kMxfp4Static, None)
+    assert reason.endswith("EPLB")
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert _is_supported(cutedsl, kMxfp4Static, None) == (True, "")
+    assert fi_ep.sm90_weight_format(quant_config) is None
 
 
 def test_megakernels_are_oracle_backends():
@@ -479,6 +537,34 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
         is_act_and_mul=True,
     )
     assert all(out is src for out, src in zip(converted, tensors))
+
+
+def test_mxfp4_kernel_format_passes_megakernel_weights_through_on_sm107(monkeypatch):
+    """SM107 takes MXFP4 experts as stored; SM100/SM103 still get bf16."""
+    w13 = torch.zeros(2, 64, 32, dtype=torch.uint8)
+    w2 = torch.zeros(2, 64, 16, dtype=torch.uint8)
+    w13_scale = torch.full((2, 64, 2), 127, dtype=torch.uint8)
+    w2_scale = torch.full((2, 64, 1), 127, dtype=torch.uint8)
+    # E2M1 1.0 in the low nibble of the first byte, at block scale 2**1.
+    w13[0, 0, 0] = 0x02
+    w13_scale[0, 0, 0] = 128
+    tensors = (w13, w2, w13_scale, w2_scale)
+
+    def convert():
+        return convert_weight_to_mxfp4_moe_kernel_format(
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, torch.nn.Module(), *tensors
+        )
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+    assert all(out is src for out, src in zip(convert(), tensors))
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    w13_out, w2_out, w13_scale_out, w2_scale_out, _, _ = convert()
+    expected_w13 = torch.zeros(2, 64, 64, dtype=torch.bfloat16)
+    expected_w13[0, 0, 0] = 2.0
+    assert torch.equal(w13_out, expected_w13)
+    assert torch.equal(w2_out, torch.zeros(2, 64, 32, dtype=torch.bfloat16))
+    assert w13_scale_out is None and w2_scale_out is None
 
 
 def test_passthrough_all2all_backend_selects_the_pass_through_stages():

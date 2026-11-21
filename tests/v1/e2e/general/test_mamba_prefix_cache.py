@@ -559,7 +559,7 @@ def _run_mamba_prefix_cache_mrv2(
 ):
     backend = additional_config["gdn_prefill_backend"]
     internal_checkpoints = backend == "flashinfer" or (
-        backend == "triton" and current_platform.is_cuda()
+        backend == "triton" and current_platform.is_cuda_alike()
     )
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
