@@ -23,6 +23,15 @@ For further details on generative models, please refer to [this page](../models/
 - `LLM.enqueue_chat` - Enqueues chat conversations for generation without waiting.
 - `LLM.wait_for_completion` - Waits for all enqueued requests to complete and returns results.
 
+## Streaming Outputs
+
+For Python streaming through `AsyncLLM.generate` or `LLMEngine.step`,
+`RequestOutputKind.CUMULATIVE` returns the completion so far. Later generation
+does not extend the token IDs or sample logprobs in previously returned completions.
+
+Cumulative outputs copy the token and sample-logprob history. For long generations,
+use `RequestOutputKind.DELTA` when only the new output is needed.
+
 ## Pooling APIs
 
 For further details on pooling models, please refer to [this page](../models/pooling_models/README.md).

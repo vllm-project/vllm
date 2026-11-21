@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
+from weakref import WeakKeyDictionary
 
 import numpy as np
 import torch
@@ -61,14 +62,43 @@ class RequestOutputCollector:
 
     def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
+        # Copy cumulative logprobs only when consumed, after coalescing.
+        # Weak keys discard bounds for outputs replaced in the queue.
+        self._logprob_lengths: (
+            WeakKeyDictionary[RequestOutput, dict[int, int]] | None
+        ) = WeakKeyDictionary() if output_kind == RequestOutputKind.CUMULATIVE else None
         self.request_id = request_id
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
 
+    def _record_logprob_lengths(
+        self, output: RequestOutput | PoolingRequestOutput | Exception
+    ) -> None:
+        if self._logprob_lengths is not None and isinstance(output, RequestOutput):
+            self._logprob_lengths[output] = {
+                completion.index: len(completion.logprobs)
+                for completion in output.outputs
+                if completion.logprobs is not None
+            }
+
+    def _merge_output(self, current: RequestOutput, output: RequestOutput) -> None:
+        current.add(output, aggregate=self.aggregate)
+        if self._logprob_lengths is not None:
+            self._logprob_lengths[current].update(self._logprob_lengths[output])
+
+    def _snapshot_logprobs(self, output: RequestOutput | PoolingRequestOutput) -> None:
+        if self._logprob_lengths is None or not isinstance(output, RequestOutput):
+            return
+        lengths = self._logprob_lengths.pop(output)
+        for completion in output.outputs:
+            if completion.logprobs is not None:
+                completion.logprobs = completion.logprobs[: lengths[completion.index]]
+
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
+        self._record_logprob_lengths(output)
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
@@ -77,7 +107,7 @@ class RequestOutputCollector:
         ):
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
-            self.output.add(output, aggregate=self.aggregate)
+            self._merge_output(self.output, output)
         elif isinstance(self.output, PoolingRequestOutput) and isinstance(
             output, PoolingRequestOutput
         ):
@@ -91,6 +121,7 @@ class RequestOutputCollector:
         self.ready.clear()
         if isinstance(output, Exception):
             raise output
+        self._snapshot_logprobs(output)
         return output
 
     def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
@@ -101,6 +132,8 @@ class RequestOutputCollector:
             self.ready.clear()
         if isinstance(output, Exception):
             raise output
+        if output is not None:
+            self._snapshot_logprobs(output)
         return output
 
     def close(self):
@@ -139,8 +172,9 @@ class StreamingInputOutputCollector(RequestOutputCollector):
             self._backlog.clear()
         elif self._backlog or _is_chunk_boundary(self.output):
             assert isinstance(output, RequestOutput)
+            self._record_logprob_lengths(output)
             if self._backlog and not _is_chunk_boundary(self._backlog[-1]):
-                self._backlog[-1].add(output, aggregate=self.aggregate)
+                self._merge_output(self._backlog[-1], output)
             else:
                 self._backlog.append(output)
             return
@@ -406,6 +440,14 @@ class RequestState:
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
+        # Synchronous outputs have no collector to snapshot them on delivery.
+        if (
+            self.output_kind == RequestOutputKind.CUMULATIVE
+            and self.queue is None
+            and output.logprobs is not None
+        ):
+            output.logprobs = output.logprobs[:]
+
         if self.parent_req is None:
             outputs = [output]
         else:
@@ -516,6 +558,10 @@ class RequestState:
         routed_experts = None
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
+
+        if self.output_kind == RequestOutputKind.CUMULATIVE:
+            # Later decoding must not extend previously returned completions.
+            token_ids = token_ids.copy()
 
         return CompletionOutput(
             index=self.request_index,

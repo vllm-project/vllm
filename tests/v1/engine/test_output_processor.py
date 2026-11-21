@@ -4,6 +4,7 @@
 import gc
 import math
 import time
+from copy import deepcopy
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -1673,6 +1674,87 @@ async def test_cumulative_output_collector_n():
     third = [k for k in result.outputs if k.index == 2]
     assert len(third) == 1
     assert third[0].text == "c"
+
+
+def _make_logprob_output(
+    logprobs: SampleLogprobs, index: int = 0, finish_reason: str | None = None
+) -> RequestOutput:
+    return RequestOutput(
+        request_id="snapshot",
+        prompt=None,
+        prompt_token_ids=[9],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=index,
+                text="x" * len(logprobs),
+                token_ids=list(range(len(logprobs))),
+                cumulative_logprob=-0.5 * len(logprobs),
+                logprobs=logprobs,
+                finish_reason=finish_reason,
+            )
+        ],
+        finished=False,
+    )
+
+
+def _append_logprob(logprobs: SampleLogprobs) -> None:
+    logprobs.append({len(logprobs): Logprob(-0.5, 1, "x")})
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+@pytest.mark.parametrize("get_nowait", [False, True])
+@pytest.mark.asyncio
+async def test_cumulative_collector_preserves_logprob_extents(
+    flat_logprobs: bool, get_nowait: bool
+):
+    """Coalescing one child must preserve another child's earlier logprobs."""
+    collector = RequestOutputCollector(RequestOutputKind.CUMULATIVE, "snapshot")
+    first: SampleLogprobs = FlatLogprobs() if flat_logprobs else []
+    second: SampleLogprobs = FlatLogprobs() if flat_logprobs else []
+    _append_logprob(first)
+    _append_logprob(second)
+    first_output = _make_logprob_output(first, index=0)
+    expected = deepcopy(first_output.outputs)
+    collector.put(first_output)
+    collector.put(_make_logprob_output(second, index=1))
+    _append_logprob(first)
+    _append_logprob(second)
+    second_output = _make_logprob_output(second, index=1)
+    expected.extend(deepcopy(second_output.outputs))
+    collector.put(second_output)
+    result = collector.get_nowait() if get_nowait else await collector.get()
+    assert isinstance(result, RequestOutput)
+    assert result.outputs == expected
+    _append_logprob(first)
+    _append_logprob(second)
+    assert result.outputs == expected
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+@pytest.mark.parametrize("get_nowait", [False, True])
+@pytest.mark.asyncio
+async def test_streaming_input_collector_preserves_logprob_extents(
+    flat_logprobs: bool, get_nowait: bool
+):
+    """Each queued input boundary must keep its own logprob history."""
+    collector = StreamingInputOutputCollector(RequestOutputKind.CUMULATIVE, "snapshot")
+    logprobs: SampleLogprobs = FlatLogprobs() if flat_logprobs else []
+    snapshots = []
+    for finish_reason in ("length", "length", None, None):
+        _append_logprob(logprobs)
+        output = _make_logprob_output(logprobs, finish_reason=finish_reason)
+        snapshots.append(deepcopy(output.outputs[0]))
+        collector.put(output)
+    retained = []
+    for snapshot in (snapshots[0], snapshots[1], snapshots[-1]):
+        result = collector.get_nowait() if get_nowait else await collector.get()
+        assert isinstance(result, RequestOutput)
+        assert result.outputs == [snapshot]
+        retained.append((result.outputs[0], snapshot))
+        _append_logprob(logprobs)
+    for completion, snapshot in retained:
+        assert completion == snapshot
 
 
 def _make_boundary_output(
