@@ -331,7 +331,13 @@ class _QuadFinalizePublishDeviceKernel:
         fp32_weights: bool = False,
         owner_capacity: int | None = None,
         elements_per_thread: int = QUAD_BF16,
+        contiguous_owner_rows: int | None = None,
     ) -> None:
+        if contiguous_owner_rows is not None and (
+            owner_capacity is None or not 0 < contiguous_owner_rows <= owner_capacity
+        ):
+            raise ValueError("contiguous owners require a positive bounded row count")
+        self.contiguous_owner_rows = contiguous_owner_rows
         if elements_per_thread not in (QUAD_BF16, VEC_BF16):
             raise ValueError("elements_per_thread must be 4 or 8")
         if hidden <= 0 or hidden % elements_per_thread:
@@ -572,12 +578,18 @@ class _QuadFinalizePublishDeviceKernel:
                     packed,
                 )
             else:
+                if cutlass.const_expr(self.contiguous_owner_rows is None):
+                    owner = token % self.tp
+                    owner_row = token // self.tp
+                else:
+                    owner = token // self.contiguous_owner_rows
+                    owner_row = token % self.contiguous_owner_rows
                 mailbox_element = (
                     (Int64(stage) * self.tp + self.rank) * self.owner_capacity
-                    + Int64(token // self.tp)
+                    + Int64(owner_row)
                 ) * self.hidden + Int64(fragment) * self.elements
                 owner_mailbox = load_global_u64(
-                    contribution_mailbox_multicast_address + Int64(token % self.tp) * 8
+                    contribution_mailbox_multicast_address + Int64(owner) * 8
                 )
                 self.store_unicast(owner_mailbox + mailbox_element * 2, packed)
 

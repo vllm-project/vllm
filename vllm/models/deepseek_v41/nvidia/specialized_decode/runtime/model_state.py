@@ -150,6 +150,14 @@ class DeepseekV41MetadataGraphModelState(DeepseekV41ModelState):
         if self._join_staged_lookback() is not input_batch:
             super()._fill_lookback(input_batch, req_states)
 
+    def _metadata_rows_supported(self, rows: int) -> bool:
+        decode = getattr(self, "decode", None)
+        return (
+            decode is None
+            or not getattr(decode, "is_dep", False)
+            or (0 < rows <= decode.config.max_rows)
+        )
+
     def _build_attn_metadata(
         self,
         input_batch: InputBatch,
@@ -163,6 +171,20 @@ class DeepseekV41MetadataGraphModelState(DeepseekV41ModelState):
         **kwargs: Any,
     ) -> dict[str, Any]:
         build = super()._build_attn_metadata
+        if not self._metadata_rows_supported(input_batch.num_tokens_after_padding):
+            # Join a preceding small batch before returning to the stock build.
+            self._join_staged_lookback()
+            return build(
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture=for_capture,
+                ubatch_idx=ubatch_idx,
+                **kwargs,
+            )
         if self._recording is not None:
             return self.graphs.capture(
                 self._recording,
@@ -211,6 +233,8 @@ class DeepseekV41MetadataGraphModelState(DeepseekV41ModelState):
         self.graphs.release()
         if self.graphs.can_record(attn_groups):
             for key in self.graphs.capture_keys():
+                if not self._metadata_rows_supported(key[3]):
+                    continue
                 self._recording = key
                 try:
                     self.prepare_attn(

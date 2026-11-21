@@ -161,7 +161,7 @@ class MoEStep:
         overlapping = shared.maybe_forward_async(hidden_states)
         router_logits, _ = runner.gate(hidden_states)
         runner._maybe_apply_shared_experts(hidden_states, SharedExpertsOrder.NO_OVERLAP)
-        if front_applies(gemm, runner):
+        if front_applies(gemm.front_config, runner):
             # The router's padding mask, as select_experts applies it.
             routing = gemm.front(
                 hidden_states,

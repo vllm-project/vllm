@@ -63,6 +63,7 @@ if TYPE_CHECKING:
 
     from ...dspark import DSparkDeepseekV4Model
     from ...model import DeepseekV4DecoderLayer, DeepseekV4Model
+    from ..dep.runtime import DEPDecode
     from .draft import DraftDecode
 
 DecodeOutput: TypeAlias = torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]
@@ -82,7 +83,7 @@ class DecodeStep(NamedTuple):
     low_batch: bool
     # The attention side projections run on aux streams.
     overlap_inputs: bool
-    executor: "SpecializedDecode | DraftDecode"
+    executor: "SpecializedDecode | DraftDecode | DEPDecode"
 
     def run(
         self,
@@ -106,7 +107,9 @@ class DecodeStep(NamedTuple):
         )
 
 
-def step_gates(rows: int, executor: "SpecializedDecode | DraftDecode") -> DecodeStep:
+def step_gates(
+    rows: int, executor: "SpecializedDecode | DraftDecode | DEPDecode"
+) -> DecodeStep:
     """The step of `rows` rows (0 < rows <= `FUSED_MHC_MAX_ROWS`)."""
     return DecodeStep(
         rows=rows,
@@ -384,15 +387,23 @@ class SpecializedDecode:
     ) -> DecodeOutput:
         """`DeepseekV4Model.forward` after the layers: the MTP buffer, the
         collapse of the hc streams with the last pre-mix and the final norm."""
-        backbone = self.backbone
-        if backbone._mtp_hidden_buffer is not None:
-            backbone._mtp_hidden_buffer[: streams.shape[0]].copy_(streams.flatten(1))
-        hidden_states = backbone.norm(hc_collapse_triton(streams, pre))
-        aux_hidden_states = [
-            aux[layer_id]
-            for layer_id in backbone.aux_hidden_state_layers
-            if layer_id in aux
-        ]
-        if aux_hidden_states:
-            return hidden_states, aux_hidden_states
-        return hidden_states
+        return finish_layers(self.backbone, streams, pre, aux)
+
+
+def finish_layers(
+    backbone: "DeepseekV4Model",
+    streams: torch.Tensor,
+    pre: torch.Tensor,
+    aux: dict[int, torch.Tensor],
+) -> DecodeOutput:
+    if backbone._mtp_hidden_buffer is not None:
+        backbone._mtp_hidden_buffer[: streams.shape[0]].copy_(streams.flatten(1))
+    hidden_states = backbone.norm(hc_collapse_triton(streams, pre))
+    aux_hidden_states = [
+        aux[layer_id]
+        for layer_id in backbone.aux_hidden_state_layers
+        if layer_id in aux
+    ]
+    if aux_hidden_states:
+        return hidden_states, aux_hidden_states
+    return hidden_states

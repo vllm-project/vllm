@@ -369,6 +369,9 @@ print(output)
 
 See [this page](generative_models.md) for more information on how to use generative models.
 
+For DeepSeek-V4.1 on two, four, or eight SM103 GPUs, see the experimental
+[DP + EP specialized decode](deepseek_v41_dep_decode.md) configuration.
+
 #### Text Generation
 
 These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
