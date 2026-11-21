@@ -439,3 +439,27 @@ steps:
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd
+
+# HiSparse on ROCm needs gfx950; the MI250 E2E Core mirror skips these tests.
+- label: ":amd: (MI355) HiSparse E2E"
+  key: amd-hisparse-e2e-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/hisparse_kernels.cu
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+  - vllm/models/deepseek_v32/
+  - vllm/platforms/rocm.py
+  - tests/v1/e2e/general/test_hisparse.py
+  - tests/v1/kv_connector/unit/test_hisparse_connector.py
+  - tests/v1/kv_connector/unit/test_hisparse_stats.py
+  commands:
+  - pytest -v -s v1/kv_connector/unit/test_hisparse_connector.py v1/kv_connector/unit/test_hisparse_stats.py
+  - pytest -v -s v1/e2e/general/test_hisparse.py

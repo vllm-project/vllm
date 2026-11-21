@@ -622,3 +622,22 @@ def test_forward_mqa_indexer_layer_always_remaps(monkeypatch):
 
     _run_forward(impl, metadata)
     assert len(remap_calls) == 1
+
+
+def test_compact_topk_to_ragged_packs_valid_prefixes():
+    # HiSparse hands physical top-k with each row's valid entries first; the
+    # ragged stream must hold exactly those, back to back.
+    topk = torch.tensor(
+        [[5, 7, -1, -1], [1, -1, -1, -1], [-1, -1, -1, -1], [9, 8, 6, 4]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    counts = torch.tensor([2, 1, 0, 4], dtype=torch.int32, device="cuda")
+    indptr = torch.full((topk.shape[0] + 1,), -7, dtype=torch.int32, device="cuda")
+    out = torch.full((topk.numel(),), -7, dtype=torch.int32, device="cuda")
+
+    sparse_mod.compact_topk_to_ragged(topk, counts, indptr, out)
+
+    assert indptr.tolist() == [0, 2, 3, 3, 7]
+    assert out[:7].tolist() == [5, 7, 1, 9, 8, 6, 4]
+    assert out[7:].tolist() == [-7] * (topk.numel() - 7)

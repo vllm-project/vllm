@@ -482,7 +482,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/custom_all_gather_reduce_scatter_ops.cpp"
     "csrc/custom_all_reduce.cu"
     "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
-    "csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
+    "csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu"
+    "csrc/hisparse_kernels.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
@@ -509,7 +510,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/hisparse_kernels.cu"
       "csrc/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
       "csrc/attention/dcp_utils/dcp_direct_kv_gather.cu"
       "csrc/attention/dcp_utils/dcp_direct_q_gather.cu")

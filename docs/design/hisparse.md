@@ -280,7 +280,16 @@ allocation. Streams, ordinary events, current-stream queries, and synchronizatio
 use `torch.Stream`, `torch.Event`, and `torch.accelerator` directly. The backend
 provides IPC event creation/import/export only for shared host pools.
 Without HiSparse, sparse attention keeps its normal stream and event path.
-ROCm does not currently provide a HiSparse backend.
+ROCm selects `ROCmHiSparseBackend` (gfx950 only) through
+`ROCM_AITER_MLA_SPARSE`, for bfloat16 models with the 512 + 64 MLA head layout,
+`auto`/`bfloat16`/`fp8` KV caches (not `fp8_ds_mla`) and no attention sinks.
+ROCm keeps one private host pool per tensor-parallel rank, so physical host
+memory is `host_pool_gib` times the local TP size. HIP does provide interprocess
+events, but on ROCm 10 (HIP 7.15) a stream wait on one returns before an
+earlier asynchronous device-to-host copy on the recording stream has completed;
+an ordinary event orders the same copy correctly. Peers waiting on rank 0's IPC
+events could therefore read partially mirrored rows, so `ROCmHiSparseBackend`
+leaves `supports_shared_host_pool` off until HIP orders copies behind them.
 
 ## Main classes
 

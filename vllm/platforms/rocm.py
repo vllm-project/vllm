@@ -686,6 +686,10 @@ class RocmPlatform(Platform):
         pass
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        return "vllm.v1.hisparse.backend.ROCmHiSparseBackend"
+
+    @classmethod
     def is_pin_memory_available(cls) -> bool:
         if in_wsl():
             version = _get_wsl_kernel_version()

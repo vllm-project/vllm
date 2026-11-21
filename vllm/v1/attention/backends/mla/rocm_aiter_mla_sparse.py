@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
@@ -552,6 +553,48 @@ def generate_sparse_seqlen_triton(
     return out
 
 
+@triton.jit
+def _compact_topk_to_ragged_kernel(
+    topk_ptr,  # int32 [num_tokens, topk_stride], valid entries first
+    counts_ptr,  # int32 [num_tokens]
+    indptr_ptr,  # int32 [num_tokens + 1]
+    out_ptr,  # int32 [>= indptr[num_tokens]]
+    topk_stride,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token_id = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK)
+    count = tl.load(counts_ptr + token_id)
+    indices = tl.load(
+        topk_ptr + token_id * topk_stride + offsets,
+        mask=offsets < tl.minimum(count, WIDTH),
+    )
+    row_start = tl.load(indptr_ptr + token_id)
+    tl.store(out_ptr + row_start + offsets, indices, mask=offsets < count)
+
+
+def compact_topk_to_ragged(
+    topk_indices: torch.Tensor,
+    valid_counts: torch.Tensor,
+    indptr: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    """Pack each row's first valid_counts entries into a ragged index stream."""
+    num_tokens, width = topk_indices.shape
+    indptr[:1].zero_()
+    torch.cumsum(valid_counts, dim=0, out=indptr[1 : num_tokens + 1])
+    _compact_topk_to_ragged_kernel[(num_tokens,)](
+        topk_indices,
+        valid_counts,
+        indptr,
+        out,
+        topk_indices.stride(0),
+        WIDTH=width,
+        BLOCK=triton.next_power_of_2(width),
+    )
+
+
 class ROCMAiterMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -676,12 +719,18 @@ class ROCMAiterMLASparseMetadataBuilder(
         # never reads the persistent metadata either.
         # fp8_ds_mla never reads it either: its forward_mqa branch always
         # routes to aiter's Triton sparse_mla_fwd.
-        self._use_persistent_metadata = all(
-            getattr(attention_context[name].impl, "sinks", None) is None
-            and not getattr(attention_context[name].impl, "use_aiter_sparse_mla", False)
-            and getattr(attention_context[name].impl, "kv_cache_dtype", None)
-            != "fp8_ds_mla"
-            for name in layer_names
+        # HiSparse attends on the hot buffer through the Triton kernel too.
+        self._use_persistent_metadata = (
+            vllm_config.attention_config.hisparse_config is None
+            and all(
+                getattr(attention_context[name].impl, "sinks", None) is None
+                and not getattr(
+                    attention_context[name].impl, "use_aiter_sparse_mla", False
+                )
+                and getattr(attention_context[name].impl, "kv_cache_dtype", None)
+                != "fp8_ds_mla"
+                for name in layer_names
+            )
         )
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
         self._num_compute_units = current_platform.num_compute_units()
@@ -1117,6 +1166,25 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     reason,
                 )
 
+        self.use_hisparse = isinstance(self.index_group, HiSparseMLAIndexGroup)
+        if self.use_hisparse:
+            reason = self._hisparse_unsupported_reason(vllm_config)
+            if reason is not None:
+                raise NotImplementedError(
+                    f"HiSparse with ROCM_AITER_MLA_SPARSE: {reason}."
+                )
+            # Ragged index stream over the hot buffer (or the staged prefill
+            # rows), rebuilt per call from the index group's physical top-k.
+            assert self.topk_indices_buffer is not None
+            # The query is requested with them: q_concat_buffer starts at the
+            # same workspace offset, so the index stream would overwrite it.
+            self._hisparse_scratch_specs = (
+                (q_concat_shape, vllm_config.model_config.dtype),
+                ((max_tokens + 1,), torch.int32),
+                ((max_tokens * self.topk_indices_buffer.shape[1],), torch.int32),
+            )
+            current_workspace_manager().get_simultaneous(*self._hisparse_scratch_specs)
+
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
@@ -1159,10 +1227,22 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         )
         store_mxfp4_mla(kv_c_normed, slot_mapping.flatten(), kv_cache)
 
-    def record_logical_topk_ready(self) -> None:
-        # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
-        # but does not participate in sparse-MLA index groups.
-        pass
+    def _hisparse_unsupported_reason(self, vllm_config: VllmConfig) -> str | None:
+        from vllm.platforms.rocm import on_gfx950
+
+        # The hot-buffer path runs aiter's Triton sparse MLA kernel, which has
+        # 64-bit offsets and no persistent metadata.
+        if not on_gfx950():
+            return "requires gfx950"
+        if self.kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
+            return f"kv-cache dtype {self.kv_cache_dtype!r} is not supported"
+        if vllm_config.model_config.dtype != torch.bfloat16:
+            return "requires a bfloat16 model"
+        if self.sinks is not None:
+            return "attention sinks are not supported"
+        if self.kv_lora_rank != 512 or self.qk_rope_head_dim != 64:
+            return "requires the 512 + 64 MLA head layout"
+        return None
 
     def _forward_mla(
         self,
@@ -1453,6 +1533,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
 
+        if self.use_hisparse:
+            # The common path resolves top-k into the hot buffer and calls
+            # _forward_mqa_kernel.
+            return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
+
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
         # fp8_ds_mla is an opaque per-token byte format (fp8 latent + per-128
         # fp32 scales + bf16 rope); only the Triton sparse MLA kernel reads it,
@@ -1630,3 +1715,69 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         return self._forward_mla(
             layer, mla_padded_q, kv_c_and_k_pe_cache.unsqueeze(1), attn_metadata
         )
+
+    def _forward_mqa_kernel(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+        *,
+        layer: AttentionLayer,
+        block_size: int,
+        is_decode: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """HiSparse attention over physical rows of the hot buffer or staging."""
+        fp8_dtype = current_platform.fp8_dtype()
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        q_buf, indptr_buf, indices_buf = current_workspace_manager().get_simultaneous(
+            *self._hisparse_scratch_specs
+        )
+        if isinstance(q, tuple):
+            ql_nope, q_pe = q
+            if fp8_attention:
+                q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
+                    ql_nope, q_pe, layer._q_scale
+                )
+            else:
+                q = q_buf[: ql_nope.shape[0]]
+                ops.concat_mla_q(ql_nope, q_pe, q)
+        elif fp8_attention and q.dtype != fp8_dtype:
+            original_q_shape = q.shape
+            q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
+            q = q.view(original_q_shape)
+        # Physical top-k are flat rows: the hot buffer and the staged prefill
+        # rows are compact, so their block size need not match block_size.
+        if kv_cache.is_contiguous():
+            kv_rows = kv_cache.view(-1, kv_cache.shape[-1])
+        else:
+            kv_rows, _ = flat_kv_row_view(kv_cache, block_size)
+        if fp8_attention:
+            kv_rows = kv_rows.view(fp8_dtype)
+
+        num_tokens = topk_indices.shape[0]
+        indptr = indptr_buf[: num_tokens + 1]
+        compact_topk_to_ragged(topk_indices, valid_counts, indptr, indices_buf)
+        output = torch.empty(
+            [num_tokens, self.num_heads, self.kv_lora_rank],
+            dtype=self.q_concat_buffer.dtype,
+            device=q.device,
+        )
+        rocm_aiter_ops.triton_sparse_mla_fwd(
+            q,
+            kv_rows.view(-1, 1, 1, q.shape[-1]),
+            output,
+            self.scale,
+            indptr,
+            indices_buf,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            q_scale=layer._q_scale if fp8_attention else None,
+            kv_scale=layer._k_scale if fp8_attention else None,
+            attn_sink=None,
+            has_invalid=False,
+        )
+        # Graph padding rows select no keys, and the no-sink normalization of
+        # an empty row is NaN.
+        output.masked_fill_((valid_counts == 0)[:, None, None], 0)
+        return output, None
