@@ -234,6 +234,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -307,6 +308,8 @@ class JambaModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
+        # Lets AutoWeightsLoader map checkpoint KV-cache scale names.
+        self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
 
