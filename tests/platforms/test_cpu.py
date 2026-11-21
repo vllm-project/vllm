@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
 from vllm.platforms.cpu import CpuPlatform
+from vllm.platforms.interface import CpuArchEnum
 
 
 class _FakeModel:
@@ -222,3 +223,33 @@ def test_cpu_conv_state_layout_selection(
 
     CpuPlatform.check_and_update_config(config)
     assert os.environ.get(layout_env) == expected_layout
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "expected"),
+    [
+        pytest.param(
+            {"bf16": True},
+            [torch.bfloat16, torch.float16, torch.float32],
+            id="feat-bf16",
+        ),
+        pytest.param(
+            {"bf16": False}, [torch.float32, torch.float16], id="no-feat-bf16"
+        ),
+        pytest.param(
+            {}, [torch.bfloat16, torch.float16, torch.float32], id="not-reported"
+        ),
+    ],
+)
+def test_linux_arm_supported_dtypes_follow_bf16_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    capabilities: dict[str, bool],
+    expected: list[torch.dtype],
+):
+    monkeypatch.setattr(
+        CpuPlatform, "get_cpu_architecture", classmethod(lambda cls: CpuArchEnum.ARM)
+    )
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("torch.cpu.get_capabilities", lambda: capabilities)
+
+    assert CpuPlatform().supported_dtypes == expected

@@ -212,7 +212,7 @@ docker buildx build -f docker/Dockerfile.cpu \
 ```
 
 !!! note "ARM BF16 requirements"
-    ARM BF16 support requires ARMv8.6-A or later (FEAT_BF16). Supported on AWS Graviton3/4, AmpereOne, and other recent ARM processors.
+    ARM BF16 support requires ARMv8.6-A or later (FEAT_BF16). Supported on AWS Graviton3/4, AmpereOne, and other recent ARM processors. On Linux CPUs without FEAT_BF16, `--dtype auto` uses FP32 for BF16 models.
 
 #### Launching the OpenAI server
 

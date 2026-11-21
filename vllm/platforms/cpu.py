@@ -133,7 +133,15 @@ class CpuPlatform(Platform):
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
             return [torch.bfloat16, torch.float16, torch.float32]
-        # x86/aarch64 CPU has supported both bf16 and fp16 natively.
+        elif self.get_cpu_architecture() == CpuArchEnum.ARM and not (
+            torch.cpu.get_capabilities().get("bf16", True)
+        ):
+            # Without FEAT_BF16 (measured on Neoverse N1), bf16 matmul falls
+            # back to OpenBLAS's software sbgemm, and fp16 matmul was also far
+            # slower than fp32 there, so prefer fp32. bf16 stays available
+            # when torch does not report the capability.
+            return [torch.float32, torch.float16]
+        # x86 and aarch64 with FEAT_BF16 support both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
     @classmethod
