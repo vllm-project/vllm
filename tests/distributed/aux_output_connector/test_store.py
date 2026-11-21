@@ -2045,12 +2045,17 @@ def _finish_empty_request(connector: AuxOutputSchedulerConnector):
 
 
 @pytest.mark.parametrize(
-    "max_bytes,kv_transfer_config,expected",
-    [(None, None, 6), (None, object(), 12), (400, object(), 5), (1, None, 1)],
+    "max_bytes,kv_transfer_config,expected,worker_expected",
+    [
+        (None, None, 6, 12),
+        (None, object(), 12, 18),
+        (400, object(), 5, 5),
+        (1, None, 1, 1),
+    ],
     ids=["kv-cache", "kv-connector", "max-bytes", "max-bytes-floor"],
 )
 def test_retained_objects_follow_max_bytes(
-    monkeypatch, max_bytes, kv_transfer_config, expected
+    monkeypatch, max_bytes, kv_transfer_config, expected, worker_expected
 ):
     monkeypatch.setattr(
         connector_module, "resolve_kv_cache_block_sizes", lambda *_: (16, 8)
@@ -2064,6 +2069,10 @@ def test_retained_objects_follow_max_bytes(
     )
     kv_cache_config = SimpleNamespace(num_blocks=3)
     assert retained_objects(vllm_config, kv_cache_config) == (expected, 8)
+    assert retained_objects(vllm_config, kv_cache_config, include_active=True) == (
+        worker_expected,
+        8,
+    )
 
 
 @pytest.mark.parametrize(
