@@ -61,6 +61,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend impo
     TransferOp,
     TransferState,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.factory import (
+    create_transfer_backend,
+    resolve_transfer_engine,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.te import (
     TransferEngineBackend,
 )
@@ -115,15 +119,23 @@ _PULL_LOST_EVENTS: Final[int] = zmq.EVENT_DISCONNECTED | zmq.EVENT_CONNECT_RETRI
 _PULL_HEARTBEAT_IVL_MS: Final[int] = 2000
 _PULL_HEARTBEAT_TIMEOUT_MS: Final[int] = 10000
 
-try:
-    from mooncake.engine import TransferEngine
-except ImportError:
-    logger.warning(
-        "Please install mooncake by following the instructions at "
-        "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
-        "to run VLLM with MooncakeTransferEngine."
-    )
-    TransferEngine = None
+def _load_transfer_engine() -> type | None:
+    """Imports the classic engine only when the TE backend is selected.
+
+    The TENT module and the engine bundled with older Mooncake releases link
+    different asio builds, so loading the classic engine on a TENT worker can
+    make `import tent` fail with an undefined symbol.
+    """
+    try:
+        from mooncake.engine import TransferEngine
+    except ImportError:
+        logger.warning(
+            "Please install mooncake by following the instructions at "
+            "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
+            "to run VLLM with MooncakeTransferEngine."
+        )
+        return None
+    return TransferEngine
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -1383,9 +1395,6 @@ class MooncakeConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
-        if TransferEngine is None:
-            logger.error("Mooncake is not available")
-            raise RuntimeError("Mooncake is not available")
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
@@ -1425,14 +1434,29 @@ class MooncakeConnectorWorker:
         device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "device_name", ""
         )
+        self._transfer_engine = resolve_transfer_engine(
+            kv_transfer_config.kv_connector_extra_config
+        )
+        engine_cls = (
+            _load_transfer_engine() if self._transfer_engine == "te" else None
+        )
+        if self._transfer_engine == "te" and engine_cls is None:
+            logger.error("Mooncake is not available")
+            raise RuntimeError("Mooncake is not available")
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        self.transfer_backend: TransferBackend = TransferEngineBackend(
-            engine_cls=TransferEngine,
+        logger.info("The Mooncake connector is using %s.", self._transfer_engine)
+        self.transfer_backend: TransferBackend = create_transfer_backend(
+            self._transfer_engine,
+            engine_cls=engine_cls,
             hostname=self.hostname,
             protocol=protocol,
             device_name=device_name,
+            transfer_timeout_s=kv_transfer_config.kv_connector_extra_config.get(
+                "transfer_timeout_s"
+            ),
+            overrides=kv_transfer_config.kv_connector_extra_config.get("tent_config"),
         )
         self.rpc_port = self.transfer_backend.rpc_port
 

@@ -82,11 +82,30 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
+- **transfer_engine**: `"te"` (default) or `"tent"`, the Mooncake transfer engine that moves the KV blocks. `"te"` is Mooncake's Transfer Engine; `"tent"` is Transfer Engine NEXT. Left unset, `MC_USE_TENT` or `MC_USE_TEV1` selects `"tent"`; setting `"te"` while either variable is set is an error rather than a silent override. Both sides of a transfer must run the same engine.
+- **tent_config**: Optional object deep-merged into the TENT configuration vLLM generates. The generated keys cover `metadata_type`, `rpc_server_hostname`, the requested transport, the RDMA device whitelist and the metrics port; overrides replace them.
+- **transfer_timeout_s**: Seconds a `"tent"` transfer waits for the engine before giving up on it. (default 60) `0` waits forever, which leaves a sender pinned when a peer disappears mid-transfer. On expiry the backend reports the ranges that have not completed as failed.
 - **kv_lease_duration**: Seconds the prefiller holds a finished request's KV blocks before the decoder must renew them. (default unset)
     - Unset keeps the fixed `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
     - When set, the decoder renews the lease every `kv_lease_duration / 6` seconds from the time the request arrives until its pull settles, and each renewal extends it to at least `kv_lease_duration * 2 / 3` seconds from then, as in [NixlConnector](../design/nixl_kv_cache_lease.md). Blocks of a decoder that crashed are freed within about `kv_lease_duration` seconds, while requests queued on a busy decoder keep their blocks.
     - Set the same value on prefill and decode instances. A decoder without it does not renew, so its requests that wait longer than the lease lose their prefilled KV; a prefiller without it rejects renewals, and the decoder logs a warning. Prefill instances from releases without this option log an error for each renewal they receive, so upgrade them before enabling it on decode instances.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
+
+!!! note
+    `transfer_engine: "tent"` needs a `tent` Python module in the Mooncake build (`-DUSE_TENT=ON`), so keep `te` unless the deployment ships TENT. Serving KV blocks that live in GPU memory also needs `-DUSE_CUDA=ON`; without it, registering a CUDA tensor crashes inside TENT instead of reporting an error.
+
+### TENT transfer engine
+
+With `transfer_engine: "tent"`, vLLM submits the KV ranges of one request as one TENT batch and reports one outcome per range:
+
+- Each range becomes one TENT task. Ranges that are contiguous on both sides are not folded, so a request made of many small blocks builds one Python request object per block. The array entry point in [Mooncake #5525](https://github.com/kvcache-ai/Mooncake/pull/5525) removes that cost.
+- The batch is submitted once and polled through `get_transfer_status_overall` with 20-50 us backoff until it leaves `PENDING` or `transfer_timeout_s` expires. The backend then reads `get_transfer_status_list` and settles every range: a completed range keeps its data, any other state is reported as failed with the engine state name, and the decoder reschedules the blocks behind those ranges.
+- `transfer_timeout_s` caps the wait; `0` waits without a limit. On expiry the backend reads whatever states the engine reports and reports the ranges that have not completed as failed.
+- An engine call that raises while submitting closes that peer's segment and propagates the error, so the transfer fails instead of leaving a partially submitted batch behind.
+- `shutdown` waits up to 5 s for each peer's in-flight submission, closes that peer's segment, and logs a warning when a peer is still busy.
+- The engine names its segment after the configured `rpc_server_hostname`; that name has to be the address peers reach this worker by.
+- TENT metrics are off by default because the connector passes no metrics port; set `tent_config: {"metrics": {"http_port": 9100 + rank}}` to enable the engine's own HTTP metrics without colliding with other ranks on the host.
+- `mooncake_protocol` and `device_name` keep their meaning: the protocol selects the TENT transport, and the whitelist becomes `topology/rdma_whitelist`. A transport the connector did not advertise is disabled in the generated configuration.
 
 ## Prometheus metrics
 
@@ -111,6 +130,11 @@ The following Prometheus metrics are exported when MooncakeConnector is active, 
     lease duration is too short for your network or workload. Increase
     `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`, or set `kv_lease_duration` on both
     instances so that queued requests keep their blocks.
+
+!!! note
+    These metrics come from the connector. With `transfer_engine: "tent"` the
+    engine exports its own set on a separate HTTP port; see the TENT section
+    above.
 
 ## Example Scripts/Code
 
