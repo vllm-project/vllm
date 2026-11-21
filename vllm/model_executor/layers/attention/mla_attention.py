@@ -455,6 +455,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     supports_dense_mha_prefill: ClassVar[bool] = True
     # PCP+DCP is validated per model; subclasses opt in.
     supports_pcp_dcp: ClassVar[bool] = False
+    # Models using a compatible paged sparse backend may opt in.
+    supports_fp8_ds_mla_sliding_window: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -521,9 +523,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
-        if sliding_window is not None and kv_cache_dtype in (
-            "fp8_ds_mla",
-            "nvfp4_ds_mla",
+        if sliding_window is not None and (
+            kv_cache_dtype == "nvfp4_ds_mla"
+            or (
+                kv_cache_dtype == "fp8_ds_mla"
+                and not self.supports_fp8_ds_mla_sliding_window
+            )
         ):
             raise ValueError(
                 f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
