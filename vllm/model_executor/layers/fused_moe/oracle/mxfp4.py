@@ -2319,10 +2319,19 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
+    expert_input_alignment = 1
+    if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+        from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+        expert_input_alignment = get_mk_alignment_for_contiguous_layout()[0]
+
     return make_moe_kernel(
         moe_quant_config,
         moe_config,
         experts_cls,
         routing_tables,
+        prepare_finalize_kwargs={
+            "expert_input_alignment": expert_input_alignment,
+        },
         experts_log="Using %s",
     )

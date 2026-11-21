@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
+    silu_mul_quant_fp8_packed_triton,
 )
 from vllm.utils.deep_gemm import (
     calc_diff,
@@ -95,6 +96,44 @@ def test_ep_gather_uses_64_bit_output_row_offsets():
     )
 
     torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)
+
+
+def test_grouped_output_uses_64_bit_row_offsets():
+    inputs = torch.ones((3, 128), device="cuda", dtype=torch.bfloat16)
+    output = torch.empty_strided(
+        inputs.shape, ((1 << 30) + 128, 1), device="cuda", dtype=inputs.dtype
+    )
+    ids = torch.zeros((3, 1), device="cuda", dtype=torch.int64)
+    weights = torch.ones((3, 1), device="cuda")
+    ep_gather(inputs, ids, weights, None, None, output)
+    torch.testing.assert_close(output, inputs, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_rows", [3, 511, 512, 8193])
+def test_grouped_activation_quantization_skips_nan_padding(num_rows):
+    inputs = torch.randn(num_rows, 256, device="cuda", dtype=torch.bfloat16)
+    ids = torch.zeros(num_rows + 1, device="cuda", dtype=torch.int32)[1:]
+    ids[::3] = -1
+    inputs[ids < 0] = float("nan")
+    sanitized = torch.where((ids >= 0)[:, None], inputs, 0)
+    reference_q, reference_scales = silu_mul_quant_fp8_packed_triton(sanitized)
+    actual_q, actual_scales = silu_mul_quant_fp8_packed_triton(inputs, expert_ids=ids)
+    torch.testing.assert_close(actual_q.float(), reference_q.float(), rtol=0, atol=0)
+    torch.testing.assert_close(actual_scales, reference_scales, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_rows", [3, 8193])
+def test_grouped_output_weights_rows_without_reading_nan_padding(num_rows):
+    inputs = torch.randn(num_rows + 1, 128, device="cuda", dtype=torch.bfloat16)[1:]
+    ids = torch.zeros(num_rows + 1, 1, device="cuda", dtype=torch.int64)[1:]
+    ids[::2] = -1
+    weights = torch.full((num_rows, 1), 0.25, device="cuda")
+    inputs[ids[:, 0] < 0] = float("nan")
+    weights[ids[:, 0] < 0] = float("nan")
+    output = torch.empty_like(inputs)
+    ep_gather(inputs, ids, weights, None, None, output)
+    expected = torch.where(ids >= 0, inputs.float() * weights, 0).to(inputs.dtype)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("workspace_dtype", [torch.float16, torch.bfloat16])
@@ -924,3 +963,54 @@ def test_deepgemm_fp4_padded_decode_padding_robust(
 
         assert torch.isfinite(out_poison).all(), "padding garbage leaked into output"
         torch.testing.assert_close(out_poison, out_clean, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_rows", [3, 8193])
+@pytest.mark.parametrize("with_expert_map", [False, True])
+def test_expanded_preparation_masks_padding_and_builds_live_expert_bounds(
+    num_rows, with_expert_map
+):
+    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+        prepare_expanded_deepgemm_input,
+    )
+
+    torch.manual_seed(42)
+    # Offset, strided inputs exercise the last partial tile and pointer arithmetic.
+    ids = torch.randint(-1, 48, (num_rows + 1, 2), device="cuda")[1:, :1]
+    scales = torch.rand((num_rows + 1, 320), device="cuda")[1:, ::2]
+    counts = torch.arange(48, device="cuda", dtype=torch.int64) % 7
+    counts[::3] = 0
+    expert_map = (
+        torch.arange(48, device="cuda", dtype=torch.int32).flip(0)
+        if with_expert_map
+        else None
+    )
+    mapped = ids[:, 0] if expert_map is None else expert_map[ids[:, 0].clamp_min(0)]
+    expected_ids = torch.where(ids[:, 0] >= 0, mapped, -1).to(torch.int32)
+    scales[ids[:, 0] < 0] = float("nan")
+    expected_scales = torch.where((expected_ids >= 0)[:, None], scales, 1)
+    padded = (counts + 127) // 128 * 128
+    expected_ends = (padded.cumsum(0) - padded + counts).to(torch.int32)
+
+    actual_scales, actual_ids, actual_ends = prepare_expanded_deepgemm_input(
+        ids, scales, counts, expert_map, 128
+    )
+    torch.testing.assert_close(actual_ids, expected_ids, rtol=0, atol=0)
+    torch.testing.assert_close(actual_scales, expected_scales, rtol=0, atol=0)
+    torch.testing.assert_close(actual_ends, expected_ends, rtol=0, atol=0)
+
+
+def test_expanded_preparation_uses_64_bit_id_row_offsets():
+    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+        prepare_expanded_deepgemm_input,
+    )
+
+    ids = torch.empty_strided((3, 1), (1 << 30, 1), device="cuda", dtype=torch.int64)
+    ids[:, 0].copy_(torch.arange(3, device="cuda"))
+    scales = torch.ones((3, 40), device="cuda")
+    counts = torch.zeros(48, device="cuda", dtype=torch.int32)
+    counts[:3] = 1
+    _, actual_ids, _ = prepare_expanded_deepgemm_input(ids, scales, counts, None, 128)
+    torch.testing.assert_close(
+        actual_ids, torch.arange(3, device="cuda", dtype=torch.int32), rtol=0, atol=0
+    )

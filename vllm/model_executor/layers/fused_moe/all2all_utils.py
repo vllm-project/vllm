@@ -197,6 +197,7 @@ def maybe_make_prepare_finalize(
     use_monolithic: bool = False,
     all2all_manager: Any | None = None,
     input_dtype: torch.dtype | None = None,
+    expert_input_alignment: int = 1,
 ) -> FusedMoEPrepareAndFinalize | None:
     if moe.moe_parallel_config.use_passthrough_all2all:
         # The experts dispatch and combine themselves, in every EP topology.
@@ -299,6 +300,7 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
+        kernel_config = get_current_vllm_config().kernel_config
         prepare_finalize = DeepEPV2PrepareAndFinalize(
             buffer=handle,
             num_dispatchers=all2all_manager.world_size,
@@ -308,6 +310,9 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             sp_size=moe.moe_parallel_config.sp_size,
+            do_expand=kernel_config.deepep_v2_do_expand,
+            do_cpu_sync=kernel_config.deepep_v2_do_cpu_sync,
+            expert_alignment=expert_input_alignment,
         )
 
     elif moe.use_moonep_kernels:

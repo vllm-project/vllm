@@ -15,6 +15,88 @@ from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
 from vllm.utils.math_utils import round_up
 
 
+@triton.jit(do_not_specialize=["M"])
+def _prepare_expanded_deepgemm_input(
+    ids,
+    scales,
+    counts,
+    expert_map,
+    out_ids,
+    out_scales,
+    expert_ends,
+    M,
+    S: tl.constexpr,
+    E: tl.constexpr,
+    ID_STRIDE: tl.constexpr,
+    SF_STRIDE_M: tl.constexpr,
+    SF_STRIDE_K: tl.constexpr,
+    COUNT_STRIDE: tl.constexpr,
+    ALIGNMENT: tl.constexpr,
+    HAS_EXPERT_MAP: tl.constexpr,
+    BLOCK: tl.constexpr,
+    EXPERT_BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    rows = offsets // S
+    cols = offsets % S
+    valid = rows < M
+    expert = tl.load(ids + rows * ID_STRIDE, valid, other=-1)
+    if HAS_EXPERT_MAP:
+        expert = tl.load(expert_map + expert, valid & (expert >= 0), other=-1)
+    sf = tl.load(
+        scales + rows.to(tl.int64) * SF_STRIDE_M + cols * SF_STRIDE_K,
+        valid,
+        other=1,
+    )
+    sf = tl.where(expert >= 0, sf, 1)
+    tl.store(out_scales + offsets.to(tl.int64), sf, valid)
+    tl.store(out_ids + rows, expert, valid & (cols == 0))
+    if tl.program_id(0) == 0:
+        experts = tl.arange(0, EXPERT_BLOCK)
+        n = tl.load(counts + experts * COUNT_STRIDE, experts < E, other=0).to(tl.int32)
+        padded = tl.cdiv(n, ALIGNMENT) * ALIGNMENT
+        ends = tl.cumsum(padded) - padded + n
+        tl.store(expert_ends + experts, ends, experts < E)
+
+
+def prepare_expanded_deepgemm_input(
+    topk_ids: torch.Tensor,
+    scales: torch.Tensor,
+    counts: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    alignment: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare safe scales and expert metadata without copying expanded activations."""
+    assert topk_ids.ndim == 2 and topk_ids.shape[1] == 1
+    M, S = scales.shape
+    assert topk_ids.shape[0] == M and M > 0
+    out_ids = torch.empty((M,), dtype=torch.int32, device=topk_ids.device)
+    out_scales = torch.empty((M, S), dtype=scales.dtype, device=scales.device)
+    expert_ends = torch.empty_like(counts, dtype=torch.int32)
+    _prepare_expanded_deepgemm_input[(triton.cdiv(M * S, 1024),)](
+        topk_ids,
+        scales,
+        counts,
+        expert_map,
+        out_ids,
+        out_scales,
+        expert_ends,
+        M,
+        S,
+        counts.numel(),
+        topk_ids.stride(0),
+        scales.stride(0),
+        scales.stride(1),
+        counts.stride(0),
+        alignment,
+        expert_map is not None,
+        1024,
+        triton.next_power_of_2(counts.numel()),
+        num_warps=4,
+    )
+    return out_scales, out_ids, expert_ends
+
+
 def expert_num_tokens_round_up_and_sum(
     expert_num_tokens: torch.Tensor, alignment: int
 ) -> int:
@@ -380,6 +462,7 @@ def _fwd_kernel_ep_gather(
     topk_num: tl.constexpr,
     expert_map,
     HAS_EXPERT_MAP: tl.constexpr,
+    HAS_INPUT_INDEX: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     cur_block = tl.program_id(0)
@@ -398,10 +481,12 @@ def _fwd_kernel_ep_gather(
                 expert_id = apply_expert_map(expert_id, expert_map)
 
             if expert_id >= 0:
-                source_token_index = tl.load(
-                    input_index + cur_token * input_index_stride0 + topk_index
-                )
-                source_token_index_i64 = source_token_index.to(tl.int64)
+                source_token_index = cur_token
+                if HAS_INPUT_INDEX:
+                    source_token_index = tl.load(
+                        input_index + cur_token * input_index_stride0 + topk_index
+                    )
+                source_token_index_i64 = tl.cast(source_token_index, tl.int64)
                 acc_weight = tl.load(
                     recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
                 )
@@ -427,10 +512,13 @@ def ep_gather(
     input_tensor: torch.Tensor,
     recv_topk_ids: torch.Tensor,
     recv_topk_weight: torch.Tensor,
-    input_index: torch.Tensor,
+    input_index: torch.Tensor | None,
     expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
+    if input_index is None:
+        assert recv_topk_ids.size(1) == 1
+        assert input_tensor.shape == output_tensor.shape
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
@@ -450,14 +538,15 @@ def ep_gather(
         recv_topk_weight.stride(0),
         recv_topk_weight.stride(1),
         input_index,
-        input_index.stride(0),
-        input_index.stride(1),
+        input_index.stride(0) if input_index is not None else 0,
+        input_index.stride(1) if input_index is not None else 0,
         output_tensor,
         output_tensor.stride(0),
         output_tensor.stride(1),
         topk_num=recv_topk_ids.shape[1],
         expert_map=expert_map,
         HAS_EXPERT_MAP=expert_map is not None,
+        HAS_INPUT_INDEX=input_index is not None,
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,
     )
