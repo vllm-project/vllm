@@ -2334,6 +2334,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
+        VLLM_ROCM_USE_AITER_FLYDSL_ROUTER: Runs the DeepSeek-V4.1 MoE router
+            decode batches on the FlyDSL GEMM + top-k (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2411,6 +2413,9 @@ class rocm_aiter_ops:
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
     # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
+    _FLYDSL_ROUTER = envs.VLLM_ROCM_USE_AITER_FLYDSL_ROUTER
+    # Devices whose FlyDSL router kernels are compiled for every row bucket.
+    _FLYDSL_ROUTER_WARMED: set[torch.device] = set()
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2444,6 +2449,7 @@ class rocm_aiter_ops:
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
             envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
         )
+        cls._FLYDSL_ROUTER = envs.VLLM_ROCM_USE_AITER_FLYDSL_ROUTER
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -2827,6 +2833,29 @@ class rocm_aiter_ops:
             return True
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; ignoring it.",
+            reason,
+        )
+        return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_flydsl_router_enabled(cls) -> bool:
+        if not cls._FLYDSL_ROUTER:
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        if not cls._AITER_ENABLED:
+            reason = "VLLM_ROCM_USE_AITER is off"
+        elif not on_gfx950():
+            reason = "the kernel is gfx950-only"
+        elif envs.VLLM_BATCH_INVARIANT:
+            reason = "its k-split depends on the batch size (VLLM_BATCH_INVARIANT)"
+        elif error := cls._flydsl_router_ops()[1]:
+            reason = f"the AITER FlyDSL router failed to import ({error})"
+        else:
+            return True
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_FLYDSL_ROUTER is set, but %s; ignoring it.",
             reason,
         )
         return False
@@ -4192,6 +4221,100 @@ class rocm_aiter_ops:
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
+    @functools.cache
+    def _flydsl_router_ops() -> tuple[Any | None, str]:
+        """The AITER FlyDSL router module, or None and why it did not import."""
+        try:
+            module = "aiter.ops.flydsl.router_sqrtsoftplus_topk"
+            return importlib.import_module(module), ""
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+    @classmethod
+    def prepare_flydsl_router(
+        cls, gate: torch.Tensor, bias: torch.Tensor, top_k: int
+    ) -> torch.Tensor | None:
+        """Prepare a MoE gate for `flydsl_router_topk`.
+
+        The first call on a device compiles the kernels of every row bucket,
+        with and without a padding mask, so graph capture never compiles.
+
+        Args:
+            gate: The router weight, `[num_experts, hidden]`.
+            bias: The fp32 score-correction bias, `[num_experts]`.
+            top_k: Experts routed per token.
+
+        Returns:
+            The gate in the kernel's load-time layout (a permutation), or None
+            when the kernel does not take this gate, bias and top-k.
+
+        """
+        ops = cls._flydsl_router_ops()[0]
+        if ops is None:
+            return None
+        probe = torch.empty(1, gate.shape[1], dtype=torch.bfloat16, device=gate.device)
+        if not ops.router_sqrtsoftplus_topk_supported(probe, gate, bias, top_k):
+            return None
+        if gate.device not in cls._FLYDSL_ROUTER_WARMED:
+            for with_padding in (False, True):
+                ops.router_sqrtsoftplus_topk_warmup(
+                    gate.device, weight_shuffled=True, with_padding=with_padding
+                )
+            cls._FLYDSL_ROUTER_WARMED.add(gate.device)
+        return ops.shuffle_router_gate(gate)
+
+    @classmethod
+    def flydsl_router_topk(
+        cls,
+        x: torch.Tensor,
+        gate_shuffled: torch.Tensor,
+        bias: torch.Tensor,
+        routed_scaling_factor: float,
+        is_padding: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Router GEMM + sqrt-softplus biased top-k on the FlyDSL kernel.
+
+        Matches GateLinear followed by `fused_topk_bias` (sqrtsoftplus,
+        renormalized, no hash table or `bias_vl`) except for the last fp32 bits
+        of the logits. The op validates shapes, strides and pointers only, so
+        the call is CUDA graph safe.
+
+        Args:
+            x: bf16 hidden states, `[M, hidden]`.
+            gate_shuffled: The gate from `prepare_flydsl_router`.
+            bias: The fp32 score-correction bias, `[num_experts]`.
+            routed_scaling_factor: The routed weights of a row sum to this.
+            is_padding: Optional bool `[M]`; these rows get id -1, weight 0.
+
+        Returns:
+            (fp32 weights, int32 ids), both `[M, top_k]`, or None when the
+            kernel does not take `x`: above its tuned row count (768) or, with
+            a warning, for a layout it rejects.
+
+        """
+        ops = cls._flydsl_router_ops()[0]
+        assert ops is not None
+        if x.shape[0] > ops.TUNED_MAX_ROWS:
+            return None
+        try:
+            return ops.flydsl_router_sqrtsoftplus_topk(
+                x,
+                gate_shuffled,
+                bias,
+                routed_scaling_factor,
+                is_padding=is_padding,
+                weight_shuffled=True,
+            )
+        except ValueError as e:
+            # Raised by the op's input check, before any launch.
+            logger.warning_once(
+                "AITER FlyDSL router declined a batch (%s); GateLinear + top-k "
+                "routes it.",
+                e,
+            )
+            return None
 
     @staticmethod
     @functools.cache
