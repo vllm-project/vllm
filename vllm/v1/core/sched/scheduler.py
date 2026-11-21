@@ -1927,12 +1927,7 @@ class Scheduler(SchedulerInterface):
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
-        params = update.sampling_params
-        assert params is not None and session.sampling_params is not None
-        if params.return_aux_outputs != session.sampling_params.return_aux_outputs:
-            params = params.clone()
-            params.return_aux_outputs = session.sampling_params.return_aux_outputs
-        session.sampling_params = params
+        session.sampling_params = update.sampling_params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:

@@ -521,38 +521,6 @@ def _aux_outputs_params(
     return SamplingParams(max_tokens=max_tokens, return_aux_outputs=return_aux_outputs)
 
 
-@pytest.mark.parametrize("return_aux_outputs", [True, False])
-def test_aux_outputs_flag_is_fixed_for_a_session(return_aux_outputs):
-    scheduler = create_scheduler()
-
-    def chunk(flag: bool) -> Request:
-        (request,) = create_requests(
-            num_requests=1,
-            num_tokens=8,
-            req_ids=["session"],
-            sampling_params=SamplingParams(
-                max_tokens=1, logprobs=2, return_aux_outputs=flag
-            ),
-        )
-        request.resumable = True
-        return request
-
-    session = chunk(return_aux_outputs)
-    scheduler.add_request(session)
-    scheduler.update_from_output(
-        scheduler.schedule(),
-        ModelRunnerOutput(req_ids=["session"], sampled_token_ids=[[0]]),
-    )
-    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-
-    update = chunk(not return_aux_outputs)
-    scheduler.add_request(update)
-    assert session.status == RequestStatus.WAITING
-    assert session.sampling_params.return_aux_outputs == return_aux_outputs
-    assert update.sampling_params.return_aux_outputs != return_aux_outputs
-    assert session.sampling_params.logprobs == 2
-
-
 def test_aux_outputs_opt_out_is_not_recorded():
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)
