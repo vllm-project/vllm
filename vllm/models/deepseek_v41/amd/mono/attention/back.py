@@ -739,6 +739,11 @@ def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False, settle=False):
 # ---------------------------------------------------------------- kernel
 
 
+def wob_passes(wob_tasks):
+    """Passes of two wo_b tasks a CTA: one on 256 CTAs."""
+    return cdiv(cdiv(wob_tasks, BLOCKS), 2)
+
+
 def back_plan(key):
     """(nchunk, n_split, n_comb, COMB0, WOA0, WOB0, early_wob) of a build."""
     s, d = key.tokens, Dims(key.tp)
@@ -748,7 +753,8 @@ def back_plan(key):
     n_comb = s * (d.heads // COMB_HEADS)
     COMB0 = n_split % BLOCKS
     assert d.woa_tasks <= BLOCKS
-    assert BLOCKS < d.wob_tasks <= 2 * BLOCKS
+    # wo_b runs two tasks a pass; a pass's first task is in the stage on every CTA
+    assert BLOCKS * (2 * wob_passes(d.wob_tasks) - 1) <= d.wob_tasks
     # the GEMVs past the attention units, so CTAs without attention work have
     # their weights in flight from the start
     WOA0 = (n_split + n_comb) % BLOCKS
@@ -870,6 +876,8 @@ def run_back(c, key, bid):
     a = c["args"]
     tiles = token_tiles(s)
     _, n_split, n_comb, COMB0, WOA0, WOB0, early_wob = back_plan(key)
+    passes = wob_passes(wob_tasks)
+    assert not c["tuned"] or passes == 1  # tuned: the 256-CTA grid only
     stamp(c, 0)
     for unit in range(first_task(bid, 0), n_split, BLOCKS):
         stage_split(c, unit)
@@ -1001,4 +1009,21 @@ def run_back(c, key, bid):
         )
         if const_expr(ti == 0):
             stamp(c, 13)
+    # a grid of fewer than 160 CTAs: the CTA's further wo_b pairs (2 BLOCKS
+    # apart), each its weights and every token tile of X8B again (L2 hits)
+    for p in range_constexpr(1, passes):
+        task_a = wob_task + 2 * BLOCKS * p
+        task_b = task_a + BLOCKS
+        has_b = task_b < wob_tasks
+        ops_a = wob_loads(c, task_a)
+        ops_b = wob_loads(c, fx.min(task_b, wob_tasks - 1), pred=has_b)
+        regs = rows_loads(c, *x8b, *tiles[0])
+        for ti in range_constexpr(len(tiles)):
+            t0, n = tiles[ti]
+            rows_store(c, regs, o_rows // 4, o_rows // 32, c["xl"], c["xsl"], n)
+            if const_expr(ti + 1 < len(tiles)):
+                regs = rows_loads(c, *x8b, *tiles[ti + 1])
+            stage_wob(
+                c, task_a, ops_a, fx.min(task_b, wob_tasks - 1), ops_b, has_b, t0, n
+            )
     stamp(c, 4)
