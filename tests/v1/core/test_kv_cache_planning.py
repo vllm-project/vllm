@@ -46,6 +46,10 @@ from vllm.v1.core.kv_cache_planning import (
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
 )
+from vllm.v1.core.sched.prompt_embeds_budget import (
+    prompt_embeds_budget_rows,
+    prompt_embeds_row_bytes,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     DFlashSlidingWindowManager,
@@ -1854,6 +1858,76 @@ def test_auto_fit_max_model_len():
     # Should be reduced to fit in memory
     assert vllm_config.model_config.max_model_len < 1024
     assert vllm_config.model_config.max_model_len > 0
+
+
+@pytest.mark.parametrize("max_num_batched_tokens", [512, 4096])
+def test_prompt_embeds_rows_are_set_aside_from_kv_cache(max_num_batched_tokens):
+    """Workers hold up to max_model_len + max_num_batched_tokens prompt_embeds
+    rows, so the KV cache is sized without that memory."""
+    mem_per_block = 16 * 2 * 64 * 4 * 2 * 2  # 2 layers, 16KB per block each
+    available_memory = mem_per_block * 1024
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_layer(),
+        "layer_2": new_kv_cache_layer(),
+    }
+    num_blocks = {}
+    for enable_prompt_embeds in (False, True):
+        vllm_config = VllmConfig(
+            model_config=ModelConfig(
+                max_model_len=1024, enable_prompt_embeds=enable_prompt_embeds
+            ),
+            scheduler_config=SchedulerConfig(
+                max_model_len=1024,
+                is_encoder_decoder=False,
+                max_num_batched_tokens=max_num_batched_tokens,
+            ),
+        )
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        (config,) = get_kv_cache_configs(
+            vllm_config, [kv_cache_specs], [available_memory]
+        )
+        num_blocks[enable_prompt_embeds] = config.num_blocks
+
+    rows = 1024 + max_num_batched_tokens
+    rows_bytes = rows * prompt_embeds_row_bytes(vllm_config)
+    assert num_blocks[False] == available_memory // mem_per_block
+    assert num_blocks[True] == (available_memory - rows_bytes) // mem_per_block
+
+
+def test_auto_fit_max_model_len_counts_prompt_embeds_rows():
+    """Auto-fit must leave room for the prompt_embeds rows of the length it
+    picks, not of the model's full context."""
+    mem_per_block = 16 * 2 * 64 * 4 * 2 * 2  # 2 layers, 16KB per block each
+    limited_memory = mem_per_block * 32  # 512 tokens of KV cache alone
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_layer(),
+        "layer_2": new_kv_cache_layer(),
+    }
+    fitted = {}
+    for enable_prompt_embeds in (False, True):
+        model_config = ModelConfig(
+            max_model_len=1024, enable_prompt_embeds=enable_prompt_embeds
+        )
+        model_config.original_max_model_len = -1
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            scheduler_config=SchedulerConfig(
+                max_model_len=1024,
+                is_encoder_decoder=False,
+                max_num_batched_tokens=128,
+            ),
+        )
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        (config,) = get_kv_cache_configs(
+            vllm_config, [kv_cache_specs], [limited_memory]
+        )
+        fitted[enable_prompt_embeds] = (model_config.max_model_len, config)
+
+    max_len, config = fitted[True]
+    rows = prompt_embeds_budget_rows(max_len, vllm_config.scheduler_config)
+    rows_bytes = rows * prompt_embeds_row_bytes(vllm_config)
+    assert 0 < max_len < fitted[False][0]
+    assert config.num_blocks * mem_per_block + rows_bytes <= limited_memory
 
 
 def test_auto_fit_max_model_len_with_hybrid():

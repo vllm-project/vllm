@@ -99,6 +99,7 @@ def create_scheduler(
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
     encoder_cache_size: int | None = None,
+    enable_prompt_embeds: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -126,6 +127,7 @@ def create_scheduler(
         # SchedulerConfig one, so both must agree.
         max_model_len=max_model_len,
         runner=runner,
+        enable_prompt_embeds=enable_prompt_embeds,
     )
     if mm_encoder_only:
         model_config.multimodal_config.mm_encoder_only = True

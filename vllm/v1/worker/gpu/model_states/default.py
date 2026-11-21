@@ -7,11 +7,13 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_transferred_mrope_position_delta,
 )
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_budget_rows
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -43,9 +45,22 @@ class DefaultModelState(ModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
 
         self.prompt_embeds_state: PromptEmbedsState | None = None
+        self.stores_prompt_embeds = False
         if self.model_config.enable_prompt_embeds:
+            # Only the first PP rank reads prompt_embeds (later ranks receive
+            # hidden states), so only it holds them. KV cache planning still
+            # sets their memory aside on every rank, which only costs KV cache
+            # when a later rank is the most memory-constrained one.
+            self.stores_prompt_embeds = (
+                self.vllm_config.parallel_config.pipeline_parallel_size == 1
+                or get_pp_group().is_first_rank
+            )
             self.prompt_embeds_state = PromptEmbedsState(
-                self.max_num_reqs, self.inputs_embeds_size, self.dtype, self.device
+                self.max_num_reqs,
+                prompt_embeds_budget_rows(self.max_model_len, self.scheduler_config),
+                self.inputs_embeds_size,
+                self.dtype,
+                self.device,
             )
             if not self.supports_mm_inputs:
                 # Persistent buffer analogous to encoder_runner.inputs_embeds.
@@ -112,13 +127,19 @@ class DefaultModelState(ModelState):
                 mm_features=mm_features,
                 position_delta=position_delta,
             )
-        if self.prompt_embeds_state is not None:
+        if self.prompt_embeds_state is not None and self.stores_prompt_embeds:
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
     def get_mrope_position_delta(self, req_index: int) -> int | None:
         if self.rope_state is None:
             return None
         return self.rope_state.get_prefill_delta(req_index)
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.max_num_rows = prompt_embeds_budget_rows(
+                max_model_len, self.scheduler_config
+            )
 
     def remove_request(self, req_id: str) -> None:
         if self.mm_prefix_ranges is not None:

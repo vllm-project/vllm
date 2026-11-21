@@ -54,6 +54,10 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.prompt_embeds_budget import (
+    PromptEmbedsBudget,
+    prompt_embeds_budget_rows,
+)
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -219,6 +223,10 @@ class Scheduler(SchedulerInterface):
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
+
+        self.prompt_embeds_budget = PromptEmbedsBudget(
+            prompt_embeds_budget_rows(self.max_model_len, self.scheduler_config)
+        )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -1047,6 +1055,8 @@ class Scheduler(SchedulerInterface):
             step_skipped_async_kv: deque[Request] = deque()
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
+            # Set once a prompt_embeds request does not fit the budget.
+            prompt_embeds_blocked = False
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -1120,6 +1130,10 @@ class Scheduler(SchedulerInterface):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
+                    skip_request(request_queue)
+                    continue
+
+                if request.prompt_embeds is not None and prompt_embeds_blocked:
                     skip_request(request_queue)
                     continue
 
@@ -1341,6 +1355,15 @@ class Scheduler(SchedulerInterface):
                             request, num_computed_tokens, window_loaded
                         )
                         num_computed_tokens -= num_replay_tokens
+                    if request.prompt_embeds is not None and not (
+                        self.prompt_embeds_budget.fits(request, num_computed_tokens)
+                    ):
+                        # Admit no later prompt_embeds request this step, so the
+                        # budget drains for the first one that does not fit and
+                        # is waiting.
+                        prompt_embeds_blocked = True
+                        skip_request(request_queue)
+                        continue
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -1611,6 +1634,9 @@ class Scheduler(SchedulerInterface):
                 ):
                     raise RuntimeError(f"Invalid request status: {request.status}")
                 scheduled_new_reqs.append(request)
+                self.prompt_embeds_budget.reserve(request, num_computed_tokens)
+                # Only the admission right after a failed load skips external KV.
+                request.kv_load_failed = False
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
@@ -1849,6 +1875,7 @@ class Scheduler(SchedulerInterface):
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
+        self.prompt_embeds_budget.release(request.request_id)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
@@ -1875,6 +1902,59 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+
+    def _resend_rolled_back_prompt_embeds(
+        self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
+    ) -> tuple[set[str], int]:
+        """Re-send running requests whose first invalid block starts below the
+        first prompt_embeds row the workers hold.
+
+        Preempting them sends them to the workers again, rows included, when
+        they resume, and they recompute the lost KV instead of loading it
+        again. The blocks from the first invalid one on are evicted from the
+        prefix cache first, as the fail policy evicts downstream blocks: some
+        hold invalid KV or KV computed from it, and the request recomputes them
+        all. Running requests sharing them recompute them.
+
+        Returns:
+            The re-sent request IDs and the number of computed tokens they lost.
+
+        """
+        resent_req_ids: set[str] = set()
+        num_lost_tokens = 0
+        timestamp = time.monotonic()
+        for request in list(self.running):
+            offset = self.prompt_embeds_budget.offset(request)
+            if not offset:
+                # No prompt embeds, or the workers hold them from position 0:
+                # no rollback goes below them.
+                continue
+            req_id = request.request_id
+            (block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            num_computed = request.num_computed_tokens - num_scheduled_tokens.get(
+                req_id, 0
+            )
+            computed_block_ids = block_ids[: cdiv(num_computed, self.block_size)]
+            first_invalid = next(
+                (
+                    idx
+                    for idx, block_id in enumerate(computed_block_ids)
+                    if block_id in invalid_block_ids
+                ),
+                None,
+            )
+            if first_invalid is None or first_invalid * self.block_size >= offset:
+                # No invalid computed block, or the rollback to the first one
+                # stays within the held rows: the scan in _handle_invalid_blocks
+                # rolls the request back in place.
+                continue
+            self.kv_cache_manager.evict_blocks(set(block_ids[first_invalid:]))
+            request.kv_load_failed = True  # Skip KV reads and recompute the KV.
+            self.running.remove(request)
+            self._preempt_request(request, timestamp, drop_stale_output=True)
+            resent_req_ids.add(req_id)
+            num_lost_tokens += num_computed - first_invalid * self.block_size
+        return resent_req_ids, num_lost_tokens
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1908,6 +1988,12 @@ class Scheduler(SchedulerInterface):
             # in order.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
+            if (
+                request.prompt_embeds is not None
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                # The workers drop the rows after this step reads them.
+                self.prompt_embeds_budget.release(req_id)
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -3240,6 +3326,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
+        self.prompt_embeds_budget.release(request.request_id)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
@@ -3950,6 +4037,17 @@ class Scheduler(SchedulerInterface):
         total_failed_requests = len(async_failed_req_ids)
         total_failed_tokens = num_failed_tokens
 
+        # Re-send requests rolled back below their prompt_embeds rows before the
+        # scan below: it frees their blocks, so the invalid blocks they share
+        # are recomputed by requests that stay running.
+        resent_req_ids: set[str] = set()
+        if self.recompute_kv_load_failures:
+            resent_req_ids, num_failed_tokens = self._resend_rolled_back_prompt_embeds(
+                invalid_block_ids, num_scheduled_tokens
+            )
+            total_failed_requests += len(resent_req_ids)
+            total_failed_tokens += num_failed_tokens
+
         # handle sync loads (may be cached, collect blocks for eviction)
         sync_failed_req_ids, num_failed_tokens, sync_blocks_to_evict = (
             self._update_requests_with_invalid_blocks(
@@ -3990,4 +4088,4 @@ class Scheduler(SchedulerInterface):
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
-        return sync_failed_req_ids
+        return sync_failed_req_ids | resent_req_ids

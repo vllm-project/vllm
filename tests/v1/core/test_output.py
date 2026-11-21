@@ -13,7 +13,9 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.request import Request
 
 
 def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestData:
@@ -160,3 +162,44 @@ def test_unpickled_long_lists_are_untracked() -> None:
     new = copy.deepcopy(new)
     assert not gc.is_tracked(new.block_ids[0]) and gc.is_tracked(new.block_ids[1])
     assert new.block_ids[0] == long
+
+
+def _embeds_new_request_data(
+    prompt_embeds: torch.Tensor,
+    num_computed_tokens: int,
+    prompt_is_token_ids: list[bool] | None = None,
+) -> NewRequestData:
+    request = Request(
+        request_id="test_req",
+        prompt_token_ids=None if prompt_is_token_ids is None else [0] * 6,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=prompt_is_token_ids,
+    )
+    request.num_computed_tokens = num_computed_tokens
+    return NewRequestData.from_request(request, ([],), request.prefill_token_ids)
+
+
+def test_from_request_sends_only_uncomputed_prompt_embeds() -> None:
+    """Rows of computed positions (e.g. prefix-cache hits) are not sent, nor
+    their token-id flags; prompt_len still covers the whole prompt."""
+    prompt_embeds = torch.randn(6, 4)
+    is_token_ids = [True, False, False, True, False, False]
+
+    new_req = _embeds_new_request_data(prompt_embeds, 4, is_token_ids)
+
+    assert new_req.prompt_embeds_offset == 4
+    assert new_req.prompt_embeds is not None
+    torch.testing.assert_close(new_req.prompt_embeds, prompt_embeds[4:])
+    assert new_req.prompt_is_token_ids == is_token_ids[4:]
+    assert new_req.prompt_len == 6
+
+
+def test_from_request_clamps_offset_to_prompt() -> None:
+    """A resumed request may have computed past its prompt: it sends no rows."""
+    new_req = _embeds_new_request_data(torch.randn(6, 4), 9)
+
+    assert new_req.prompt_embeds_offset == 6
+    assert new_req.prompt_embeds is not None and len(new_req.prompt_embeds) == 0
+    assert new_req.prompt_len == 6

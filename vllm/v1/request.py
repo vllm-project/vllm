@@ -248,6 +248,9 @@ class Request:
         self.update_block_hashes()
 
         self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
+        # Set when a failed KV load re-sends the request, until it is admitted
+        # again: that admission recomputes the lost KV instead of loading it.
+        self.kv_load_failed = False
 
         # Used for streaming
         self.resumable = resumable
@@ -364,7 +367,7 @@ class Request:
     def skip_reading_external_kv(self) -> bool:
         # KV connector hits are not bounded by prefix_cache_hit_limit, so a
         # bounded request reuses only the local prefix cache.
-        return self.prefix_cache_hit_limit is not None
+        return self.prefix_cache_hit_limit is not None or self.kv_load_failed
 
     def get_prefix_cache_hit_limit(self) -> int | None:
         """Number of leading tokens that may be read from the prefix cache:

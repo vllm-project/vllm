@@ -593,6 +593,132 @@ def test_max_num_active_seqs_caps_admission():
     assert scheduler.max_num_running_reqs == 16
 
 
+def _prompt_embeds_request(request_id: str, num_rows: int) -> Request:
+    sampling_params = SamplingParams(max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        prompt_embeds=torch.zeros(num_rows, 8),
+    )
+
+
+def _new_req_ids(output: SchedulerOutput) -> list[str]:
+    return [req.req_id for req in output.scheduled_new_reqs]
+
+
+def test_prompt_embeds_admission_waits_for_gpu_budget():
+    """A prompt_embeds request waits while its rows would push the rows held on
+    the GPU past the budget. Requests
+    without embeds are admitted past it, and it is admitted once a held prompt
+    is fully computed, before that request finishes."""
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=64, enable_prompt_embeds=True
+    )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.prompt_embeds_budget.max_num_rows = 64
+    scheduler.add_request(_prompt_embeds_request("a", 40))
+    scheduler.add_request(_prompt_embeds_request("b", 40))
+    scheduler.add_request(create_requests(1, num_tokens=10, req_ids=["c"])[0])
+
+    assert _new_req_ids(scheduler.schedule()) == ["a", "c"]
+    # a's whole prompt was scheduled, so the workers drop its rows.
+    assert _new_req_ids(scheduler.schedule()) == ["b"]
+    assert "a" in scheduler.requests
+
+
+def test_prompt_embeds_budget_covers_a_full_step():
+    """The budget leaves room for a full step of new prompts besides one
+    max-length prompt, so prompt_embeds requests can fill steps longer than
+    max_model_len."""
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=256, enable_prompt_embeds=True
+    )
+    for request_id in "abcd":
+        scheduler.add_request(_prompt_embeds_request(request_id, 60))
+
+    assert _new_req_ids(scheduler.schedule()) == ["a", "b", "c", "d"]
+
+
+def test_prompt_embeds_waiting_request_is_not_starved():
+    """A prompt_embeds request that does not fit holds back later prompt_embeds
+    requests, even ones that fit, so short prompts cannot keep a long one
+    waiting. Requests without prompt_embeds still go ahead."""
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=64, enable_prompt_embeds=True
+    )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.prompt_embeds_budget.max_num_rows = 64
+    scheduler.add_request(_prompt_embeds_request("a", 40))
+    scheduler.add_request(_prompt_embeds_request("b", 60))
+    scheduler.add_request(_prompt_embeds_request("c", 16))
+    scheduler.add_request(create_requests(1, num_tokens=10, req_ids=["d"])[0])
+
+    assert _new_req_ids(scheduler.schedule()) == ["a", "d"]
+    # a's prompt was computed in one step, so its rows are released.
+    assert _new_req_ids(scheduler.schedule()) == ["b"]
+
+
+def test_prompt_embeds_budget_counts_only_uncached_rows():
+    """Workers get only the rows past a prefix-cache hit, so only those count
+    against the budget. B shares two cached 16-row blocks with A and sends 16
+    of its 48 rows, so B and C (40 rows) fit 64 rows together; B's full 48 rows
+    would not."""
+    scheduler = create_scheduler(
+        max_model_len=64, enable_prompt_embeds=True, enable_prefix_caching=True
+    )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.prompt_embeds_budget.max_num_rows = 64
+    init_none_hash(sha256)
+    block_hasher = get_request_block_hasher(16, sha256)
+    shared = torch.randn(40, 8)
+
+    def request(request_id: str, prompt_embeds: torch.Tensor) -> Request:
+        sampling_params = SamplingParams(max_tokens=4)
+        sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            prompt_embeds=prompt_embeds,
+            block_hasher=block_hasher,
+        )
+
+    scheduler.add_request(request("a", torch.cat([shared, torch.randn(8, 8)])))
+    assert _new_req_ids(scheduler.schedule()) == ["a"]
+
+    scheduler.add_request(request("b", torch.cat([shared, torch.randn(8, 8)])))
+    scheduler.add_request(request("c", torch.randn(40, 8)))
+    output = scheduler.schedule()
+
+    assert _new_req_ids(output) == ["b", "c"]
+    new_b = output.scheduled_new_reqs[0]
+    assert new_b.prompt_embeds_offset == 32
+    assert new_b.prompt_embeds is not None and len(new_b.prompt_embeds) == 16
+
+
+def test_prompt_embeds_budget_released_on_preemption():
+    """Preempting a request mid-prefill releases its rows (the workers drop
+    them), so a waiting prompt_embeds request that did not fit is admitted."""
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=16, enable_prompt_embeds=True
+    )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.prompt_embeds_budget.max_num_rows = 64
+    request = _prompt_embeds_request("a", 40)
+    scheduler.add_request(request)
+    scheduler.add_request(_prompt_embeds_request("b", 40))
+    assert _new_req_ids(scheduler.schedule()) == ["a"]
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    assert _new_req_ids(scheduler.schedule()) == ["b"]
+
+
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)

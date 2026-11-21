@@ -37,6 +37,15 @@ else:
     Request = object
 
 
+def num_prompt_embeds_to_send(request: Request, num_computed_tokens: int) -> int:
+    """Rows of `request.prompt_embeds` at positions not computed yet, the only
+    ones workers need. The scheduler budgets the rows sent, so both use this
+    count."""
+    if request.prompt_embeds is None:
+        return 0
+    return max(len(request.prompt_embeds) - num_computed_tokens, 0)
+
+
 @dataclass
 class NewRequestData:
     req_id: str
@@ -49,8 +58,13 @@ class NewRequestData:
     lora_request: LoRARequest | None
     # All the tokens to prefill: the prompt, plus any generated tokens on resume.
     prefill_token_ids: list[int]
+    # Rows of prompt positions from `prompt_embeds_offset` on, not from 0:
+    # row `i` is position `prompt_embeds_offset + i`. Same for the flags below.
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
+    # Prompt position of the first row of `prompt_embeds`: rows below it were
+    # already computed (e.g. prefix-cache hits) and are not sent.
+    prompt_embeds_offset: int = 0
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
 
@@ -62,6 +76,17 @@ class NewRequestData:
         prefill_token_ids: list[int],
         uses_mrope: bool = False,
     ) -> "NewRequestData":
+        prompt_embeds = request.prompt_embeds
+        prompt_is_token_ids = request.prompt_is_token_ids
+        offset = 0
+        if prompt_embeds is not None:
+            offset = len(prompt_embeds) - num_prompt_embeds_to_send(
+                request, request.num_computed_tokens
+            )
+            # A view: the worker transport sends only these rows' bytes.
+            prompt_embeds = prompt_embeds[offset:]
+            if prompt_is_token_ids is not None:
+                prompt_is_token_ids = prompt_is_token_ids[offset:]
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -75,8 +100,9 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
-            prompt_embeds=request.prompt_embeds,
-            prompt_is_token_ids=request.prompt_is_token_ids,
+            prompt_embeds=prompt_embeds,
+            prompt_is_token_ids=prompt_is_token_ids,
+            prompt_embeds_offset=offset,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
         )
@@ -91,7 +117,7 @@ class NewRequestData:
         if self.prompt_token_ids is not None:
             return len(self.prompt_token_ids)
         if self.prompt_embeds is not None:
-            return self.prompt_embeds.shape[0]
+            return self.prompt_embeds_offset + self.prompt_embeds.shape[0]
         return 0
 
     def __repr__(self) -> str:
@@ -108,7 +134,8 @@ class NewRequestData:
             f"block_ids={self.block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"lora_request={self.lora_request},"
-            f"prompt_embeds_shape={prompt_embeds_shape}"
+            f"prompt_embeds_shape={prompt_embeds_shape},"
+            f"prompt_embeds_offset={self.prompt_embeds_offset}"
             ")"
         )
 
@@ -130,7 +157,8 @@ class NewRequestData:
             f"block_ids={self.block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"lora_request={self.lora_request},"
-            f"prompt_embeds_shape={prompt_embeds_shape}"
+            f"prompt_embeds_shape={prompt_embeds_shape},"
+            f"prompt_embeds_offset={self.prompt_embeds_offset}"
             ")"
         )
 

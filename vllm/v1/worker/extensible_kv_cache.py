@@ -30,6 +30,10 @@ from vllm.utils.vmm_driver import (
     MEM_HANDLE_TYPE_FABRIC,
     MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
 )
+from vllm.v1.core.sched.prompt_embeds_budget import (
+    prompt_embeds_budget_rows,
+    prompt_embeds_row_bytes,
+)
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -681,6 +685,13 @@ def measure_kv_cache_blocks(
                 format_gib(requested_memory),
                 format_gib(withheld),
             )
+    # Leave room for the prompt_embeds rows workers may hold: they are
+    # allocated per request, after this measurement.
+    if row_bytes := prompt_embeds_row_bytes(vllm_config):
+        rows = prompt_embeds_budget_rows(
+            vllm_config.model_config.max_model_len, vllm_config.scheduler_config
+        )
+        available = max(available - rows * row_bytes, 0)
     kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,
         vllm_config.model_config.multimodal_config,

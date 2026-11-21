@@ -11,6 +11,7 @@ mixed-mode `prompt_is_token_ids` mask (token-id rows keep the base embedding).
 
 from dataclasses import dataclass
 
+import numpy as np
 import pytest
 import torch
 
@@ -28,6 +29,7 @@ from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 
 HIDDEN = 24
 MAX_NUM_REQS = 8
+MAX_NUM_ROWS = 16
 DEVICE = torch.device(current_platform.device_type)
 
 
@@ -36,28 +38,43 @@ class _NewReqData:
     req_id: str
     prompt_embeds: torch.Tensor | None
     prompt_is_token_ids: list[bool] | None = None
+    prompt_embeds_offset: int = 0
+    num_computed_tokens: int = 0
 
 
 @dataclass(slots=True)
 class _Batch:
     num_reqs: int
-    num_scheduled_tokens: torch.Tensor  # np-like, only .max() is used
+    req_ids: list[str]
+    num_scheduled_tokens: np.ndarray
     idx_mapping: torch.Tensor
+    idx_mapping_np: np.ndarray
     query_start_loc: torch.Tensor
+    num_computed_tokens_np: np.ndarray | None = None
 
 
 def _make_state() -> PromptEmbedsState:
-    return PromptEmbedsState(MAX_NUM_REQS, HIDDEN, torch.float32, DEVICE)
+    return PromptEmbedsState(
+        MAX_NUM_REQS,
+        MAX_NUM_ROWS,
+        HIDDEN,
+        torch.float32,
+        DEVICE,
+    )
 
 
-def _batch(num_scheduled: list[int], idx_mapping: list[int]) -> _Batch:
+def _batch(
+    num_scheduled: list[int], idx_mapping: list[int], req_ids: list[str]
+) -> _Batch:
     query_start_loc = [0]
     for n in num_scheduled:
         query_start_loc.append(query_start_loc[-1] + n)
     return _Batch(
         num_reqs=len(num_scheduled),
-        num_scheduled_tokens=torch.tensor(num_scheduled, dtype=torch.int32),
+        req_ids=req_ids,
+        num_scheduled_tokens=np.array(num_scheduled, dtype=np.int32),
         idx_mapping=torch.tensor(idx_mapping, dtype=torch.int64, device=DEVICE),
+        idx_mapping_np=np.array(idx_mapping, dtype=np.intp),
         query_start_loc=torch.tensor(query_start_loc, dtype=torch.int32, device=DEVICE),
     )
 
@@ -69,6 +86,7 @@ def _apply(
     num_tokens: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the overlay on a fresh base buffer; return (result, base)."""
+    batch.num_computed_tokens_np = np.array(num_computed, dtype=np.int32)
     num_computed_tokens = torch.zeros(MAX_NUM_REQS, dtype=torch.int32, device=DEVICE)
     for batch_idx, req_index in enumerate(batch.idx_mapping.tolist()):
         num_computed_tokens[req_index] = num_computed[batch_idx]
@@ -92,7 +110,9 @@ def test_overlay_chunked_prefill_and_decode():
     state.apply_staged_writes()
 
     # a: chunk [2, 6) of its embeds; b: fully decoded; c: no embeds.
-    batch = _batch(num_scheduled=[4, 1, 3], idx_mapping=[0, 1, 2])
+    batch = _batch(
+        num_scheduled=[4, 1, 3], idx_mapping=[0, 1, 2], req_ids=["a", "b", "c"]
+    )
     out, base = _apply(state, batch, num_computed=[2, 7, 1], num_tokens=8)
 
     torch.testing.assert_close(out[0:4], embeds_a[2:6].to(DEVICE))
@@ -107,7 +127,7 @@ def test_overlay_clamps_to_embeds_length():
     state.add_request(3, _NewReqData("a", embeds))
     state.apply_staged_writes()
 
-    batch = _batch(num_scheduled=[3], idx_mapping=[3])
+    batch = _batch(num_scheduled=[3], idx_mapping=[3], req_ids=["a"])
     out, base = _apply(state, batch, num_computed=[2], num_tokens=3)
 
     torch.testing.assert_close(out[0:2], embeds[2:4].to(DEVICE))
@@ -123,7 +143,7 @@ def test_overlay_respects_is_token_ids_mask():
     state.add_request(0, _NewReqData("a", embeds, is_token_ids))
     state.apply_staged_writes()
 
-    batch = _batch(num_scheduled=[5], idx_mapping=[0])
+    batch = _batch(num_scheduled=[5], idx_mapping=[0], req_ids=["a"])
     out, base = _apply(state, batch, num_computed=[0], num_tokens=5)
 
     embeds_gpu = embeds.to(DEVICE)
@@ -146,8 +166,56 @@ def test_index_reuse_clears_stale_entry():
     state.add_request(0, _NewReqData("b", None))
     state.apply_staged_writes()
 
-    batch = _batch(num_scheduled=[2, 2], idx_mapping=[0, 1])
+    batch = _batch(num_scheduled=[2, 2], idx_mapping=[0, 1], req_ids=["b", "other"])
     out, base = _apply(state, batch, num_computed=[0, 0], num_tokens=4)
 
     torch.testing.assert_close(out[0:2], base[0:2])
     torch.testing.assert_close(out[2:4], other.to(DEVICE))
+
+
+def test_drops_embeds_after_last_prompt_step():
+    """A request's GPU embeddings are freed after the step that computes its
+    last prompt position, and only then; the scheduler counts them against
+    the max_model_len budget until that step."""
+    state = _make_state()
+    embeds = torch.randn(6, HIDDEN, dtype=torch.float32)
+    state.add_request(0, _NewReqData("a", embeds))
+    state.apply_staged_writes()
+
+    out, _ = _apply(state, _batch([4], [0], ["a"]), num_computed=[0], num_tokens=4)
+    torch.testing.assert_close(out, embeds[0:4].to(DEVICE))
+    assert "a" in state.gpu_tensors
+
+    out, _ = _apply(state, _batch([2], [0], ["a"]), num_computed=[4], num_tokens=2)
+    torch.testing.assert_close(out, embeds[4:6].to(DEVICE))
+    assert "a" not in state.gpu_tensors
+
+
+def test_rows_over_budget_fail_loudly():
+    """Rows held on the GPU must stay within the budget KV cache planning sets
+    aside. Adding past it means the scheduler and workers disagree on when rows
+    are freed, so it fails with an error that names the request."""
+    state = _make_state()
+    state.add_request(0, _NewReqData("a", torch.randn(10, HIDDEN)))
+    with pytest.raises(RuntimeError, match="request b exceed the prompt_embeds budget"):
+        state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
+
+    state.remove_request("a")
+    state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
+
+
+def test_overlay_reads_rows_past_the_offset():
+    """Rows below `prompt_embeds_offset` were computed before the request was
+    sent and are not sent; row 0 holds that prompt position."""
+    state = _make_state()
+    embeds = torch.randn(10, HIDDEN, dtype=torch.float32)
+    state.add_request(
+        0,
+        _NewReqData("a", embeds[6:], prompt_embeds_offset=6, num_computed_tokens=6),
+    )
+    state.apply_staged_writes()
+
+    out, _ = _apply(state, _batch([4], [0], ["a"]), num_computed=[6], num_tokens=4)
+
+    torch.testing.assert_close(out, embeds[6:10].to(DEVICE))
+    assert "a" not in state.gpu_tensors
