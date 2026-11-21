@@ -15,7 +15,17 @@ class FilesystemResolver(LoRAResolver):
     async def resolve_lora(
         self, base_model_name: str, lora_name: str
     ) -> LoRARequest | None:
-        lora_path = os.path.join(self.lora_cache_dir, lora_name)
+        if not lora_name or os.path.isabs(lora_name):
+            return None
+        cache_dir = os.path.normpath(self.lora_cache_dir)
+        lora_path = os.path.normpath(os.path.join(cache_dir, lora_name))
+        try:
+            if os.path.commonpath([cache_dir, lora_path]) != cache_dir or (
+                lora_path == cache_dir
+            ):
+                return None
+        except ValueError:
+            return None
         maybe_lora_request = await self._get_lora_req_from_path(
             lora_name, lora_path, base_model_name
         )
