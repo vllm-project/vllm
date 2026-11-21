@@ -24,6 +24,8 @@ def _attn_res_kernel(
     output_norm_weight_ptr,
     output_ptr,
     output_scale_ptr,
+    block_rstd_ptr,
+    stride_rstd_m: tl.constexpr,
     stride_prefix_m: tl.constexpr,
     stride_delta_m: tl.constexpr,
     stride_block_m: tl.constexpr,
@@ -35,6 +37,7 @@ def _attn_res_kernel(
     eps: tl.constexpr,
     output_norm_eps: tl.constexpr,
     HAS_DELTA: tl.constexpr,
+    CACHE_BLOCK_RSTD: tl.constexpr,
     WRITE_BLOCK: tl.constexpr,
     APPLY_OUTPUT_NORM: tl.constexpr,
     QUANT_MAX: tl.constexpr,
@@ -107,9 +110,30 @@ def _attn_res_kernel(
                 eviction_policy="evict_first",
             ).to(tl.float32)
             values = tl.where(is_prefix[:, None], updated_prefix[None, :], block_values)
-            reciprocal_std = tl.rsqrt(
-                tl.sum(values * values, axis=1) * (1.0 / hidden_size) + eps
-            )
+            if CACHE_BLOCK_RSTD:
+                tl.static_assert(BLOCK_L == 1)
+                if source_tile == 0 or source_tile == num_blocks:
+                    # Block 0 keeps the consumer's reduction order, including
+                    # when the initial writer has a fused FP8 output norm.
+                    reciprocal_std = tl.rsqrt(
+                        tl.sum(values * values, axis=1) * (1.0 / hidden_size) + eps
+                    )
+                    if WRITE_BLOCK and source_tile == num_blocks:
+                        tl.store(
+                            block_rstd_ptr
+                            + row_idx * stride_rstd_m
+                            + block_write_idx
+                            + tl.arange(0, BLOCK_L) * 0,
+                            reciprocal_std,
+                        )
+                else:
+                    reciprocal_std = tl.load(
+                        block_rstd_ptr + row_idx * stride_rstd_m + source_offsets,
+                    )
+            else:
+                reciprocal_std = tl.rsqrt(
+                    tl.sum(values * values, axis=1) * (1.0 / hidden_size) + eps
+                )
             logits = tl.sum(values * input_qk_weight[None, :], axis=1) * reciprocal_std
             scores = tl.where(source_mask, logits, -float("inf"))
 
@@ -160,8 +184,30 @@ def attn_res(
     output_norm_eps: float,
     *,
     quant_dtype: torch.dtype | None = None,
+    block_rstd_cache: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Mix historical blocks and the live prefix, optionally caching their RMS.
+
+    A cache belongs to one ordered model forward. Each block after block 0
+    must be written by this function before any consumer reads it, using the
+    same epsilon. Only a live-prefix writer publishes a cache entry; block 0
+    is always recomputed. The cache must not alias the residual bank.
+    """
     num_tokens, hidden_size = prefix.shape
+    if block_rstd_cache is not None:
+        assert num_tokens >= 256 and hidden_size == 7168
+        assert prefix.dtype == blocks.dtype == torch.bfloat16
+        assert delta is None or (
+            delta.shape == prefix.shape
+            and delta.dtype == prefix.dtype
+            and delta.device == prefix.device
+        )
+        assert block_rstd_cache.shape == blocks.shape[:2] == (num_tokens, 8)
+        assert block_rstd_cache.dtype == torch.float32
+        assert block_rstd_cache.device == prefix.device == blocks.device
+        assert block_rstd_cache.is_contiguous()
+        assert eps == 1e-5 and 0 <= num_blocks <= 8
+        assert block_write_idx == -1 or block_write_idx == num_blocks < 8
     assert prefix.stride(-1) == 1
     assert delta is None or delta.stride(-1) == 1
     assert blocks.stride(-1) == 1
@@ -195,6 +241,8 @@ def attn_res(
         output_norm_weight,
         output,
         scale,
+        block_rstd_cache,
+        0 if block_rstd_cache is None else block_rstd_cache.stride(0),
         prefix.stride(0),
         0 if delta is None else delta.stride(0),
         blocks.stride(0),
@@ -206,6 +254,7 @@ def attn_res(
         eps,
         output_norm_eps,
         HAS_DELTA=delta is not None,
+        CACHE_BLOCK_RSTD=block_rstd_cache is not None,
         WRITE_BLOCK=block_write_idx >= 0,
         APPLY_OUTPUT_NORM=output_norm_weight is not None,
         QUANT_MAX=0.0 if quant_dtype is None else get_fp8_min_max()[1],

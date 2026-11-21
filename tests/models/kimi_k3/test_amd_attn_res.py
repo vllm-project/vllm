@@ -305,6 +305,132 @@ def test_mla_input_quant_requires_all_consumers(matching, requires_unquantized):
     )
 
 
+def _norm_cache_sequence(
+    prefix, delta, blocks, weights, cache, quant_dtype=None, mixed_output=False
+):
+    outputs: list[torch.Tensor] = []
+    for block in range(8):
+        for write in (True, False):
+            result = attn_res(
+                prefix,
+                None if block == 0 and write else delta,
+                blocks,
+                weights[block, 0],
+                weights[block, 1],
+                weights[block, 2] if block % 2 == 0 else None,
+                block if write else block + 1,
+                block if write else -1,
+                1e-5,
+                1e-5,
+                quant_dtype=quant_dtype if write or not mixed_output else None,
+                block_rstd_cache=cache,
+            )
+            outputs.extend(result if isinstance(result, tuple) else (result,))
+    return outputs
+
+
+@pytest.mark.parametrize("num_tokens", [280, 336])
+@pytest.mark.parametrize(
+    "quantized,mixed_output", [(False, False), (True, False), (True, True)]
+)
+def test_norm_cache_preserves_each_writer_and_consumer(
+    num_tokens, quantized, mixed_output
+):
+    """A changed forward must overwrite stale norms before using any block."""
+    torch.manual_seed(20261113)
+    hidden = 7168
+    prefix = _randn_with_row_padding(num_tokens, hidden, padding=7)
+    reference_prefix = prefix.clone()
+    delta = _randn_with_row_padding(num_tokens, hidden, padding=11)
+    blocks = _randn_with_row_padding(num_tokens, 8, hidden, padding=13)
+    reference_blocks = blocks.clone()
+    weights = torch.randn(8, 3, hidden, device="cuda", dtype=torch.bfloat16)
+    weights[:, 1] /= hidden**0.5
+    cache = torch.full((num_tokens, 8), float("nan"), device="cuda")
+    quant_dtype = current_platform.fp8_dtype() if quantized else None
+
+    for _ in range(2):
+        prefix.normal_()
+        reference_prefix.copy_(prefix)
+        # Block 0 is deliberately invalid in the cache, even on the second
+        # forward. Its native historical reduction must never load this slot.
+        cache[:, 0] = float("nan")
+        reference = _norm_cache_sequence(
+            reference_prefix,
+            delta,
+            reference_blocks,
+            weights,
+            None,
+            quant_dtype,
+            mixed_output,
+        )
+        actual = _norm_cache_sequence(
+            prefix, delta, blocks, weights, cache, quant_dtype, mixed_output
+        )
+        for output, expected in zip(actual, reference):
+            assert torch.isfinite(output.float()).all()
+            torch.testing.assert_close(output.float(), expected.float(), atol=0, rtol=0)
+        torch.testing.assert_close(prefix, reference_prefix, atol=0, rtol=0)
+        torch.testing.assert_close(blocks, reference_blocks, atol=0, rtol=0)
+        assert torch.isnan(cache[:, 0]).all()
+        assert torch.isfinite(cache[:, 1:]).all()
+
+
+def test_norm_cache_forward_local_storage_survives_shared_pool_replays():
+    """Alternating graph shapes must not consume another forward's norm cache."""
+    torch.manual_seed(20261113)
+    hidden, max_tokens = 7168, 336
+    source = torch.randn(max_tokens, hidden, device="cuda", dtype=torch.bfloat16)
+    delta = torch.randn_like(source)
+    weights = torch.randn(8, 3, hidden, device="cuda", dtype=torch.bfloat16)
+    weights[:, 1] /= hidden**0.5
+    manager = workspace.WorkspaceManager(torch.device("cuda"))
+    pool = torch.cuda.graph_pool_handle()
+    captures: dict[
+        int, list[tuple[torch.cuda.CUDAGraph, list[torch.Tensor], torch.Tensor]]
+    ] = {}
+
+    def forward(num_tokens, cached, bank):
+        prefix = source[:num_tokens].clone()
+        cache = (
+            torch.empty((num_tokens, 8), device="cuda", dtype=torch.float32)
+            if cached
+            else None
+        )
+        return _norm_cache_sequence(prefix, delta[:num_tokens], bank, weights, cache)
+
+    for num_tokens in (280, 336):
+        captures[num_tokens] = []
+        for cached in (False, True):
+            bank = manager.get_persistent(
+                ("attnres-test-bank", cached),
+                (max_tokens, 8, hidden),
+                torch.bfloat16,
+            )[:num_tokens]
+
+            forward(num_tokens, cached, bank)
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=pool):
+                outputs = forward(num_tokens, cached, bank)
+            captures[num_tokens].append((graph, outputs, bank))
+    manager.lock()
+
+    pressure = torch.empty(32 * 1024**2, device="cuda", dtype=torch.uint8)
+    for num_tokens in (280, 336, 280):
+        source.normal_()
+        delta.normal_()
+        pressure.fill_(255)
+        for graph, _, bank in captures[num_tokens]:
+            bank.fill_(float("nan"))
+            graph.replay()
+        reference, actual = captures[num_tokens]
+        for expected, output in zip(reference[1], actual[1]):
+            assert torch.isfinite(output).all()
+            torch.testing.assert_close(output, expected, atol=0, rtol=0)
+        torch.testing.assert_close(actual[2], reference[2], atol=0, rtol=0)
+
+
 # Small so the CPU tests stay cheap; the size itself has no significance.
 BANK_TOKENS = 64
 HIDDEN = 16
