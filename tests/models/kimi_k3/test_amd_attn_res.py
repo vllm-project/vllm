@@ -324,10 +324,13 @@ def _model() -> KimiLinearModel:
     model = object.__new__(KimiLinearModel)
     nn.Module.__init__(model)
     model.max_num_batched_tokens = BANK_TOKENS
+    model.routing_observed = False
     return model
 
 
-def _pass_through_layer(positions, hidden_states, residual, prefix_delta):
+def _pass_through_layer(
+    positions, hidden_states, residual, prefix_delta, sp_num_tokens=None
+):
     return hidden_states, residual, torch.zeros_like(hidden_states)
 
 
