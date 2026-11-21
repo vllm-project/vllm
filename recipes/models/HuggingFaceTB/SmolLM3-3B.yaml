@@ -1,0 +1,156 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "SmolLM3 3B"
+  slug: "smollm3-3b"
+  provider: "Hugging Face"
+  description: "Hugging Face's fully open 3B decoder-only model with dual-mode reasoning, multilingual coverage, and a 64K native context window."
+  date_added: 2026-11-10
+  date_updated: 2026-11-10
+  tasks:
+    - text
+  performance_headline: "Fully open 3B model with a toggleable thinking mode — single consumer GPU"
+
+model:
+  model_id: "HuggingFaceTB/SmolLM3-3B"
+  architecture: dense
+  parameter_count: "3B"
+  active_parameters: "3B"
+  context_length: 65536
+  base_args: []
+  base_env: {}
+
+features:
+  no_think:
+    description: "Disable the reasoning trace so the model answers directly. Thinking is on by default for this checkpoint; this flag flips the chat template to No-Think mode server-wide."
+    label: "No-Think"
+    args:
+      - "--default-chat-template-kwargs"
+      - '{"enable_thinking": false}'
+
+opt_in_features:
+  - no_think
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 8
+    description: "Full BF16 weights (~6.2 GB) — single 8 GB+ GPU with room for KV cache"
+
+compatible_strategies:
+  - single_node_tp
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  SmolLM3-3B is Hugging Face's fully open 3B decoder-only model: grouped-query
+  attention with NoPE on three of every four layers, 11.2T pre-training tokens,
+  multilingual data, and a 64K native context window. Its headline feature is
+  **dual-mode reasoning** — one checkpoint serves both a deliberate reasoner and
+  a fast instruct model.
+
+  vLLM serves it through the Hugging Face `transformers` backend
+  (`SmolLM3ForCausalLM`), so there is no custom model code or kernel to build.
+
+  ## Prerequisites
+
+  - **Hardware**: 1× GPU with ≥8 GB VRAM for BF16. This recipe was validated on a
+    16 GB consumer GPU (Blackwell / `sm120`), so the CUDA build must match the
+    card's compute capability.
+  - **vLLM**: any build that registers `SmolLM3ForCausalLM` in the model registry.
+  - **Windows hosts**: vLLM does not support Windows natively; run it under WSL2.
+
+  ### pip (NVIDIA CUDA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Deployment Configurations
+
+  ### Quick Start (Single GPU, BF16)
+
+  ```bash
+  vllm serve HuggingFaceTB/SmolLM3-3B --port 8000
+  ```
+
+  On a small-VRAM GPU, cap the context to leave room for KV cache:
+
+  ```bash
+  vllm serve HuggingFaceTB/SmolLM3-3B --max-model-len 16384 \
+    --gpu-memory-utilization 0.85
+  ```
+
+  ### No-Think Mode as the Default
+
+  ```bash
+  vllm serve HuggingFaceTB/SmolLM3-3B \
+    --default-chat-template-kwargs '{"enable_thinking": false}' \
+    --port 8000
+  ```
+
+  ## Reasoning Modes
+
+  This checkpoint **thinks by default**: the chat template asks for a reasoning
+  trace, which vLLM returns inside the response `content` as a `<think>` block
+  (there is no dedicated `--reasoning-parser` for the SmolLM3 family, so the
+  trace is not split into a separate field).
+
+  Thinking can be turned off either server-wide or per request:
+
+  | Mode | How to select | Verified |
+  | --- | --- | --- |
+  | Think (default) | no extra flags | yes |
+  | No-Think | `--default-chat-template-kwargs '{"enable_thinking": false}'` | yes |
+  | No-Think | `chat_template_kwargs: {"enable_thinking": false}` per request | yes |
+  | No-Think | `/no_think` suffix on the system message | yes |
+
+  The model card additionally documents `/think` and `/deep_think` system-message
+  suffixes for choosing the reasoning depth per conversation:
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "HuggingFaceTB/SmolLM3-3B",
+      "messages": [
+        {"role": "system", "content": "You are a concise assistant./no_think"},
+        {"role": "user", "content": "What is 17 times 3?"}
+      ]
+    }'
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="HuggingFaceTB/SmolLM3-3B",
+      messages=[{"role": "user", "content": "Explain group-query attention in one sentence."}],
+      max_tokens=512,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Configuration Tips
+
+  - `--max-model-len`: the native window is 64K (65536); lowering it frees VRAM
+    for KV cache. Going beyond 64K requires the RoPE scaling settings from the
+    model card.
+  - `--gpu-memory-utilization`: lower it when the driver or a co-located process
+    already holds VRAM — vLLM aborts startup if the request exceeds free memory.
+  - `--kv-cache-dtype fp8`: roughly halves KV cache memory.
+  - `--enforce-eager`: use it if CUDA graph capture OOMs on a tight VRAM budget.
+
+  ## References
+
+  - [Model card](https://huggingface.co/HuggingFaceTB/SmolLM3-3B)
+  - [SmolLM3 announcement](https://huggingface.co/blog/smollm3)
+  - [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)
