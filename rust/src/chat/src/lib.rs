@@ -120,6 +120,11 @@ impl ChatRequestProcessor {
         }
     }
 
+    /// Return the active model renderer for prompt construction.
+    pub fn renderer(&self) -> DynChatRenderer {
+        self.backend.chat_renderer()
+    }
+
     /// Configure the parser selections used to prepare generation requests.
     pub fn with_parser_selections(
         mut self,
@@ -229,7 +234,7 @@ impl ChatRequestProcessor {
         if self.exclude_tools_when_tool_choice_none {
             request.tool_context.exclude_initial_tools_if_none();
         }
-        let renderer = self.backend.chat_renderer();
+        let renderer = self.renderer();
         if request.chat_options.chat_template.is_some() && !renderer.renders_request_chat_template()
         {
             return Err(Error::UnsupportedRequestChatTemplate);

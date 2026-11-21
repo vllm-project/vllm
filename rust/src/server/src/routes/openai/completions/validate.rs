@@ -2,11 +2,19 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde_json::Value;
+use vllm_text::Prompt;
 
-use super::types::CompletionRequest;
+use super::types::{CompletionPrompt, CompletionRequest};
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
+
+pub(super) fn missing_prompt_error() -> ApiError {
+    ApiError::invalid_request(
+        "Either prompt or prompt_embeds must be provided and non-empty.",
+        Some("prompt"),
+    )
+}
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -33,15 +41,40 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    // Python's protocol validator counts an empty embeddings list as absent.
+    let has_embeds = request
+        .prompt_embeds
+        .as_ref()
+        .is_some_and(|embeds| !matches!(embeds, Value::Array(items) if items.is_empty()));
     if request.suffix.is_some() {
-        bail_invalid_request!(param = "suffix", "suffix is not supported.");
+        if !has_embeds && request.prompt.as_ref().is_none_or(|prompt| {
+            matches!(prompt, CompletionPrompt::Single(Prompt::Text(prefix)) if prefix.is_empty())
+        }) {
+            return Err(missing_prompt_error());
+        }
+        if request.echo {
+            bail_invalid_request!(param = "suffix", "Echo is unsupported with suffix.");
+        }
+        if request.prompt_embeds.is_some() {
+            bail_invalid_request!(
+                param = "suffix",
+                "suffix is not supported with prompt_embeds"
+            );
+        }
+        if request.truncate_prompt_tokens.is_some() {
+            bail_invalid_request!(
+                param = "suffix",
+                "suffix is not supported with truncate_prompt_tokens"
+            );
+        }
+        // Python treats the empty JSON array as an empty batch when rendering FIM.
+        if matches!(&request.prompt, Some(CompletionPrompt::Single(Prompt::TokenIds(ids))) if ids.is_empty())
+        {
+            bail_invalid_request!(param = "prompt", "You must pass at least one prompt");
+        }
     }
 
-    // Python's prompt-presence validator treats an empty `prompt_embeds` list
-    // like an absent one; lowering ignores it.
-    if (request.prompt_embeds.as_ref())
-        .is_some_and(|embeds| !matches!(embeds, Value::Array(embeds) if embeds.is_empty()))
-    {
+    if has_embeds {
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
     }
 

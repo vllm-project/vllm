@@ -453,6 +453,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 #[derive(Clone)]
 struct FakeChatBackend {
     model_id: String,
+    renderer: Option<DynChatRenderer>,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
     sampling_hints: vllm_text::SamplingHints,
     /// Serve without a tokenizer, like `--skip-tokenizer-init`.
@@ -466,6 +467,9 @@ const UNKNOWN_DECODE_TOKEN_ID: u32 = 10_000;
 fn fake_chat_tokenizer() -> TestTokenizer {
     TestTokenizer::new()
         .with_bos_token("<bos>", FAKE_BOS_TOKEN_ID)
+        .with_regular_token("<｜fim▁begin｜>", 128801)
+        .with_regular_token("<｜fim▁hole｜>", 128800)
+        .with_regular_token("<｜fim▁end｜>", 128802)
         .with_regular_token("<image>", 999)
         .with_regular_token("<|image_pad|>", 151655)
         .with_regular_token("<think>", 0xF001)
@@ -480,6 +484,7 @@ impl FakeChatBackend {
     fn new() -> Self {
         Self {
             model_id: "test-model".to_string(),
+            renderer: None,
             multimodal_model_info: None,
             sampling_hints: Default::default(),
             skip_tokenizer_init: false,
@@ -496,9 +501,7 @@ impl FakeChatBackend {
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
             model_id: model_id.into(),
-            multimodal_model_info: None,
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 
@@ -506,10 +509,8 @@ impl FakeChatBackend {
         multimodal_model_info: vllm_chat::multimodal::MultimodalModelInfo,
     ) -> Self {
         Self {
-            model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 }
@@ -545,7 +546,7 @@ impl TextBackend for FakeChatBackend {
 
 impl ChatBackend for FakeChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
+        self.renderer.clone().unwrap_or_else(|| Arc::new(self.clone()))
     }
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
@@ -823,7 +824,7 @@ fn test_render_app_with(
     )))
 }
 
-fn test_render_state(
+pub(super) fn test_render_state(
     max_model_len: Option<u32>,
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
@@ -2685,6 +2686,100 @@ async fn render_completion_returns_one_generate_request_per_prompt() {
             (&json!("cmpl-body-req-1"), &json!([256, 99, 100, 101])),
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completion_suffix_submits_deepseek_v4_fim_tokens() {
+    let backend = Arc::new(FakeChatBackend {
+        renderer: Some(Arc::new(vllm_chat::DeepSeekV4ChatRenderer::default())),
+        ..FakeChatBackend::new()
+    });
+    let (mut app, engine) = test_app_with_backend_and_engine_request_check(backend, |request| {
+        assert_eq!(
+            decode_prompt_token_ids(request),
+            Some(vec![FAKE_BOS_TOKEN_ID, 128801, 97, 128800, 122, 128802])
+        );
+    })
+    .await;
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({"prompt":"a","suffix":"z"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    engine.finish().await;
+}
+
+#[tokio::test]
+async fn completion_suffix_renders_each_deepseek_v41_prompt() {
+    let backend = Arc::new(FakeChatBackend {
+        renderer: Some(Arc::new(vllm_chat::DeepSeekV41ChatRenderer::default())),
+        ..FakeChatBackend::new()
+    });
+    let mut app = build_render_router(Arc::new(RenderState {
+        chat: ChatRequestProcessor::new(backend, None, None),
+        ..test_render_state(Some(128), ParserSelection::Auto, ParserSelection::Auto)
+    }));
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/completions/render",
+        json!({"prompt":["a","b"],"suffix":"","add_special_tokens":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body[0]["token_ids"], json!([128801, 97, 128800, 128802]));
+    assert_eq!(body[1]["token_ids"], json!([128801, 98, 128800, 128802]));
+
+    for (request, message) in [
+        (
+            json!({"prompt":"","prompt_embeds":[],"suffix":"z"}),
+            "Either prompt or prompt_embeds must be provided and non-empty.",
+        ),
+        (
+            json!({"prompt":[],"suffix":"z"}),
+            "You must pass at least one prompt",
+        ),
+    ] {
+        let (status, body) = post_json(&mut app, "/v1/completions/render", request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["param"], "prompt");
+        assert_eq!(body["error"]["message"], message);
+    }
+}
+
+#[tokio::test]
+async fn completion_suffix_rejects_unsupported_inputs() {
+    let mut app = test_render_app();
+    for (mut request, message) in [
+        (
+            json!({"prompt":"a"}),
+            "suffix is only supported for models with FIM completion rendering",
+        ),
+        (
+            json!({"prompt":[97]}),
+            "suffix requires text prompt input for FIM completion rendering",
+        ),
+        (
+            json!({"prompt":"a","echo":true}),
+            "Echo is unsupported with suffix.",
+        ),
+        (
+            json!({"prompt":"a","prompt_embeds":"AAAA"}),
+            "suffix is not supported with prompt_embeds",
+        ),
+        (
+            json!({"prompt":"a","truncate_prompt_tokens":1}),
+            "suffix is not supported with truncate_prompt_tokens",
+        ),
+    ] {
+        request["suffix"] = json!("z");
+        let (status, body) = post_json(&mut app, "/v1/completions/render", request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["param"], "suffix");
+        assert_eq!(body["error"]["message"], message);
+    }
 }
 
 #[tokio::test]

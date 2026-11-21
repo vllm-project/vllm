@@ -86,6 +86,11 @@ struct RenderedToolSchema<'a> {
     strict: Option<bool>,
 }
 
+/// DeepSeek V4 and V4.1 use the same fill-in-the-middle markers.
+pub(super) fn render_completion_suffix(prefix: &str, suffix: &str) -> String {
+    format!("<｜fim▁begin｜>{prefix}<｜fim▁hole｜>{suffix}<｜fim▁end｜>")
+}
+
 /// Render one chat request into the final prompt string.
 pub(super) fn render_request(
     request: &ChatRequest,
