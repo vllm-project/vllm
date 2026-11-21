@@ -1011,6 +1011,9 @@ __global__ void masked_activation_kernel(
 #define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                         \
   int d = input.size(-1) / 2;                                                 \
   int64_t num_tokens = input.numel() / input.size(-1);                        \
+  if (num_tokens == 0) {                                                      \
+    return;                                                                   \
+  }                                                                           \
   dim3 grid(num_tokens);                                                      \
   dim3 block(std::min(d, 1024));                                              \
   const torch::stable::accelerator::DeviceGuard device_guard(                 \
