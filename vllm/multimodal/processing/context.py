@@ -422,6 +422,8 @@ class InputProcessingContext:
 
         try:
             output = hf_processor(**data, **allowed_kwargs)
+        except VLLMValidationError:
+            raise
         except Exception as exc:
             msg = (
                 f"Failed to apply {type(hf_processor).__name__} "

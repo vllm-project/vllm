@@ -109,6 +109,18 @@ Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
 
+### 6. Media preprocessing limit
+
+`VLLM_MAX_MEDIA_PREPROCESSING_BYTES` defaults to 715,827,880 bytes (about
+683 MiB). Preprocessors that support this limit estimate temporary
+allocations for one prompt before expanding decoded media into features or
+image tiles. The preprocessing and decode budgets can be configured
+independently. OCR processors account for all global views and local tiles
+in the document plus temporary buffers for one view. For deployments that
+expect long multi-page scans, size the preprocessing limit for the configured
+page count and crop settings. Set this value to `0` to disable the
+preprocessing check.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
