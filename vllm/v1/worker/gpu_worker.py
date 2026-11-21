@@ -20,7 +20,6 @@ from torch.distributed import ReduceOp
 
 import vllm.envs as envs
 from vllm.config import (
-    CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
     update_config,
@@ -1088,12 +1087,9 @@ class Worker(WorkerBase):
             # e.g. for the max-num-batched token size in chunked prefill.
             compile_sizes = self.vllm_config.compilation_config.compile_sizes
             warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []  # type: ignore[assignment]
-            cg_capture_sizes: list[int] = []
-
-            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
-                warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
+            manager = self.model_runner.cudagraph_manager
+            cg_capture_sizes = manager.planned_token_counts() if manager else set()
+            warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
             compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
             # For each compile_range, if none of the batch sizes
