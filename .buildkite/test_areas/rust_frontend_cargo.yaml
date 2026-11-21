@@ -24,6 +24,7 @@ steps:
   source_file_dependencies:
   - rust/
   - rust-toolchain.toml
+  - tests/benchmarks/stream_cases.json
   - .buildkite/test_areas/rust_frontend_cargo.yaml
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
   commands:
