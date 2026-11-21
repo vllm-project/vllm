@@ -9,6 +9,7 @@ import torch
 
 from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
@@ -250,6 +251,44 @@ def test_extract_hidden_states_with_predictable_dummy_model(
             atol=1e-5,
         )
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
+
+
+def test_extract_hidden_states_nemotron_parse(vllm_runner, tmp_path):
+    layer_ids = [2, 5, 9, 10]
+    with vllm_runner(
+        "nvidia/Nemotron-3.5-Parse",
+        trust_remote_code=True,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        max_model_len=4096,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+    ) as runner:
+        image = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
+        prompt = {
+            "prompt": "<pad></s><s><predict_no_text_in_pic>",
+            "multi_modal_data": {"image": image},
+        }
+        (output,) = runner.llm.generate(
+            prompt, SamplingParams(max_tokens=1, temperature=0)
+        )
+
+        assert output.prompt_token_ids is not None
+        assert output.prompt_token_ids.count(1) > 1
+        expected_shape = (len(output.prompt_token_ids), len(layer_ids), 1024)
+        get_and_check_output(output, expected_shape)
 
 
 @create_new_process_for_each_test()

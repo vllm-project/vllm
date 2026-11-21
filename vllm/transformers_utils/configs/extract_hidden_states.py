@@ -21,6 +21,7 @@ class ExtractHiddenStatesConfig(PreTrainedConfig):
     ):
         assert method == "extract_hidden_states"
 
+        source_text_key = "text_config"
         if isinstance(model, dict):
             model_dict = model
             source_text_config = None
@@ -28,6 +29,18 @@ class ExtractHiddenStatesConfig(PreTrainedConfig):
             model_dict = model.to_dict()
             text_config = model.get_text_config()
             source_text_config = text_config if text_config is not model else None
+            if source_text_config is not None:
+                # Restore the object under its original Transformers config key.
+                text_keys = ("text_config", "decoder", "generator", "text_encoder")
+                source_text_key = next(
+                    (
+                        key
+                        for key in text_keys
+                        if key in model_dict
+                        and getattr(model, key, None) is source_text_config
+                    ),
+                    "text_config",
+                )
         else:
             model_dict = {}
             source_text_config = None
@@ -43,7 +56,7 @@ class ExtractHiddenStatesConfig(PreTrainedConfig):
         # downstream get_hf_text_config() needs it as a PreTrainedConfig
         # for attribute access. Re-insert the original object.
         if source_text_config is not None:
-            combined["text_config"] = source_text_config
+            combined[source_text_key] = source_text_config
 
         super().__init__(**combined)
 
