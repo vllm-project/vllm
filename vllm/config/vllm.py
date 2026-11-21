@@ -1352,6 +1352,21 @@ class VllmConfig:
             raise ValueError(
                 "Kitty KV cache does not support kv_cache_dtype_skip_layers."
             )
+        if self.model_config is None:
+            return
+        from vllm.v1.attention.ops.kitty.decode import G_PAD
+
+        model_config = self.model_config
+        group = model_config.get_num_attention_heads(
+            self.parallel_config
+        ) // model_config.get_num_kv_heads(self.parallel_config)
+        if group > G_PAD:
+            raise ValueError(
+                f"Kitty KV cache supports at most {G_PAD} query heads per KV "
+                f"head, but the model has {group}."
+            )
+        if getattr(model_config.hf_text_config, "attn_logit_softcapping", None):
+            raise ValueError("Kitty KV cache does not support logits soft-capping.")
 
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""

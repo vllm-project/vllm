@@ -154,7 +154,9 @@ class KittyMetadata(AttentionMetadata):
     seq_lens_cpu: torch.Tensor  # cache lengths after this step
     old_lens: torch.Tensor  # [num_reqs] cache lengths before this step
     old_lens_cpu: np.ndarray
-    block_table: torch.Tensor  # packed pages only
+    # Packed pages only. TODO: entry 0 (the sink block) is allocated per request
+    # but never written, since the sink lives in the residual.
+    block_table: torch.Tensor
     k_jobs: torch.Tensor  # [Jk, 2] (request, block) K pages sealed this step
     v_jobs: torch.Tensor  # [Jv, 2] (request, block) V pages sealed this step
     k_writes: torch.Tensor  # [3, n] (token, request, row) residual K writes
@@ -361,18 +363,24 @@ class KittyAttentionImpl(AttentionImpl[KittyMetadata]):
         kv_sharing_target_layer_name: str | None = None,
         **kwargs,
     ) -> None:
-        assert not logits_soft_cap, "Kitty does not support logits soft-cap."
-        assert kv_sharing_target_layer_name is None, (
-            "Kitty does not support KV sharing across layers."
-        )
-        assert alibi_slopes is None and sliding_window is None
+        unsupported = {
+            "logits soft-capping": logits_soft_cap,
+            "KV sharing across layers": kv_sharing_target_layer_name is not None,
+            "ALiBi": alibi_slopes is not None,
+            "sliding window attention": sliding_window is not None,
+        }
+        if found := [name for name, used in unsupported.items() if used]:
+            raise NotImplementedError(
+                f"Kitty KV cache does not support: {', '.join(found)}."
+            )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads or num_heads
-        assert self.num_heads // self.num_kv_heads <= G_PAD, (
-            f"Kitty supports at most {G_PAD} query heads per KV head."
-        )
+        if self.num_heads // self.num_kv_heads > G_PAD:
+            raise NotImplementedError(
+                f"Kitty KV cache supports at most {G_PAD} query heads per KV head."
+            )
         self.kv_cache_dtype = kv_cache_dtype
         ratio = get_current_vllm_config().attention_config.kitty_boost_ratio
         self.d_boost = kitty_d_boost(head_size, ratio)
