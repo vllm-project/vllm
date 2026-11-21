@@ -322,6 +322,99 @@ class TestNonStreaming:
             "content": "Document <tool_call> usage",
         }
 
+    def test_markup_inside_parameter_value(self, parser, mock_request):
+        """Regression issue 58147 (in-value markup case)
+
+        Tool-call markup inside a genuine call's parameter value is value
+        text: the real call must not be cut short and no phantom call may
+        start. Reported with a write(path, content) call whose content
+        documents the format itself.
+        """
+        text = (
+            "<tool_call>\n"
+            "<function=write>\n"
+            "<parameter=path>\n"
+            "/tmp/t.xml\n"
+            "</parameter>\n"
+            "<parameter=content>\n"
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<root>\n"
+            "  <function=foo>\n"
+            "  <parameter=bar>baz</parameter>\n"
+            "</root>\n"
+            "\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "path": "/tmp/t.xml",
+            "content": (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                "<root>\n"
+                "  <function=foo>\n"
+                "  <parameter=bar>baz</parameter>\n"
+                "</root>\n"
+            ),
+        }
+
+    def test_nested_parameter_closed_before_in_value_function(
+        self, parser, mock_request
+    ):
+        """Regression: nested parameter closing order (review on PR 68581)
+
+        A complete nested ``<parameter=`` span followed by in-value
+        ``<function=`` markup must not end the outer value early: the inner
+        closer is not the outer value's own, so no phantom call may start.
+        """
+        text = (
+            "<tool_call>\n"
+            "<function=write>\n"
+            "<parameter=content>\n"
+            "<parameter=x>1</parameter><function=foo>\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "<parameter=x>1</parameter><function=foo>"
+        }
+
+    def test_unclosed_value_still_recovers_at_next_parameter(
+        self, parser, mock_request
+    ):
+        """A genuinely missing </parameter> keeps the current recovery: the
+        open value ends at the next top-level <parameter= opener and the
+        following parameters still parse."""
+        text = (
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Dallas\n"
+            "<parameter=state>TX</parameter>\n"
+            "<parameter=unit>fahrenheit</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "city": "Dallas",
+            "state": "TX",
+            "unit": "fahrenheit",
+        }
+
 
 class TestStreaming:
     def test_basic_streaming(self, parser, mock_request):
@@ -726,6 +819,172 @@ class TestStreaming:
         assert last_call["name"] == "get_weather"
         assert json.loads(last_call["arguments"]) == {"city": "Tokyo"}
 
+    def test_streaming_markup_inside_parameter_value(self, parser, mock_request):
+        """Regression issue 58147 (in-value markup case), streaming path."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=write>\n",
+            "<parameter=path>\n",
+            "/tmp/t.xml\n",
+            "</parameter>\n",
+            "<parameter=content>\n",
+            '<?xml version="1.0" encoding="UTF-8"?>\n',
+            "<root>\n",
+            "  <function=foo>\n",
+            "  <parameter=bar>baz</parameter>\n",
+            "</root>\n",
+            "\n",
+            "</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "write"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "path": "/tmp/t.xml",
+            "content": (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                "<root>\n"
+                "  <function=foo>\n"
+                "  <parameter=bar>baz</parameter>\n"
+                "</root>\n"
+            ),
+        }
+
+    # A complete call block quoted inside a value (a file documenting the
+    # format): its own </parameter> / </function> closers are value text.
+    _QUOTED_BLOCK = (
+        "<tool_call>\n<function=function_name>\n<parameter=parameter_name>\n"
+        "value\n</parameter>\n</function>\n</tool_call>\n"
+    )
+    _QUOTED_BLOCK_CALL_CHUNKS = [
+        "<tool_call>\n",
+        "<function=write>\n",
+        "<parameter=path>\n",
+        "notes.md\n",
+        "</parameter>\n",
+        "<parameter=content>\n",
+        # The in-value wrapper tags are special tokens: each arrives as its
+        # own chunk, as from a real tokenizer.
+        "The format is:\n",
+        "<tool_call>",
+        "\n<function=function_name>\n",
+        "<parameter=parameter_name>\n",
+        "value\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+        "\nend\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    _QUOTED_BLOCK_ARGS = {
+        "path": "notes.md",
+        "content": "The format is:\n" + _QUOTED_BLOCK + "end",
+    }
+
+    def test_quoted_call_block_inside_parameter_value(self, parser, mock_request):
+        """Regression issue 58147 (complete call block quoted in a value)."""
+        text = "".join(self._QUOTED_BLOCK_CALL_CHUNKS)
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write"
+        assert json.loads(result.tool_calls[0].function.arguments) == (
+            self._QUOTED_BLOCK_ARGS
+        )
+
+    def test_streaming_quoted_call_block_inside_parameter_value(
+        self, parser, mock_request
+    ):
+        """Streaming path of the quoted-call-block regression."""
+        results = simulate_tool_streaming(
+            parser, mock_request, self._QUOTED_BLOCK_CALL_CHUNKS
+        )
+
+        assert collect_function_name(results) == "write"
+        assert json.loads(collect_tool_arguments(results)) == self._QUOTED_BLOCK_ARGS
+
+    def test_quoted_call_block_then_second_call(self, parser, mock_request):
+        """The real call still ends at its own </function>: a following call
+        parses on its own."""
+        text = "".join(self._QUOTED_BLOCK_CALL_CHUNKS) + (
+            "\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+            "</parameter>\n</function>\n</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "write",
+            "get_weather",
+        ]
+        assert json.loads(result.tool_calls[0].function.arguments) == (
+            self._QUOTED_BLOCK_ARGS
+        )
+        assert json.loads(result.tool_calls[1].function.arguments) == {"city": "Paris"}
+
+    def test_bare_function_mention_in_value_then_close(self, parser, mock_request):
+        """An unclosed in-value <function= mention does not hold the value
+        open past its own </parameter>."""
+        text = (
+            "<tool_call>\n<function=write>\n<parameter=content>\n"
+            "use <function=NAME> to call\n</parameter>\n"
+            "<parameter=path>\nn.md\n</parameter>\n</function>\n</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert len(result.tool_calls) == 1
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "use <function=NAME> to call",
+            "path": "n.md",
+        }
+
+    def test_streaming_nested_parameter_closed_before_in_value_function(
+        self, parser, mock_request
+    ):
+        """Streaming path of the nested-closer ordering regression."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=write>\n",
+            "<parameter=content>\n",
+            "<parameter=x>1</parameter>",
+            "<function=foo>\n",
+            "</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "write"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": "<parameter=x>1</parameter><function=foo>"
+        }
+
+    def test_streaming_unclosed_value_recovers_at_next_parameter(
+        self, parser, mock_request
+    ):
+        """Streaming keeps the missing-</parameter> recovery: the open value
+        ends at the next top-level opener and later parameters still stream."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Dallas\n",
+            "<parameter=state>TX</parameter>\n",
+            "<parameter=unit>fahrenheit</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "city": "Dallas",
+            "state": "TX",
+            "unit": "fahrenheit",
+        }
+
     def test_streaming_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
         """Regression issue 58227
         Check that <tool_call> tag is ok inside parameter value
@@ -957,7 +1216,7 @@ class TestArgValueExtender:
         from vllm.parser import qwen3
 
         mock_request.tools = [write_tool]
-        param_re = qwen3._PARAM_RE
+        param_re = qwen3._PARAM_TAG_RE
         matches = 0
 
         class CountingPattern:
@@ -978,7 +1237,7 @@ class TestArgValueExtender:
 
                 return param_re.sub(count, *args)
 
-        monkeypatch.setattr(qwen3, "_PARAM_RE", CountingPattern())
+        monkeypatch.setattr(qwen3, "_PARAM_TAG_RE", CountingPattern())
         text = LOOP_HEAD + LOOP_PARAMS * 200 + LOOP_TAIL
         simulate_tool_streaming(
             qwen3.Qwen3Parser(
@@ -1011,12 +1270,15 @@ class TestArgValueExtender:
         expected = ["", 'a\\"', "\\nb", "", "\\n</param", None]
         assert [extend(d) for d in deltas] == expected
 
-    def test_extender_stops_at_split_next_parameter(self):
+    def test_extender_holds_at_split_next_parameter(self):
+        """An in-value opener may be value text (issue 58147), so the
+        extender holds from it until the value's own closer resolves it,
+        instead of ending the value at the opener."""
         from vllm.parser.qwen3 import _qwen3_arg_value_extender
 
         extend = _qwen3_arg_value_extender("<parameter=k>x")
         assert extend is not None
-        assert [extend(d) for d in ["< para", "meter ="]] == ["< para", None]
+        assert [extend(d) for d in ["< para", "meter ="]] == ["< para", ""]
 
     @pytest.mark.parametrize(
         "raw_args",

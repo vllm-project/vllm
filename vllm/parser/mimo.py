@@ -11,7 +11,7 @@ from vllm.parser.qwen3 import (
     _PARTIAL_PARAM_RE,
     CHATML_TURN_BOUNDARIES,
     Qwen3Parser,
-    _param_value_extender,
+    _legacy_param_value_extender,
     qwen3_config,
 )
 
@@ -37,10 +37,13 @@ class MiMoParser(Qwen3Parser):
                     thinking=thinking,
                     name="mimo",
                     turn_boundary_tokens=CHATML_TURN_BOUNDARIES,
+                    # MiMo keeps the flat next-opener recovery with verbatim
+                    # values; the nested parameter states are qwen3-only.
+                    nested_param_values=False,
                 ),
                 arg_converter=_mimo_arg_converter,
                 arg_value_extender=functools.partial(
-                    _param_value_extender, trim_newlines=False
+                    _legacy_param_value_extender, trim_newlines=False
                 ),
             ),
         )
