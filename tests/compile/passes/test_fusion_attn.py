@@ -286,17 +286,24 @@ elif current_platform.is_rocm():
     "batch_size", [7, 256, 533] if current_platform.is_cuda() else [8]
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "nvfp4"])
 @pytest.mark.parametrize(
-    "backend, model_name, model_class, custom_ops",
-    # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
-    list(
-        flat_product(
-            BACKENDS_FP8, PATTERN_TEST_MODELS_FP8, ["+quant_fp8", "-quant_fp8"]
+    "backend, model_name, model_class, custom_ops, kv_cache_dtype",
+    [
+        (*case, kv_cache_dtype)
+        for case in (
+            # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
+            list(
+                flat_product(
+                    BACKENDS_FP8, PATTERN_TEST_MODELS_FP8, ["+quant_fp8", "-quant_fp8"]
+                )
+            )
+            # quant_fp4 only has the custom impl
+            + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""]))
         )
-    )
-    # quant_fp4 only has the custom impl
-    + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""])),
+        for kv_cache_dtype in ("fp8", "nvfp4")
+        # NVFP4 KV cache is only supported by FlashInfer.
+        if kv_cache_dtype == "fp8" or case[0] == AttentionBackendEnum.FLASHINFER
+    ],
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
@@ -322,8 +329,6 @@ def test_attention_quant_pattern(
     ):
         # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires SM100/SM107 and flashinfer")
-    if kv_cache_dtype == "nvfp4" and backend != AttentionBackendEnum.FLASHINFER:
-        pytest.skip("NVFP4 KV cache is only supported by FlashInfer")
 
     # trtllm-gen has no NVFP4-KV kernel with NVFP4 output, so with an NVFP4 KV
     # cache the FP4 output fusion must be rejected: the standalone
