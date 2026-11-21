@@ -2148,24 +2148,6 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
-    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
-      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
-        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
-          const int vglobal_fetch_start =
-              partition_start_token_idx +
-              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
-              vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-          Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2]
-              .xy[vfetch_depth % 2] = mask_v_cache_padding<cache_t>(
-              Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2]
-                  .xy[vfetch_depth % 2],
-              vglobal_fetch_start, seq_len);
-        }
-      }
-    }
-  }
-
   floatx8 dout[TLOOP];
   // qk wmma
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
@@ -2279,16 +2261,30 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   _B16x8 outelems[VHELOOP];
   // Softmax V wmma
   // v layout: 16he across lanes x (16x2) tokens per lane
+  const bool partition_has_v_padding =
+      partition_start_token_idx + T_PAR_SIZE > seq_len;
   for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
     floatx8 tmp_out = {0};
     for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
       for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP / 2;
            vfetch_depth++) {
         const int offset = vfetch_depth;
+        _B16x16 vtmp = Vlocal[vtoken_depth][vhe_depth][vfetch_depth];
+        if (__builtin_expect(partition_has_v_padding, 0)) {
+          const int vglobal_fetch_start =
+              partition_start_token_idx +
+              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+              2 * vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          vtmp.xy[0] = mask_v_cache_padding<cache_t>(
+              vtmp.xy[0], vglobal_fetch_start, seq_len);
+          vtmp.xy[1] = mask_v_cache_padding<cache_t>(
+              vtmp.xy[1], vglobal_fetch_start + CONTIGUOUS_KV_ELEMS_16B_LOAD,
+              seq_len);
+        }
         // if output format is 16 qheads across 16 lanes, 16 head elems spread
         // across rows
         tmp_out = gcn_wmma16x16x16_instr<scalar_t, 0, 0, 0>(
-            Vlocal[vtoken_depth][vhe_depth][vfetch_depth].u16x16,
+            vtmp.u16x16,
             shared_logits[vtoken_depth][offset][lane16id][0].u16x16, tmp_out);
       }
     }
