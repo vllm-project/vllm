@@ -106,7 +106,7 @@ def _segment_input(b, XQ, XK, XV, SXQ, SXK, SXV):
 
 
 @triton.jit(do_not_specialize=["M"])
-def _low_m_grouped_kernel(
+def _qkv_bmm_kernel(
     XQ,
     XK,
     XV,
@@ -263,19 +263,37 @@ def low_m_bmm(
     return out
 
 
-def low_m_grouped_linear(
-    xs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+def use_qkv_bmm(
+    x_q: torch.Tensor, x_k: torch.Tensor, x_v: torch.Tensor, w: torch.Tensor
+) -> bool:
+    """Whether `qkv_bmm` serves bf16 `x_q`, `x_k`, `x_v` `[M, K]` and `w`."""
+    return (
+        x_q.is_cuda
+        and x_q.ndim == 2
+        and 0 < x_q.shape[0] <= MAX_M
+        and x_q.shape == x_k.shape == x_v.shape
+        and x_q.dtype == x_k.dtype == x_v.dtype == w.dtype == torch.bfloat16
+        and x_q.stride(1) == x_k.stride(1) == x_v.stride(1) == w.stride(1) == 1
+        and current_platform.is_device_capability_family(120)
+    )
+
+
+def qkv_bmm(
+    x_q: torch.Tensor,
+    x_k: torch.Tensor,
+    x_v: torch.Tensor,
     w: torch.Tensor,
-    starts: tuple[int, int],
+    k_start: int,
+    v_start: int,
 ) -> torch.Tensor:
     """One launch of three linears on consecutive row ranges of `w` `[N, K]`:
-    output columns `[0, starts[0])` from `xs[0]`, `[starts[0], starts[1])`
-    from `xs[1]` and the rest from `xs[2]`, each `[M, K]` with M <= 16.
-    Returns `[M, N]` with fp32 accumulation."""
-    x_q, x_k, x_v = xs
+    output columns `[0, k_start)` from `x_q`, `[k_start, v_start)` from `x_k`
+    and the rest from `x_v`, each `[M, K]` with M <= 16. Returns `[M, N]`
+    with fp32 accumulation."""
+    xs = (x_q, x_k, x_v)
     m, k = x_q.shape
     n = w.shape[0]
-    s1, s2 = starts
+    s1, s2 = k_start, v_start
     bn = 32
     assert 0 < m <= MAX_M and w.shape == (n, k)
     assert all(x.shape == (m, k) and x.stride(1) == 1 for x in xs)
@@ -284,7 +302,7 @@ def low_m_grouped_linear(
     out = torch.empty((m, n), dtype=x_q.dtype, device=x_q.device)
     # About 1.6 waves of 32-column tiles at Inkling's 8608 columns; wider
     # tiles or split-K measured no faster.
-    _low_m_grouped_kernel[(triton.cdiv(n, bn),)](
+    _qkv_bmm_kernel[(triton.cdiv(n, bn),)](
         x_q,
         x_k,
         x_v,
