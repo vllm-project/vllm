@@ -18,6 +18,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.draft_vocab import draft_logits_to_target
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -948,17 +949,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
-        if self.draft_id_to_target_id is None:
-            return logits
-
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
-        logits_new = logits.new_full(
-            (logits.shape[0], self.config.vocab_size),
-            float("-inf"),
+        return draft_logits_to_target(
+            logits, self.draft_id_to_target_id, self.config.vocab_size
         )
-        logits_new[:, targets] = logits
-        return logits_new
 
     def precompute_and_store_context_kv(
         self,
