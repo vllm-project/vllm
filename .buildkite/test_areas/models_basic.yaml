@@ -649,6 +649,23 @@ steps:
   - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
   - pytest -v -s kernels/test_engram.py
 
+- label: ":nvidia: (4xH100) GLM-5.3-Flash mHC Boundary"
+  key: glm5next-mhc-boundary-4xh100
+  optional: true
+  timeout_in_minutes: 15
+  device: h100
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/glm5next/nvidia/specialized_decode/all_reduce_mhc.py
+  - vllm/models/glm5next/nvidia/specialized_decode/runtime/
+  - vllm/models/glm5next/common/mtp.py
+  - vllm/models/glm5next/nvidia/specialized_decode/cutedsl/finalize_publish.py
+  - vllm/models/common/ops/moe_tail_fusion/primitives.py
+  - tests/models/glm5next/test_specialized_decode_ar_mhc.py
+  - tests/models/glm5next/tp4.py
+  commands:
+  - pytest -v -s models/glm5next/test_specialized_decode_ar_mhc.py
+
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
   automatic_shard: true
