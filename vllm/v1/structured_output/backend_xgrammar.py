@@ -14,9 +14,11 @@ from vllm.sampling_params import SamplingParams, check_json_nesting
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
+    GrammarCompileOptions,
     StructuredOutputBackend,
     StructuredOutputGrammar,
     StructuredOutputOptions,
+    resolve_disable_any_whitespace,
 )
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
@@ -121,6 +123,7 @@ class XgrammarBackend(StructuredOutputBackend):
         request_type: StructuredOutputOptions,
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
+        options: GrammarCompileOptions | None = None,
     ) -> StructuredOutputGrammar:
         # Note(arpera):
         # Our flag disable_any_whitespace does NOT map directly to
@@ -130,17 +133,20 @@ class XgrammarBackend(StructuredOutputBackend):
         # but also specify a list of separators after which
         # xgrammar must not insert spaces.
         # This is a requirement of xgrammar's API, so we must comply with it.
-        separators = (",", ":") if self.disable_any_whitespace else None
+        disable_any_whitespace = resolve_disable_any_whitespace(
+            options, self.disable_any_whitespace
+        )
+        separators = (",", ":") if disable_any_whitespace else None
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
                 grammar_spec,
-                any_whitespace=not self.disable_any_whitespace,
+                any_whitespace=not disable_any_whitespace,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
                 '{"type": "object"}',
-                any_whitespace=not self.disable_any_whitespace,
+                any_whitespace=not disable_any_whitespace,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
@@ -161,7 +167,27 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
-            if "structures" in s_tag:
+            if disable_any_whitespace:
+                # Structural tags have no any_whitespace or separators option, so the
+                # JSON nodes are rewritten to match the JSON paths.
+                if "structures" in s_tag:
+                    tag = xgr.StructuralTag.from_legacy_structural_tag(
+                        [
+                            xgr.StructuralTagItem(
+                                begin=s["begin"],
+                                schema=json.dumps(s["schema"]),
+                                end=s["end"],
+                            )
+                            for s in s_tag["structures"]
+                        ],
+                        s_tag["triggers"],
+                    )
+                else:
+                    tag = xgr.StructuralTag.model_validate(s_tag)
+                ctx = self.full_vocab_compiler.compile_structural_tag(
+                    _without_json_whitespace(tag)
+                )
+            elif "structures" in s_tag:
                 # Falling back to deprecated method of compiling structural tag
                 tags = [
                     xgr.StructuralTagItem(
@@ -570,3 +596,38 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         "XGrammar structured outputs backend "
         "does not support this structured outputs specification"
     )
+
+
+def _without_json_whitespace(tag: "xgr.StructuralTag") -> "xgr.StructuralTag":
+    """Forbid whitespace in the JSON values of a structural tag.
+
+    Used when ``disable_any_whitespace`` is set, server-wide or per request, for tags
+    built by the tool-call registry and for structural tags sent directly in a
+    request. xgrammar's ``JSONSchemaFormat`` has no ``any_whitespace`` option, and
+    ``max_whitespace_cnt`` must be positive, so each JSON-style node is replaced by
+    the grammar the JSON paths compile: ``any_whitespace=False`` with ``(",", ":")``
+    separators. Whitespace inside string values is not affected. Nodes in other
+    styles, such as the XML tool-call formats, are left as they are.
+    """
+    # Imported here, as xgrammar is loaded lazily.
+    from pydantic import BaseModel
+    from xgrammar.structural_tag import GrammarFormat, JSONSchemaFormat
+
+    def convert(node: Any) -> Any:
+        if isinstance(node, JSONSchemaFormat) and node.style == "json":
+            grammar = xgr.Grammar.from_json_schema(
+                json.dumps(node.json_schema),
+                any_whitespace=False,
+                separators=(",", ":"),
+                any_order=node.any_order,
+            )
+            return GrammarFormat(grammar=str(grammar))
+        if isinstance(node, BaseModel):
+            for name in type(node).model_fields:
+                setattr(node, name, convert(getattr(node, name)))
+        elif isinstance(node, list):
+            return [convert(item) for item in node]
+        return node
+
+    tag.format = convert(tag.format)
+    return tag

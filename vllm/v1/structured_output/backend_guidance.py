@@ -17,9 +17,11 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
+    GrammarCompileOptions,
     StructuredOutputBackend,
     StructuredOutputGrammar,
     StructuredOutputOptions,
+    resolve_disable_any_whitespace,
 )
 from vllm.v1.structured_output.request import get_structured_output_key
 from vllm.v1.structured_output.utils import strip_speculative_padding
@@ -190,17 +192,19 @@ class GuidanceBackend(StructuredOutputBackend):
         request_type: StructuredOutputOptions,
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
+        options: GrammarCompileOptions | None = None,
     ) -> StructuredOutputGrammar:
-        self.serialized_grammar = serialize_guidance_grammar(
+        # Local, not an attribute: grammars compile concurrently on a thread pool.
+        serialized_grammar = serialize_guidance_grammar(
             request_type,
             grammar_spec,
-            self.disable_any_whitespace,
+            resolve_disable_any_whitespace(options, self.disable_any_whitespace),
             self.disable_additional_properties,
         )
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
-            self.serialized_grammar,
+            serialized_grammar,
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
 
