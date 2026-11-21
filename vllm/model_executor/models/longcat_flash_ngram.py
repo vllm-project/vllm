@@ -179,6 +179,13 @@ class FlashNgramModel(FlashModel):
             self.ngram_embeddings = None
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if not get_pp_group().is_first_rank:
+            return super().load_weights(
+                (name, weight)
+                for name, weight in weights
+                if not name.startswith("ngram_embeddings.")
+            )
+
         # Names arrive with the ``model.`` prefix already stripped (routed here
         # by AutoWeightsLoader). Split the concatenated/sharded ngram tables and
         # stacked projections; delegate everything else to FlashModel.
@@ -231,7 +238,10 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
     @staticmethod
-    def get_model_state_cls() -> type["LongcatNgramModelState"]:
+    def get_model_state_cls() -> type[DefaultModelState]:
+        # Later pipeline stages consume intermediate tensors from the previous rank.
+        if not get_pp_group().is_first_rank:
+            return DefaultModelState
         return LongcatNgramModelState
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
