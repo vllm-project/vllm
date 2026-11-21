@@ -48,7 +48,11 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVLoadAttestation,
+    KVLoadFailureReport,
+)
 from vllm.v1.request import Request
 
 from .data import MooncakeStoreConnectorMetadata
@@ -323,6 +327,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             request, block_ids, partial_tail_offloads
         )
 
+    def note_transfer_attempt(self, request: Request, transfer_generation: int) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.note_transfer_attempt(request, transfer_generation)
+
     def reset_cache(self) -> bool | None:
         """Reset the external Mooncake store on prefix-cache reset.
 
@@ -434,6 +442,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def get_load_failure_reports(self) -> list[KVLoadFailureReport]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_load_failure_reports()
+
+    def get_load_attestations(self) -> list[KVLoadAttestation]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_load_attestations()
 
     def get_kv_connector_kv_cache_events(
         self,

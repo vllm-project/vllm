@@ -32,7 +32,11 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVLoadAttestation,
+    KVLoadFailureReport,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
@@ -208,6 +212,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
+        # Child connectors whose evidence
+        # getters raised in the current drain. A child whose NEGATIVE
+        # channel is broken must not have its POSITIVE statements counted
+        # as if nothing were lost: its attestations are excluded for the
+        # same step, so the scheduler's gates see the missing evidence and
+        # fail affected requests closed (the recompute fallback) instead
+        # of publishing over a swallowed failure report. The memo is
+        # reset at the start of every get_load_failure_reports() -- the
+        # first evidence getter the model runner drains each step -- so a
+        # recovered child is re-admitted on the next step.
+        self._broken_evidence_children: set[int] = set()
 
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
@@ -451,6 +466,96 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
+
+    def note_transfer_attempt(
+        self, request: "Request", transfer_generation: int
+    ) -> None:
+        """Forward the transfer identity to the child connector CHOSEN for
+        this request's load.
+
+        Selection happens in get_num_new_matched_tokens() (the first child
+        advertising tokens records itself in _requests_to_connector);
+        the scheduler calls this at admission, after selection and before
+        update_state_after_alloc(). Only the chosen child is performing
+        the external load, so only it may carry the attempt's identity:
+        notifying the other children as though they were loading too
+        would let them emit evidence for an attempt they never executed.
+
+        A child that ignores the notification (the base no-op) produces
+        identity-less evidence, which the scheduler's gates loudly reject
+        under the repair policy -- fail-closed, never silent.
+        """
+        chosen = self._requests_to_connector.get(request.request_id)
+        if chosen is None:
+            # No child was selected for this request: no load attempt
+            # exists to notify anyone about (the scheduler only calls this
+            # for requests with external computed tokens, which imply a
+            # selection; defensive no-op otherwise).
+            return
+        self._connectors[chosen].note_transfer_attempt(request, transfer_generation)
+
+    def _aggregate_child_evidence(self, getter_name: str, first_drain: bool) -> list:
+        """Concatenate one evidence getter's results across all children.
+
+        A child that raises does not turn its silence into apparent
+        successful completion: the exception is logged, the child is
+        marked broken for this drain cycle, and it contributes nothing to
+        EITHER evidence getter -- a child whose failure-report channel
+        exploded must not have its healthy-looking attestations counted
+        as though nothing were lost. The scheduler's completeness gates
+        then see the missing evidence and fail affected requests closed
+        (the recompute fallback -- engine-survivable, never a silent
+        pass).
+        """
+        if first_drain:
+            # get_load_failure_reports is drained first each step (see
+            # the model runner mixin); reset the memo so a recovered
+            # child is re-admitted.
+            self._broken_evidence_children = set()
+        evidence: list = []
+        for i, c in enumerate(self._connectors):
+            if i in self._broken_evidence_children:
+                continue
+            try:
+                evidence.extend(getattr(c, getter_name)())
+            except Exception:
+                logger.exception(
+                    "Child connector %s raised in %s(); its transfer "
+                    "evidence is excluded for this step (the scheduler's "
+                    "evidence gates will fail affected requests closed).",
+                    type(c).__name__,
+                    getter_name,
+                )
+                self._broken_evidence_children.add(i)
+        return evidence
+
+    def get_load_failure_reports(self) -> list[KVLoadFailureReport]:
+        """Aggregate the children's structured load-failure reports.
+
+        Only the chosen child reports for a request it is actually
+        loading, but an unselected or misbehaving child's report is
+        preserved rather than filtered here: attribution and identity are
+        the scheduler's judgment (its gates drop unattributable evidence
+        and reject identity mismatches), not the wrapper's.
+        """
+        return self._aggregate_child_evidence(
+            "get_load_failure_reports", first_drain=True
+        )
+
+    def get_load_attestations(self) -> list[KVLoadAttestation]:
+        """Aggregate the children's positive per-rank attestations.
+
+        Each TP rank's worker-side MultiConnector instance attests only
+        for the children that actually loaded on that rank; concatenation
+        preserves every statement (and every generation) unchanged, and
+        the TP output aggregator stamps the authoritative source_rank.
+        Children marked broken by this step's report drain are excluded
+        (their positive statements cannot vouch for a step whose
+        negative channel failed).
+        """
+        return self._aggregate_child_evidence(
+            "get_load_attestations", first_drain=False
+        )
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set xPU-specific copy ops for all sub-connectors."""
