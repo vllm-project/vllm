@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,8 +10,13 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
+    KVConnectorRole,
+    WorkerRanks,
 )
 from vllm.v1.engine import core as engine_core_module
+from vllm.v1.kv_cache_interface import KVCacheConfig
+
+from .utils import create_vllm_config
 
 pytestmark = pytest.mark.cpu_test
 
@@ -19,10 +25,13 @@ class _Metadata(KVConnectorHandshakeMetadata):
     pass
 
 
+@dataclass
+class _AgentMetadata(KVConnectorHandshakeMetadata):
+    agent: str
+
+
 class _FakeExecutor:
-    handshake_metadata_src: (
-        list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None
-    )
+    handshake_metadata_src: list[dict[Any, KVConnectorHandshakeMetadata] | None] | None
     last_instance: "_FakeExecutor | None" = None
 
     def __init__(
@@ -36,7 +45,7 @@ class _FakeExecutor:
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None:
+    ) -> list[dict[Any, KVConnectorHandshakeMetadata] | None] | None:
         self.handshake_calls += 1
         return self.handshake_metadata
 
@@ -48,9 +57,7 @@ def _run_engine_core_handshake(
     monkeypatch: pytest.MonkeyPatch,
     connector: KVConnectorBase_V1,
     *,
-    handshake_metadata: (
-        list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None
-    ),
+    handshake_metadata: list[dict[Any, KVConnectorHandshakeMetadata] | None] | None,
 ) -> _FakeExecutor:
     class _FakeScheduler:
         def __init__(self, **kwargs: Any) -> None:
@@ -119,7 +126,15 @@ def _run_engine_core_handshake(
 
 
 class _LegacyConnector(KVConnectorBase_V1):
-    def __init__(self) -> None:
+    def __init__(self, pcp_size: int = 1, dcp_size: int = 1) -> None:
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+        vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+        super().__init__(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        )
         self.legacy_metadata: dict[int, KVConnectorHandshakeMetadata] | None = None
 
     def start_load_kv(self, forward_context: Any, **kwargs: Any) -> None:
@@ -160,8 +175,8 @@ class _LegacyConnector(KVConnectorBase_V1):
 
 
 class _PPAwareConnector(_LegacyConnector):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, pcp_size: int = 1, dcp_size: int = 1) -> None:
+        super().__init__(pcp_size, dcp_size)
         self.pp_aware_metadata: (
             dict[tuple[int, int], KVConnectorHandshakeMetadata] | None
         ) = None
@@ -175,9 +190,9 @@ class _PPAwareConnector(_LegacyConnector):
 def test_engine_unwraps_handshake_metadata_for_legacy_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Engine core always asks workers for `(pp_rank, tp_rank)`-keyed metadata,
-    then unwraps to `{tp_rank: metadata}` for a connector that has not opted
-    into PP-aware handshake (single-PP producer, all `pp_rank == 0`)."""
+    """Engine core unwraps worker metadata to `{tp_rank: metadata}` for a
+    connector that has not opted into PP-aware handshake (single-PP producer,
+    all `pp_rank == 0`)."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
     connector = _LegacyConnector()
@@ -186,9 +201,9 @@ def test_engine_unwraps_handshake_metadata_for_legacy_connector(
         monkeypatch,
         connector,
         handshake_metadata=[
-            {(0, 0): metadata_0},
+            {WorkerRanks(pp_rank=0, pcp_rank=0, tp_rank=0): metadata_0},
             None,
-            {(0, 1): metadata_1},
+            {WorkerRanks(pp_rank=0, pcp_rank=0, tp_rank=1): metadata_1},
         ],
     )
 
@@ -207,15 +222,18 @@ def test_engine_rejects_pp_producer_for_legacy_connector(
         _run_engine_core_handshake(
             monkeypatch,
             connector,
-            handshake_metadata=[{(0, 0): _Metadata()}, {(1, 0): _Metadata()}],
+            handshake_metadata=[
+                {WorkerRanks(pp_rank=0, pcp_rank=0, tp_rank=0): _Metadata()},
+                {WorkerRanks(pp_rank=1, pcp_rank=0, tp_rank=0): _Metadata()},
+            ],
         )
 
 
 def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A PP-aware connector receives the full `(pp_rank, tp_rank)`-keyed dict
-    unchanged."""
+    """A PP-aware connector receives every stage's metadata keyed by
+    `(pp_rank, tp_rank)`."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
     connector = _PPAwareConnector()
@@ -223,7 +241,10 @@ def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
     executor = _run_engine_core_handshake(
         monkeypatch,
         connector,
-        handshake_metadata=[{(0, 0): metadata_0}, {(1, 0): metadata_1}],
+        handshake_metadata=[
+            {WorkerRanks(pp_rank=0, pcp_rank=0, tp_rank=0): metadata_0},
+            {WorkerRanks(pp_rank=1, pcp_rank=0, tp_rank=0): metadata_1},
+        ],
     )
 
     assert executor.handshake_calls == 1
@@ -232,3 +253,71 @@ def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
         (0, 0): metadata_0,
         (1, 0): metadata_1,
     }
+
+
+@pytest.mark.parametrize(
+    ("dcp_size", "agents", "expected"),
+    [
+        # PCP x DCP: PCP rank 1 maps past the TP ranks.
+        (2, ("pcp0", "pcp1"), {(0, 0): "pcp0", (0, 1): "pcp1"}),
+        # PCP without DCP: equal reports share one key.
+        (1, ("same", "same"), {(0, 0): "same"}),
+    ],
+)
+def test_engine_keys_pcp_ranks_by_tp_rank_for_pp_aware_connector(
+    monkeypatch: pytest.MonkeyPatch,
+    dcp_size: int,
+    agents: tuple[str, str],
+    expected: dict[tuple[int, int], str],
+) -> None:
+    """The PCP rank is folded into `(pp_rank, tp_rank)` only under PCP x DCP."""
+    connector = _PPAwareConnector(pcp_size=2, dcp_size=dcp_size)
+
+    _run_engine_core_handshake(
+        monkeypatch,
+        connector,
+        handshake_metadata=[
+            {WorkerRanks(pp_rank=0, pcp_rank=pcp_rank, tp_rank=0): _AgentMetadata(a)}
+            for pcp_rank, a in enumerate(agents)
+        ],
+    )
+
+    assert connector.pp_aware_metadata == {
+        key: _AgentMetadata(agent) for key, agent in expected.items()
+    }
+
+
+def test_engine_rejects_different_pcp_metadata_for_pp_aware_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without DCP, PCP ranks share a `(pp_rank, tp_rank)` key, so different
+    metadata raises instead of keeping only the last rank's."""
+    connector = _PPAwareConnector(pcp_size=2, dcp_size=1)
+
+    with pytest.raises(ValueError, match="PCP ranks reported different"):
+        _run_engine_core_handshake(
+            monkeypatch,
+            connector,
+            handshake_metadata=[
+                {WorkerRanks(0, 0, 0): _AgentMetadata("nixl")},
+                {WorkerRanks(0, 1, 0): _AgentMetadata("store")},
+            ],
+        )
+
+
+def test_engine_passes_platform_worker_keys_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keys other than `WorkerRanks`, such as those of out-of-tree platform
+    workers, reach the connector unchanged."""
+    metadata_0 = _Metadata()
+    metadata_1 = _Metadata()
+    connector = _PPAwareConnector(pcp_size=2)
+
+    _run_engine_core_handshake(
+        monkeypatch,
+        connector,
+        handshake_metadata=[{(0, 0, 0): metadata_0}, {(0, 1, 0): metadata_1}],
+    )
+
+    assert connector.pp_aware_metadata == {(0, 0, 0): metadata_0, (0, 1, 0): metadata_1}

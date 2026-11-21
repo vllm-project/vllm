@@ -44,7 +44,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import torch
 
@@ -151,6 +151,14 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """
 
     pass
+
+
+class WorkerRanks(NamedTuple):
+    """Position of a worker in its engine's `PP x PCP x TP` layout."""
+
+    pp_rank: int
+    pcp_rank: int
+    tp_rank: int
 
 
 class KVConnectorMetadata(ABC):  # noqa: B024
@@ -828,6 +836,35 @@ class KVConnectorBase_V1(ABC):
         self.set_xfer_handshake_metadata(
             {tp_rank: meta for (_, tp_rank), meta in metadata.items()}
         )
+
+    def set_worker_handshake_metadata(
+        self, metadata: dict[WorkerRanks, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """Set handshake metadata keyed by the ranks of each worker.
+
+        The default calls `set_xfer_handshake_metadata_pp_aware` with
+        `(pp_rank, tp_rank)` keys, folding the PCP rank into the TP rank under
+        PCP x DCP. Without DCP, the PCP ranks of a key must report equal (`==`)
+        metadata. Override to receive the metadata of every worker.
+        """
+        parallel_config = self._vllm_config.parallel_config
+        pcp_stride = (
+            parallel_config.tensor_parallel_size
+            if parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+            else 0
+        )
+        pp_aware: dict[tuple[int, int], KVConnectorHandshakeMetadata] = {}
+        for ranks, rank_metadata in metadata.items():
+            key = (ranks.pp_rank, ranks.tp_rank + ranks.pcp_rank * pcp_stride)
+            if key in pp_aware and pp_aware[key] != rank_metadata:
+                raise ValueError(
+                    f"{type(self).__name__} receives one handshake metadata per "
+                    f"(pp_rank, tp_rank), but PCP ranks reported different "
+                    f"metadata for {key}."
+                )
+            pp_aware[key] = rank_metadata
+        self.set_xfer_handshake_metadata_pp_aware(pp_aware)
 
     @classmethod
     def build_prom_metrics(

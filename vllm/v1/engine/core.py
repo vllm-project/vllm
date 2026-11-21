@@ -33,6 +33,7 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import WorkerRanks
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -983,13 +984,16 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
                 # Merge all worker dicts into a single dict
-                content: dict[tuple[int, int], Any] = {}
+                content: dict[Any, Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+                if all(isinstance(key, WorkerRanks) for key in content):
+                    kv_connector.set_worker_handshake_metadata(content)
+                else:
+                    # Out-of-tree platform workers may use their own keys.
+                    kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
     def _reset_caches(
         self,

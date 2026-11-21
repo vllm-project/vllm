@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     SupportsHMA,
+    WorkerRanks,
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
@@ -35,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorHandshakeMetadata,
     MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
@@ -443,7 +445,7 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:7] == [
         "bind_kv_cache_manager",
         "get_finished_count",
-        "set_xfer_handshake_metadata_pp_aware",
+        "set_worker_handshake_metadata",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
@@ -470,7 +472,7 @@ def test_multi_example_connector_consistency():
     assert storage2_scheduler_events[:7] == [
         "bind_kv_cache_manager",
         "get_finished_count",
-        "set_xfer_handshake_metadata_pp_aware",
+        "set_worker_handshake_metadata",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
@@ -1394,6 +1396,39 @@ def test_handshake_metadata_of_subclass_reaches_every_connector():
         assert connector.received_handshake_metadata == {
             (0, 0): HandshakeTestMetadata(agent="nixl")
         }
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_of_every_pcp_rank_reaches_its_connector():
+    """With PCP and no DCP, NIXL reports on PCP rank 0 only and a KV store such
+    as UMBP on every rank. PCP rank 1 must not replace NIXL's metadata."""
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [_handshake_child("nixl"), _handshake_child("store")]
+        },
+        kv_role="kv_both",
+    )
+    vllm_config.parallel_config.prefill_context_parallel_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    scheduler = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    nixl = HandshakeTestMetadata(agent="nixl")
+    store = HandshakeTestMetadata(agent="store")
+
+    scheduler.set_worker_handshake_metadata(
+        {
+            WorkerRanks(0, 0, 0): MultiKVConnectorHandshakeMetadata((nixl, store)),
+            WorkerRanks(0, 1, 0): MultiKVConnectorHandshakeMetadata((None, store)),
+        }
+    )
+
+    nixl_connector, store_connector = scheduler.sub_connectors
+    assert nixl_connector.received_handshake_metadata == {(0, 0): nixl}
+    assert store_connector.received_handshake_metadata == {(0, 0): store}
 
 
 def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
