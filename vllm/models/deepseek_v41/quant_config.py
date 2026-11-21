@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.models.deepseek_v4.quant_config import NVFP4_MOE_ALGOS
 from vllm.platforms import current_platform
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
@@ -134,7 +135,7 @@ class DeepseekV4FP8Config(Fp8Config):
         return self._resolved_moe_quant_algo or ""
 
     def _is_nvfp4_expert_layer(self, prefix: str) -> bool:
-        if self.moe_quant_algo != "NVFP4":
+        if self.moe_quant_algo not in NVFP4_MOE_ALGOS:
             return False
         match = _EXPERTS_LAYER_RE.search(prefix)
         if match is None or not self._modelopt_ignore:
@@ -155,6 +156,9 @@ class DeepseekV4FP8Config(Fp8Config):
             )
 
             self._nvfp4_config = ModelOptNvFp4Config(
+                # Weight-only exports carry no calibrated input_scale: the W4A4
+                # path would fold one that was never loaded, so they run W4A16.
+                quant_method=self.moe_quant_algo or "NVFP4",
                 is_checkpoint_nvfp4_serialized=True,
                 kv_cache_quant_algo=None,
                 exclude_modules=[],

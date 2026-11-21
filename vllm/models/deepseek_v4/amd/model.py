@@ -99,6 +99,7 @@ from vllm.models.deepseek_v4.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.models.deepseek_v4.amd.silu_and_mul_mxfp8 import silu_and_mul_mxfp8
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
+from vllm.models.deepseek_v4.quant_config import NVFP4_MOE_ALGOS
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
@@ -336,7 +337,7 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
     if quant_config is None or quant_config.get_name() != "deepseek_v4_fp8":
         reasons.append("the DeepSeek V4 FP8 quantization config is not active")
     else:
-        if getattr(quant_config, "moe_quant_algo", "").upper() == "NVFP4":
+        if getattr(quant_config, "moe_quant_algo", "").upper() in NVFP4_MOE_ALGOS:
             reasons.append("routed experts use NVFP4")
         if getattr(quant_config, "weight_block_size", None) != [128, 128]:
             reasons.append("shared experts are not block-128 FP8")

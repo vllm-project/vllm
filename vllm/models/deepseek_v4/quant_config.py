@@ -57,6 +57,11 @@ def align_mtp_quant_config(
     )
 
 
+# moe_quant_algo values served by ModelOptNvFp4FusedMoE: W4A4 NVFP4, and
+# weight-only W4A16_NVFP4 (Marlin) for exports without an input_scale.
+NVFP4_MOE_ALGOS = ("NVFP4", "W4A16_NVFP4")
+
+
 class DeepseekV4FP8Config(Fp8Config):
     """FP8 config for DeepSeek V4 with expert-dtype-aware MoE dispatch.
 
@@ -137,6 +142,9 @@ class DeepseekV4FP8Config(Fp8Config):
             )
 
             self._nvfp4_config = ModelOptNvFp4Config(
+                # Weight-only exports carry no calibrated input_scale: the W4A4
+                # path would fold one that was never loaded, so they run W4A16.
+                quant_method=self.moe_quant_algo or "NVFP4",
                 is_checkpoint_nvfp4_serialized=True,
                 kv_cache_quant_algo=None,
                 exclude_modules=[],
@@ -215,7 +223,7 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
-                if self.moe_quant_algo == "NVFP4":
+                if self.moe_quant_algo in NVFP4_MOE_ALGOS:
                     from vllm.model_executor.layers.quantization.modelopt import (
                         ModelOptNvFp4FusedMoE,
                     )
