@@ -57,7 +57,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
-from vllm.models.glm5next.common.kda import _Glm5NextMergedColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -1319,6 +1318,19 @@ def test_merged_lora_b_replicated_shards(
     default_vllm_config, dist_init, tp_size, replicated, partial_adapter
 ):
     """Replicated projections retain all B rows on every rank during loading."""
+
+    class ReplicatedMergedColumnParallelLinear(MergedColumnParallelLinear):
+        replicated_shard_ids = (4, 5)
+
+        def __init__(
+            self, input_size: int, output_sizes: list[int], tp_size: int, **kwargs
+        ) -> None:
+            sizes = [
+                size * tp_size if i in self.replicated_shard_ids else size
+                for i, size in enumerate(output_sizes)
+            ]
+            super().__init__(input_size, sizes, **kwargs)
+
     sizes = [32, 32, 32, 8, 8, 8]
     names = ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"]
     config = LoRAConfig(max_loras=1, max_lora_rank=8, lora_dtype=torch.float32)
@@ -1342,8 +1354,8 @@ def test_merged_lora_b_replicated_shards(
             torch.device("cpu"),
         ):
             if replicated:
-                base = _Glm5NextMergedColumnParallelLinear(
-                    16, sizes, (4, 5), tp_size=tp_size, bias=False
+                base = ReplicatedMergedColumnParallelLinear(
+                    16, sizes, tp_size=tp_size, bias=False
                 )
             else:
                 base = MergedColumnParallelLinear(16, sizes, bias=False)
