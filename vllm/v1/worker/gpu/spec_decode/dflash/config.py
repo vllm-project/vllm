@@ -57,10 +57,45 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
         return True
 
     @property
+    def sample_from_anchor(self) -> bool:
+        """Whether the anchor query also predicts a draft token.
+
+        False (the default) is the fill-in layout: the anchor is the bonus token
+        and one mask query per draft token follows it. True is the anchor-first
+        layout, where every query predicts the next token. Read from
+        `dflash_config`, falling back to the top level of the HF config, where
+        some checkpoints set it as DSpark does. False without a draft model config.
+
+        Raises:
+            ValueError: If `dflash_config` and the top level set different values.
+
+        """
+        draft_model_config = self.spec_config.draft_model_config
+        if draft_model_config is None:
+            return False
+        hf_config = draft_model_config.hf_config
+        dflash_config = getattr(hf_config, "dflash_config", None) or {}
+        nested = dflash_config.get("sample_from_anchor")
+        top_level = getattr(hf_config, "sample_from_anchor", None)
+        if (
+            nested is not None
+            and top_level is not None
+            and bool(nested) != bool(top_level)
+        ):
+            raise ValueError(
+                f"Conflicting sample_from_anchor: dflash_config has {nested!r} "
+                f"but the top-level config has {top_level!r}."
+            )
+        return bool(nested if nested is not None else top_level)
+
+    @property
+    def num_query_tokens(self) -> int:
+        """Query tokens per request in one draft forward pass."""
+        return self.num_speculative_tokens + (0 if self.sample_from_anchor else 1)
+
+    @property
     def num_lookahead_tokens(self) -> int:
-        # Fill-in drafting uses a bonus query plus one query per draft token.
-        num_drafts = self.num_scheduled_spec_tokens
-        return num_drafts + 1 if num_drafts else 0
+        return self.num_query_tokens if self.num_scheduled_spec_tokens else 0
 
     def max_num_draft_seqs(self, max_num_batched_tokens: int) -> int | None:
         # The draft pass has num_lookahead_tokens queries for every request.
