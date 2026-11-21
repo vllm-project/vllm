@@ -21,6 +21,11 @@ from vllm.models.qwen4_exp.nvidia import qsa_indexer
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8 as qsa_fp8_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
+from vllm.models.qwen4_exp.nvidia.qsa import (
+    QSADensePrefillMetadata,
+    Qwen4ExpQSAImpl,
+    Qwen4ExpQSANvidiaMetadataBuilder,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -109,8 +114,10 @@ def test_qsa_hisparse_starts_with_automatic_cache_layout(
         assert len(result.outputs[0].token_ids) == 2
 
 
-def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
+@pytest.mark.parametrize("skip_for_dense", [False, True])
+def test_qsa_mtp_or_visible_prefill_updates_cache_but_skips_selection(
     monkeypatch: pytest.MonkeyPatch,
+    skip_for_dense: bool,
 ) -> None:
     rows = torch.tensor([[3, 1, -1], [5, 2, 0]], dtype=torch.int32)
     raw_metadata = SimpleNamespace(
@@ -128,7 +135,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     updates = []
     selections = []
     indexer = SimpleNamespace(
-        skip_topk=True,
+        skip_topk=not skip_for_dense,
         _metadata=lambda: (raw_metadata, compressed_metadata),
         index_n_heads=1,
         index_kv_heads=1,
@@ -180,6 +187,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         qkv=torch.zeros(2, 4),
         slot_mapping=torch.arange(2),
         main_kv_cache=attn.kv_cache,
+        skip_selection=skip_for_dense,
     )
 
     assert actual is rows
@@ -329,6 +337,145 @@ def _qsa_sparse_paged_attention_reference(
         probabilities = torch.softmax(scores * softmax_scale, dim=-1)
         output[row] = torch.einsum("hk,khd->hd", probabilities, values).to(q.dtype)
     return output
+
+
+def _visible_prefill_case(sizes, contexts, device="cpu"):
+    builder = Qwen4ExpQSANvidiaMetadataBuilder.__new__(Qwen4ExpQSANvidiaMetadataBuilder)
+    builder.visible_tokens = 2051
+    builder.full_prefix_cu = torch.tensor([0, 2051], dtype=torch.int32, device=device)
+    starts = torch.tensor(
+        list(itertools.accumulate(sizes, initial=0)), dtype=torch.int32
+    )
+    lengths = torch.tensor(contexts, dtype=torch.int32)
+    cm = SimpleNamespace(
+        num_reqs=len(sizes),
+        num_actual_tokens=sum(sizes),
+        max_query_len=max(sizes),
+        query_start_loc_cpu=starts,
+        query_start_loc=starts.to(device),
+        seq_lens_cpu_upper_bound=lengths,
+        seq_lens=lengths.to(device),
+        block_table_tensor=torch.empty(0),
+        slot_mapping=torch.empty(0),
+    )
+    return builder, cm
+
+
+@pytest.mark.parametrize(
+    "sizes, contexts, expected",
+    [
+        ([1023], [1023], None),
+        ([1024], [1024], (0, 1024, True)),
+        ([2051], [2051], (0, 2051, True)),
+        ([2052], [2052], (0, 2051, False)),
+        ([1536], [1537], None),
+        ([1, 1024, 1800], [3000, 1024, 1800], (1, 2825, False)),
+        ([1024, 1536], [1024, 1536], (0, 2560, False)),
+        ([1, 1536, 2304], [4000, 1536, 2304], None),
+        ([1, 1536], [4000, 2048], None),
+    ],
+)
+def test_visible_prefill_uses_only_fresh_causal_rows(sizes, contexts, expected):
+    builder, cm = _visible_prefill_case(sizes, contexts)
+    metadata = builder.build(0, cm)
+    assert isinstance(metadata, QSADensePrefillMetadata) == (expected is not None)
+    if expected is not None:
+        first, end, skip = expected
+        start = sum(sizes[:first])
+        assert (metadata.first_request, metadata.first_row, metadata.end_row) == (
+            first,
+            start,
+            end,
+        )
+        assert metadata.skip_selection is skip
+        dense_sizes = sizes[first:] if len(sizes) > 1 else [end]
+        assert metadata.used_keys.tolist() == dense_sizes
+        assert metadata.cu_query.tolist() == list(
+            itertools.accumulate(dense_sizes, initial=0)
+        )
+    assert not isinstance(
+        builder.build_for_cudagraph_capture(cm), QSADensePrefillMetadata
+    )
+    cm.seq_lens_cpu_upper_bound = None
+    assert not isinstance(builder.build(0, cm), QSADensePrefillMetadata)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize(
+    "sizes, contexts",
+    [
+        ([1536], [1536]),
+        ([2304], [2304]),
+        ([1, 1024, 1536], [2601, 1024, 1536]),
+    ],
+)
+def test_visible_prefill_matches_paged_attention(sizes, contexts):
+    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+    if (
+        not current_platform.is_device_capability(90)
+        or get_flash_attn_version(head_size=256) != 3
+    ):
+        pytest.skip("requires Hopper FA3")
+    torch.manual_seed(617)
+    n, nr, page, dim = sum(sizes), len(sizes), 832, 256
+    kwargs = dict(device="cuda", dtype=torch.bfloat16)
+    builder, cm = _visible_prefill_case(sizes, contexts, "cuda")
+    width = math.ceil(max(contexts) / page)
+    raw = torch.randn(nr * width, page, 1, 2 * dim, **kwargs)
+    k, v = raw.split(dim, dim=-1)
+    table = torch.randperm(nr * width, device="cuda", dtype=torch.int32).view(nr, width)
+    metadata = builder.update_block_table(builder.build(0, cm), table, cm.slot_mapping)
+    assert isinstance(metadata, QSADensePrefillMetadata)
+    q = torch.randn(n, 6, dim, **kwargs)
+    gate = torch.randn_like(q)
+    req = torch.repeat_interleave(
+        torch.arange(nr, device="cuda", dtype=torch.int32),
+        torch.tensor(sizes, device="cuda"),
+        output_size=n,
+    )
+    lens = torch.cat(
+        [
+            torch.arange(c - s + 1, c + 1, dtype=torch.int32, device="cuda")
+            for s, c in zip(sizes, contexts)
+        ]
+    )[:, None]
+    start = (lens // 4 - 512).clamp_min(0) * 4
+    cols = torch.arange(2051, dtype=torch.int32, device="cuda")[None, :]
+    packed = torch.cat(
+        [torch.where(cols < lens - start, cols + start, -1), lens - start], dim=1
+    )
+    baseline = torch.empty_like(q)
+    qsa_ops.qsa_sparse_paged_attention(
+        q, k, v, packed, table, req, True, baseline, output_gate=gate
+    )
+    lo, hi = metadata.first_row, metadata.end_row
+    edges = sorted({0, lo, hi - 1, n - 1})
+    fp_ref = _qsa_sparse_paged_attention_reference(
+        q[edges], k, v, packed[edges, :-1], table, req[edges], dim**-0.5
+    )
+    fp_ref = (fp_ref.float() * gate[edges].float().sigmoid()).to(q.dtype)
+    # Fully visible rows must never consume stale indices. The sparse remainder must.
+    packed[lo:hi, :-1] = -1
+    packed[lo:hi, -1] = 0
+    impl = Qwen4ExpQSAImpl.__new__(Qwen4ExpQSAImpl)
+    impl.index_group, impl.head_size, impl.kv_cache_dtype = None, dim, "bfloat16"
+    out = torch.full_like(q, float("nan"))
+    impl.forward(
+        SimpleNamespace(topk_indices_buffer=packed),
+        q,
+        raw.transpose(1, 2),
+        metadata,
+        out,
+        token_to_req=req,
+        use_prefill_config=True,
+        output_gate=gate,
+        dense_prefill=metadata,
+    )
+    assert torch.equal(out[:lo], baseline[:lo])
+    assert torch.equal(out[hi:], baseline[hi:])
+    torch.testing.assert_close(out[lo:hi], baseline[lo:hi], atol=0.016, rtol=0.015)
+    torch.testing.assert_close(out[edges], fp_ref, atol=0.016, rtol=0.015)
 
 
 @requires_qsa_metadata_kernels

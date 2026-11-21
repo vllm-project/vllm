@@ -216,6 +216,103 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
         )
 
 
+@dataclass
+class QSADensePrefillMetadata(Qwen4ExpQSAMetadata):
+    first_request: int
+    first_row: int
+    end_row: int
+    max_dense_query_len: int
+    cu_query: torch.Tensor
+    used_keys: torch.Tensor
+    skip_selection: bool
+
+    @property
+    def num_dense_requests(self) -> int:
+        return self.used_keys.numel()
+
+
+class Qwen4ExpQSANvidiaMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        layers = vllm_config.compilation_config.static_forward_context
+        self.full_prefix_cu = None
+        if layer_names and all(
+            getattr(layers.get(name), "supports_dense_prefill", False)
+            for name in layer_names
+        ):
+            indexer = layers[layer_names[0]].indexer
+            # All complete blocks and the current partial block fit in the budget.
+            self.visible_tokens = indexer.token_topk + indexer.compress_ratio - 1
+            self.full_prefix_cu = torch.tensor(
+                [0, self.visible_tokens], dtype=torch.int32, device=device
+            )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Qwen4ExpQSAMetadata:
+        cm = common_attn_metadata
+        metadata = super().build(common_prefix_len, cm, fast_build)
+        if fast_build or self.full_prefix_cu is None or cm.max_query_len < 1024:
+            return metadata
+        upper = cm.seq_lens_cpu_upper_bound
+        if upper is None or cm.num_reqs == 0:
+            return metadata
+        starts = cm.query_start_loc_cpu.numpy()
+        n, total = cm.num_reqs, cm.num_actual_tokens
+        if starts[0] != 0 or starts[n] != total:
+            return metadata
+        contexts = upper.numpy()
+        if n == 1:
+            if contexts[0] != total or cm.max_query_len != total:
+                return metadata
+            first, row = 0, 0
+            end = longest = min(total, self.visible_tokens)
+            cu = cm.query_start_loc[:2] if end == total else self.full_prefix_cu
+            used = cu[1:]
+        else:
+            first, longest = n, 0
+            while first:
+                size = int(starts[first] - starts[first - 1])
+                if (
+                    not 1024 <= size <= self.visible_tokens
+                    or contexts[first - 1] != size
+                ):
+                    break
+                first -= 1
+                longest = max(longest, size)
+            if first == n:
+                return metadata
+            row, end = int(starts[first]), total
+            cu = cm.query_start_loc[first : n + 1]
+            if row:
+                cu = cu - row
+            used = cm.seq_lens[first:n]
+        return QSADensePrefillMetadata(
+            **vars(metadata),
+            first_request=first,
+            first_row=row,
+            end_row=end,
+            max_dense_query_len=longest,
+            cu_query=cu,
+            used_keys=used,
+            skip_selection=n == 1 and end == total,
+        )
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> Qwen4ExpQSAMetadata:
+        return self.build(0, common_attn_metadata, fast_build=True)
+
+
 class Qwen4ExpQSABackend(AttentionBackend):
     """Full-attention backend used by the merged QSA owner."""
 
@@ -248,7 +345,7 @@ class Qwen4ExpQSABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type[Qwen4ExpQSAMetadataBuilder]:
-        return Qwen4ExpQSAMetadataBuilder
+        return Qwen4ExpQSANvidiaMetadataBuilder
 
     @classmethod
     def is_sparse(cls) -> bool:
@@ -330,6 +427,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         token_to_req: torch.Tensor,
         use_prefill_config: bool,
         output_gate: torch.Tensor,
+        dense_prefill: QSADensePrefillMetadata | None = None,
     ) -> torch.Tensor:
         """Run sparse attention over the owner's indexer-selected K/V rows."""
         num_tokens = attn_metadata.num_actual_tokens
@@ -347,6 +445,37 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         out = output[:num_tokens]
         output_gate = output_gate[:num_tokens]
         if self.index_group is None:
+            if dense_prefill is not None:
+                from .ops.qsa import qsa_sparse_paged_attention
+                from .ops.qsa_dense import dense_paged_attention
+
+                start, end = dense_prefill.first_row, dense_prefill.end_row
+                k, v = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+                dense_paged_attention(
+                    query[start:end],
+                    k,
+                    v,
+                    output_gate[start:end],
+                    out[start:end],
+                    dense_prefill,
+                )
+                # Exactly one sparse remainder is possible: an older leading
+                # request in a mixed step or the suffix of a long single request.
+                sparse = slice(0, start) if start else slice(end, num_tokens)
+                if start or end < num_tokens:
+                    qsa_sparse_paged_attention(
+                        query[sparse],
+                        k,
+                        v,
+                        selected[sparse],
+                        attn_metadata.block_table,
+                        token_to_req[sparse],
+                        True,
+                        out[sparse],
+                        output_gate=output_gate[sparse],
+                        config_rows=num_tokens,
+                    )
+                return output
             self.attend(
                 layer,
                 query,
@@ -676,6 +805,20 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # MTP skip_topk steps reuse rows frozen from step 0; the valid count
         # is a row column, so compaction/reuse keep it paired with the content.
         self.topk_indices_buffer = topk_indices_buffer
+        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+        self.supports_dense_prefill = (
+            current_platform.is_device_capability(90)
+            and self.head_dim == 256
+            and self.num_heads == 6
+            and self.num_kv_heads == 1
+            and self.kv_cache_torch_dtype == torch.bfloat16
+            and self.indexer.compress_ratio == 4
+            and self.indexer.token_topk == 2048
+            and vllm_config.num_speculative_tokens == 0
+            and not envs.VLLM_BATCH_INVARIANT
+            and get_flash_attn_version(head_size=self.head_dim) == 3
+        )
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
@@ -774,6 +917,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 num_tokens, slot_mapping.shape[0]
             )
             main_kv_cache = self.impl.kv_view(resident)
+        dense_prefill = (
+            main_metadata
+            if isinstance(main_metadata, QSADensePrefillMetadata)
+            and self.index_group is None
+            and not torch.cuda.is_current_stream_capturing()
+            else None
+        )
         selected, main_outputs = self.indexer(
             projected_qk,
             positions,
@@ -782,6 +932,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             qkv=qkv,
             slot_mapping=slot_mapping,
             main_kv_cache=main_kv_cache,
+            skip_selection=dense_prefill is not None and dense_prefill.skip_selection,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
@@ -807,6 +958,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             token_to_req=indexer_metadata.token_to_req,
             use_prefill_config=main_metadata.max_query_len > self._max_decode_query_len,
             output_gate=output_gate,
+            dense_prefill=dense_prefill,
         )
 
     def forward(

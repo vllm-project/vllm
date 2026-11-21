@@ -686,6 +686,7 @@ def qsa_sparse_paged_attention(
     *,
     output_gate: torch.Tensor,
     valid_counts: torch.Tensor | None = None,
+    config_rows: int | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
@@ -791,6 +792,7 @@ def qsa_sparse_paged_attention(
         softmax_scale,
         output_scale,
         valid_counts=valid_counts,
+        config_rows=config_rows,
     )
 
 
@@ -808,6 +810,7 @@ def _qsa_sparse_paged_splitk(
     output_scale: float,
     *,
     valid_counts: torch.Tensor | None,
+    config_rows: int | None = None,
 ) -> torch.Tensor:
     """The split-K kernel (and merge) at _select_config's config."""
     is_fp8 = k_cache.dtype != torch.bfloat16
@@ -820,7 +823,11 @@ def _qsa_sparse_paged_splitk(
     else:
         selection_width = indices.shape[1]
     block_n, partial_warps, num_tiles, num_splits = _select_config(
-        q.shape[0], k_cache.shape[2], use_prefill_config, selection_width, is_fp8
+        q.shape[0] if config_rows is None else config_rows,
+        k_cache.shape[2],
+        use_prefill_config,
+        selection_width,
+        is_fp8,
     )
 
     # Split=1 writes output directly and compiles out all workspace accesses.
