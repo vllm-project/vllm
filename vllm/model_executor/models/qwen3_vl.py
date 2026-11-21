@@ -100,6 +100,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import validate_video_preprocessing_budget
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
@@ -922,6 +923,8 @@ class Qwen3VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
 
 
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
+    default_mm_limits = {"video": 32}
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3VLConfig)
 
@@ -1436,6 +1439,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             timestamps_per_video = []
+            video_tensor_bytes = 0
 
             for item_idx, item in enumerate(videos):
                 video_array, metadata = item
@@ -1497,8 +1501,14 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     video_mm_kwargs,
                 )
 
+                video_pixels = video_outputs["pixel_values_videos"]
+                # Reserve the concatenated tensor while the inputs are live.
+                video_tensor_bytes += (
+                    video_pixels.untyped_storage().nbytes() + video_pixels.nbytes
+                )
+                validate_video_preprocessing_budget(video_tensor_bytes)
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
-                pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
+                pixel_values_videos_lst.append(video_pixels)
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),

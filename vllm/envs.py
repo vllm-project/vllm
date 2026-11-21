@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
+    VLLM_MAX_MEDIA_PREPROCESSING_BYTES: int = 715_827_880
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -1087,6 +1088,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # per pixel. Set to 0 to disable.
     "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "715827880")
+    ),
+    # Maximum estimated bytes per prompt in supported media preprocessors.
+    # Set to 0 to disable the preprocessing checks.
+    "VLLM_MAX_MEDIA_PREPROCESSING_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", "715827880")
     ),
     "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", "256")
@@ -2603,6 +2609,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB",
         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
+        "VLLM_MAX_MEDIA_PREPROCESSING_BYTES",
         "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
