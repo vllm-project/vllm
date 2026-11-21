@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
@@ -65,6 +66,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         tier_type: str,
         custom_param: int = 0,
         backpressure_detector: "BackpressureDetector | None" = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ):
         """Initialize the example secondary tier.
 
@@ -74,6 +76,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             tier_type: Name identifying this tier type.
             custom_param: Dummy parameter demonstrating custom args.
             backpressure_detector: Optional backpressure detector.
+            access_mode: Direction(s) in which this tier may transfer data;
+                the tiering manager skips lookups and stores it cannot serve.
 
         """
         super().__init__(
@@ -81,6 +85,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
             backpressure_detector=backpressure_detector,
+            access_mode=access_mode,
         )
 
         self._config_info = ExampleTierInfo(example_info=custom_param)

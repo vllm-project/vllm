@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
@@ -141,6 +142,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ):
         """Args:
         offloading_spec: Offloading configuration.
@@ -155,6 +157,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        access_mode: `read` serves loads but never writes blocks, `write`
+            writes blocks but never serves loads, and `readwrite` (default)
+            does both.
 
         """
         super().__init__(
@@ -162,6 +167,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             primary_kv_view,
             tier_type,
             backpressure_detector,
+            access_mode=access_mode,
         )
         self.locality = Locality(locality) if locality is not None else None
 
