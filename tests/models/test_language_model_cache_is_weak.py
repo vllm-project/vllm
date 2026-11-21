@@ -4,7 +4,7 @@
 
 A strong-keyed module-level dict pins every model ever loaded in the process
 for the life of the interpreter. In-process teardown
-(``VLLM_ENABLE_V1_MULTIPROCESSING=0``) then keeps the weights -- and the KV
+(`VLLM_ENABLE_V1_MULTIPROCESSING=0`) then keeps the weights -- and the KV
 cache aliased onto the model's layers -- resident after engine shutdown.
 """
 

@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ROCm native MX linear kernels must not depend on the number of rows."""
+"""The MX linear kernels used under batch invariance must not depend on the
+number of rows."""
 
 import pytest
 import torch
-from utils import requires_mx
+from utils import requires_mx, skip_if_not_cuda
 
+from vllm.model_executor.kernels.linear import HummingMxfp8LinearKernel
+from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.utils.import_utils import has_humming
 from vllm.utils.torch_utils import set_random_seed
 
 SEED = 0
@@ -116,8 +121,7 @@ def _mxfp8_weights(n: int, k: int):
 def test_mxfp4_linear_is_batch_invariant(n: int, k: int, use_asm_gemm: bool):
     pytest.importorskip("aiter")
 
-    # Importing the module registers torch.ops.vllm.gemm_with_dynamic_quant.
-    import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
+    from vllm._aiter_ops import rocm_aiter_ops
 
     set_random_seed(SEED)
     weight, weight_scale = _mxfp4_weights(n, k, use_asm_gemm)
@@ -125,7 +129,7 @@ def test_mxfp4_linear_is_batch_invariant(n: int, k: int, use_asm_gemm: bool):
 
     probes = {
         num_tokens: _probe(
-            torch.ops.vllm.gemm_with_dynamic_quant(
+            rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
                 x[:num_tokens], weight, weight_scale, use_asm_gemm, torch.bfloat16
             )
         )
@@ -161,5 +165,47 @@ def test_mxfp8_linear_is_batch_invariant(n: int, k: int, dtype: torch.dtype):
     failures = _variant_rows(probes)
     assert not failures, (
         f"MXFP8 linear depends on the row count (N={n}, K={k}, {dtype}):\n  "
+        + "\n  ".join(failures)
+    )
+
+
+@skip_if_not_cuda
+@pytest.mark.skipif(not has_humming(), reason="requires Humming")
+@pytest.mark.parametrize("n,k", MXFP8_CASES)
+def test_humming_mxfp8_linear_is_batch_invariant(
+    default_vllm_config, dist_init, n: int, k: int
+):
+    """The layer captures Humming's compute config while loading, so
+    VLLM_BATCH_INVARIANT (set by conftest) must be on before it is built."""
+    default_vllm_config.kernel_config.linear_backend = "humming"
+    set_random_seed(SEED)
+    layer = ColumnParallelLinear(
+        input_size=k,
+        output_size=n,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+        prefix="model.layers.0.self_attn.o_proj",
+        disable_tp=True,
+    ).cuda()
+    assert type(layer.quant_method.kernel) is HummingMxfp8LinearKernel
+    weight, weight_scale = _mxfp8_weights(n, k)
+    layer.weight.data.copy_(weight)
+    layer.weight_scale.data.copy_(weight_scale)
+    layer.quant_method.process_weights_after_loading(layer)
+    x = torch.randn(max(MXFP8_TOKEN_COUNTS), k, device="cuda", dtype=torch.bfloat16)
+
+    probes = {
+        num_tokens: _probe(layer.quant_method.apply(layer, x[:num_tokens]))
+        for num_tokens in MXFP8_TOKEN_COUNTS
+    }
+
+    failures = _variant_rows(probes)
+    assert not failures, (
+        f"Humming MXFP8 linear depends on the row count (N={n}, K={k}):\n  "
         + "\n  ".join(failures)
     )

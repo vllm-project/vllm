@@ -26,7 +26,7 @@ batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BatchDescriptor:
     """Batch descriptor for cudagraph dispatching. We should keep the num of
     items as minimal as possible to properly and uniquely describe the padded
@@ -42,10 +42,6 @@ class BatchDescriptor:
     uniform: bool = False
     """
     True if all the requests in the batch have the same number of tokens.
-    """
-    has_lora: bool = False
-    """
-    Whether this batch has active LoRA adapters.
     """
     num_active_loras: int = 0
     """
@@ -77,7 +73,7 @@ def _compute_sp_num_tokens(
     return sp_tokens.tolist()
 
 
-@dataclass
+@dataclass(slots=True)
 class DPMetadata:
     num_tokens_across_dp_cpu: torch.Tensor
 

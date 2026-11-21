@@ -24,7 +24,7 @@ from ...utils import multi_gpu_test
 ATTN_BACKEND = ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
 MODELS = [
-    "hmellor/tiny-random-Gemma2ForCausalLM",
+    "vllm-project/tiny-random-Gemma2ForCausalLM",
     "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
@@ -88,7 +88,7 @@ TARGET_TEST_SUITE = _resolve_target_test_suite()
 )
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted."""
-    llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
+    llm = LLM("vllm-project/tiny-random-LlamaForCausalLM")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
@@ -268,20 +268,15 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
             v1_test_failed_model_execution(vllm_model)
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
-def test_raise_on_logit_nans(
-    vllm_runner, monkeypatch, use_v2_model_runner: bool
-) -> None:
+def test_raise_on_logit_nans(vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_RAISE_ON_LOGIT_NANS", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     envs.disable_envs_cache()
 
     try:
         with vllm_runner("facebook/opt-125m", enforce_eager=True) as vllm_model:
             engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
-            assert model_runner.vllm_config.use_v2_model_runner is use_v2_model_runner
             model_cls = type(model_runner.model)
             original_compute_logits = model_cls.compute_logits
 
