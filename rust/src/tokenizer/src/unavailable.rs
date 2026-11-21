@@ -41,4 +41,20 @@ impl Tokenizer for UnavailableTokenizer {
     fn vocab_size(&self) -> usize {
         self.vocab_size
     }
+
+    fn estimate_max_token(&self, _text: &str) -> usize {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_max_token_returns_zero() {
+        let tokenizer = UnavailableTokenizer::new(100);
+        assert_eq!(tokenizer.estimate_max_token("hello world"), 0);
+        assert_eq!(tokenizer.estimate_max_token(""), 0);
+    }
 }

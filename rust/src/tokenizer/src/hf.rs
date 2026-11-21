@@ -186,6 +186,7 @@ pub struct HuggingFaceTokenizer {
     added_vocab: Box<[(String, u32)]>,
     vocab_size: usize,
     leading_space_marker: Option<char>,
+    max_token_len: usize,
 }
 
 impl HuggingFaceTokenizer {
@@ -212,6 +213,7 @@ impl HuggingFaceTokenizer {
         };
         // HF materializes the merged vocabulary to count it, so cache the result.
         let vocab_size = tokenizer.get_vocab_size(true);
+        let max_token_len = tokenizer.get_vocab(true).keys().map(|s| s.len()).max().unwrap_or(0);
         let leading_space_marker = leading_space_marker(&tokenizer);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
@@ -219,6 +221,7 @@ impl HuggingFaceTokenizer {
             added_vocab,
             vocab_size,
             leading_space_marker,
+            max_token_len,
         }
     }
 
@@ -253,6 +256,15 @@ impl HuggingFaceTokenizer {
                 .iter()
                 .filter(|(token, _)| tokenizer.model().token_to_id(token).is_none())
                 .count();
+        let model = tokenizer.model();
+        let max_model_token_len = (0..model.vocab_size() as u32)
+            .filter_map(|id| model.id_to_token(id))
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
+        let max_added_token_len =
+            added_vocab.iter().map(|(token, _)| token.len()).max().unwrap_or(0);
+        let max_token_len = max_model_token_len.max(max_added_token_len);
         let backend = if byte_level {
             Backend::FastokensByteLevel(Box::new(tokenizer))
         } else {
@@ -266,6 +278,7 @@ impl HuggingFaceTokenizer {
             // fastokens rejects Metaspace pre-tokenizers, so those tokenizers load
             // through the HF backend.
             leading_space_marker: None,
+            max_token_len,
         }
     }
 
@@ -388,6 +401,10 @@ impl Tokenizer for HuggingFaceTokenizer {
 
     fn is_special_id(&self, token_id: u32) -> bool {
         self.special_token_ids.binary_search(&token_id).is_ok()
+    }
+
+    fn estimate_max_token(&self, text: &str) -> usize {
+        text.len().checked_div(self.max_token_len).unwrap_or(0)
     }
 }
 
@@ -720,6 +737,12 @@ mod tests {
         let fast = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
         assert_eq!(fast.vocab_size(), hf.vocab_size());
         assert_eq!(fast.vocab_size(), 10);
+        assert_eq!(fast.estimate_max_token(""), 0);
+        assert_eq!(hf.estimate_max_token(""), 0);
+        assert_eq!(fast.max_token_len, hf.max_token_len);
+        let text = "a".repeat(fast.max_token_len * 4 + 2);
+        assert_eq!(fast.estimate_max_token(&text), 4);
+        assert_eq!(hf.estimate_max_token(&text), 4);
         assert_eq!(
             fast.encode("hello<|im_end|>", false).unwrap(),
             hf.encode("hello<|im_end|>", false).unwrap()
