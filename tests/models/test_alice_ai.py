@@ -104,7 +104,9 @@ def test_kda_cache_contract_is_fp32_recurrent() -> None:
                 linear_conv_kernel_dim=4,
             ),
         ),
-        cache_config=SimpleNamespace(mamba_cache_dtype="auto"),
+        cache_config=SimpleNamespace(
+            mamba_cache_dtype="auto", mamba_ssm_cache_dtype="auto"
+        ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         speculative_config=None,
     )
