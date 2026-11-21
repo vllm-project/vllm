@@ -94,7 +94,10 @@ async def build_async_engine_client_from_engine_args(
         async_llm = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,
-            enable_log_requests=engine_args.enable_log_requests,
+            enable_log_requests=(
+                engine_args.enable_log_requests
+                or engine_args.enable_log_request_ids_only
+            ),
             aggregate_engine_logging=engine_args.aggregate_engine_logging,
             disable_log_stats=engine_args.disable_log_stats,
             client_addresses=client_config,
