@@ -117,6 +117,14 @@ impl UnsupportedArgs {
             }
         }
 
+        // `vllm serve` passes frontend args via `--args-json` without populating
+        // env-backed defaults into the JSON payload, so `clap`'s `env` attribute
+        // alone would not catch `VLLM_MAX_TOKENIZE_TOKENS` when launched through
+        // the Python entrypoint. Check the process environment explicitly here.
+        if std::env::var("VLLM_MAX_TOKENIZE_TOKENS").is_ok_and(|v| !v.trim().is_empty()) {
+            unsupported.push("VLLM_MAX_TOKENIZE_TOKENS");
+        }
+
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
             let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
@@ -252,11 +260,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,
 
-    /// Arguments to be forwarded to the model's processor for multi-modal data,
-    /// e.g., image processor.
-    #[arg(long)]
-    pub mm_processor_kwargs: Option<Unsupported>,
-
     /// The size (in GiB) of the multi-modal processor cache.
     #[arg(long)]
     pub mm_processor_cache_gb: Option<Unsupported>,
@@ -308,8 +311,11 @@ pub struct EngineUnsupportedArgs {
 
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub aggregate_engine_logging: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend's periodic stats line always
+    /// aggregates across engines.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1, hide = true)]
+    pub aggregate_engine_logging: Option<Noop>,
 }
 
 /// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but
@@ -377,8 +383,10 @@ pub struct ServerUnsupportedArgs {
     pub enable_server_load_tracking: Option<Noop>,
 
     /// Log level for uvicorn.
-    #[arg(long)]
-    pub uvicorn_log_level: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend does not run uvicorn.
+    #[arg(long, hide = true)]
+    pub uvicorn_log_level: Option<Noop>,
 
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
@@ -420,15 +428,24 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub h11_max_header_count: Option<Unsupported>,
 
+    /// Maximum number of tokens allowed in /tokenize, /detokenize, and
+    /// /v1/messages/count_tokens requests.
+    #[arg(long)]
+    pub max_tokenize_tokens: Option<Unsupported>,
+
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
         visible_alias = "no-enable-offline-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_offline_docs: Option<Unsupported>,
+    pub enable_offline_docs: Option<Noop>,
 
     /// If set, run pooling score MaxSim on GPU in the API server process.
     /// Can significantly improve late-interaction scoring performance.
