@@ -10,6 +10,8 @@ import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 import msgpack
@@ -49,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferError,
     TransferId,
     WriteTask,
+    _positive_finite_timeout,
     fill_remote_pod_from_config,
     fold_local_rank,
     get_moriio_mode,
@@ -162,6 +165,27 @@ except ImportError:
 
 def is_moriio_available() -> bool:
     return MoRIIO_enabled
+
+
+class _WriteRecvPhase(Enum):
+    WAITING = "waiting"
+    # Timed out and sent to the workers, until their report comes back.
+    TIMED_OUT = "timed_out"
+    # Failed on timeout; the scheduler holds its blocks until every worker
+    # releases them (a late write_done), since RDMA may still write into them.
+    HELD = "held"
+
+
+@dataclass(slots=True)
+class _WriteRecv:
+    """A WRITE consumer receive whose producer push is not reported in
+    finished_recving yet, and its `write_recv_timeout` timer."""
+
+    # The request already finished (e.g. aborted): it keeps its transfer_id
+    # mapping so the late write_done can still release its delayed-free blocks.
+    finished: bool = False
+    deadline: float = math.inf
+    phase: _WriteRecvPhase = _WriteRecvPhase.WAITING
 
 
 def _describe_memory(memory_desc: Any) -> str:
@@ -777,6 +801,27 @@ class MoRIIOConnectorScheduler:
         # For chunked prefill, we perform layer-wise access within the final chunk.
         # TODO: Perform transfer at end chunk.
         self._reqs_need_pending_save: dict[ReqId, tuple[Request, BlockIds]] = {}
+        write_recv_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.write_recv_timeout",
+            self.kv_transfer_config.kv_connector_extra_config.get(
+                "write_recv_timeout", MoRIIOConstants.DEFAULT_WRITE_RECV_TIMEOUT
+            ),
+        )
+        # WRITE consumer: seconds a receive waits for its write_done; None while
+        # the timer is off. Only a pure consumer runs it: a kv_both worker runs
+        # as a producer.
+        self._write_recv_timeout: float | None = None
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and self.kv_transfer_config.kv_role == "kv_consumer"
+        ):
+            if self.kv_transfer_config.kv_load_failure_policy == "fail":
+                self._write_recv_timeout = write_recv_timeout
+            else:
+                logger.warning(
+                    "MoRI-IO WRITE-mode consumer: write_recv_timeout is disabled; "
+                    "it requires kv_load_failure_policy='fail'."
+                )
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -799,11 +844,12 @@ class MoRIIOConnectorScheduler:
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
-        # WRITE consumer: requests whose producer push has not been reported
-        # in finished_recving yet, mapped to whether the request already
-        # finished (e.g. aborted). A finished one keeps its transfer_id mapping
-        # so the late write_done can still release its delayed-free blocks.
-        self._write_recvs_in_flight: dict[ReqId, bool] = {}
+        # WRITE consumer: the receives in flight.
+        self._write_recvs_in_flight: dict[ReqId, _WriteRecv] = {}
+
+    @property
+    def _write_recv_timer_enabled(self) -> bool:
+        return self._write_recv_timeout is not None
 
     def get_exchange_clipped_blocks(
         self,
@@ -1110,7 +1156,7 @@ class MoRIIOConnectorScheduler:
             and params.get("do_remote_prefill")
             and num_external_tokens > 0
         ):
-            self._write_recvs_in_flight.setdefault(request_id, False)
+            self._write_recvs_in_flight.setdefault(request_id, _WriteRecv())
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
             local_block_ids: BlockIds = blocks.get_block_ids()
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -1389,6 +1435,16 @@ class MoRIIOConnectorScheduler:
                             num_skip_blocks=num_skip_blocks,
                         )
 
+                # Every rank holding the request times it, notifying or not.
+                recv = self._write_recvs_in_flight.get(request.request_id)
+                if (
+                    num_external_tokens > 0
+                    and recv is not None
+                    and math.isinf(recv.deadline)
+                    and self._write_recv_timeout is not None
+                ):
+                    recv.deadline = time.monotonic() + self._write_recv_timeout
+
             # Only trigger 1 KV transfer per request.
 
             params["do_remote_prefill"] = False
@@ -1570,7 +1626,35 @@ class MoRIIOConnectorScheduler:
         self._reqs_need_save.clear()
         self._reqs_need_send = {}
 
+        if self._write_recv_timer_enabled:
+            meta.write_recv_timed_out_req_ids = self._reap_stale_write_recvs()
+
         return meta
+
+    def _reap_stale_write_recvs(self) -> set[ReqId]:
+        """Time out the WRITE receives past their deadline and return them."""
+        now = time.monotonic()
+        expired = {
+            req_id
+            for req_id, recv in self._write_recvs_in_flight.items()
+            if recv.phase is _WriteRecvPhase.WAITING and now >= recv.deadline
+        }
+        for req_id in expired:
+            self._write_recvs_in_flight[req_id].phase = _WriteRecvPhase.TIMED_OUT
+            logger.error(
+                "MoRI-IO WRITE: no write_done for request %s after %.0fs "
+                "(write_recv_timeout); failing it if it is still waiting. Its "
+                "blocks stay allocated because the producer may still write them.",
+                req_id,
+                self._write_recv_timeout,
+            )
+        return expired
+
+    def _forget_write_recv(self, req_id: ReqId) -> None:
+        """Stop timing a WRITE receive that has not timed out."""
+        recv = self._write_recvs_in_flight.get(req_id)
+        if recv is not None and recv.phase is _WriteRecvPhase.WAITING:
+            recv.deadline = math.inf
 
     def shutdown(self):
         for path, sock in self.paths.items():
@@ -1657,7 +1741,13 @@ class MoRIIOConnectorScheduler:
         #   transfer_id. update_connector_output unmaps it then.
         # Producer: must keep the mapping until we get notification that blocks can
         #   be freed, which may be several scheduler steps later.
+        # A receive that timed out is still in flight, so it keeps its mapping
+        # too and its late write_done can release the blocks the scheduler holds
+        # for it. A request finished before its deadline (an abort) stops its
+        # timer, as if it had none.
         if not self.is_producer:
+            if self._write_recv_timer_enabled:
+                self._forget_write_recv(request_id)
             transfer_id = params.get("transfer_id") if params else None
             owner = (
                 self.transfer_id_to_request_id.get(transfer_id)
@@ -1668,7 +1758,7 @@ class MoRIIOConnectorScheduler:
                 # Rejection cleanup must not unmap or release an active receive.
                 return False, None
             if request_id in self._write_recvs_in_flight:
-                self._write_recvs_in_flight[request_id] = True
+                self._write_recvs_in_flight[request_id].finished = True
             else:
                 self.unmap_request_id(request_id, transfer_id=transfer_id)
         logger.debug(
@@ -1803,14 +1893,38 @@ class MoRIIOConnectorScheduler:
           deadline is a stale duplicate (e.g. a real ACK landing after the
           send was already reaped) and is dropped.
 
-        Consumers never populate finished_sending (they report
-        finished_recving). They unmap in request_finished, except for a WRITE
-        request that finished while still waiting, which is unmapped here once
-        its finished_recving arrives.
+        Consumers report finished_recving. They unmap in request_finished,
+        except for a WRITE request that finished while still waiting, which is
+        unmapped here once its finished_recving arrives. This also stops the
+        WRITE receive timer, and handles a timed-out receive
+        (`write_recv_timeout`): the workers report it in failed_recving and
+        finished_recving, so the request fails; it is still waiting, so the
+        scheduler holds its blocks until finished_recving, which is withheld
+        here. A late write_done is then reported by each worker in
+        finished_sending, and passed on as the finished_recving that frees them.
         """
         if not self.is_producer:
+            if self._write_recv_timer_enabled:
+                recving = set(connector_output.finished_recving or ())
+                failed = set(connector_output.failed_recving or ())
+                held: set[ReqId] = set()
+                for req_id in recving & failed:
+                    recv = self._write_recvs_in_flight.get(req_id)
+                    if recv is not None and recv.phase is _WriteRecvPhase.TIMED_OUT:
+                        recv.phase = _WriteRecvPhase.HELD
+                        held.add(req_id)
+                # A release in the step of the hold is final too: the worker saw
+                # the write end (e.g. a write_failed with the timeout).
+                released: set[ReqId] = set()
+                for req_id in connector_output.finished_sending or ():
+                    recv = self._write_recvs_in_flight.get(req_id)
+                    if recv is not None and recv.phase is _WriteRecvPhase.HELD:
+                        released.add(req_id)
+                connector_output.finished_recving = (recving - held) | released
+                connector_output.finished_sending = set()
             for req_id in connector_output.finished_recving or ():
-                if self._write_recvs_in_flight.pop(req_id, False):
+                recv = self._write_recvs_in_flight.pop(req_id, None)
+                if recv is not None and recv.finished:
                     self.unmap_request_id(req_id)
             return
 
@@ -1970,6 +2084,11 @@ class MoRIIOConnectorWorker:
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
         self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
+        # Timed-out receives from start_load_kv, for the next get_transfer_results.
+        self._write_recv_timed_out: set[ReqId] = set()
+        # Receives this worker reported, done, failed or timed out, while the
+        # scheduler maps them.
+        self._write_recv_reported: set[ReqId] = set()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -3099,12 +3218,48 @@ class MoRIIOConnectorWorker:
             while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
                 pending.popitem(last=False)
             done_recving |= failed_recving
+            done_sending |= self._report_write_recv_timeouts(
+                done_recving, failed_recving
+            )
 
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
             failed_recving=failed_recving,
         )
+
+    def _report_write_recv_timeouts(
+        self, done_recving: set[ReqId], failed_recving: set[ReqId]
+    ) -> set[ReqId]:
+        """Report the receives the scheduler timed out (`write_recv_timeout`).
+
+        Every worker reports a receive in finished_recving once, as the
+        aggregator counts. A timed-out one this worker has not reported is
+        reported now, as failed, so the request fails while the scheduler
+        holds its blocks. Its write_done comes later as a release in
+        finished_sending; one this worker had already completed is released
+        at once.
+
+        Returns:
+            The receives this worker releases, for finished_sending.
+
+        """
+        # Reported already, so only a timed-out one: its late write_done (or
+        # write_failed) releases it.
+        released = done_recving & self._write_recv_reported
+        done_recving -= released
+        failed_recving -= released
+        # Every report so far, a producer write_failed included: each counted once.
+        self._write_recv_reported |= done_recving
+        for req_id in self._write_recv_timed_out:
+            if req_id in self._write_recv_reported:
+                released.add(req_id)
+            else:
+                done_recving.add(req_id)
+                failed_recving.add(req_id)
+                self._write_recv_reported.add(req_id)
+        self._write_recv_timed_out = set()
+        return released
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
@@ -3479,6 +3634,9 @@ class MoRIIOConnectorWorker:
             self.moriio_wrapper.async_wait_reqid()
             return
         if self.mode == MoRIIOMode.WRITE:
+            live_req_ids = set(self.transfer_id_to_request_id.values())
+            self._write_recv_reported &= live_req_ids
+            self._write_recv_timed_out |= metadata.write_recv_timed_out_req_ids
             return
 
         # Handshake every referenced remote prefill rank up front, before any
