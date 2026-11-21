@@ -30,8 +30,8 @@ def qkv_gate_weights(wrapper):
         return w, wrapper.g_proj.weight
     if not getattr(wrapper, "_qkv_gate_fused", False):
         return w, None
-    n = wrapper.q_lora_rank + wrapper.mla_attn.kv_lora_rank + wrapper.qk_rope_head_dim
-    return w[:n], w[n:]
+    proj = wrapper.fused_qkv_a_proj
+    return w[: proj.latent_rows], w[proj.gate_row_offset :]
 
 
 def attend(wrapper, q8, kv_cache, md):

@@ -1628,6 +1628,27 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         copy_weight_(param_data, loaded_weight)
 
 
+def _weight_block_rows(quant_config: QuantizationConfig | None, prefix: str) -> int:
+    """Row height of the per-block weight scales `quant_config` gives the layer
+    at `prefix`, or 1 when its weight scales are not row-blocked."""
+    if quant_config is None:
+        return 1
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8Config,
+        ModelOptMixedPrecisionConfig,
+    )
+
+    if isinstance(quant_config, ModelOptMixedPrecisionConfig):
+        algo = quant_config._resolve_quant_algo(prefix)
+        return 128 if algo in ("FP8_PB_WO", "FP8_BLOCK_SCALES") else 1
+    if isinstance(quant_config, ModelOptFp8Config):
+        return 128 if quant_config.quant_method == "FP8_PB_WO" else 1
+    block = getattr(quant_config, "weight_block_size", None)
+    if block:
+        return max(int(block[0]), 1)
+    return 1
+
+
 class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
     """Kimi-K3 QKV-A projection fused with its output-gate projection.
 
@@ -1639,6 +1660,17 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
     The per-rank shard layout is `[q_a | kv_a | gate]`. The latent shards
     stay replicated across tensor-parallel ranks while the gate shard is
     tensor-parallel, matching the standalone projections they replace.
+
+    With row-blocked weight scales (e.g. FP8 128x128 block scales) every shard
+    must start on a block boundary, because the fused loader places shard i's
+    scales from block ceil(row_offset / block). Kimi-K3's latents are
+    1536 + 576 = 2112 rows, so the gate would start inside block 16 while its
+    scales start at block 17, and half of every gate block would be scaled by
+    its neighbour's scale. In that case `latent_padding` zero rows are stored
+    after kv_a so the gate starts at `gate_row_offset`, on its own blocks, and
+    `forward()` drops the padding columns: callers still receive
+    `[q_a | kv_a | gate]` contiguous. Code that slices `weight` by rows must
+    use `latent_rows` and `gate_row_offset`.
     """
 
     def __init__(
@@ -1655,11 +1687,30 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
     ) -> None:
         tp_size = get_tensor_model_parallel_world_size()
 
+        self.kv_rows = kv_lora_rank + qk_rope_head_dim
+        self.latent_rows = q_lora_rank + self.kv_rows
+        block = _weight_block_rows(quant_config, prefix)
+        self.latent_padding = -self.latent_rows % block
+        if self.latent_padding:
+            if q_lora_rank % block:
+                raise ValueError(
+                    f"{prefix}: q_lora_rank {q_lora_rank} is not a multiple of "
+                    f"the {block}-row weight scale block"
+                )
+            logger.info_once(
+                "KimiK3MergedQKVGateLinear: storing %d zero rows between kv_a "
+                "and the gate to align the gate to its %d-row weight scale "
+                "blocks.",
+                self.latent_padding,
+                block,
+            )
+        self.gate_row_offset = self.latent_rows + self.latent_padding
+
         # MergedColumnParallelLinear divides every logical shard by TP size.
         # Inflate the replicated latent shards to retain their checkpoint widths.
         output_sizes = [
             q_lora_rank * tp_size,
-            (kv_lora_rank + qk_rope_head_dim) * tp_size,
+            (self.kv_rows + self.latent_padding) * tp_size,
             total_num_heads * v_head_dim,
         ]
         super().__init__(
@@ -1677,6 +1728,23 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: tuple[int, ...] | int | None,
     ) -> None:
+        if self.latent_padding:
+            if not isinstance(loaded_shard_id, int):
+                raise ValueError(
+                    "KimiK3MergedQKVGateLinear with block-aligned latent "
+                    "padding needs q_a, kv_a and the gate loaded as separate "
+                    f"shards, got shard id {loaded_shard_id!r}"
+                )
+            if loaded_shard_id == 1 and param is self.weight:
+                # kv_a's weight shard is latent_padding rows taller than the
+                # checkpoint tensor: append zero rows. Its scale shard keeps the
+                # checkpoint's ceil(kv_rows / block) blocks, which cover them.
+                assert loaded_weight.shape[0] == self.kv_rows
+                padded = loaded_weight.new_zeros(
+                    self.kv_rows + self.latent_padding, *loaded_weight.shape[1:]
+                )
+                padded[: self.kv_rows].copy_(loaded_weight)
+                loaded_weight = padded
         is_replicated = isinstance(loaded_shard_id, int) and loaded_shard_id < 2
         if not is_replicated:
             loader(param, loaded_weight, loaded_shard_id)
@@ -1715,6 +1783,24 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
         self._load_with_replicated_latents(
             super().weight_loader_v2, param, loaded_weight, loaded_shard_id
         )
+
+    def forward(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        result = super().forward(input_)
+        if not self.latent_padding:
+            return result
+        # Drop the zero padding columns so callers keep [q_a | kv_a | gate].
+        output = result[0] if self.return_bias else result
+        output = torch.cat(
+            (
+                output[..., : self.latent_rows],
+                output[..., self.gate_row_offset :],
+            ),
+            dim=-1,
+        )
+        return (output, result[1]) if self.return_bias else output
 
 
 # --8<-- [start:row_parallel_linear]
