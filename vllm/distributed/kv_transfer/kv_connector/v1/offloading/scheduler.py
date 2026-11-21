@@ -63,7 +63,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -291,6 +291,7 @@ class OffloadingConnectorScheduler:
         self._current_batch_sync_loads: set[ReqId] = set()
         self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush: set[int] = set()
+        self._pending_allocations: dict[ReqId, tuple[KVCacheBlocks, bool]] = {}
         # GPU block IDs allocated in the current engine step
         self._current_batch_allocated_block_ids: set[int] = set()
         # if GPU prefix caching is enabled,
@@ -1065,22 +1066,13 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
-        req_status = self._req_status[request.request_id]
-        # Include allocations made by other connectors in a MultiConnector.
-        # Full-attention prefix hits were touched, not allocated.
-        num_locally_computed_tokens = req_status.num_locally_computed_tokens
-        for group_idx, group_blocks in enumerate(blocks.blocks):
-            if group_idx not in self._groups_sharing_offload_pool:
-                continue
-            num_prefix_blocks = self._num_prefix_blocks(
-                group_idx, num_locally_computed_tokens
-            )
-            self._current_batch_allocated_block_ids.update(
-                block.block_id
-                for block in group_blocks[num_prefix_blocks:]
-                if block.block_id != 0
-            )
-
+        # Deferred loads reach this hook once their fence clears, while the
+        # request is already parked. Remember the hand-off in case it aborts.
+        load_prepared = (
+            num_external_tokens > 0
+            or request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        )
+        self._pending_allocations[request.request_id] = (blocks, load_prepared)
         if num_external_tokens == 0:
             return
 
@@ -1088,8 +1080,10 @@ class OffloadingConnectorScheduler:
         # already saw as HIT, so both must sit inside the same region.
         self._acquire_step()
 
+        req_status = self._req_status[request.request_id]
         sync_load = request.request_id in self._current_batch_sync_loads
 
+        num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
         partial_tail_boundary = req_status.partial_tail_boundary
         if partial_tail_boundary is not None:
@@ -1209,6 +1203,17 @@ class OffloadingConnectorScheduler:
             self._chunks_being_loaded.update(keys_to_load)
         req_status.partial_tail_boundary = None
 
+    def _record_allocated_blocks(
+        self, block_id_groups: tuple[list[int], ...], local_prefix_tokens: int
+    ) -> None:
+        for group_idx, group_blocks in enumerate(block_id_groups):
+            if group_idx not in self._groups_sharing_offload_pool:
+                continue
+            num_prefix_blocks = self._num_prefix_blocks(group_idx, local_prefix_tokens)
+            self._current_batch_allocated_block_ids.update(
+                bid for bid in group_blocks[num_prefix_blocks:] if bid != 0
+            )
+
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
         """Update request states from the Scheduler's output."""
         # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
@@ -1231,6 +1236,8 @@ class OffloadingConnectorScheduler:
                         for config_group_idx in self._sliding_window_groups
                     )
                 req_status.update_block_id_groups(block_id_groups)
+                if req_id not in scheduler_output.num_scheduled_tokens:
+                    continue
                 local_prefix_tokens = 0
                 if is_full_table:
                     local_prefix_tokens = req_status.num_locally_computed_tokens
@@ -1240,15 +1247,22 @@ class OffloadingConnectorScheduler:
                         local_prefix_tokens = min(
                             local_prefix_tokens, req_status.req.num_computed_tokens
                         )
-                for group_idx, group_blocks in enumerate(block_id_groups):
-                    if group_idx not in self._groups_sharing_offload_pool:
-                        continue
-                    num_prefix_blocks = self._num_prefix_blocks(
-                        group_idx, local_prefix_tokens
-                    )
-                    self._current_batch_allocated_block_ids.update(
-                        bid for bid in group_blocks[num_prefix_blocks:] if bid != 0
-                    )
+                self._record_allocated_blocks(block_id_groups, local_prefix_tokens)
+
+        # MultiConnector passes zero external tokens to its non-loading children.
+        # For an immediate async load, core parks the request after the callback.
+        for req_id, (blocks, load_prepared) in self._pending_allocations.items():
+            if req_id in scheduler_output.num_scheduled_tokens:
+                continue
+            load_req_status = self._req_status.get(req_id)
+            if load_req_status is not None and (
+                load_prepared
+                or load_req_status.req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            ):
+                self._record_allocated_blocks(
+                    blocks.get_block_ids(), load_req_status.num_locally_computed_tokens
+                )
+        self._pending_allocations.clear()
 
         for copy in scheduler_output.kv_cache_block_copies or ():
             self._current_batch_allocated_block_ids.add(copy.dst_block_id)

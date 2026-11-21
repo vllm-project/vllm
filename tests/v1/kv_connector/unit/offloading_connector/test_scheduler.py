@@ -790,7 +790,7 @@ def test_handoff_handler_is_absent_without_handoffs(request_runner):
 @pytest.mark.parametrize("cow_reuse", [False, True])
 def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     scheduler = _make_partial_tail_scheduler()
-    _make_partial_tail_request(scheduler)
+    _make_real_partial_tail_request(scheduler, "req")
     _as_mock(scheduler.manager.prepare_store).side_effect = (
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
@@ -811,6 +811,8 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     else:
         output.scheduled_cached_reqs.req_ids = ["req"]
         output.scheduled_cached_reqs.new_block_ids = [([], [99])]
+        output.num_scheduled_tokens = {"req": 1}
+        output.total_num_scheduled_tokens = 1
     meta = scheduler.build_connector_meta(output)
     assert isinstance(meta, OffloadingConnectorMetadata)
 
@@ -4588,9 +4590,9 @@ def test_no_store_job_while_a_load_is_pending(request_runner):
         assert not any(s.is_store for s in sched._job_statuses.values())
 
 
-def test_fence_at_update_state_after_alloc(request_runner):
+def test_fence_for_async_kv_load_without_forward(request_runner):
     """A load reusing a finished request's pending-store block triggers
-    a flush via update_state_after_alloc's fence.
+    a flush even though no tokens are scheduled.
 
     num_gpu_blocks=2 forces the BlockPool to give req2 the same block
     req1 just freed.
@@ -4643,9 +4645,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
 
 
 def test_fence_at_build_store_jobs(request_runner):
-    """A new prefill (no load -> update_state_after_alloc returns early)
-    reusing a finished request's pending-store block is flushed by
-    build_store_jobs's fence."""
+    """A scheduled prefill fences a pending store before reusing its block."""
     runner = request_runner(
         blocks_per_chunk=1,
         block_size=4,
@@ -4694,9 +4694,16 @@ def test_fence_at_build_store_jobs(request_runner):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("async_scheduling", [True, False])
-@pytest.mark.parametrize("shared_prefix", [True, False])
-def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
-    """A prefix hit preserves the store; a reallocation still flushes it."""
+@pytest.mark.parametrize(
+    ("shared_prefix", "scheduled"),
+    [
+        pytest.param(True, True, id="shared-prefix"),
+        pytest.param(False, True, id="scheduled-reuse"),
+        pytest.param(False, False, id="allocation-without-execution"),
+    ],
+)
+def test_full_attention_pending_store_fence(async_scheduling, shared_prefix, scheduled):
+    """Only reuse by a scheduled request fences a pending store."""
     config = create_vllm_config(
         block_size=4,
         kv_connector="OffloadingConnector",
@@ -4742,6 +4749,19 @@ def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
         block_size=4,
     )
     scheduler.add_request(request_b)
+    if not scheduled:
+        # Exercise the allocation hook before the request has a forward or load.
+        new_blocks = scheduler.kv_cache_manager.allocate_slots(
+            request_b, request_b.num_tokens
+        )
+        assert new_blocks is not None
+        assert new_blocks.get_block_ids() == ([block_id],)
+        connector.update_state_after_alloc(request_b, new_blocks, 0)
+        metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+        assert isinstance(metadata, OffloadingConnectorMetadata)
+        assert not (metadata.jobs_to_flush or set()) & jobs
+        return
+
     output = scheduler.schedule()
     metadata = output.kv_connector_metadata
     assert isinstance(metadata, OffloadingConnectorMetadata)
