@@ -273,3 +273,16 @@ class TestHYV3ExtractToolCallsStreaming:
         tc = _collect_streaming_tool_calls(results)
         assert len(tc) == 1 and tc[0]["name"] == "get_current_date"
         assert json.loads(tc[0]["arguments"]) == {}
+
+
+def test_extract_tool_calls_keeps_unparsed_section_as_content(
+    hy_v3_tool_parser, mock_request
+):
+    parser = hy_v3_tool_parser
+    model_output = (
+        f"{parser.tool_calls_start_token}get_weather{parser.tool_calls_end_token}"
+    )
+    result = parser.extract_tool_calls(model_output, mock_request)
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == model_output
