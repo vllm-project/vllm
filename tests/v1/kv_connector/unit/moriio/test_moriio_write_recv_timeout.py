@@ -321,6 +321,15 @@ def test_write_failed_with_the_timeout_frees_the_blocks(engine):
     assert engine.pool.get_num_free_blocks() == free_before
 
 
+@pytest.mark.parametrize("role, timed", [("kv_consumer", True), ("kv_both", False)])
+def test_timer_runs_only_on_a_pure_consumer(consumer_role, role, timed):
+    """A kv_both scheduler acts as a consumer, but its workers run as producers
+    and never report a timed-out receive, so its timer stays off."""
+    config = create_moriio_config(role=role, block_size=BLOCK_SIZE)
+    connector = create_scheduler(config).connector.connector_scheduler
+    assert (connector._write_recv_timeout is not None) == timed
+
+
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_every_kv_cache_group_is_held_and_then_freed(
     consumer_role, monkeypatch, layout
