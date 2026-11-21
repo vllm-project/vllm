@@ -314,6 +314,75 @@ def _tq_decode_stage1(
 
 
 # ---------------------------------------------------------------------------
+# Stage 2: log-sum-exp merge of the split partials. One program per (batch,
+# query head, head_dim chunk). The splits are reduced as [BLOCK_S, BLOCK_DC]
+# tiles whose loads are independent, instead of one dependent load chain per
+# split, so small batches with many splits are not latency bound.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _tq_decode_stage2(
+    Mid_o_ptr,  # [B, Hq, NUM_KV_SPLITS, D+1] float32
+    O_ptr,  # [B, Hq, D] query dtype
+    Lse_ptr,  # [B, Hq] float32
+    Seq_lens_ptr,  # [B] int32
+    stride_mid_b,
+    stride_mid_h,
+    stride_mid_s,
+    stride_ob,
+    stride_oh,
+    stride_lse_b,
+    NUM_KV_SPLITS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_S: tl.constexpr,
+    BLOCK_DC: tl.constexpr,
+):
+    bid = tl.program_id(0)
+    hid = tl.program_id(1)
+    dc = tl.program_id(2)
+
+    seq_len = tl.load(Seq_lens_ptr + bid)
+    split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
+    base = Mid_o_ptr + bid.to(tl.int64) * stride_mid_b + hid * stride_mid_h
+    d_offs = dc * BLOCK_DC + tl.arange(0, BLOCK_DC)
+    d_mask = d_offs < HEAD_DIM
+    s_range = tl.arange(0, BLOCK_S)
+
+    m = tl.full([], -float("inf"), dtype=tl.float32)
+    l_sum = tl.zeros([], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_DC], dtype=tl.float32)
+    for s0 in tl.static_range(0, NUM_KV_SPLITS, BLOCK_S):
+        s = s0 + s_range
+        # stage 1 wrote split s iff its start (s * split_len) < seq_len
+        valid = (s < NUM_KV_SPLITS) & (s * split_len < seq_len)
+        lse_s = tl.load(
+            base + s * stride_mid_s + HEAD_DIM, mask=valid, other=-float("inf")
+        )
+        tile = tl.load(
+            base + s[:, None] * stride_mid_s + d_offs[None, :],
+            mask=valid[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+        m_new = tl.maximum(m, tl.max(lse_s, 0))
+        m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+        w = tl.exp(lse_s - m_safe)  # 0 for invalid splits
+        alpha = tl.exp(m - m_safe)
+        acc = acc * alpha + tl.sum(w[:, None] * tile, 0)
+        l_sum = l_sum * alpha + tl.sum(w, 0)
+        m = m_new
+
+    safe_l = tl.where(l_sum > 0.0, l_sum, 1.0)
+    tl.store(
+        O_ptr + bid * stride_ob + hid * stride_oh + d_offs,
+        (acc / safe_l).to(O_ptr.dtype.element_ty),
+        mask=d_mask,
+    )
+    if dc == 0:
+        tl.store(Lse_ptr + bid * stride_lse_b + hid, m + tl.log(safe_l))
+
+
+# ---------------------------------------------------------------------------
 # Pre-dequant kernel: Bulk dequant K (MSE+norms) and V to fp16
 # ---------------------------------------------------------------------------
 
@@ -454,10 +523,6 @@ def _tq_full_dequant_kv(
     vo_base = bid * stride_vo_b + hid * stride_vo_h + pos * stride_vo_s
     tl.store(V_out_ptr + vo_base + d_offs, v_vals.to(tl.float16), mask=d_mask)
 
-
-# ---------------------------------------------------------------------------
-# Stage 2: Reuse from triton_decode_attention.py
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Launcher — cached constants + fused GEMM
@@ -607,24 +672,35 @@ def triton_turboquant_decode_attention(
         if buf_holder is not None:
             buf_holder._tq_lse_buf = lse
 
-    grid2 = (B, Hq)
-    _fwd_kernel_stage2[grid2](
+    stage2_args = (
         mid_o,
         output,
         lse,
         seq_lens,
-        mid_o.stride(0),
-        mid_o.stride(1),
-        mid_o.stride(2),
-        output.stride(0),
-        output.stride(1),
+        *mid_o.stride()[:3],
+        *output.stride()[:2],
         lse.stride(0),
-        NUM_KV_SPLITS=NUM_KV_SPLITS,
-        BLOCK_DV=cfg["BLOCK_D"],
-        Lv=D,
-        OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
-        num_warps=4,
-        num_stages=2,
     )
+    if current_platform.is_cuda():
+        block_dc = min(32 if B * Hq < 2048 else 64, cfg["BLOCK_D"])
+        _tq_decode_stage2[(B, Hq, triton.cdiv(D, block_dc))](
+            *stage2_args,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            HEAD_DIM=D,
+            BLOCK_S=min(triton.next_power_of_2(NUM_KV_SPLITS), 128),
+            BLOCK_DC=block_dc,
+            num_warps=2,
+            num_stages=1,
+        )
+    else:  # ROCm and XPU keep the shared stage 2 (not measured there)
+        _fwd_kernel_stage2[(B, Hq)](
+            *stage2_args,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            BLOCK_DV=cfg["BLOCK_D"],
+            Lv=D,
+            OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
+            num_warps=4,
+            num_stages=2,
+        )
 
     return output  # already in query dtype

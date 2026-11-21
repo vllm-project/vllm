@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
@@ -75,6 +76,35 @@ logger = init_logger(__name__)
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+# Stage 1 runs one program per (batch, head, KV split), so small decode batches
+# use more KV splits to fill the GPU. The split count depends only on the batch
+# size, so it is fixed per captured CUDA graph.
+_DECODE_SPLIT_FACTORS = ((16, 4), (32, 2))  # (max batch size, factor)
+
+
+def _decode_split_factors(is_turboquant: bool) -> tuple[tuple[int, int], ...]:
+    """Split tiers of the Triton decode on CUDA. FlyDSL (ROCm), other
+    platforms and UltraQuant keep tq_max_kv_splits_for_cuda_graph splits."""
+    return _DECODE_SPLIT_FACTORS if is_turboquant and current_platform.is_cuda() else ()
+
+
+def _decode_kv_splits(
+    batch_size: int, max_num_kv_splits: int, factors: tuple[tuple[int, int], ...]
+) -> int:
+    for max_batch, factor in factors:
+        if batch_size <= max_batch:
+            return max_num_kv_splits * factor
+    return max_num_kv_splits
+
+
+def _max_decode_split_rows(
+    max_batch: int, max_num_kv_splits: int, factors: tuple[tuple[int, int], ...]
+) -> int:
+    """Largest batch x splits product decode can request, for buffer sizing."""
+    sizes = {max_batch} | {min(max_batch, b) for b, _ in factors}
+    return max(b * _decode_kv_splits(b, max_num_kv_splits, factors) for b in sizes)
+
 
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
 # use the TQ decode kernel directly instead of full-dequant + flash_attn.
@@ -240,8 +270,14 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             self.vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
+        factors = _decode_split_factors(self.kv_cache_spec.kv_quant_mode.is_turboquant)
+        if factors:  # sized by bytes for the largest batch x splits product
+            mid_o_rows = _max_decode_split_rows(max_num_reqs, max_num_splits, factors)
+            mid_o = (mid_o_rows, num_heads, 1, head_size + 1)
+        else:
+            mid_o = (max_num_reqs, num_heads, max_num_splits, head_size + 1)
         current_workspace_manager().get_simultaneous(
-            ((max_num_reqs, num_heads, max_num_splits, head_size + 1), torch.float32),
+            (mid_o, torch.float32),
             ((max_num_reqs, num_heads, head_size), model_config.dtype),
             ((max_num_reqs, num_heads), torch.float32),
         )
@@ -367,6 +403,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # tracks FlyDSL availability (single switch for the whole pipeline).
         self._use_flydsl = is_flydsl_available()
         self._soa_store = self._use_flydsl
+        self._split_factors = _decode_split_factors(is_turboquant=True)
 
     def _flash_attn_varlen(
         self,
@@ -1112,7 +1149,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Falls back to kernel-internal allocation if workspace unavailable.
         B = query.shape[0]
         D = self.head_size
-        S = self.max_num_kv_splits
+        S = _decode_kv_splits(B, self.max_num_kv_splits, self._split_factors)
         Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
         if is_workspace_manager_initialized():
@@ -1220,7 +1257,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             output_buf=output_buf,
             lse_buf=lse_buf,
             buf_holder=layer,
-            max_num_kv_splits=self.max_num_kv_splits,
+            max_num_kv_splits=S,
         )
         return result
 
