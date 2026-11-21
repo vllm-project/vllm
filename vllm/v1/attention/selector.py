@@ -42,6 +42,9 @@ class AttentionSelectorConfig(NamedTuple):
     use_dcp: bool = False
     use_rswa: bool = False
     use_hisparse: bool = False
+    # Kernel block size this layer must use because other layers of the model
+    # only support it (all layers share one kernel block size). None = any.
+    required_kernel_block_size: int | None = None
 
     def __repr__(self):
         return (
@@ -63,7 +66,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_pcp={self.use_pcp}, "
             f"use_dcp={self.use_dcp}, "
             f"use_rswa={self.use_rswa}, "
-            f"use_hisparse={self.use_hisparse})"
+            f"use_hisparse={self.use_hisparse}, "
+            f"required_kernel_block_size={self.required_kernel_block_size})"
         )
 
 
@@ -120,8 +124,13 @@ def get_attn_backend(
     attn_type: str | None = None,
     num_heads: int | None = None,
     has_sliding_window: bool = False,
+    required_kernel_block_size: int | None = None,
 ) -> type[AttentionBackend]:
-    """Selects which attention backend to use and lazily imports it."""
+    """Selects which attention backend to use and lazily imports it.
+
+    required_kernel_block_size: set when other layers of the model only support
+    one kernel block size, so this layer's backend must support exactly it.
+    """
     if kv_cache_dtype is not None:
         assert is_known_kv_cache_dtype(kv_cache_dtype), (
             f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
@@ -182,6 +191,7 @@ def get_attn_backend(
         use_hisparse=(
             use_sparse and vllm_config.attention_config.hisparse_config is not None
         ),
+        required_kernel_block_size=required_kernel_block_size,
     )
 
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over

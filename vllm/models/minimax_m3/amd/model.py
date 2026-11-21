@@ -150,6 +150,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLMultiModalProcessor,
     MiniMaxM3VLProcessingInfo,
 )
+from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
@@ -670,6 +671,12 @@ class MiniMaxM3Attention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            # The sparse layers' backends only take a kernel block of the sparse
+            # block size, and every layer shares one kernel block size, so the
+            # dense layers must pick a backend that supports it too.
+            required_kernel_block_size=(
+                SPARSE_BLOCK_SIZE if _sparse_attention_layer_ids(config) else None
+            ),
         )
 
     def forward(
