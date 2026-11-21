@@ -62,3 +62,19 @@ def test_enable_layerwise_nvtx_tracing_is_deprecated(caplog_vllm):
         assert msg not in caplog_vllm.text
         ObservabilityConfig(enable_layerwise_nvtx_tracing=True)
     assert msg in caplog_vllm.text
+
+
+def test_collect_detailed_traces_is_deprecated(caplog_vllm):
+    msg = "collect_detailed_traces is deprecated"
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        ObservabilityConfig()
+        assert msg not in caplog_vllm.text
+        ObservabilityConfig(collect_detailed_traces=["all"])
+    assert msg in caplog_vllm.text
+
+
+def test_collect_detailed_traces_no_longer_requires_an_otlp_endpoint():
+    """It is a no-op, so refusing to start over it only blocks the user."""
+    config = ObservabilityConfig(collect_detailed_traces=["model"])
+
+    assert config.otlp_traces_endpoint is None
