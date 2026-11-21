@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 
 if TYPE_CHECKING:
@@ -348,11 +349,17 @@ def mxfp4_w4a16_extra_kwargs(
             "bias1": quant_config.w1_bias,
             "bias2": quant_config.w2_bias,
         }
-    return {
+    kwargs = {
         "gate_mode_override": GateMode.INTERLEAVE.value,
         "bias1": quant_config.w1_bias,
         "bias2": quant_config.w2_bias,
     }
+    if quant_config.deferred_activation_key == kMxfp8Dynamic:
+        # Must match what a MoRI MXFP8 dispatch hands over.
+        from aiter import dtypes
+
+        kwargs["q_dtype_a"] = dtypes.fp8
+    return kwargs
 
 
 def rocm_aiter_fused_experts(

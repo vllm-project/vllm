@@ -431,6 +431,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             gemm1_beta=1.0,
             swiglu_limit=7.0,
             layer=layer,
+            moe_config=self.moe,
         )
 
     def apply(
@@ -653,8 +654,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        # Checkpoint-declared activation quantization. Only backends that pick
-        # their activation format from the layer (Humming) consume it.
+        # Activation quantization the checkpoint declares or defaults to, with
+        # any user override applied. Only backends that pick their activation
+        # format from the layer (Humming, AITER w4a16) consume it.
         self.activation_key = activation_key
         self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
         self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
@@ -1098,6 +1100,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias=w2_bias,
             swiglu_limit=swiglu_limit,
             layer=layer,
+            moe_config=self.moe,
+            activation_key=self.activation_key,
         )
 
     def apply(

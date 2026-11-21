@@ -173,6 +173,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 layer=layer,
+                moe_config=self.moe,
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

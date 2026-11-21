@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    resolve_default_moe_activation_key,
+)
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -56,7 +59,11 @@ def _mxfp4_moe_method(moe: FusedMoEConfig) -> Mxfp4MoEMethod:
         from .nvidia.quantization import mxfp4_moe_method
 
         return mxfp4_moe_method(moe)
-    return Mxfp4MoEMethod(moe, activation_key=kMxfp8Dynamic)
+    # The checkpoint does not serialize an activation scheme for its experts;
+    # MXFP8 is only a default the user may override.
+    return Mxfp4MoEMethod(
+        moe, activation_key=resolve_default_moe_activation_key(kMxfp8Dynamic)
+    )
 
 
 class DeepseekV4FP8Config(Fp8Config):

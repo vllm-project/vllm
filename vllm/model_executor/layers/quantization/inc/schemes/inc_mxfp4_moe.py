@@ -166,6 +166,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
             mxfp4_backend=self.mxfp4_backend,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
+            moe_config=self.moe,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
