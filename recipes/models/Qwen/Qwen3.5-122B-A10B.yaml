@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Mid-size Qwen3.5 multimodal MoE (122B total / 10B active) with gated delta networks, 256 experts, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-10-07
+  date_updated: 2026-10-27
   tasks:
     - multimodal
     - text
@@ -148,6 +148,19 @@ strategy_overrides:
       env:
         VLLM_SSM_CONV_STATE_LAYOUT: "DS"
 
+
+troubleshooting:
+  - title: "assert num_cache_lines >= batch"
+    when: { hardware: [nvidia, amd] }
+    body: |
+      The CUDA graph capture size is larger than the Mamba cache. Reduce
+      `--max-cudagraph-capture-size` (default 512); see
+      [vllm#34571](https://github.com/vllm-project/vllm/pull/34571).
+
+  - title: "Prefix caching is experimental"
+    body: |
+      Prefix caching for the Mamba cache runs in the experimental "align" mode.
+
 guide: |
   ## Overview
 
@@ -163,72 +176,20 @@ guide: |
   - **Hardware (FP8):** 2x H200 or 4x H100
   - **Hardware (Int4):** single 80 GB GPU
 
-  ### Install vLLM
+  ## AMD (MI325X / MI355X)
 
-  ```bash
-  uv venv
-  source .venv/bin/activate
-  uv pip install -U vllm --torch-backend=auto
-  ```
+  Three settings matter on ROCm and none is on by default: `VLLM_ROCM_USE_AITER=1`
+  switches the MoE to the AITER FP8 kernels, `--attention-backend ROCM_AITER_FA`
+  keeps decode flat across context (the auto-selected `ROCM_ATTN` decays with
+  prompt length on this hybrid GDN model), and `--kv-cache-dtype fp8` keeps MTP
+  flat across context too. The AMD commands above set all three (the FP8 KV cache
+  on the FP8 variant).
 
-  ## Launching the Server
-
-  ### BF16 on 4xH200 (TP4)
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-122B-A10B \
-    --tensor-parallel-size 4 \
-    --max-model-len 262144 \
-    --reasoning-parser qwen3
-  ```
-
-  ### FP8 on 2xH200 (TP2)
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
-    --tensor-parallel-size 2 \
-    --max-model-len 262144 \
-    --reasoning-parser qwen3
-  ```
-
-  ### Throughput-focused (text-only, EP)
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
-    -dp 4 --enable-expert-parallel \
-    --language-model-only \
-    --reasoning-parser qwen3 \
-    --enable-prefix-caching
-  ```
-
-  ### MTP speculative decoding
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
-    --tensor-parallel-size 2 \
-    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
-    --reasoning-parser qwen3
-  ```
-
-  ### AMD (MI325X / MI355X, single GPU, FP8)
-
-  The FP8 checkpoint fits one MI300X-class GPU. Three settings matter on ROCm and none is on by
-  default: `VLLM_ROCM_USE_AITER=1` switches the MoE to the AITER FP8 kernels,
-  `--attention-backend ROCM_AITER_FA` keeps decode flat across context (the auto-selected
-  `ROCM_ATTN` decays with prompt length on this hybrid GDN model), and `--kv-cache-dtype fp8`
-  keeps MTP flat across context too.
-
-  ```bash
-  VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
-    --attention-backend ROCM_AITER_FA \
-    --kv-cache-dtype fp8 --max-num-seqs 64 \
-    --reasoning-parser qwen3
-  ```
-
-  `--max-num-seqs 64` because the default exceeds the Mamba block budget on 192 GB. MTP
-  (`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`) works with the same
-  flags. Single-stream decode (tokens/s at ~200 / ~2k / ~12k / ~30k prompt tokens, 128 output
-  tokens, prefix caching off), measured 2026-10-07 on `vllm/vllm-openai-rocm:v0.31.0`:
+  The FP8 checkpoint also fits one MI300X-class GPU; there, add
+  `--max-num-seqs 64`, because the default exceeds the Mamba block budget on
+  192 GB. Single-stream decode of the FP8 checkpoint on one GPU (tokens/s at
+  ~200 / ~2k / ~12k / ~30k prompt tokens, 128 output tokens, prefix caching off),
+  measured 2026-10-07 on `vllm/vllm-openai-rocm:v0.31.0`:
 
   | | MI325X | MI355X |
   |---|---|---|
@@ -247,20 +208,20 @@ guide: |
   from openai import OpenAI
 
   client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  # The server's model name is the checkpoint it runs: the selected variant's.
+  model = client.models.list().data[0].id
   resp = client.chat.completions.create(
-      model="Qwen/Qwen3.5-122B-A10B",
+      model=model,
       messages=[{"role": "user", "content": "Summarize the gated delta networks paper."}],
       max_tokens=512,
   )
   print(resp.choices[0].message.content)
   ```
 
-  ## Troubleshooting
-
-  - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
-    (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
-  - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
-  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+  Qwen3.5 thinks before it answers. To turn thinking off for one request, pass
+  `extra_body={"chat_template_kwargs": {"enable_thinking": False}}`; for every
+  request, start the server with
+  `--default-chat-template-kwargs '{"enable_thinking": false}'`.
 
   ## References
 
