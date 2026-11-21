@@ -94,6 +94,11 @@ message KVHintAction {
   string action_type = 2;
   string action_version = 3;
   google.protobuf.Struct payload = 4;
+  // KV block hashes for the action. The server writes them into the payload
+  // as `block_hashes`, as exact integers. A `Struct` number is a double and
+  // cannot hold a 64-bit hash exactly. Setting both this field and
+  // `block_hashes` in `payload` is rejected.
+  repeated uint64 block_hashes = 5;
 }
 
 message RandomSampling {
