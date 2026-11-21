@@ -355,8 +355,6 @@ def flashinfer_wrapper(
         reshape_batch_size = q.shape[0]
         q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     # cuDNN <= 9.10.2.21 requires q, k to be contiguous
-    # this comes with no cost for ViTs with RoPE because
-    # RoPE has already made q and k contiguous.
     q, k = q.contiguous(), k.contiguous()
 
     assert cu_seqlens is not None
