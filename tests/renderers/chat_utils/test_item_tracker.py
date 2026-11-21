@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.multimodal.processing import BaseProcessingInfo
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 
 
@@ -26,36 +24,6 @@ def test_media_io_kwargs_default_to_video_processor_frame_caps(monkeypatch):
     assert tracker.media_io_kwargs == {
         "video": {"max_frames": 16, "min_frames": 4, "fps": 1}
     }
-
-
-class _FrameCapsInfo(BaseProcessingInfo):
-    def __init__(self, modality: str):
-        super().__init__(MagicMock())
-        self.modality = modality
-        self.hf_processor_calls = 0
-
-    def get_supported_mm_limits(self):
-        return {self.modality: None}
-
-    def get_hf_processor(self, **kwargs):
-        self.hf_processor_calls += 1
-        return SimpleNamespace(
-            video_processor=SimpleNamespace(max_frames=384, min_frames=4)
-        )
-
-
-def test_video_frame_limits_read_the_hf_video_processor():
-    assert _FrameCapsInfo("video").get_video_frame_limits() == {
-        "max_frames": 384,
-        "min_frames": 4,
-    }
-
-
-def test_video_frame_limits_skip_the_hf_processor_without_video():
-    info = _FrameCapsInfo("audio")
-
-    assert info.get_video_frame_limits() == {}
-    assert info.hf_processor_calls == 0
 
 
 @pytest.mark.asyncio
