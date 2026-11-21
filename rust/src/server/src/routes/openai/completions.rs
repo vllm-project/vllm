@@ -25,7 +25,7 @@ use vllm_text::{
     TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
 };
 
-use self::convert::{ResponseOptions, prepare_completion_request};
+use self::convert::{PreparedPrompt, ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
@@ -40,7 +40,9 @@ use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
 };
-use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::routes::openai::utils::choices::{
+    ChoiceChunk, ChoiceResponse, merge_batch_choice_chunk_streams, merge_batch_choice_responses,
+};
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -53,14 +55,15 @@ use crate::utils::{
     unix_timestamp,
 };
 
+/// Lower a completions request into one text request per prompt.
 pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
     processor: &TextRequestProcessor,
-) -> Result<TextRequest, ApiError> {
-    prepare_completion_request(request, lora_resolution, ctx, processor)
-        .map(|prepared| prepared.text_request)
+) -> Result<Vec<TextRequest>, ApiError> {
+    let prepared = prepare_completion_request(request, lora_resolution, ctx, processor)?;
+    Ok(prepared.prompts.into_iter().map(|prompt| prompt.text_request).collect())
 }
 
 /// Validate one completions request and proxy it into the shared `vllm-text`
@@ -69,31 +72,25 @@ pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let stream = body.stream;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let prepared = match prepare_completion_request(
+    let prepared = prepare_completion_request(
         body,
         &lora_resolution,
         request_context,
         state.chat.text().request_processor(),
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => return error.into_response(),
-    };
-    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
-    {
-        return error.into_response();
-    }
-    if let Err(error) = validate_max_output_tokens(
-        "max_tokens",
-        prepared.text_request.sampling_params.max_tokens,
-        state.llm().info().max_model_len,
-    ) {
-        return error.into_response();
+    )?;
+    validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)?;
+    for prompt in &prepared.prompts {
+        validate_max_output_tokens(
+            "max_tokens",
+            prompt.text_request.sampling_params.max_tokens,
+            state.llm().info().max_model_len,
+        )?;
     }
     // Without a tokenizer, string-form logprobs would key every candidate by
     // the same empty token string. The token-ID form needs no tokenizer.
@@ -104,11 +101,10 @@ pub async fn completions(
             .return_tokens_as_token_ids
             .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
     {
-        return text_submit_error(
+        return Err(text_submit_error(
             "invalid completion request",
             vllm_text::Error::TokenizerUnavailable,
-        )
-        .into_response();
+        ));
     }
     let request_span = tracing::info_span!(
         "completions",
@@ -118,77 +114,88 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    let text_streams = match state
-        .chat
-        .text()
-        .generate_n(prepared.text_request, prepared.n)
-        .instrument(request_span.clone())
-        .await
-    {
-        Ok(streams) => streams,
-        Err(error) => {
-            return text_submit_error("failed to submit completion request", error).into_response();
-        }
-    };
+    // A failed submission drops the streams of the earlier prompts, which
+    // aborts them.
+    let mut streams_by_prompt = Vec::with_capacity(prepared.prompts.len());
+    for PreparedPrompt { text_request, echo } in prepared.prompts {
+        let text_streams = state
+            .chat
+            .text()
+            .generate_n(text_request, prepared.n)
+            .instrument(request_span.clone())
+            .await
+            .map_err(|error| text_submit_error("failed to submit completion request", error))?;
+        streams_by_prompt.push((echo, text_streams));
+    }
 
     if stream {
-        let chunk_streams = text_streams
+        let chunk_streams = streams_by_prompt
             .into_iter()
-            .map(|text_stream| {
-                completion_chunk_stream(
-                    text_stream,
-                    prepared.request_id.clone(),
-                    prepared.response_model.clone(),
-                    created,
-                    state.system_fingerprint.clone(),
-                    api_server_options,
-                    prepared.options.clone(),
-                )
+            .map(|(echo, text_streams)| {
+                text_streams
+                    .into_iter()
+                    .map(|text_stream| {
+                        completion_chunk_stream(
+                            text_stream,
+                            echo.clone(),
+                            prepared.request_id.clone(),
+                            prepared.response_model.clone(),
+                            created,
+                            state.system_fingerprint.clone(),
+                            api_server_options,
+                            prepared.options.clone(),
+                        )
+                    })
+                    .collect()
             })
             .collect();
-        let sse_stream =
-            openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
+        let sse_stream = openai_sse_stream(merge_batch_choice_chunk_streams(chunk_streams))
+            .instrument(request_span);
 
-        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
+        Ok(sse_response(
+            sse_stream,
+            api_server_options.sse_keep_alive_interval,
+        ))
     } else {
-        let responses = future::try_join_all(text_streams.into_iter().map(|text_stream| {
-            collect_completion(
-                text_stream,
-                prepared.request_id.clone(),
-                prepared.response_model.clone(),
-                created,
-                state.system_fingerprint.clone(),
-                api_server_options,
-                prepared.options.clone(),
-            )
-        }))
-        .instrument(request_span.clone())
-        .await;
-        match responses {
-            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
-            Err(error) => error.into_response(),
-        }
+        let responses =
+            future::try_join_all(streams_by_prompt.into_iter().map(|(echo, text_streams)| {
+                future::try_join_all(text_streams.into_iter().map(|text_stream| {
+                    collect_completion(
+                        text_stream,
+                        echo.clone(),
+                        prepared.request_id.clone(),
+                        prepared.response_model.clone(),
+                        created,
+                        state.system_fingerprint.clone(),
+                        api_server_options,
+                        prepared.options.clone(),
+                    )
+                }))
+            }))
+            .instrument(request_span.clone())
+            .await?;
+        Ok(Json(merge_batch_choice_responses(responses)).into_response())
     }
 }
 
-/// Merge the responses of a request's choices, in index order, like Python's
-/// non-streaming response for `n > 1`: the prompt-level fields come from the
-/// first choice, usage adds up per [`Usage::add_choice`], and per-request
-/// metrics, which describe a single sample, are reported only for `n = 1`.
-fn merge_choice_responses(responses: Vec<CompletionResponse>) -> CompletionResponse {
-    let mut responses = responses.into_iter();
-    let mut merged = responses.next().expect("a request has at least one choice");
-    for (index, response) in (1..).zip(responses) {
-        merged.metrics = None;
-        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
-            usage.add_choice(other);
-        }
-        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+impl ChoiceResponse for CompletionResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
             choice.index = index;
-            choice
-        }));
+        }
     }
-    merged
+
+    fn usage_mut(&mut self) -> Option<&mut Usage> {
+        self.usage.as_mut()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
+
+    fn append_choices(&mut self, other: Self) {
+        self.choices.extend(other.choices);
+    }
 }
 
 impl ChoiceChunk for CompletionSseChunk {
@@ -214,6 +221,7 @@ impl ChoiceChunk for CompletionSseChunk {
 
 async fn collect_completion(
     stream: impl TextOutputStream,
+    echo: Option<String>,
     request_id: String,
     response_model: String,
     created: u64,
@@ -232,7 +240,6 @@ async fn collect_completion(
         // Ignored: non-streaming responses are collected before usage is attached.
         include_continuous_usage: _,
         prompt_only,
-        echo,
         requested_logprobs,
         include_prompt_logprobs,
         return_token_ids,
@@ -347,6 +354,7 @@ async fn collect_completion(
 #[try_stream]
 async fn completion_chunk_stream(
     stream: impl TextOutputStream,
+    echo: Option<String>,
     request_id: String,
     response_model: String,
     created: u64,
@@ -364,7 +372,6 @@ async fn completion_chunk_stream(
         include_usage,
         include_continuous_usage,
         prompt_only,
-        echo,
         requested_logprobs,
         // Ignored: streaming prompt logprobs are rejected for Python parity.
         include_prompt_logprobs: _,
@@ -390,6 +397,7 @@ async fn completion_chunk_stream(
     // for stop strings or incomplete UTF-8 lags the tokens.
     let mut next_text_offset = 0_u32;
     let mut first_chunk = true;
+    let mut deferred_prompt_logprobs_error: Option<ApiError> = None;
     let mut continuous_usage = ContinuousUsage::default();
     // The generated text so far, for the complete line of
     // `--enable-log-outputs`.
@@ -418,6 +426,7 @@ async fn completion_chunk_stream(
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids,
                 prompt_logprobs,
+                ..
             }) => {
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
@@ -425,12 +434,20 @@ async fn completion_chunk_stream(
                     // Like Python, the echoed prompt carries its own logprobs, and
                     // generated tokens continue from the offsets they report.
                     let logprobs = if requested_logprobs.is_some() {
-                        Some(echoed_prompt_logprobs_to_openai(
+                        match echoed_prompt_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
                             return_tokens_as_token_ids,
-                        )?)
+                        ) {
+                            Ok(logprobs) => Some(logprobs),
+                            // The update that follows may be the engine's error,
+                            // which explains the missing prompt logprobs.
+                            Err(error) => {
+                                deferred_prompt_logprobs_error = Some(error);
+                                continue;
+                            }
+                        }
                     } else {
                         None
                     };
@@ -462,10 +479,19 @@ async fn completion_chunk_stream(
                     SampledDelta {
                         token_ids,
                         logprobs,
+                        ..
                     },
                 finished,
             }) => {
                 let delta = decoded.text;
+                // Like Python, a terminal engine error ends the stream before
+                // anything else its update carries, logprobs included.
+                if let Some(finished) = &finished {
+                    completion_finish_reason_to_openai(&finished.finish_reason)?;
+                }
+                if let Some(error) = deferred_prompt_logprobs_error.take() {
+                    return Err(error);
+                }
                 // Prompt-only streaming already emitted the echoed prompt in the Start chunk.
                 // The one generated token is only used to drive the engine to a finished event,
                 // so hide its delta and forward only the terminal finish/usage metadata.
@@ -742,7 +768,7 @@ mod tests {
     };
 
     use super::{
-        ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
+        ApiError, ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
         StreamResponseEnvelope, collect_completion, completion_chunk_stream, final_chunk,
     };
 
@@ -757,6 +783,7 @@ mod tests {
             sampled: SampledDelta {
                 token_ids,
                 logprobs,
+                sampling_mask: None,
             },
             finished: finished.map(Box::new),
         }
@@ -811,6 +838,7 @@ mod tests {
                 Ok(DecodedTextEvent::Start {
                     prompt_token_ids: vec![1].into(),
                     prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
                 }),
                 Ok(decoded_delta(
                     "hi",
@@ -825,7 +853,6 @@ mod tests {
                         finish_reason: FinishReason::stop_eos(),
                         kv_transfer_params: None,
                         ec_transfer_params: None,
-                        sampling_mask: None,
                         spec_decode_metrics,
                         timestamps: vllm_llm::RequestTimestamps {
                             queued_ts: 10.0,
@@ -843,6 +870,7 @@ mod tests {
         for enabled in [false, true] {
             let response = collect_completion(
                 make_stream(None),
+                None,
                 "cmpl-1".into(),
                 "model".into(),
                 1,
@@ -874,6 +902,7 @@ mod tests {
                 num_draft_tokens: 6,
                 ..Default::default()
             })),
+            None,
             "cmpl-1".into(),
             "model".into(),
             1,
@@ -900,6 +929,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2, 3, 4, 5].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 "h",
@@ -959,7 +989,6 @@ mod tests {
                     ))),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: Some(RequestSpecDecodeMetrics {
                         num_spec_tokens: 3,
                         histogram: vec![0, 1, 1, 0],
@@ -980,6 +1009,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            None,
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1116,6 +1146,7 @@ mod tests {
             let events = std::iter::once(Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![9].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }))
             .chain(deltas.iter().enumerate().map(|(i, (token, text))| {
                 Ok(decoded_delta(
@@ -1127,7 +1158,6 @@ mod tests {
                         finish_reason: FinishReason::Stop(None),
                         kv_transfer_params: None,
                         ec_transfer_params: None,
-                        sampling_mask: None,
                         spec_decode_metrics: None,
                         weight_versions: None,
                         routed_experts: None,
@@ -1139,6 +1169,7 @@ mod tests {
 
             let chunks = completion_chunk_stream(
                 stream::iter(events),
+                None,
                 "cmpl-1".to_string(),
                 "model".to_string(),
                 1,
@@ -1168,6 +1199,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta("a", vec![7], None, None)),
             Ok(decoded_delta(
@@ -1185,7 +1217,6 @@ mod tests {
                         serde_json::json!({"remote_block_ids": [1, 2]}),
                     )),
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1196,6 +1227,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            None,
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1236,6 +1268,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 "ok",
@@ -1250,7 +1283,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1261,6 +1293,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            None,
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1305,6 +1338,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1319,7 +1353,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1330,6 +1363,7 @@ mod tests {
 
         let response = super::collect_completion(
             stream,
+            Some("hello".to_string()),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1337,7 +1371,6 @@ mod tests {
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
-                echo: Some("hello".to_string()),
                 return_token_ids: true,
                 ..Default::default()
             },
@@ -1363,6 +1396,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1377,7 +1411,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1388,6 +1421,7 @@ mod tests {
 
         let response = super::collect_completion(
             stream,
+            Some("Hello".to_string()),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1395,7 +1429,6 @@ mod tests {
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
-                echo: Some("Hello".to_string()),
                 requested_logprobs: Some(1),
                 include_prompt_logprobs: true,
                 ..Default::default()
@@ -1424,6 +1457,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1440,7 +1474,6 @@ mod tests {
                         serde_json::json!({"remote_block_ids": [1, 2]}),
                     )),
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1451,6 +1484,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            Some("hello".to_string()),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1459,7 +1493,6 @@ mod tests {
             ResponseOptions {
                 include_usage: true,
                 prompt_only: true,
-                echo: Some("hello".to_string()),
                 return_token_ids: true,
                 ..Default::default()
             },
@@ -1508,6 +1541,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1522,7 +1556,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1533,6 +1566,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            Some("Hello".to_string()),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1540,7 +1574,6 @@ mod tests {
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
-                echo: Some("Hello".to_string()),
                 requested_logprobs: Some(1),
                 ..Default::default()
             },
@@ -1572,6 +1605,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completion_chunk_stream_rejects_missing_prompt_logprobs() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1, 2].into(),
+                prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
+            }),
+            Ok(decoded_delta(
+                "",
+                vec![],
+                None,
+                Some(Finished {
+                    usage: Default::default(),
+                    finish_reason: FinishReason::Length,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
+                    timestamps: Default::default(),
+                }),
+            )),
+        ]);
+        let chunks = completion_chunk_stream(
+            stream,
+            Some("hello".to_string()),
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            None,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                prompt_only: true,
+                requested_logprobs: Some(1),
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], Err(ApiError::ServerError { .. })));
+    }
+
+    #[tokio::test]
+    async fn completion_chunk_stream_ends_with_terminal_error_before_its_text() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1, 2].into(),
+                prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
+            }),
+            Ok(decoded_delta("Hello", vec![3], None, None)),
+            Ok(decoded_delta(
+                " world",
+                vec![4],
+                None,
+                Some(Finished {
+                    usage: Default::default(),
+                    finish_reason: FinishReason::Error(None),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
+                    timestamps: Default::default(),
+                }),
+            )),
+        ]);
+        let chunks = completion_chunk_stream(
+            stream,
+            None,
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            None,
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(chunks.len(), 2);
+        match &chunks[0] {
+            Ok(CompletionSseChunk::Chunk(chunk)) => assert_eq!(chunk.choices[0].text, "Hello"),
+            other => panic!("expected the earlier text chunk, got {other:?}"),
+        }
+        assert!(matches!(&chunks[1], Err(ApiError::ServerError { .. })));
+    }
+
+    #[tokio::test]
     async fn completion_chunk_stream_maps_prompt_only_logprobs() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
@@ -1588,6 +1710,7 @@ mod tests {
                         }],
                     }],
                 }),
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1602,7 +1725,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1613,6 +1735,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            Some("hello".to_string()),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1620,7 +1743,6 @@ mod tests {
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
-                echo: Some("hello".to_string()),
                 requested_logprobs: Some(1),
                 ..Default::default()
             },

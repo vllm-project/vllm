@@ -384,6 +384,17 @@ def test_server_answers_after_a_failed_lookup(
     assert client.lookup("good", 128, []).hit_length == 8
 
 
+def test_server_reports_a_failed_store_check_as_an_error(
+    lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
+) -> None:
+    _, client, store_worker = lookup_server
+    # The store worker returns None when the store cannot answer for every key.
+    store_worker.lookup.return_value = None
+    assert client.lookup("req", 128, []).hit_length == 0
+    # Unlike an expiry, this says the store is unhealthy.
+    assert client.circuit_breaker._failures == 1
+
+
 def test_reset_waits_for_running_lookups(
     lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
 ) -> None:
