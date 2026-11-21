@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
+    _exceeds_aiter_kv_addressing,
     _use_rocm_sparse_triton,
     fit_kpool_indices_to_aiter,
 )
@@ -153,6 +154,21 @@ def test_rocm_sparse_triton_route(
         )
         is expected
     )
+
+
+def test_aiter_kv_addressing_limit_counts_the_layer_view_span():
+    """AITER decode uses 32-bit byte offsets; the route covers the whole view."""
+    rows = 2**32 // 1024
+    kv = torch.empty(rows + 1, 512, dtype=torch.bfloat16, device="meta")
+    assert not _exceeds_aiter_kv_addressing(kv[:rows])
+    assert _exceeds_aiter_kv_addressing(kv)
+
+    blocks, layers, block_size = 1024, 64, 64
+    blhnc = torch.empty(
+        blocks, layers, block_size, 576, dtype=torch.bfloat16, device="meta"
+    )
+    assert blhnc[:, 0].numel() * blhnc.element_size() < 2**32
+    assert _exceeds_aiter_kv_addressing(blhnc[:, 0])
 
 
 @pytest.mark.parametrize(

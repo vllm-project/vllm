@@ -521,3 +521,69 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         dtype,
         native=dtype == torch.bfloat16,
     )
+
+
+@torch.inference_mode()
+def test_sparse_mla_sink_wide_head_split_decode_matches_reference() -> None:
+    """Rope-carrying >128-head sink decode must not take the split-KV kernel."""
+    _require_aiter()
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_sparse_decode_bf16_num_splits,
+    )
+
+    set_random_seed(160)
+    device = torch.device("cuda")
+    num_heads, batch_size, seq_len, pool_size = 160, 3, 1024, 4096
+    assert rocm_sparse_decode_bf16_num_splits(batch_size, num_heads, seq_len) > 1
+
+    q = (torch.randn(batch_size, num_heads, Q_HEAD_DIM, device=device) * 0.2).to(
+        torch.bfloat16
+    )
+    kv = (torch.randn(pool_size, 1, Q_HEAD_DIM, device=device) * 0.2).to(torch.bfloat16)
+    indices = torch.cat(
+        [torch.randperm(pool_size, device=device)[:seq_len] for _ in range(batch_size)]
+    ).to(torch.int32)
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        paged_kv_indptr=torch.arange(
+            0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=device
+        ),
+        paged_kv_indices=indices,
+        num_prefills=0,
+        num_decodes=batch_size,
+        num_decode_tokens=batch_size,
+        max_query_len=1,
+        max_seq_len=seq_len,
+        topk_tokens=seq_len,
+    )
+    sinks = torch.linspace(-2.0, 6.0, num_heads, device=device)
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = V_HEAD_DIM
+    impl.kv_cache_dtype = "auto"
+    impl.scale = SM_SCALE
+    impl.sinks = sinks
+
+    output, lse = impl._forward_mla(
+        SimpleNamespace(_q_scale=None, _k_scale=None), q, kv, metadata
+    )
+
+    references = [
+        _sink_reference(
+            q[i].float(),
+            kv[indices[i * seq_len : (i + 1) * seq_len].long(), 0].float(),
+            sinks,
+            SM_SCALE,
+        )
+        for i in range(batch_size)
+    ]
+    expected, _, value_scale, score_error = (
+        torch.stack(values) for values in zip(*references)
+    )
+    assert lse is None
+    _assert_sink_output_close(
+        output, expected, value_scale, score_error, q.dtype, native=False
+    )

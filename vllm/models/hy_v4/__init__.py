@@ -50,9 +50,15 @@ def __getattr__(name: str) -> Any:
         if current_platform.is_rocm()
         else ".nvidia.model",
         "HYV4MTP": ".nvidia.mtp",
-        "HYV4DFlyForCausalLM": ".nvidia.dfly",
+        "HYV4DFlyForCausalLM": ".amd.dfly"
+        if current_platform.is_rocm()
+        else ".nvidia.dfly",
         "HYV4VLForConditionalGeneration": (
-            ".nvidia.vl_model" if current_platform.is_cuda_alike() else ".vl_stub"
+            ".amd.vl_model"
+            if current_platform.is_rocm()
+            else ".nvidia.vl_model"
+            if current_platform.is_cuda()
+            else ".vl_stub"
         ),
     }
     model_cls = getattr(import_module(modules[name], __name__), name)
