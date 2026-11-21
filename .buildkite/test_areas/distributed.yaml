@@ -562,6 +562,7 @@ steps:
 
 - label: ":nvidia: (H100) ShardQ Sequence Parallel"
   key: deepseek-shardq-sequence-parallel
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   working_dir: "/vllm-workspace/"
@@ -896,7 +897,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
-  - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=1) or distributed(num_gpus=2)'
   mirror:
     amd:
       automatic_shard: true
