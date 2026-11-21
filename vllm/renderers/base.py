@@ -47,7 +47,7 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
-from vllm.multimodal.processing.processor import MultiModalProcessorCacheMissError
+from vllm.multimodal.processing.processor import MULTIMODAL_DATA_OMITTED_ERRORS
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
@@ -1522,7 +1522,7 @@ class BaseRenderer(ABC, Generic[_T]):
                     skip_mm_cache=skip_mm_cache,
                     tok_params=tok_params,
                 )
-            except MultiModalProcessorCacheMissError:
+            except MULTIMODAL_DATA_OMITTED_ERRORS:
                 if not is_media_fetching_deferred:
                     raise
                 return None
@@ -1582,7 +1582,7 @@ class BaseRenderer(ABC, Generic[_T]):
                     skip_mm_cache=skip_mm_cache,
                     tok_params=tok_params,
                 )
-            except MultiModalProcessorCacheMissError:
+            except MULTIMODAL_DATA_OMITTED_ERRORS:
                 if not is_media_fetching_deferred:
                     raise
                 return None

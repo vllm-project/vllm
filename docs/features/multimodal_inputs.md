@@ -1507,5 +1507,8 @@ This optimization requires the processor cache and is disabled for unified visio
 chunks and audio extracted from video. An item supplied without a URL must still be
 cached for the request to succeed.
 
+Some models skip the processor cache for certain requests, such as DeepSeek-VL2 with
+more than two images. Such requests always take the retry, and fail if an item has no URL.
+
 The UUID is authoritative on a cache hit; vLLM does not verify that the URL
 still identifies the cached media (see [Multimodal Media UUID Security](../usage/security.md#multimodal-media-uuid-security)).
