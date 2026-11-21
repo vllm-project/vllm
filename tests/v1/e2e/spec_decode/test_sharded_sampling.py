@@ -158,6 +158,7 @@ def test_dspark_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
                 )
                 return greedy, seeded
             finally:
+                llm.llm_engine.engine_core.shutdown()
                 del llm
                 torch.accelerator.empty_cache()
                 cleanup_dist_env_and_memory()

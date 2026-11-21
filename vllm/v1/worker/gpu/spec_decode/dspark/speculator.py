@@ -34,6 +34,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.device_communicators.xpu_communicator import XpuCommunicator
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -95,7 +96,9 @@ class DSparkSpeculator(DFlashSpeculator):
         self.use_confidence_head: bool = False
 
         # Set when the sequential sampling can be batch-sharded across TP.
-        self._sharded_sequential_comm: PyNcclCommunicator | None = None
+        self._sharded_sequential_comm: PyNcclCommunicator | XpuCommunicator | None = (
+            None
+        )
 
         # Whether the markov bias is fused into the Gumbel sample kernel.
         self._fuse_markov_bias: bool = False
@@ -119,7 +122,10 @@ class DSparkSpeculator(DFlashSpeculator):
     def _try_enable_sharded_sequential_sampling(self) -> None:
         tp_size = get_tp_group().world_size
         lm_head = getattr(self.model, "lm_head", None)
-        pynccl_comm = get_tp_pynccl_comm()
+        comm: PyNcclCommunicator | XpuCommunicator | None = get_tp_pynccl_comm()
+        device_comm = get_tp_group().device_communicator
+        if comm is None and isinstance(device_comm, XpuCommunicator):
+            comm = device_comm
         reason = None
         if self.draft_logits is not None and self.draft_logits.row_mapping is None:
             reason = "the draft logits cache is replicated"
@@ -136,8 +142,8 @@ class DSparkSpeculator(DFlashSpeculator):
             getattr(lm_head, "tp_size", None) != tp_size
         ):
             reason = "the draft model cannot compute vocab-sharded draft logits"
-        elif pynccl_comm is None:
-            reason = "PyNCCL is unavailable"
+        elif comm is None:
+            reason = "neither PyNCCL nor an XPU communicator is available"
 
         if reason is not None:
             logger.info(
@@ -146,7 +152,7 @@ class DSparkSpeculator(DFlashSpeculator):
             )
             return
 
-        self._sharded_sequential_comm = pynccl_comm
+        self._sharded_sequential_comm = comm
         logger.info(
             "DSpark sequential sampling is batch-sharded across %d TP ranks.",
             tp_size,
@@ -433,8 +439,13 @@ class DSparkSpeculator(DFlashSpeculator):
             packed = torch.cat(
                 [local_tokens, confidence.float().view(torch.int32).long()], dim=1
             )
-        gathered = packed.new_empty(tp_size * capacity, packed.shape[1])
-        self._sharded_sequential_comm.all_gather(gathered, packed.contiguous())
+        if isinstance(self._sharded_sequential_comm, XpuCommunicator):
+            gathered = self._sharded_sequential_comm.all_gather(
+                packed.contiguous(), dim=0
+            )
+        else:
+            gathered = packed.new_empty(tp_size * capacity, packed.shape[1])
+            self._sharded_sequential_comm.all_gather(gathered, packed.contiguous())
 
         # Write the output draft tokens and confidences.
         packed = gathered[gathered_src_idxs]
