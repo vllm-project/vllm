@@ -17,6 +17,10 @@ For further details on generative models, please refer to [this page](../models/
 - `LLM.generate` - Generates completions for the given input prompts.
 - `LLM.chat` - Generates responses for a chat conversation.
 
+When passing a token-ID prompt dictionary to `LLM.generate`, truncation configured
+via `tokenization_kwargs` applies only to that request. The dictionary retains its
+original `prompt_token_ids` for reuse in later calls.
+
 ## Asynchronous Queue APIs
 
 - `LLM.enqueue` - Enqueues prompts for generation without waiting for completion.
