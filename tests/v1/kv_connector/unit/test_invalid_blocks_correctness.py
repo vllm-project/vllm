@@ -177,6 +177,129 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     ), "Request should be reschedulable for recomputation"
 
 
+def test_sync_recompute_retires_inflight_output_state(recompute_scheduler: Scheduler):
+    """Recompute must retire in-flight output sampled from the invalid KV.
+
+    A KV load failure can surface after scheduling already reserved output
+    placeholders and drafted spec tokens. Restarting from the truncated
+    frontier without retiring that state leaks stale placeholders into the
+    scheduling arithmetic and lets invalid-KV outputs land as valid ones.
+    """
+    num_prompt_blocks = 100
+    num_external_computed_blocks = 99
+    invalid_block_idx = 50
+
+    num_prompt_tokens = num_prompt_blocks * recompute_scheduler.block_size
+    num_external_computed_tokens = (
+        num_external_computed_blocks * recompute_scheduler.block_size
+    )
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    recompute_scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens,
+    }
+
+    # mock connector indicating sync load
+    recompute_scheduler.connector = Mock()
+    recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    recompute_scheduler.connector.request_finished.return_value = (False, None)
+    recompute_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = recompute_scheduler.schedule()
+
+    # Stand in for async-scheduling state at failure time: one placeholder
+    # share outstanding beyond this step's, plus drafted spec tokens.
+    request.num_output_placeholders = 1
+    request.num_in_flight_tokens += 1
+    request.spec_token_ids = [-1]
+    spec_ids_ref = request.spec_token_ids
+
+    req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    model_runner_output = create_model_runner_output(
+        [request],
+        invalid_block_ids={req_block_ids[invalid_block_idx]},
+        use_eos=False,
+    )
+
+    recompute_scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    expected_truncated = invalid_block_idx * recompute_scheduler.block_size
+    assert request.num_computed_tokens == expected_truncated
+    assert request.num_output_placeholders == 0
+    # This step's share drains in lockstep in update_from_output; the extra
+    # outstanding share stays marked until its own output returns.
+    assert request.num_stale_output_tokens == 1
+    assert request.drop_stale_output
+    assert request.spec_token_ids == []
+    # Rebound rather than mutated: anything still holding the step's draft
+    # list keeps its contents.
+    assert spec_ids_ref == [-1]
+
+
+def test_sync_recompute_rewinds_frontier_below_placeholder_span(
+    recompute_scheduler: Scheduler,
+):
+    """Zeroing placeholders also rewinds the frontier they still covered.
+
+    Same idiom as _handle_stopped_request: if the restart frontier lands
+    inside the placeholder span, the covered positions would stay marked as
+    computed while their in-flight output is dropped, so they would never be
+    delivered or re-sampled. The realistic trigger is the shared-block
+    restore branch for a decoding request whose in-flight placeholders
+    outnumber the step's scheduled tokens; the min() arithmetic is shared
+    with the truncation branch exercised here, so this pins it with an
+    exaggerated placeholder span the sync-load fixture can reach.
+    """
+    num_prompt_blocks = 100
+    num_external_computed_blocks = 99
+    invalid_block_idx = 70
+    placeholder_span = 555  # deliberately spans several blocks
+
+    num_prompt_tokens = num_prompt_blocks * recompute_scheduler.block_size
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    recompute_scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_blocks
+        * recompute_scheduler.block_size,
+    }
+
+    recompute_scheduler.connector = Mock()
+    recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    recompute_scheduler.connector.request_finished.return_value = (False, None)
+    recompute_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = recompute_scheduler.schedule()
+
+    request.num_output_placeholders = placeholder_span
+    request.num_in_flight_tokens += placeholder_span
+
+    req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    model_runner_output = create_model_runner_output(
+        [request],
+        invalid_block_ids={req_block_ids[invalid_block_idx]},
+        use_eos=False,
+    )
+
+    # Frontier before the failure: external blocks plus this step's share.
+    frontier = request.num_computed_tokens
+    recompute_scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    truncated = invalid_block_idx * recompute_scheduler.block_size
+    assert truncated > frontier - placeholder_span
+    # Not the truncated block boundary: the placeholder span is dropped as
+    # stale, so the restart frontier must sit below it.
+    assert request.num_computed_tokens == frontier - placeholder_span
+    assert request.num_output_placeholders == 0
+
+
 def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     """Test sync fail case - invalid blocks must be evicted from cache.
 
