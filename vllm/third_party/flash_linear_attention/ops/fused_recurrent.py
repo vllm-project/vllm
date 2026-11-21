@@ -134,7 +134,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_g = tl.load(p_g).to(tl.float32)
             b_h *= exp(b_g)
         else:
-            b_gk = tl.load(p_gk).to(tl.float32)
+            b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
             b_h *= exp(b_gk[None, :])
         # [BV]
         b_v -= tl.sum(b_h * b_k[None, :], 1)
