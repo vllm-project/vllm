@@ -62,6 +62,7 @@ from vllm.v1.attention.ops.flydsl_turboquant_decode import (
 from vllm.v1.attention.ops.triton_turboquant_decode import (
     _tq_full_dequant_kv,
     _use_fp8_e4b15,
+    _use_mse_gqa,
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
@@ -78,15 +79,22 @@ if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 # Stage 1 runs one program per (batch, head, KV split), so small decode batches
-# use more KV splits to fill the GPU. The split count depends only on the batch
-# size, so it is fixed per captured CUDA graph.
+# use more KV splits to fill the GPU. The grouped MSE-key kernel runs one
+# program per KV head, not per query head, so it uses more. The split count
+# depends only on the batch size, so it is fixed per captured CUDA graph.
 _DECODE_SPLIT_FACTORS = ((16, 4), (32, 2))  # (max batch size, factor)
+_GQA_DECODE_SPLIT_FACTORS = ((4, 4), (16, 2))
 
 
-def _decode_split_factors(is_turboquant: bool) -> tuple[tuple[int, int], ...]:
-    """Split tiers of the Triton decode on CUDA. FlyDSL (ROCm), other
-    platforms and UltraQuant keep tq_max_kv_splits_for_cuda_graph splits."""
-    return _DECODE_SPLIT_FACTORS if is_turboquant and current_platform.is_cuda() else ()
+def _decode_split_factors(
+    is_turboquant: bool, grouped: bool = False
+) -> tuple[tuple[int, int], ...]:
+    """Split tiers of the Triton decode on CUDA (`grouped`: the grouped MSE-key
+    stage 1). FlyDSL (ROCm), other platforms and UltraQuant keep
+    tq_max_kv_splits_for_cuda_graph splits."""
+    if not (is_turboquant and current_platform.is_cuda()):
+        return ()
+    return _GQA_DECODE_SPLIT_FACTORS if grouped else _DECODE_SPLIT_FACTORS
 
 
 def _decode_kv_splits(
@@ -270,7 +278,16 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             self.vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
-        factors = _decode_split_factors(self.kv_cache_spec.kv_quant_mode.is_turboquant)
+        quant_mode = self.kv_cache_spec.kv_quant_mode
+        grouped = False
+        if quant_mode.is_turboquant:
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            tq = TurboQuantConfig.from_cache_dtype(quant_mode.name.lower(), head_size)
+            grouped = _use_mse_gqa(tq.key_fp8, num_heads // num_kv_heads, head_size)
+        factors = _decode_split_factors(quant_mode.is_turboquant, grouped)
         if factors:  # sized by bytes for the largest batch x splits product
             mid_o_rows = _max_decode_split_rows(max_num_reqs, max_num_splits, factors)
             mid_o = (mid_o_rows, num_heads, 1, head_size + 1)
@@ -403,7 +420,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # tracks FlyDSL availability (single switch for the whole pipeline).
         self._use_flydsl = is_flydsl_available()
         self._soa_store = self._use_flydsl
-        self._split_factors = _decode_split_factors(is_turboquant=True)
+        self._split_factors = _decode_split_factors(
+            True, _use_mse_gqa(self.tq_config.key_fp8, self.num_kv_groups, head_size)
+        )
 
     def _flash_attn_varlen(
         self,
@@ -920,6 +939,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                             key_fp8=self.tq_config.key_fp8,
                             norm_correction=self.tq_config.norm_correction,
                             PiT=PiT,
+                            pi_is_hadamard=True,
                         )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -1258,6 +1278,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             lse_buf=lse_buf,
             buf_holder=layer,
             max_num_kv_splits=S,
+            pi_is_hadamard=True,
         )
         return result
 
