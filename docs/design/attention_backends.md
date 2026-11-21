@@ -241,13 +241,6 @@ MLA decode backends are selected using the standard
 
 --8<-- "gen:table-mla-decode"
 
-#### Token-sharded sparse prefill on Hopper
-
-For eligible DSA models on Hopper, `FLASH_ATTN_MLA_SPARSE` supports
-`sparse_mla_shard_q`. In long prefills, each tensor-parallel rank scores and
-attends a subset of the query tokens using all attention heads. Decode tokens
-continue to be split by head.
-
 ### DeepSeek V4 Decode Backends
 
 DeepSeek V4 sparse MLA uses its own decode backends, selected via
