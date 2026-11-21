@@ -64,14 +64,24 @@ def _temporary_replayssm_autotune_state(
     *,
     prepare_dummy_block_tables: bool = True,
 ) -> Generator[None]:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.mamba.abstract import MambaBase
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+    replayssm_types = (
+        MambaAttentionBackendEnum.MAMBA2,
+        MambaAttentionBackendEnum.GDN_ATTN,
+    )
     reset_tensors: list[torch.Tensor] = []
     reset_trackers: dict[int, torch.Tensor] = {}
     for module in runner.get_model().modules():
-        if not isinstance(module, MambaMixer2) or not module.use_replayssm:
+        # Mamba2 and GDN ReplaySSM layers share the tracker lifecycle.
+        if (
+            not isinstance(module, MambaBase)
+            or module.mamba_type not in replayssm_types
+            or not module.use_replayssm
+        ):
             continue
-        assert module.replayssm_buffer_len is not None
+        assert getattr(module, "replayssm_buffer_len", None) is not None
         ring_start = module._replayssm_ring_start
         prev_num_accepted = module._replayssm_prev_num_accepted
         for tensor in module.kv_cache:

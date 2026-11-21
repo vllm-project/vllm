@@ -61,6 +61,7 @@ from vllm.model_executor.layers.mamba.ops.gdn_prefill_conv import (
     gdn_prefill_conv,
     gdn_prefill_conv_supported,
 )
+from vllm.model_executor.layers.mamba.ops.gdn_replayssm import gdn_replayssm_verify
 from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
     chunk_gdn_hip_fwd,
     is_hip_gdn_available,
@@ -943,7 +944,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Cached-decode kernel (reuses the engine-level mamba_* flags). When
         # enabled, the paged GDN page grows to 5 tensors and the non-spec decode
         # branch decodes through fused_recurrent_gated_delta_rule_replayssm.
+        # With speculative decoding the verify window instead replays through
+        # gdn_replayssm_verify, and the runner commits the ring trackers.
         self.use_replayssm = self.cache_config.use_replayssm
+        self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
         if self.use_replayssm and (
             reason := self._replayssm_unsupported_reason(vllm_config, self.beta_scale)
         ):
@@ -968,8 +972,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> str | None:
         if beta_scale != 1.0:
             return "does not support scaled beta (linear_allow_neg_eigval)"
-        if vllm_config.num_speculative_tokens > 0:
-            return "does not support speculative decoding yet"
+        if vllm_config.num_speculative_tokens + 1 > 8:
+            return "verifies at most 8 tokens per step (num_speculative_tokens <= 7)"
         if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
             return "requires --mamba-backend triton"
         if vllm_config.mamba_config.enable_stochastic_rounding:
@@ -1059,6 +1063,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
+        if self.cache_config.use_replayssm:
+            return "ReplaySSM decodes through its own kernel"
         conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
         if (
             self.beta_scale != 1.0
@@ -2068,7 +2074,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ],
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
+                max_query_len=self.num_spec + 1,
                 validate_data=False,
             )
 
@@ -2139,7 +2145,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        # ReplaySSM reads q/k/v straight from the packed conv output.
+        query_spec, key_spec, value_spec = (
+            (None, None, None)
+            if self.use_replayssm
+            else self.rearrange_mixed_qkv(mixed_qkv_spec)
+        )
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -2205,7 +2216,44 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        spec_in_place = False
+        if spec_sequence_masks is not None and self.use_replayssm:
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            assert mixed_qkv_spec is not None
+            assert self.replayssm_buffer_len is not None
+            spec_in_place = mixed_qkv_non_spec is None
+            num_spec_tokens = mixed_qkv_spec.size(0)
+            spec_out = (
+                core_attn_out[:num_spec_tokens]
+                if spec_in_place
+                else core_attn_out.new_empty(num_spec_tokens, *core_attn_out.shape[1:])
+            )
+            num_spec_decodes = attn_metadata.num_spec_decodes
+            kv_cache = self.kv_cache
+            # Column 0 holds the live checkpoint slot. The runner advances the
+            # ring trackers after rejection sampling.
+            gdn_replayssm_verify(
+                mixed_qkv_spec,
+                a_spec,
+                b_spec,
+                self.A_log,
+                self.dt_bias,
+                kv_cache[1],
+                kv_cache[2],
+                kv_cache[3],
+                kv_cache[4],
+                self._replayssm_ring_start,
+                self._replayssm_prev_num_accepted,
+                spec_state_indices_tensor[:num_spec_decodes, 0],
+                spec_query_start_loc[: num_spec_decodes + 1],
+                spec_out,
+                max_query_len=self.num_spec + 1,
+                logical_window=self.replayssm_buffer_len,
+                scale=self.head_k_dim**-0.5,
+            )
+            core_attn_out_spec, last_recurrent_state = spec_out.unsqueeze(0), None
+        elif spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2344,7 +2392,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
             # Init cache
             scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
-            if self.use_replayssm and self._plans_replayssm_decode:
+            if (
+                self.use_replayssm
+                and not self.use_replayssm_trackers
+                and self._plans_replayssm_decode
+            ):
                 # Cached decode appends to the ring that prefill leaves empty.
                 self._replayssm_ring_start.index_fill_(
                     0, prefill_state_indices.long(), 0
@@ -2389,7 +2441,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
             )
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if not spec_in_place:
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         elif not prefill_in_place:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
