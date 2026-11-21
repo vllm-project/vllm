@@ -176,6 +176,8 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `parallel_drafting` | `boolean` | `null` | Deprecated and has no effect. `dflash` and `dspark` always draft in parallel, and no other method supports it. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
+| `draft_temperature` | `float >= 0` | `None` | Override the temperature for model-based draft proposals. Positive values require `draft_sample_method="probabilistic"`; zero selects greedy drafting. Unset preserves existing behavior. |
+| `draft_temperature_mapping` | List of mapping segments | `None` | Map each request's target temperature to a draft temperature using piecewise quadratic functions. Requires probabilistic drafting and is mutually exclusive with `draft_temperature`. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
 | `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. With `synthetic`, runs FLy's entropy computation without deferring rejections (see [FLy](fly.md#measuring-fly-cost-with-synthetic-acceptance)). |
@@ -243,6 +245,69 @@ vllm serve <target-model> \
 ```
 
 ### Notes
+
+To tune probabilistic proposals independently of the target, set
+`draft_temperature` in the speculative configuration:
+
+```bash
+vllm serve YOUR_MODEL --speculative-config '{
+  "method": "mtp",
+  "num_speculative_tokens": 3,
+  "draft_sample_method": "probabilistic",
+  "draft_temperature": 0.7
+}'
+```
+
+The target continues to use each request's sampling parameters. With lossless
+verification, changing the draft temperature affects acceptance and performance,
+while preserving the target output distribution. Verification uses the same
+draft temperature as proposal sampling. An unset override lets probabilistic
+drafting inherit each request's temperature; greedy drafting always uses argmax.
+A zero override selects the greedy path without allocating a draft logits cache.
+The override is not supported by lookup methods such as n-gram or suffix decoding.
+Benchmark both greedy and probabilistic drafting: a higher acceptance rate may
+not offset the memory and verification cost of retaining draft logits.
+
+To make the draft temperature depend on each request's target temperature, use
+`draft_temperature_mapping`. For example, this configuration uses half the target
+temperature below `1`, and the target temperature at or above `1`:
+
+```bash
+vllm serve YOUR_MODEL --speculative-config '{
+  "method": "mtp",
+  "num_speculative_tokens": 3,
+  "draft_sample_method": "probabilistic",
+  "draft_temperature_mapping": [
+    {"target_temperature_lt": 1.0, "linear": 0.5},
+    {"linear": 1.0}
+  ]
+}'
+```
+
+Each segment evaluates `quadratic * T**2 + linear * T + constant`, where `T` is
+the request's target temperature. All three coefficients default to zero. A
+single segment can express a scale, an affine mapping, a quadratic, or a constant:
+
+| Mapping | Segment |
+| --- | --- |
+| `0.5 * T` | `{"linear": 0.5}` |
+| `0.5 * T + 0.25` | `{"linear": 0.5, "constant": 0.25}` |
+| `0.25 * T**2 + 0.5 * T + 0.125` | `{"quadratic": 0.25, "linear": 0.5, "constant": 0.125}` |
+
+Segments cover consecutive intervals starting at zero. Each
+`target_temperature_lt` is an exclusive upper bound and must strictly increase;
+the final segment must omit the bound to cover all larger temperatures. Jumps at
+boundaries are allowed. Coefficients must be finite, and the mapping must remain
+nonnegative throughout every segment, including between its endpoints.
+
+Requests with different target temperatures can share a batch. A mapped zero
+uses greedy proposals for that request; the engine retains its draft-logits cache
+for probabilistic requests. To select greedy drafting for the entire engine
+without that cache, use `draft_temperature: 0`. The fixed override and mapping
+cannot be set together. Both options leave target sampling parameters unchanged;
+with neither option set, existing greedy or inherited-temperature behavior is
+preserved. The example coefficients illustrate configuration and are not tuned
+recommendations for any model.
 
 - `--speculative-config` expects a JSON object on the CLI. In YAML config
   files, use a nested mapping instead of an escaped JSON string.

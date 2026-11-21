@@ -8,7 +8,7 @@ class XPressSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.xpress.speculator.XPressSpeculator"
     )
-    supported_options = frozenset({"xpress_topc"})
+    supported_options = DFlashSpeculatorConfig.supported_options | {"xpress_topc"}
 
     @classmethod
     def apply_options(cls, spec: SpeculativeConfig) -> None:

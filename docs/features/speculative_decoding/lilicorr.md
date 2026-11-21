@@ -37,12 +37,13 @@ with Mamba2 targets.
 - `"draft_sample_method":"greedy"` selects the highest-scoring candidate at each
   step of the correlator's conditional walk.
 - `"draft_sample_method":"probabilistic"` samples from those conditional scores
-  using the request's temperature and supplies the realized proposal
-  distributions to the rejection sampler.
+  using the request's temperature (or the `draft_temperature` override) and
+  supplies the realized proposal distributions to the rejection sampler.
 
 These settings control proposals; they do not replace the target model's
-sampling settings. With request temperature zero, probabilistic proposals also
-use argmax. For nonzero temperatures, benchmark both modes with your checkpoint
+sampling settings. Without an override, request temperature zero also makes
+probabilistic proposals use argmax. See the [draft temperature options](README.md#notes).
+For nonzero temperatures, benchmark both modes with your checkpoint
 and workload: compare acceptance length and end-to-end throughput or latency.
 Neither mode is universally faster.
 

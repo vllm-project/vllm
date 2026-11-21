@@ -202,7 +202,9 @@ def test_v2_greedy_sampling_applies_thinking_budget():
     """Greedy-only requests must not bypass thinking-budget processing."""
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     sampler = Sampler(
-        vllm_config=SimpleNamespace(reasoning_config=MockReasoningConfig()),
+        vllm_config=SimpleNamespace(
+            reasoning_config=MockReasoningConfig(), speculative_config=None
+        ),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,

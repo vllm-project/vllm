@@ -10,6 +10,7 @@ import textwrap
 from contextlib import nullcontext
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
+from math import nextafter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -4962,6 +4963,189 @@ def test_draft_sample_method_probabilistic_is_accepted():
         draft_sample_method="probabilistic",
     )
     assert speculative_config.draft_sample_method == "probabilistic"
+
+
+@pytest.fixture
+def draft_temperature_config(tmp_path):
+    from transformers import LlamaConfig
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    ).save_pretrained(tmp_path)
+    target = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="float32",
+        max_model_len=128,
+    )
+
+    def make_config(**kwargs):
+        return SpeculativeConfig(
+            method="draft_model",
+            model=str(tmp_path),
+            num_speculative_tokens=1,
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+            **kwargs,
+        )
+
+    return make_config
+
+
+@pytest.mark.parametrize("temperature", [None, 0.0, 0.7, 1.5])
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_controls_proposal_sampling(
+    temperature, draft_temperature_config
+):
+    config = draft_temperature_config(
+        draft_sample_method="probabilistic",
+        draft_temperature=temperature,
+    )
+    assert config.draft_temperature == temperature
+    assert config.draft_sample_method == (
+        "greedy" if temperature == 0.0 else "probabilistic"
+    )
+    assert config.resolve_draft_temperature(0.5) == (
+        0.5 if temperature is None else temperature
+    )
+
+
+@pytest.mark.parametrize(
+    "segments,expected",
+    [
+        ([{"linear": 0.5}], [0.0, 0.25, 0.5, 1.0]),
+        ([{"linear": 0.5, "constant": 0.25}], [0.25, 0.5, 0.75, 1.25]),
+        (
+            [{"quadratic": 0.25, "linear": 0.5, "constant": 0.125}],
+            [0.125, 0.4375, 0.875, 2.125],
+        ),
+        (
+            [{"target_temperature_lt": 1.0, "linear": 0.5}, {"linear": 1.0}],
+            [0.0, 0.25, 1.0, 2.0],
+        ),
+        (
+            [
+                {"target_temperature_lt": 1.0, "quadratic": -1.0, "linear": 1.0},
+                {"constant": 0.25},
+            ],
+            [0.0, 0.25, 0.25, 0.25],
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_mapping_resolves_each_request(
+    segments, expected, draft_temperature_config
+):
+    config = draft_temperature_config(
+        draft_sample_method="probabilistic", draft_temperature_mapping=segments
+    )
+    assert [
+        config.resolve_draft_temperature(t) for t in (0.0, 0.5, 1.0, 2.0)
+    ] == expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_mapping_breakpoint_is_exclusive(draft_temperature_config):
+    config = draft_temperature_config(
+        draft_sample_method="probabilistic",
+        draft_temperature_mapping=[
+            {"target_temperature_lt": 1.0, "constant": 0.0},
+            {"linear": 1.0},
+        ],
+    )
+    assert config.resolve_draft_temperature(nextafter(1.0, 0.0)) == 0.0
+    assert config.resolve_draft_temperature(1.0) == 1.0
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        [],
+        [{"target_temperature_lt": 1.0}],
+        [{}, {}],
+        [{"target_temperature_lt": 2.0}, {"target_temperature_lt": 1.0}, {}],
+        [{"target_temperature_lt": 1.0}, {"target_temperature_lt": 1.0}, {}],
+        [{"linear": float("nan")}],
+        [{"constant": float("inf")}],
+        [{"target_temperature_lt": float("inf")}, {}],
+        [{"constant": -0.1}],
+        [{"linear": -1.0, "constant": 1.0}],
+        [{"quadratic": -1.0, "constant": 1.0}],
+        [
+            {
+                "target_temperature_lt": 2.0,
+                "quadratic": 1.0,
+                "linear": -2.0,
+                "constant": 0.5,
+            },
+            {"linear": 1.0},
+        ],
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_invalid_draft_temperature_mapping_is_rejected(segments):
+    with pytest.raises(ValueError, match="draft_temperature_mapping"):
+        SpeculativeConfig(
+            method="draft_model",
+            draft_sample_method="probabilistic",
+            draft_temperature_mapping=segments,
+        )
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_mapping_excludes_constant_override(temperature):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        SpeculativeConfig(
+            method="draft_model",
+            draft_sample_method="probabilistic",
+            draft_temperature=temperature,
+            draft_temperature_mapping=[{"linear": 1.0}],
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_mapping_requires_probabilistic_sampling():
+    with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
+        SpeculativeConfig(
+            method="draft_model", draft_temperature_mapping=[{"linear": 1.0}]
+        )
+
+
+@pytest.mark.parametrize("temperature", [-0.1, float("inf"), float("nan")])
+@pytest.mark.skip_global_cleanup
+def test_invalid_draft_temperature_is_rejected(temperature):
+    with pytest.raises(ValidationError, match="draft_temperature"):
+        SpeculativeConfig(
+            method="draft_model",
+            draft_sample_method="probabilistic",
+            draft_temperature=temperature,
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_positive_draft_temperature_requires_probabilistic_sampling():
+    with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
+        SpeculativeConfig(method="draft_model", draft_temperature=0.7)
+
+
+@pytest.mark.parametrize("method", ["ngram", "suffix"])
+@pytest.mark.parametrize("option", ["draft_temperature", "draft_temperature_mapping"])
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_requires_a_draft_model(method, option):
+    value = 0.7 if option == "draft_temperature" else [{"linear": 1.0}]
+    with pytest.raises(ValueError, match=f"{option} is not supported"):
+        SpeculativeConfig(
+            method=method,
+            num_speculative_tokens=1,
+            draft_sample_method="probabilistic",
+            **{option: value},
+        )
 
 
 @pytest.mark.parametrize(

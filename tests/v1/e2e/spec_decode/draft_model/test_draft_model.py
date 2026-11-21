@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import multi_gpu_only, single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, VllmConfig, replace
@@ -70,6 +71,145 @@ def some_high_acceptance_metrics() -> dict:
         "expected_acceptance_len": 3.4,  # ref: 3.75
         "expected_acceptance_rate": 0.8,  # ref: 0.9
     }
+
+
+@single_gpu_only
+@pytest.mark.parametrize("draft_temperature", [0.0, 0.7])
+@pytest.mark.parametrize(
+    "method,model",
+    [
+        ("draft_model", "Qwen/Qwen3-0.6B"),
+        ("mtp", "Qwen/Qwen3.5-0.8B-Base"),
+    ],
+)
+def test_draft_temperature_preserves_greedy_target(
+    vllm_runner, monkeypatch, draft_temperature, method, model
+):
+    """Stochastic drafts change acceptance while the target remains greedy.
+
+    Independent drafts must preserve greedy tokens while changing acceptance.
+    MTP compares target logprobs because GDN does not support batch invariance.
+    Both paths exercise CUDA graphs.
+    """
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if method == "draft_model" else "0")
+    prompts = [
+        "The capital of France is",
+        "Write a short story about a robot:",
+        "Explain why the sky is blue:",
+        "The first ten prime numbers are",
+    ]
+    results = []
+    logprob_results = []
+    acceptance_rates = []
+    for override in (None, draft_temperature):
+        spec_config: dict[str, Any] = {
+            "method": method,
+            "model": model,
+            "num_speculative_tokens": 3,
+            "draft_sample_method": "greedy" if override is None else "probabilistic",
+        }
+        if override is not None:
+            spec_config["draft_temperature"] = override
+        with vllm_runner(
+            model,
+            block_size=None,
+            enable_chunked_prefill=None,
+            max_model_len=256,
+            max_num_seqs=len(prompts),
+            speculative_config=spec_config,
+            disable_log_stats=False,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+        ) as runner:
+            outputs = runner.llm.generate(
+                prompts,
+                SamplingParams(
+                    temperature=0,
+                    seed=42,
+                    max_tokens=32,
+                    ignore_eos=True,
+                    logprobs=5 if method == "mtp" else None,
+                ),
+            )
+            results.append([list(out.outputs[0].token_ids) for out in outputs])
+            if method == "mtp":
+                logprob_results.append(
+                    [
+                        (
+                            list(out.outputs[0].token_ids),
+                            out.outputs[0].text,
+                            out.outputs[0].logprobs,
+                        )
+                        for out in outputs
+                    ]
+                )
+            acceptance_rates.append(compute_acceptance_rate(runner.llm.get_metrics()))
+
+    assert all(rate > 0 for rate in acceptance_rates)
+    if method == "draft_model":
+        assert results[0] == results[1]
+    else:
+        check_logprobs_close(
+            outputs_0_lst=logprob_results[0],
+            outputs_1_lst=logprob_results[1],
+            name_0="greedy_draft",
+            name_1=f"draft_temperature={draft_temperature}",
+        )
+    if draft_temperature > 0 and method == "draft_model":
+        assert acceptance_rates[1] < acceptance_rates[0]
+    elif draft_temperature == 0:
+        assert acceptance_rates[1] == acceptance_rates[0]
+
+
+@single_gpu_only
+def test_draft_temperature_mapping_handles_mixed_target_temperatures(
+    vllm_runner, monkeypatch
+):
+    """A mixed mapping matches fixed overrides for the same seeded requests."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    model = "Qwen/Qwen3-0.6B"
+    prompts = [
+        "The capital of France is",
+        "Write a short story about a robot:",
+        "Explain why the sky is blue:",
+        "The first ten prime numbers are",
+    ]
+    params = [
+        SamplingParams(temperature=t, seed=42 + i, max_tokens=32, ignore_eos=True)
+        for i, t in enumerate((0.0, 0.5, 1.0, 1.5))
+    ]
+    results = []
+    cases: list[tuple[dict[str, Any], slice]] = [
+        ({"draft_temperature": 0.0}, slice(0, 2)),
+        ({"draft_temperature": 0.5}, slice(2, 4)),
+        (
+            {
+                "draft_temperature_mapping": [
+                    {"target_temperature_lt": 1.0},
+                    {"constant": 0.5},
+                ]
+            },
+            slice(0, 4),
+        ),
+    ]
+    for options, group in cases:
+        with vllm_runner(
+            model,
+            max_model_len=256,
+            max_num_seqs=4,
+            speculative_config={
+                "method": "draft_model",
+                "model": model,
+                "num_speculative_tokens": 3,
+                "draft_sample_method": "probabilistic",
+                **options,
+            },
+            disable_log_stats=False,
+        ) as runner:
+            outputs = runner.llm.generate(prompts[group], params[group])
+            results.append([list(out.outputs[0].token_ids) for out in outputs])
+            assert compute_acceptance_rate(runner.llm.get_metrics()) > 0
+    assert results[2] == results[0] + results[1]
+    assert [p.temperature for p in params] == [0.0, 0.5, 1.0, 1.5]
 
 
 cases = [
