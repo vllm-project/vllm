@@ -1972,6 +1972,51 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
+# GDN prefill fused conv1d + post-conv prep (csrc/mamba/gdn_prefill_conv.cu)
+def gdn_prefill_conv(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    num_k_heads: int,
+    head_dim: int,
+    output_g_exp: bool,
+    null_block_id: int,
+):
+    torch.ops._C.gdn_prefill_conv(
+        x,
+        weight,
+        conv_states,
+        query_start_loc,
+        cache_indices,
+        has_initial_state,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        num_k_heads,
+        head_dim,
+        output_g_exp,
+        null_block_id,
+    )
+
+
 # mamba
 def selective_scan_fwd(
     u: torch.Tensor,

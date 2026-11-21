@@ -487,6 +487,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/fused_qknorm_rope_cache_kernel.cu")
+    # CUDA-only: inline PTX (tanh.approx.f32) does not hipify.
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/mamba/gdn_prefill_conv.cu")
+    # f32x2 lowers cleanly only in an sm_103a pass (see the kernel's
+    # GDN_HAS_F32X2 comment); force that image onto the build's arch list.
+    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/mamba/gdn_prefill_conv.cu"
+        CUDA_ARCHS "10.3a")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
