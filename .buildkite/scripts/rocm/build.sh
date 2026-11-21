@@ -442,8 +442,15 @@ case $MODE in
     # test-deps are copied only over a parent of #ROCM_PROMOTE_PR's, never over one main built: an
     # existing tag holding the recorded digest is an earlier attempt's copy, so a retry finishes the
     # chain instead of stopping at it.
-    git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
-    git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
+    # Main's recipe, ignoring comment and blank lines, must be the one the images were built with,
+    # or the one at the merge base (the PR changed it, and main gets the PR's when it merges).
+    mb=${ROCM_PROMOTE_MERGE_BASE:-$ROCM_PROMOTE_SHA}
+    [[ $mb =~ ^[0-9a-f]{40}$ ]] || { echo "ROCM_PROMOTE_MERGE_BASE is malformed" >&2; exit 2; }
+    git fetch -q origin "${ROCM_PROMOTE_SHA:?}" "$mb"
+    recipe() { local f; for f in .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl; do
+      git show "$1:$f" | grep -vE '^[[:space:]]*(#|//|$)'; echo "== $f"; done; }
+    main_recipe=$(recipe HEAD)
+    [[ $main_recipe == "$(recipe "$ROCM_PROMOTE_SHA")" || $main_recipe == "$(recipe "$mb")" ]] \
       || { echo "$ROCM_PROMOTE_SHA builds with another build.sh or bake file than main" >&2; exit 1; }
     keys=$(keys_at "$ROCM_PROMOTE_SHA") || { echo "cannot compute the keys of $ROCM_PROMOTE_SHA" >&2; exit 1; }
     read -r pKs pKr <<<"$keys"

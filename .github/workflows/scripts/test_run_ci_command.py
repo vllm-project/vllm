@@ -101,6 +101,8 @@ class FakeGitHub:
         self.files = files or []
         # (path, ref) -> blob; main and the PR head share every blob by default.
         self.file_shas: dict[tuple[str, str], str] = {}
+        # (path, ref) -> text; every ref has the same recipe by default.
+        self.file_texts: dict[tuple[str, str], str | None] = {}
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -157,6 +159,12 @@ class FakeGitHub:
 
     def get_file_sha(self, path: str, ref: str) -> str:
         return self.file_shas.get((path, ref), "blob")
+
+    def get_file_text(self, path: str, ref: str) -> str | None:
+        return self.file_texts.get((path, ref), "#!/bin/bash\nbake\n")
+
+    def get_merge_base(self, base_ref: str, head_sha: str) -> str:
+        return MERGE_BASE
 
 
 class FakeBranchUpdater:
@@ -1667,6 +1675,8 @@ class RunCiCommandTest(unittest.TestCase):
 
 
 STACK_PR_FILES = ["docker/Dockerfile.rocm_base"]
+BUILD_SH = ".buildkite/scripts/rocm/build.sh"
+MERGE_BASE = "a" * 40
 STACK_BUILT = {"rocm-rocm-stack-built": "s@d1 w@d2"}
 
 
@@ -1731,6 +1741,7 @@ class RocmCacheTest(unittest.TestCase):
             {
                 "ROCM_PROMOTE_PR": "42",
                 "ROCM_PROMOTE_SHA": "fedcba9876543210",
+                "ROCM_PROMOTE_MERGE_BASE": MERGE_BASE,
                 "ROCM_PROMOTE_IMAGES": "s@d1 w@d2",
                 "VLLM_CI_ONLY_STEP_KEYS": '["rocm-base-image-cache"]',
             },
@@ -1816,14 +1827,34 @@ class RocmCacheTest(unittest.TestCase):
         self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
         self.assertIn("@reviewer chose not to cache", github.comments[0])
 
-    def test_refusals_leave_the_gate_failing(self) -> None:
-        other_recipe = FakeGitHub(files=STACK_PR_FILES)
-        other_recipe.file_shas = {("docker/docker-bake-rocm.hcl", "main"): "newer"}
-        # Built with main's recipe, but the PR changed it afterwards.
-        head_recipe = FakeGitHub(files=STACK_PR_FILES)
-        head_recipe.file_shas = {
-            (".buildkite/scripts/rocm/build.sh", "0123456789abcdef"): "changed"
+    def test_cache_allows_recipe_changes_main_gets_on_merge(self) -> None:
+        # Comment and blank lines only, on main or in the PR.
+        comments = FakeGitHub(files=STACK_PR_FILES)
+        comments.file_texts = {
+            (BUILD_SH, "main"): "#!/bin/bash\n  # a comment\n\nbake\n",
+            (BUILD_SH, "fedcba9876543210"): "#!/bin/bash\nbake\n// note\n",
+            (BUILD_SH, "0123456789abcdef"): "#!/bin/bash\nbake\n// note\n",
         }
+        # The PR changed the recipe, and main has not since the merge base.
+        changed = FakeGitHub(files=STACK_PR_FILES)
+        changed.file_texts = {
+            (BUILD_SH, "fedcba9876543210"): "bake --new",
+            (BUILD_SH, "0123456789abcdef"): "bake --new",
+        }
+        for github in (comments, changed):
+            with self.subTest(files=github.file_texts):
+                self.comment(github, ci_builds=[ci_build()])
+
+                self.assertEqual(len(self.ci.created_builds), 1)
+                self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
+
+    def test_refusals_leave_the_gate_failing(self) -> None:
+        # Main changed the recipe since the merge base.
+        other_recipe = FakeGitHub(files=STACK_PR_FILES)
+        other_recipe.file_texts = {(BUILD_SH, "main"): "bake --newer"}
+        # The PR changed the recipe after its CI built the image.
+        head_recipe = FakeGitHub(files=STACK_PR_FILES)
+        head_recipe.file_texts = {(BUILD_SH, "0123456789abcdef"): "bake --new"}
         # The PR changed the image after its CI last pushed one.
         head_stack = FakeGitHub(files=STACK_PR_FILES)
         head_stack.file_shas = {
@@ -1838,8 +1869,8 @@ class RocmCacheTest(unittest.TestCase):
             reviews=[{"user": {"login": "reviewer"}, "state": "APPROVED"}],
         )
         cases = [
-            (other_recipe, [ci_build()], "reviewer", "before main changed them"),
-            (head_recipe, [ci_build()], "reviewer", "before main changed them"),
+            (other_recipe, [ci_build()], "reviewer", "main changed `build.sh`"),
+            (head_recipe, [ci_build()], "reviewer", "after its CI built"),
             (head_stack, [ci_build()], "reviewer", "latest changes"),
             (FakeGitHub(files=STACK_PR_FILES), [], "reviewer", "built the ROCm"),
             (FakeGitHub(files=STACK_PR_FILES), reused, "reviewer", "built the ROCm"),

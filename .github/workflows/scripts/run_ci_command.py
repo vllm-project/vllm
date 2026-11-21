@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import binascii
 import http.client
 import json
 import os
@@ -90,7 +91,9 @@ ROCM_CACHE_MARKER = "<!-- vllm-ci-rocm-base-image -->"
 ROCM_CACHE_DONE = (
     f"Re-run the failed `pre-commit` check to unblock this PR.\n\n{ROCM_CACHE_MARKER}"
 )
-# build.sh promote copies only images built with main's versions of these.
+# The image keys hash the stack inputs, not these, so build.sh promote copies only
+# images built with the recipe main has after the PR merges. Comment lines and
+# blank lines are ignored.
 ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
 # build.sh base mode records the images it pushed itself under these keys, not
 # ones it reused from a tag another PR's CI could have pushed, and a runtime or
@@ -369,6 +372,27 @@ class GitHubClient:
             for path in (file["filename"], file.get("previous_filename"))
             if path
         ]
+
+    def get_merge_base(self, base_ref: str, head_sha: str) -> str:
+        base_ref = urllib.parse.quote(f"refs/heads/{base_ref}", safe="")
+        head_sha = urllib.parse.quote(head_sha, safe="")
+        response = self._request(
+            self._repo_path(f"/compare/{base_ref}...{head_sha}?per_page=1")
+        )
+        sha = (response.get("merge_base_commit") or {}).get("sha")
+        if not isinstance(sha, str):
+            raise ApiError(None, "GitHub returned no merge base.")
+        return sha
+
+    def get_file_text(self, path: str, ref: str) -> str | None:
+        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
+        try:
+            response = self._request(self._repo_path(f"/contents/{path}?ref={ref}"))
+        except ApiError as error:
+            if error.status == 404:
+                return None
+            raise
+        return binascii.a2b_base64(response["content"]).decode()
 
     def get_file_sha(self, path: str, ref: str) -> str:
         path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
@@ -1253,6 +1277,22 @@ def handle_cancel_ci(
     )
 
 
+def rocm_recipe(github: GitHubClient, ref: str) -> tuple[str | None, ...]:
+    """ROCM_RECIPE at ref, without comment lines and blank lines."""
+    return tuple(
+        None if text is None else strip_comment_lines(text)
+        for text in (github.get_file_text(path, ref) for path in ROCM_RECIPE)
+    )
+
+
+def strip_comment_lines(text: str) -> str:
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "//"))
+    )
+
+
 def handle_rocm_cache(
     *,
     actor: str,
@@ -1324,19 +1364,22 @@ def handle_rocm_cache(
             f"`{COMMAND_ROCM_CACHE}` once it passes. If CI reuses an existing "
             f"image, use `{COMMAND_ROCM_NOCACHE}`."
         )
-    # The stack was built with the source commit's recipe and main keeps the PR
-    # head's after the merge, so both must match main's. Merging main does not
-    # help when main changed them: the merge reuses the stack, so no build of
-    # this PR pushes one with main's recipe.
-    if any(
-        github.get_file_sha(p, "main") != github.get_file_sha(p, ref)
-        for p in ROCM_RECIPE
-        for ref in (sha, head_sha)
-    ):
+    # The stack was built with the source commit's recipe. Main has the PR head's
+    # after the merge, unless main changed it since the merge base. Merging main
+    # does not help then: the merge reuses the stack, so no build of this PR
+    # pushes one with main's recipe.
+    built = rocm_recipe(github, sha)
+    if built != rocm_recipe(github, head_sha):
         raise CiPreparationError(
-            "Can't cache: this PR changes `build.sh` or `docker-bake-rocm.hcl`, or "
-            "its CI built the ROCm base image before main changed them. Use "
-            f"`{COMMAND_ROCM_NOCACHE}`."
+            "Can't cache yet: this PR changed `build.sh` or `docker-bake-rocm.hcl` "
+            f"after its CI built the ROCm base image. Run `{COMMAND_RUN_CI}`, then "
+            f"`{COMMAND_ROCM_CACHE}` once it passes."
+        )
+    merge_base = github.get_merge_base(pr["base"]["ref"], head_sha)
+    if rocm_recipe(github, "main") not in (built, rocm_recipe(github, merge_base)):
+        raise CiPreparationError(
+            "Can't cache: main changed `build.sh` or `docker-bake-rocm.hcl` after "
+            f"this PR's CI built the ROCm base image. Use `{COMMAND_ROCM_NOCACHE}`."
         )
     meta_data = source["meta_data"]
     build = ci_buildkite.create_build(
@@ -1347,6 +1390,7 @@ def handle_rocm_cache(
             "env": {
                 "ROCM_PROMOTE_PR": str(pr["number"]),
                 "ROCM_PROMOTE_SHA": sha,
+                "ROCM_PROMOTE_MERGE_BASE": merge_base,
                 "ROCM_PROMOTE_IMAGES": " ".join(
                     meta_data[key]
                     for key in ROCM_BUILT_KEYS
