@@ -4,7 +4,7 @@ meta:
   provider: "Meta"
   description: "Meta Llama 3.2 1.23B dense pretrained language model with 128K context, validated for BF16 serving on Intel Xeon 6."
   date_added: 2026-08-18
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 (GNR) with BF16 serving"
@@ -13,6 +13,7 @@ meta:
     - "meta-llama/Llama-3.1-8B-Instruct"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "meta-llama/Llama-3.2-1B"
@@ -35,6 +36,13 @@ variants:
     description: "Full precision BF16"
     supported_hardware:
       - xeon6
+  redhat_fp8:
+    model_id: "RedHatAI/Llama-3.2-1B-FP8"
+    precision: fp8
+    label: "FP8 (RedHatAI)"
+    vram_minimum_gb: 2
+    description: "RedHatAI legacy FP8 checkpoint for Llama 3.2 1B"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -120,6 +128,8 @@ guide: |
   ```
 
   ## References
+
+  - [RedHatAI FP8 checkpoint](https://huggingface.co/RedHatAI/Llama-3.2-1B-FP8)
 
   - [Model card](https://huggingface.co/meta-llama/Llama-3.2-1B)
   - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

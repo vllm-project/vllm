@@ -4,7 +4,7 @@ meta:
   provider: "Meta"
   description: "Meta Llama 3.2 1B Instruct with CPU-validated Red Hat AI W8A8 and AMead10 AWQ variants."
   date_added: 2026-08-18
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "W8A8 and AWQ variants validated on Intel Xeon 6"
@@ -13,6 +13,7 @@ meta:
     - "meta-llama/Llama-3.2-3B-Instruct"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "meta-llama/Llama-3.2-1B-Instruct"
@@ -52,6 +53,23 @@ variants:
     extra_args:
       - "--quantization"
       - "awq"
+  redhat_fp8:
+    model_id: "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+    precision: fp8
+    label: "FP8 (RedHatAI)"
+    vram_minimum_gb: 2
+    description: "RedHatAI legacy FP8 checkpoint for Llama 3.2 1B Instruct"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
+  redhat_fp8_dynamic:
+    model_id: "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHatAI)"
+    vram_minimum_gb: 2
+    description: "RedHatAI FP8 with static per-channel weights and dynamic per-token activation quantization"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
 
 compatible_strategies:
   - single_node_tp
@@ -126,6 +144,9 @@ guide: |
   validated platform configuration.
 
   ## References
+
+  - [RedHatAI FP8 checkpoint](https://huggingface.co/RedHatAI/Llama-3.2-1B-Instruct-FP8)
+  - [RedHatAI FP8 Dynamic checkpoint](https://huggingface.co/RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic)
 
   - [Meta parent model](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)
   - [Red Hat AI W8A8 checkpoint](https://huggingface.co/RedHatAI/Llama-3.2-1B-Instruct-quantized.w8a8)
