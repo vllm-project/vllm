@@ -295,13 +295,20 @@ class CudaGraphManager:
         prefill_sizes = sorted(
             compilation_config.prefill_cudagraph_capture_token_sizes or []
         )
+        # A batch never holds more than max_num_reqs * max_model_len tokens.
+        max_num_tokens = self.max_num_reqs * self.vllm_config.model_config.max_model_len
+        if prefill_sizes and prefill_sizes[-1] > max_num_tokens:
+            logger.warning(
+                "Dropping %s from CUDA graph capture sizes: above "
+                "max_num_seqs * max_model_len = %d.",
+                [n for n in prefill_sizes if n > max_num_tokens],
+                max_num_tokens,
+            )
+            prefill_sizes = [n for n in prefill_sizes if n <= max_num_tokens]
         decode_sizes = self.decode_request_sizes
         if decode_sizes is None:
             decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         decode_sizes = decode_sizes or []
-        max_decode_tokens = (
-            self.max_num_reqs * self.vllm_config.uniform_decode_query_len
-        )
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
@@ -357,11 +364,7 @@ class CudaGraphManager:
         for num_tokens, num_active_loras in product(
             prefill_sizes, self.lora_capture_cases
         ):
-            # recoverSSM cannot capture a dummy query wider than its workspace.
-            if mixed_mode and (
-                not self.vllm_config.cache_config.use_kda_recoverssm
-                or num_tokens <= max_decode_tokens
-            ):
+            if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
                 # For breakable PW graphs, break-point kernels read the real batch
@@ -534,7 +537,7 @@ class CudaGraphManager:
                                 graph, pool, stream=self._capture_stream(desc)
                             ),
                         ):
-                            forward_fn(CUDAGraphMode.NONE)
+                            forward_fn(CUDAGraphMode.FULL)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
                             # forks copy_stream, but wait_prefetch only happens in
@@ -621,7 +624,10 @@ class CudaGraphManager:
     ) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableCUDAGraphWrapper(
-                model, self.vllm_config, key_fn=key_fn
+                model,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.PIECEWISE,
+                key_fn=key_fn,
             )
 
     def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
@@ -792,6 +798,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                     assert cg_mode != CUDAGraphMode.PIECEWISE, (
                         "DBO does not support PIECEWISE cudagraphs"
                     )
+                    for context in ubatch_state.forward_contexts:
+                        context.cudagraph_runtime_mode = cg_mode
                     store_capture_output(num_tokens, finish())
 
                 return ubatch_forward_fn

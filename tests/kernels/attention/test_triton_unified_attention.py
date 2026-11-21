@@ -16,6 +16,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
     compute_tile_loop_bounds,
     softmax_step,
+    split_k_segment_layout,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_3D_QUERY_LEN,
@@ -50,7 +51,7 @@ def _scratch(rows):
     return [torch.empty(shape, dtype=torch.float32, device="cpu") for shape in shapes]
 
 
-def _uses_splitk(
+def _launch_kwargs(
     monkeypatch,
     query_len,
     scratch,
@@ -59,14 +60,21 @@ def _uses_splitk(
     threshold=8,
     mm_prefix=None,
     num_seqs=2,
+    window_size=(-1, -1),
+    chunk_lookback=-1,
+    rswa_window=None,
+    window_aware_segments=True,
 ):
+    """Run the launcher with both kernels mocked. Returns the launch kwargs of
+    kernel_unified_attention and of reduce_segments (None if not launched)."""
     query = torch.empty(
         (num_seqs * query_len, 8, 128), dtype=torch.bfloat16, device="cpu"
     )
     cache = torch.empty((1, 128, 1, 128), dtype=torch.bfloat16, device="cpu")
     kernel = MagicMock()
+    reduce = MagicMock()
     monkeypatch.setattr(attention, "kernel_unified_attention", kernel)
-    monkeypatch.setattr(attention, "reduce_segments", MagicMock())
+    monkeypatch.setattr(attention, "reduce_segments", reduce)
     unified_attention(
         query,
         cache,
@@ -78,7 +86,7 @@ def _uses_splitk(
         128,
         128**-0.5,
         causal,
-        (-1, -1),
+        window_size,
         torch.zeros((num_seqs, 1), dtype=torch.int32, device="cpu"),
         0.0,
         None,
@@ -90,8 +98,24 @@ def _uses_splitk(
         softmax_segm_max=scratch[1],
         softmax_segm_expsum=scratch[2],
         mm_prefix_range=mm_prefix,
+        chunk_lookback=chunk_lookback,
+        rswa_prefix_lens=(
+            torch.zeros(num_seqs, dtype=torch.int32, device="cpu")
+            if rswa_window is not None
+            else None
+        ),
+        rswa_window=rswa_window,
+        window_aware_segments=window_aware_segments,
     )
-    return kernel.__getitem__.return_value.call_args.kwargs["IS_3D"]
+    reduce_call = reduce.__getitem__.return_value.call_args
+    return (
+        kernel.__getitem__.return_value.call_args.kwargs,
+        None if reduce_call is None else reduce_call.kwargs,
+    )
+
+
+def _uses_splitk(monkeypatch, query_len, scratch, **options):
+    return _launch_kwargs(monkeypatch, query_len, scratch, **options)[0]["IS_3D"]
 
 
 def _spy_reduce_segments(monkeypatch):
@@ -144,6 +168,145 @@ def test_splitk_admission_preserves_decode_and_bounds_verification(
         )
     scratch = _scratch(options.pop("scratch_rows", num_seqs * query_len))
     assert _uses_splitk(monkeypatch, query_len, scratch, **options) is expected
+
+
+@pytest.mark.parametrize(
+    "query_len,options,expect_3d,expect_window_segments",
+    [
+        (1, {}, True, True),
+        (1, {"window_size": (-1, -1)}, True, False),
+        (1, {"window_aware_segments": False}, True, False),
+        # Spec-decode verify still runs split-K, but with several queries.
+        (5, {}, True, False),
+        (1, {"threshold": 1}, False, False),
+        (1, {"causal": False}, True, False),
+        (1, {"causal": "per_sequence"}, True, False),
+        (1, {"mm_prefix": True}, True, False),
+        (1, {"chunk_lookback": 1}, True, False),
+        (1, {"rswa_window": 512}, True, False),
+    ],
+)
+def test_window_aware_segments_gate(
+    monkeypatch, query_len, options, expect_3d, expect_window_segments
+):
+    """Only plain causal sliding-window decode splits the window's tiles into
+    the split-K segments, and both kernels get the same segment layout."""
+    num_seqs = 2
+    options = {"window_size": (1023, 0), **options}
+    if options.get("causal") == "per_sequence":
+        options["causal"] = torch.ones(num_seqs, dtype=torch.bool, device="cpu")
+    if options.get("mm_prefix"):
+        options["mm_prefix"] = torch.zeros(
+            (num_seqs, 1, 2), dtype=torch.int32, device="cpu"
+        )
+    kernel, reduce = _launch_kwargs(
+        monkeypatch,
+        query_len,
+        _scratch(num_seqs * query_len),
+        num_seqs=num_seqs,
+        **options,
+    )
+    assert kernel["IS_3D"] is expect_3d
+    assert kernel["WINDOW_SEGMENTS"] is expect_window_segments
+    if expect_3d:
+        assert reduce["WINDOW_SEGMENTS"] is expect_window_segments
+        assert reduce["SLIDING_WINDOW"] == (1024 if expect_window_segments else 0)
+    else:
+        assert reduce is None
+
+
+@triton.jit
+def _split_k_tile_ranges(
+    output_ptr,
+    seq_lens_ptr,
+    SLIDING_WINDOW: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+    WINDOW_SEGMENTS: tl.constexpr,
+):
+    seq_idx = tl.program_id(0)
+    segm_idx = tl.program_id(1)
+    seq_len = tl.load(seq_lens_ptr + seq_idx)
+    base_tile, tiles_per_segment, num_active = split_k_segment_layout(
+        seq_len, 16, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+    )
+    # One decode query at position seq_len - 1, as in kernel_unified_attention.
+    loop_lo, loop_hi, _ = compute_tile_loop_bounds(
+        seq_len - 1,  # context_len
+        seq_len,
+        1,  # cur_batch_query_len
+        0,  # q_block_local_idx
+        segm_idx,
+        tiles_per_segment,
+        TILE_SIZE,
+        16,  # BLOCK_M
+        2,  # BLOCK_Q
+        8,  # num_queries_per_kv
+        SLIDING_WINDOW,
+        False,  # USE_MM_PREFIX
+        True,  # IS_3D
+        segm_base_tile_or_0=base_tile,
+    )
+    out = output_ptr + (seq_idx * 16 + segm_idx) * 3
+    tl.store(out, loop_lo)
+    tl.store(out + 1, loop_hi)
+    tl.store(out + 2, num_active)
+
+
+@pytest.mark.parametrize(
+    "sliding_window,tile_size,window_segments,seq_lens",
+    [
+        (2048, 16, True, [1, 100, 2047, 2048, 2049, 4096, 4103, 33000, 131072]),
+        # All 16 segments active.
+        (1024, 32, True, [4096, 131072]),
+        # 17 window tiles: 2 per segment, only 9 segments active.
+        (257, 16, True, [1040]),
+        # Windows that are not / are a multiple of the tile size.
+        (17, 16, True, [1, 16, 17, 18, 1000]),
+        (16, 16, True, [16, 17, 33]),
+        # Window inside a single tile.
+        (8, 32, True, [1, 5000]),
+        # Without window segments the whole sequence is split, as before.
+        (0, 16, False, [1, 1000, 4103]),
+    ],
+)
+def test_split_k_window_segment_tile_ranges(
+    sliding_window, tile_size, window_segments, seq_lens
+) -> None:
+    """Active split-K segments walk disjoint, consecutive slices of the
+    window's tiles that cover it exactly, at most cdiv(window_tiles, 16)
+    tiles each; inactive segments walk nothing."""
+    num_segments = 16
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE_TYPE)
+    ranges = torch.empty(
+        (len(seq_lens), num_segments, 3), dtype=torch.int32, device=DEVICE_TYPE
+    )
+    _split_k_tile_ranges[(len(seq_lens), num_segments)](
+        ranges,
+        seq_lens_t,
+        SLIDING_WINDOW=sliding_window,
+        TILE_SIZE=tile_size,
+        WINDOW_SEGMENTS=window_segments,
+    )
+    for seq_len, seq_ranges in zip(seq_lens, ranges.tolist()):
+        end_tile = -(-seq_len // tile_size)
+        first_tile = 0
+        if window_segments:
+            first_tile = max(seq_len - sliding_window, 0) // tile_size
+        num_tiles = end_tile - first_tile
+        per_segment = -(-num_tiles // num_segments)
+        num_active = -(-num_tiles // per_segment)
+        if not window_segments:
+            assert per_segment == -(-seq_len // (num_segments * tile_size))
+        for segm_idx, (lo, hi, active) in enumerate(seq_ranges):
+            assert active == num_active
+            if segm_idx < num_active:
+                assert lo < hi
+                assert (lo, hi) == (
+                    first_tile + segm_idx * per_segment,
+                    min(first_tile + (segm_idx + 1) * per_segment, end_tile),
+                )
+            else:
+                assert hi <= lo
 
 
 @pytest.mark.parametrize("empty_state", ["masked", "unvisited", "all_empty"])
@@ -1251,3 +1414,100 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     ref = soft_cap * torch.tanh(scores / soft_cap)
     assert torch.isfinite(out).all(), out
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("num_heads", [(8, 1), (5, 1)])
+# 17: not a multiple of the tile; 300 and 2048: several tiles per segment.
+@pytest.mark.parametrize("sliding_window", [17, 300, 2048])
+@pytest.mark.parametrize("use_sinks", [False, True])
+@torch.inference_mode()
+def test_triton_unified_attn_window_aware_segments(
+    num_heads: tuple[int, int],
+    sliding_window: int,
+    use_sinks: bool,
+) -> None:
+    """Decode on the 3D path with contexts far beyond the sliding window.
+
+    Splitting only the window's tiles into segments must give the same result
+    as splitting the whole sequence. Covers sinks (applied by segment 0 only)
+    and windows that are not a multiple of the tile size.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    num_query_heads, num_kv_heads = num_heads
+    head_size, block_size, num_blocks = 128, 16, 2048
+    dtype = torch.bfloat16
+    num_par_softmax_segments = 16
+
+    # Decode only: one query token per sequence, contexts below, at and far
+    # beyond the window.
+    kv_lens_list = [1, sliding_window - 1, sliding_window, sliding_window + 1]
+    kv_lens_list += [1000, 4103]
+    num_seqs = len(kv_lens_list)
+    max_kv_len = max(kv_lens_list)
+    scale = head_size**-0.5
+
+    query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.arange(num_seqs + 1, dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+    sinks = torch.randn(num_query_heads, dtype=torch.float32) if use_sinks else None
+
+    def run(window_aware_segments: bool) -> torch.Tensor:
+        output = torch.empty_like(query)
+        segm_shape = (num_seqs, num_query_heads, num_par_softmax_segments)
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=kv_lens,
+            max_seqlen_q=1,
+            max_seqlen_k=max_kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=(sliding_window - 1, 0),
+            block_table=block_tables,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            # num_seqs <= threshold: decode runs on the 3D (segmented) path.
+            seq_threshold_3D=num_seqs,
+            num_par_softmax_segments=num_par_softmax_segments,
+            # Finite stale values (not NaN, which reduce_segments filters), so
+            # a kernel/reduce disagreement on the active segments shows up.
+            softmax_segm_output=torch.full(
+                (*segm_shape, next_power_of_2(head_size)), 1e3, dtype=torch.float32
+            ),
+            softmax_segm_max=torch.zeros(segm_shape, dtype=torch.float32),
+            softmax_segm_expsum=torch.ones(segm_shape, dtype=torch.float32),
+            sinks=sinks,
+            window_aware_segments=window_aware_segments,
+        )
+        return output
+
+    output = run(window_aware_segments=True)
+    torch.testing.assert_close(
+        output, run(window_aware_segments=False), atol=1.5e-2, rtol=1e-2
+    )
+    if not use_sinks:
+        ref_output = ref_paged_attn(
+            query=query.clone(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=[1] * num_seqs,
+            kv_lens=kv_lens_list,
+            block_tables=block_tables,
+            scale=scale,
+            sliding_window=sliding_window,
+        )
+        torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)

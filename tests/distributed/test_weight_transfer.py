@@ -181,6 +181,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
             dtype_names=["float32", "bfloat16"],
             shapes=[[10, 10], [10]],
             num_updates_list=[4, 2],
+            wire_batch_bytes=1024,
         )
         assert info.num_updates_list == [4, 2]
 
@@ -191,6 +192,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[4, 2],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_empty_num_updates_list(self):
@@ -200,6 +202,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=[],
                 shapes=[],
                 num_updates_list=[],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_mismatched_num_updates(self):
@@ -209,6 +212,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32", "float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[3],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_negative_num_updates(self):
@@ -218,6 +222,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10]],
                 num_updates_list=[-1],
+                wire_batch_bytes=1024,
             )
 
 
@@ -315,6 +320,7 @@ class TestNCCLEngineParsing:
 
         monkeypatch.setattr(reload_mod, "plan_loads", logged_plan_loads)
         engine = self._make_engine()
+        engine.model._ckpt_param_names = frozenset()  # as a direct cold start records
         engine.init_transfer_engine(
             NCCLWeightTransferInitInfo(
                 master_address="127.0.0.1",
@@ -378,7 +384,8 @@ class TestNCCLEngineParsing:
             nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
         )
         model = _module_with(("w", torch.arange(6.0).view(2, 3)))
-        record_checkpoint_layout(model)
+        if refusal == "eplb":  # a layerwise cold start records no layout
+            record_checkpoint_layout(model)
         model.w.data = model.w.data.t()  # post-load processing re-laid it out
         if refusal == "eplb":
             parallel = SimpleNamespace(enable_eplb=True)
@@ -389,7 +396,7 @@ class TestNCCLEngineParsing:
             torch.device("cpu"),
             model,
         )
-        match = "VLLM_RELOAD_MODE=direct" if refusal == "layerwise" else "EPLB"
+        match = "reloads layerwise" if refusal == "layerwise" else "EPLB"
         with pytest.raises(RuntimeError, match=match):
             engine.init_transfer_engine(
                 NCCLWeightTransferInitInfo(
@@ -659,6 +666,7 @@ def test_sparse_nccl_receive_weights_without_init_raises():
         dtype_names=["float32"],
         shapes=[[10]],
         num_updates_list=[2],
+        wire_batch_bytes=1024,
     )
 
     with pytest.raises(RuntimeError, match="not initialized"):
@@ -1194,6 +1202,116 @@ def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
     sender.shutdown()
 
 
+def _sparse_test_patch(name, indices, values, dtype, full_shape=(4,)):
+    return SparseWeightPatch(
+        name=name,
+        indices=torch.tensor(indices, dtype=torch.int32),
+        values=torch.tensor(values, dtype=dtype),
+        full_shape=full_shape,
+    )
+
+
+def _replay_sparse_patches(monkeypatch, patches, batch_bytes):
+    """Send patches over a fake wire. Returns the receiving toy model, the wire, the
+    tensors received, the number received at each load, and the receive call."""
+    monkeypatch.setattr(
+        "vllm.distributed.weight_transfer.sparse_nccl_engine._WIRE_BATCH_BYTES",
+        batch_bytes,
+        raising=False,
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *_, **__: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.accelerator, "device_index", lambda *_: nullcontext())
+
+    client = RecordingClient()
+    sender = SparseNCCLTrainerWeightTransferEngine(client=client)
+    sender.model_update_group = MagicMock()
+    sender.model_update_group.device = torch.device("cpu")
+    wire = []
+    sender.model_update_group.broadcast.side_effect = lambda tensor, **_: wire.append(
+        tensor.clone()
+    )
+    sender.send_weights(patches)
+
+    model = torch.nn.Module()
+    model.a = torch.nn.Parameter(
+        torch.full((4,), -1.0, dtype=torch.bfloat16), requires_grad=False
+    )
+    model.b = torch.nn.Parameter(torch.full((2, 2), -1.0), requires_grad=False)
+
+    received: list[torch.Tensor] = []
+    loads: list[int] = []
+
+    def load_weights(weights):
+        loads.append(len(received))
+        for name, weight in weights:
+            getattr(model, name).data.copy_(weight)
+        return {name for name, _ in weights}
+
+    def receive_broadcast(tensor, **_):
+        tensor.copy_(wire[len(received)])
+        received.append(tensor)
+
+    model.load_weights = load_weights
+    receiver = SparseNCCLWeightTransferEngine(
+        WeightTransferConfig(backend="sparse_nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    receiver.model_update_group = MagicMock()
+    receiver.model_update_group.device = torch.device("cpu")
+    receiver.model_update_group.broadcast.side_effect = receive_broadcast
+    info = SparseNCCLWeightTransferUpdateInfo(**client.last_update_info)
+    return model, wire, received, loads, lambda: receiver.receive_weights(info)
+
+
+@pytest.mark.parametrize(
+    ("batch_bytes", "received_at_each_load"),
+    [(1, [2, 4, 6]), (18, [2, 4]), (1 << 20, [3, 3])],
+)
+def test_sparse_nccl_wire_batches_land_every_patch_cpu(
+    monkeypatch, batch_bytes, received_at_each_load
+):
+    """Each batch is applied before the next is received, and every patch lands in
+    input order, including one name sent in two dtypes."""
+    model, _, _, loads, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0, 1, 2], [1.0, 2.0, 3.0], torch.bfloat16),
+            _sparse_test_patch("b", [3], [4.0], torch.float32, (2, 2)),
+            _sparse_test_patch("a", [0], [5.0], torch.float32),
+        ],
+        batch_bytes,
+    )
+
+    receive()
+
+    assert loads == received_at_each_load
+    assert model.a.tolist() == [5.0, 2.0, 3.0, -1.0]
+    assert model.b.tolist() == [[-1.0, -1.0], [-1.0, 4.0]]
+
+
+def test_sparse_nccl_failed_batch_still_drains_the_wire_cpu(monkeypatch):
+    """A failed batch skips the rest of the update but raises only once every
+    broadcast has its receive, since an unmatched one would hang the trainer."""
+    model, wire, received, _, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0], [float("nan")], torch.bfloat16),
+            _sparse_test_patch("b", [2], [6.0], torch.float32, (2, 2)),
+            _sparse_test_patch("b", [3], [7.0], torch.float32, (2, 2)),
+        ],
+        1,
+    )
+
+    with pytest.raises(ValueError, match="NaN"):
+        receive()
+
+    assert len(received) == len(wire)
+    assert model.b.eq(-1).all()
+
+
 # --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
 
 
@@ -1670,6 +1788,65 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     with pytest.raises(ValueError, match="IPC handle not found"):
         engine.receive_weights(update_info)
+
+
+def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
+    """A packed IPC worker engine whose handle `(i, ...)` rebuilds to
+    `bufs[i]`."""
+    import vllm.distributed.weight_transfer.packed_tensor as packed_mod
+    import vllm.model_executor.model_loader.reload as reload_mod
+
+    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *a: bufs[a[0]])
+    monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
+    monkeypatch.setattr(reload_mod, "finish_reload", lambda *args: None)
+    model = MagicMock(spec=torch.nn.Module)
+    model.load_weights = MagicMock()
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc"),
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        model,
+    )
+    engine.init_transfer_engine(IPCWeightTransferInitInfo(packed=True))
+    return engine, model
+
+
+def _packed_ipc_chunk(handle: dict, names: list[str], n: int, last: bool = False):
+    return IPCWeightTransferUpdateInfo(
+        names=names,
+        dtype_names=["float32"] * len(names),
+        shapes=[[n]] * len(names),
+        ipc_handles=handle,
+        chunk_capacity=16 if handle else None,
+        last=last,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
+    """Only each transfer's first chunk carries the handle; finishing before
+    the last chunk raises."""
+    bufs = [
+        torch.arange(k, k + 4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
+        for k in (0, 4)
+    ]
+    engine, model = _packed_ipc_engine(monkeypatch, bufs)
+    uuid = str(torch.cuda.get_device_properties(0).uuid)
+    starts = [_packed_ipc_chunk({uuid: (k, *range(7))}, ["w"], 8) for k in (0, 1)]
+    rest = _packed_ipc_chunk({}, [], 8, last=True)  # each transfer has 2 chunks
+
+    engine.start_weight_update()
+    for start in starts:
+        engine.receive_weights(start)
+        engine.receive_weights(rest)
+    engine.finish_weight_update()
+    loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
+    assert loaded == [[0, 1, 2, 3] * 2, [4, 5, 6, 7] * 2]
+
+    engine.start_weight_update()
+    engine.receive_weights(starts[0])
+    with pytest.raises(RuntimeError, match="before its last chunk"):
+        engine.finish_weight_update()
 
 
 class RecordingClient:
@@ -2328,6 +2505,45 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
     assert client.last_update_info["shapes"] == [[8]]
 
 
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_resends_metadata_after_a_failed_update():
+    """The workers keep the metadata of an update whose finish failed (a
+    partial update a direct reload refuses): the next update must send its
+    own metadata, not reuse the one before the failed update."""
+
+    class FailingFinish(RecordingClient):
+        fail = False
+
+        def finish_weight_update(self, weight_version=None):
+            super().finish_weight_update(weight_version)
+            if self.fail:
+                raise RuntimeError("refused")
+
+    def source(*names):
+        pairs = [(n, torch.zeros(4, device="cuda")) for n in names]
+        return ModuleSource(_module_with(*pairs))
+
+    client = FailingFinish()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client, source=source("v", "w"), packed=False
+    )
+    engine.model_update_group = MagicMock(rank=0)
+
+    engine.send_weights()  # full
+    engine.source, client.fail = source("w"), True  # partial, refused
+    with pytest.raises(RuntimeError, match="refused"):
+        engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    engine.source, client.fail = source("v", "w"), False  # full again
+    engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["v", "w"]
+
+
 def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
     """Empty update info reuses the previous call's metadata for the same
     (model, src) and receives from that src; re-init clears every entry, and
@@ -2710,7 +2926,7 @@ def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
     assert client.last_update_info["names"] == ["w"]
     assert client.last_update_info["shapes"] == [[4, 4]]
     assert client.last_update_info["num_updates_list"] == [2]
-    # One broadcast for indices + one for values per patch.
+    # One broadcast for indices + one for values per wire batch.
     assert engine.model_update_group.broadcast.call_count == 2
     engine.shutdown()
 

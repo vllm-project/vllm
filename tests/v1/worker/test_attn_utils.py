@@ -38,14 +38,20 @@ from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
+    HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
 )
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
-from vllm.v1.hisparse.runtime import _has_hisparse_ops
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    HiSparseRuntime,
+    _has_hisparse_ops,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    HiSparseHotPageSpec,
     HiSparsePageSpec,
     KVCacheConfig,
     KVCacheLayerConfig,
@@ -91,7 +97,11 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
     """Resolve shared MLA geometry before planning; leave other specs alone."""
     specs = {
         "main": MLAAttentionSpec(
-            block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.SPARSE,
         ),
         "indexer": MLAAttentionSpec(
             block_size=block_size,
@@ -164,6 +174,7 @@ def test_resolve_hisparse_specs_before_kv_cache_layout():
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
                 topk_buffer_width=128,
             )
@@ -201,6 +212,7 @@ def test_resolve_hisparse_specs_before_kv_cache_layout():
     layers = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in specs}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
     vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    vllm_config.cache_config.enable_prefix_caching = False
     assert vllm_config.cache_config.kv_cache_layout is None
 
     resolved = attn_utils_module.resolve_hisparse_specs(vllm_config, specs, layers)
@@ -334,6 +346,111 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         )
         == "_DraftBackend"
     )
+
+
+def test_no_attn_metadata_layers_keep_their_layout_without_builders(monkeypatch):
+    """A context-K/V-only drafter's layers keep their kernel blocks, so the cache
+    layout is unchanged, but get no builders: no workspace, no CUDA graph limit
+    and no metadata."""
+    workspaces: list[str] = []
+
+    def backend(name, kernel_block_sizes, cg_support, owns_workspace):
+        class Builder:
+            requires_block_table_width = False
+            supports_update_block_table = False
+
+            def __init__(self, *_args):
+                pass
+
+            def get_cudagraph_support(self, *_args):
+                return cg_support
+
+            def build(self, *_args, **_kwargs):
+                return name
+
+            if owns_workspace:
+
+                def _get_workspace_buffer(self):
+                    workspaces.append(name)
+                    return torch.empty(0)
+
+        return SimpleNamespace(
+            __name__=name,
+            full_cls_name=lambda: name,
+            get_supported_kernel_block_sizes=lambda _spec=None: kernel_block_sizes,
+            get_supported_kernel_block_sizes_for_layers=lambda *_: kernel_block_sizes,
+            get_builder_cls=lambda: Builder,
+        )
+
+    target = backend("Target", [MultipleOf(16)], AttentionCGSupport.ALWAYS, False)
+    draft = backend("Draft", [16, 32, 64], AttentionCGSupport.UNIFORM_BATCH, True)
+    layers = {
+        "target": SimpleNamespace(get_attn_backend=lambda: target),
+        "draft": SimpleNamespace(get_attn_backend=lambda: draft),
+    }
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda _config, _type, names: {name: layers[name] for name in names},
+    )
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    spec = new_kv_cache_spec(
+        block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["target", "draft"], spec)],
+    )
+    vllm_config: Any = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        model_config=SimpleNamespace(max_model_len=1024),
+        scheduler_config=SimpleNamespace(max_num_seqs=2),
+        parallel_config=SimpleNamespace(
+            use_ubatching=False, decode_context_parallel_size=1
+        ),
+    )
+
+    def init(**kwargs):
+        workspaces.clear()
+        return attn_utils.init_attn_backend(
+            kv_cache_config, vllm_config, torch.device("cpu"), **kwargs
+        )
+
+    _, cg_support, _ = init()
+    assert workspaces == ["Draft"]
+    assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+
+    attn_groups, cg_support, kernel_block_sizes = init(
+        no_attn_metadata_layer_names={"draft"}
+    )
+    assert workspaces == []
+    assert cg_support.min_cg_support == AttentionCGSupport.ALWAYS
+    assert (
+        attn_utils.get_varlen_cudagraph_unsupported_backend(attn_groups, vllm_config, 4)
+        is None
+    )
+    # The draft backend still limits the kernel block size.
+    assert kernel_block_sizes == [64]
+    draft_group = attn_groups[0][1]
+    assert draft_group.kernel_block_size == 64
+    assert not draft_group.metadata_builders
+
+    query_start_loc = torch.tensor([0, 4], dtype=torch.int32)
+    attn_metadata = attn_utils.build_attn_metadata(
+        attn_groups,
+        num_reqs=1,
+        num_tokens=4,
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        max_query_len=4,
+        seq_lens=torch.tensor([4], dtype=torch.int32),
+        max_seq_len=4,
+        block_tables=[torch.zeros(1, 4, dtype=torch.int32)],
+        slot_mappings=torch.zeros(1, 4, dtype=torch.int64),
+        kv_cache_config=kv_cache_config,
+    )
+    assert attn_metadata == {"target": "Target"}
 
 
 def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
@@ -839,8 +956,18 @@ def test_allocate_compressed_mla_cache(
     assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
 
 
+_DEVICES = [
+    "cpu",
+    pytest.param(
+        "cuda",
+        marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"),
+    ),
+]
+
+
+@pytest.mark.parametrize("device", _DEVICES)
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
-def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
+def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout, device: str):
     num_blocks = 4
     num_layers = 2
     spec = AttentionSpec(
@@ -849,7 +976,9 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
         head_size=2,
         dtype=torch.float32,
     )
-    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8, device=device
+    )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
     for layer_idx, cache in enumerate(caches):
@@ -891,7 +1020,8 @@ def test_fixed_block_stride_propagates_outward_in_lhbnc():
     assert strides[0] == strides[2] * spec.num_heads
 
 
-def test_copy_kv_cache_blocks_separate_head_groups():
+@pytest.mark.parametrize("device", _DEVICES)
+def test_copy_kv_cache_blocks_separate_head_groups(device: str):
     # LHBNC stores each head group separately, so a block's bytes are scattered
     # across L*H regions.
     layout = KVCacheLayout.LHBNC
@@ -905,7 +1035,9 @@ def test_copy_kv_cache_blocks_separate_head_groups():
         num_head_slots=2,
         state_content_bytes=2 * 2 * 4,
     )
-    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8, device=device
+    )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
     for layer_idx, cache in enumerate(caches):
@@ -927,6 +1059,7 @@ def test_copy_kv_cache_blocks_separate_head_groups():
         torch.testing.assert_close(cache[1], expected[layer_idx][1])
 
 
+@pytest.mark.parametrize("device", _DEVICES)
 @pytest.mark.parametrize(
     "layout,num_layers",
     [
@@ -937,7 +1070,7 @@ def test_copy_kv_cache_blocks_separate_head_groups():
     ],
 )
 def test_copy_kv_cache_blocks_with_virtual_block_splitting(
-    layout: KVCacheLayout, num_layers: int
+    layout: KVCacheLayout, num_layers: int, device: str
 ):
     num_blocks = 4
     physical_per_logical = 2
@@ -947,7 +1080,9 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
         head_size=2,
         dtype=torch.float32,
     )
-    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8, device=device
+    )
     caches = dense_kv_cache_views(
         raw,
         spec,
@@ -1044,6 +1179,86 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         backing.untyped_storage().data_ptr()
         == caches["indexer"].untyped_storage().data_ptr()
     )
+
+
+def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
+    """The row copy data plane sees all heads' K/V without copying host storage."""
+    spec = AttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.bfloat16,
+        topk_buffer_width=2,
+        cache_role=SparseCacheRole.SPARSE,
+        is_index_group_leader=True,
+    )
+    pages = [("layer", spec, HiSparseSourceManager.config(), True)]
+    for suffix, page_spec_cls, manager_config in (
+        ("resident", HiSparsePageSpec, HiSparseResidentManager.config()),
+        ("hot", HiSparseHotPageSpec, HiSparseHotManager.config(blocks_per_request=2)),
+    ):
+        page_spec = page_spec_cls(block_size=2, page_size=32)
+        pages.append((f"layer.hisparse_{suffix}", page_spec, manager_config, False))
+    config = KVCacheConfig(
+        num_blocks=4,
+        hisparse_host_num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=96 if host else 128,
+                layers=[name],
+                layer_stride=32,
+                block_stride=32,
+                host_resident=host,
+            )
+            for name, _, _, host in pages
+        ],
+        kv_cache_groups=[
+            new_kv_cache_group([name], page_spec, manager, host_resident=host)
+            for name, page_spec, manager, host in pages
+        ],
+    )
+    host_backing = torch.zeros(96, dtype=torch.int8)
+    host_pool = SimpleNamespace(
+        allocate=lambda size: host_backing,
+        registered=host_backing,
+        shared_region=None,
+    )
+    caches = allocate_hisparse_kv_caches(
+        config, torch.device("cpu"), KVCacheLayout.BLNHC, [2, 2, 2], host_pool
+    )
+    # Exercise the real bind methods on CPU without starting GPU streams.
+    runtime = object.__new__(HiSparseRuntime)
+    runtime.row_width = 8
+    runtime.kv_dtype = torch.bfloat16
+    runtime.backend = CUDAHiSparseBackend()
+    runtime.is_group_leader = True
+    runtime.index_group = SimpleNamespace(
+        followers=[],
+        device_global_indices=torch.full((1, 2), -1),
+        lru_slots=torch.arange(2),
+        swap_stats=torch.zeros(2),
+    )
+    handle = HiSparseCacheHandle(runtime)
+    # Distinct block/token/head/K/V values in the canonical attention view
+    # detect a silent head/token transpose in the row-copy view.
+    tagged_rows = torch.arange(48, dtype=torch.float32).view(3, 2, 2, 4)
+    caches["layer"].copy_(tagged_rows.to(torch.bfloat16).transpose(1, 2))
+
+    attn_utils_module.bind_hisparse_kv_caches(
+        forward_context={
+            "layer": SimpleNamespace(hisparse_cache=handle, is_draft_layer=False)
+        },
+        kv_cache_config=config,
+        kv_caches=caches,
+        block_tables=SimpleNamespace(
+            input_block_tables=[torch.tensor([[1, 2]], dtype=torch.int32)] * 3,
+            slot_mappings=[torch.arange(2, dtype=torch.int64)] * 3,
+        ),
+        host_pool=host_pool,
+    )
+
+    assert runtime.host_cache.data_ptr() == caches["layer"].data_ptr()
+    torch.testing.assert_close(runtime.host_cache.float(), tagged_rows.view(6, 8))
 
 
 class _TableBuilder:
@@ -1223,7 +1438,8 @@ def test_packed_token_cache_cannot_be_split():
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
 
 
-def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
+@pytest.mark.parametrize("device", _DEVICES)
+def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block(device: str):
     """Hybrid overlays: a Mamba state view and an attention view of one tensor
     share a base address but span different bytes per block, and several such
     tensors live in one allocation (so the whole-storage fast path is off).
@@ -1235,19 +1451,21 @@ def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
     block_stride = 64  # bytes per scheduler block in every tensor
     state_bytes = 24  # Mamba state occupies only the leading bytes of a block
     tensor_bytes = num_blocks * block_stride
-    raw = torch.arange(num_tensors * tensor_bytes, dtype=torch.int32).to(torch.uint8)
+    raw = torch.arange(num_tensors * tensor_bytes, dtype=torch.int32).to(
+        device=device, dtype=torch.uint8
+    )
     storage = raw.untyped_storage()
 
     caches: list[torch.Tensor] = []
     for tensor_idx in range(num_tensors):
         base = tensor_idx * tensor_bytes
-        mamba = torch.empty(0, dtype=torch.int8)
+        mamba = torch.empty(0, dtype=torch.int8, device=device)
         mamba.set_(storage)
         mamba = mamba.as_strided(
             (num_blocks, 1, 1, state_bytes), (block_stride, 1, 1, 1), base
         )
         # 2 kernel pages of 8 int16 per scheduler block cover the whole block.
-        attn = torch.empty(0, dtype=torch.int16)
+        attn = torch.empty(0, dtype=torch.int16, device=device)
         attn.set_(storage)
         attn = attn.as_strided((num_blocks * 2, 1, 8, 2), (16, 16, 2, 1), base // 2)
         assert mamba.data_ptr() == attn.data_ptr()
@@ -1328,6 +1546,7 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
         attn_vllm_config=vllm_config,
         device="cpu",
         draft_attn_layer_names={"draft"},
+        speculative_config=SimpleNamespace(prefill_context_kv_only=False),
         _configure_decode_metadata_update=lambda: None,
     )
     DraftModelSpeculator.set_attn(

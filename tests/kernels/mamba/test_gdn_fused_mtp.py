@@ -89,7 +89,7 @@ def _make_vllm_config():
     config.additional_config = {
         "gdn_prefill_backend": "triton" if current_platform.is_rocm() else "cutedsl"
     }
-    config.cache_config.mamba_cache_mode = "none"
+    config.cache_config.enable_prefix_caching = False
     config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=NUM_SPEC
     )
@@ -398,7 +398,8 @@ def test_fused_model_path_matches_reference(
         output_gate_activation,
     )
     context.no_compile_layers = {PREFIX: fused_layer}
-    fused_out = torch.zeros_like(output_gate)
+    # Poison: the packed entrypoint writes every actual row, so no NaN survives.
+    fused_out = torch.full_like(output_gate, torch.nan)
     fused_mock = MagicMock(wraps=qwen_gdn_linear_attn.fused_mtp_decode_impl())
     with (
         patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=context),

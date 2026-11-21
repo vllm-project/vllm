@@ -23,6 +23,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -213,6 +214,10 @@ class Executor(ABC):
     def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
         return self.collective_rpc("get_kv_cache_layer_configs")
 
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Publish the Mamba block size resolved for the whole model."""
+        self.collective_rpc("set_mamba_block_size", args=(mamba_block_size,))
+
     def get_supported_kv_cache_layouts(self) -> list[list[str]]:
         """Layouts each worker's backends support, most preferred first."""
         return self.collective_rpc("get_supported_kv_cache_layouts")
@@ -327,8 +332,9 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch")
+    def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
+        """Returns the iteration records the output worker has completed."""
+        return self.collective_rpc("execute_dummy_batch")[0]
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")

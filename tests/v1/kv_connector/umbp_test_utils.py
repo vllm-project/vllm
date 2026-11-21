@@ -253,7 +253,7 @@ def mori_has_umbp() -> bool:
     return True
 
 
-@dataclass
+@dataclass(slots=True)
 class StandaloneServer:
     address: str
     process: subprocess.Popen
@@ -366,7 +366,7 @@ def _hybrid_kv_cache_config() -> KVCacheConfig:
     )
     mamba = MambaManager.layer_config(
         MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     return KVCacheConfig(
         num_blocks=8,
