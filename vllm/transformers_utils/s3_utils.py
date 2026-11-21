@@ -4,14 +4,21 @@
 import fnmatch
 from typing import TYPE_CHECKING
 
+from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
 
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
-    from botocore.client import BaseClient
+    from botocore.client import BaseClient  # type: ignore[import-not-found]
 
 try:
-    import boto3
-except ImportError:
+    import boto3  # type: ignore[import-not-found]
+except Exception:
+    logger.warning(
+        "boto3 failed to import; S3 support is unavailable",
+        exc_info=True,
+    )
     boto3 = PlaceholderModule("boto3")  # type: ignore[assignment]
 
 
