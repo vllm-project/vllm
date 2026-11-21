@@ -238,6 +238,12 @@ WeightTransferEngineFactory.register_engine(
 )
 
 WeightTransferEngineFactory.register_engine(
+    "sparse_disk",
+    "vllm.distributed.weight_transfer.sparse_disk_engine",
+    "SparseDiskWeightTransferEngine",
+)
+
+WeightTransferEngineFactory.register_engine(
     "sharded_rdt",
     "vllm.distributed.weight_transfer.sharded_rdt_engine",
     "ShardedRDTWeightTransferEngine",
@@ -274,6 +280,12 @@ WeightTransferTrainerFactory.register_engine(
     "sparse_nccl",
     "vllm.distributed.weight_transfer.sparse_nccl_engine",
     "SparseNCCLTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "sparse_disk",
+    "vllm.distributed.weight_transfer.sparse_disk_engine",
+    "SparseDiskTrainerWeightTransferEngine",
 )
 
 WeightTransferTrainerFactory.register_engine(

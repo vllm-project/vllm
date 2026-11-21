@@ -8,12 +8,14 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 
 import builtins
 import importlib.util
+import json
 import math
 import pickle
 import runpy
 import threading
 import time
 from contextlib import ExitStack, nullcontext
+from dataclasses import asdict
 from functools import cached_property
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -21,9 +23,11 @@ from unittest.mock import MagicMock
 import pybase64 as base64
 import pytest
 import ray
+import safetensors.torch
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
+from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
@@ -37,6 +41,7 @@ from vllm.distributed.weight_transfer import (
     WeightSource,
     WeightTransferEngineFactory,
     WeightTransferTrainerFactory,
+    sparse_disk_engine,
 )
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
@@ -65,6 +70,13 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+)
+from vllm.distributed.weight_transfer.sparse_disk_engine import (
+    SparseDiskTrainerInitInfo,
+    SparseDiskWeightTransferEngine,
+    SparseDiskWeightTransferInitInfo,
+    patch_file,
+    save_sparse_patches,
 )
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLTrainerInitInfo,
@@ -1310,6 +1322,291 @@ def test_sparse_nccl_failed_batch_still_drains_the_wire_cpu(monkeypatch):
 
     assert len(received) == len(wire)
     assert model.b.eq(-1).all()
+
+
+_SPARSE_DISK_BASE = {
+    "a": torch.arange(4, dtype=torch.bfloat16),
+    "b": torch.zeros(2, 2),
+    "c": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e4m3fn),
+}
+
+
+def _write_sparse_disk_checkpoint(folder, weights=_SPARSE_DISK_BASE):
+    """A two-shard checkpoint with an index, in three dtypes."""
+    shards = {
+        "model-00001-of-00002.safetensors": {"a": weights["a"], "c": weights["c"]},
+        "model-00002-of-00002.safetensors": {"b": weights["b"]},
+    }
+    folder.mkdir()
+    weight_map = {}
+    for file, tensors in shards.items():
+        safetensors.torch.save_file(tensors, folder / file)
+        weight_map |= dict.fromkeys(tensors, file)
+    (folder / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map})
+    )
+
+
+def _read_sparse_disk_checkpoint(folder):
+    weights = {}
+    for file in sorted(folder.glob("*.safetensors")):
+        weights |= safetensors.torch.load_file(file)
+    return weights
+
+
+def _bits(weights):
+    return {n: t.contiguous().view(torch.uint8).tolist() for n, t in weights.items()}
+
+
+def _dense_patch(weights, versions):
+    """The weights after writing every patch of `versions`, in order."""
+    weights = {name: t.clone() for name, t in weights.items()}
+    int_views = {1: torch.uint8, 2: torch.int16, 4: torch.int32}
+    for patches in versions:
+        for patch in patches:
+            view = int_views[patch.values.element_size()]
+            flat = weights[patch.name].view(-1).view(view)
+            flat[patch.indices.long()] = patch.values.view(view)
+    return weights
+
+
+_SPARSE_DISK_VERSIONS = [
+    [
+        _sparse_test_patch("a", [0, 3], [9.0, -9.0], torch.bfloat16),
+        _sparse_test_patch("b", [3], [5.0], torch.float32, (2, 2)),
+        _sparse_test_patch("c", [1], [4.0], torch.float8_e4m3fn, (3,)),
+    ],
+    [
+        _sparse_test_patch("a", [3], [7.0], torch.bfloat16),
+        _sparse_test_patch("b", [0, 3], [1.0, 2.0], torch.float32, (2, 2)),
+    ],
+    [
+        _sparse_test_patch("a", [1], [-3.0], torch.bfloat16),
+        _sparse_test_patch("b", [1], [8.0], torch.float32, (2, 2)),
+        _sparse_test_patch("c", [0, 2], [-0.5, 8.0], torch.float8_e4m3fn, (3,)),
+    ],
+]
+
+
+class _SparseDiskServer:
+    """An inference server with one sparse disk worker on a toy model, driven
+    as a `VLLMWeightSyncClient`."""
+
+    def __init__(self, checkpoint):
+        self.model = torch.nn.Module()
+        for name, tensor in _read_sparse_disk_checkpoint(checkpoint).items():
+            self.model.register_parameter(
+                name, torch.nn.Parameter(tensor, requires_grad=False)
+            )
+
+        def load_weights(weights):
+            for name, weight in weights:
+                getattr(self.model, name).data.copy_(weight)
+
+        self.model.load_weights = load_weights
+        vllm_config = create_mock_vllm_config()
+        vllm_config.load_config = LoadConfig()
+        vllm_config.model_config = SimpleNamespace(model=str(checkpoint), revision=None)
+        self.engine = WeightTransferEngineFactory.create_engine(
+            WeightTransferConfig(backend="sparse_disk"),
+            vllm_config,
+            torch.device("cpu"),
+            self.model,
+        )
+        assert isinstance(self.engine, SparseDiskWeightTransferEngine)
+        self.order: list[str] = []
+
+    def weights(self):
+        return {name: p.data for name, p in self.model.named_parameters()}
+
+    def catch_up(self, version):
+        self.start_weight_update()
+        self.update_weights({"version": version})
+        self.finish_weight_update()
+
+    def init_weight_transfer_engine(self, init_info):
+        self.engine.init_transfer_engine(self.engine.parse_init_info(init_info))
+
+    def start_weight_update(self):
+        self.order.append("start")
+        self.engine.start_weight_update()
+
+    def update_weights(self, update_info):
+        self.order.append("update")
+        self.engine.receive_weights(self.engine.parse_update_info(update_info))
+
+    def finish_weight_update(self, weight_version=None):
+        self.order.append("finish")
+        self.engine.finish_weight_update()
+
+
+def _sparse_disk_setup(tmp_path, monkeypatch):
+    """A checkpoint, a patch directory and one server whose trainer published
+    and applied the first two versions through a copy on host1."""
+    import vllm.model_executor.model_loader.reload as reload_mod
+
+    reloads: list[str] = []
+    monkeypatch.setattr(reload_mod, "start_reload", lambda model: reloads.append("s"))
+    monkeypatch.setattr(reload_mod, "finish_reload", lambda *a: reloads.append("f"))
+    checkpoint, patch_dir = tmp_path / "checkpoint", tmp_path / "patches"
+    _write_sparse_disk_checkpoint(checkpoint)
+    patch_dir.mkdir()
+    server = _SparseDiskServer(checkpoint)
+    trainer = WeightTransferTrainerFactory.trainer_init(
+        SparseDiskTrainerInitInfo(
+            patch_dir=str(patch_dir), copy_dir=str(tmp_path / "host1"), rank=0
+        ),
+        client=server,
+    )
+    for patches in _SPARSE_DISK_VERSIONS[:2]:
+        trainer.publish(patches)
+        trainer.send_weights()
+    assert server.order == ["start", "update", "finish"] * 2
+    assert reloads == ["s", "f"] * 2
+    return checkpoint, patch_dir, server, trainer
+
+
+def _late_sparse_disk_server(checkpoint, patch_dir, copy_dir, base_version=0):
+    server = _SparseDiskServer(checkpoint)
+    server.init_weight_transfer_engine(
+        asdict(
+            SparseDiskWeightTransferInitInfo(
+                patch_dir=str(patch_dir),
+                copy_dir=str(copy_dir),
+                base_version=base_version,
+            )
+        )
+    )
+    return server
+
+
+@pytest.mark.parametrize(
+    "late",
+    [
+        "reuses_copy",
+        "joins_update",
+        "replays",
+        "rebuilds_after_reboot",
+        "rebuilds_after_torn_state",
+        "rebuilds_for_new_run",
+        "rebuilds_from_newer_base",
+        "finishes_torn_copy",
+    ],
+)
+def test_sparse_disk_servers_reload_versions_from_a_host_copy_cpu(
+    tmp_path, monkeypatch, late
+):
+    """Every server ends on the densely patched weights: the first through its
+    trainer's sends, a later one by updating to the current version, which reuses
+    the host copy where it is sound and rebuilds and replays it otherwise."""
+    checkpoint, patch_dir, server, trainer = _sparse_disk_setup(tmp_path, monkeypatch)
+    base = _read_sparse_disk_checkpoint(checkpoint)
+    expected = _dense_patch(base, _SPARSE_DISK_VERSIONS[:2])
+    assert _bits(server.weights()) == _bits(expected)
+    copy_dir = tmp_path / "host1"
+    version, base_version = 2, 0
+
+    if late == "reuses_copy":
+        patch_file(patch_dir, 1).unlink()  # pruned: only the copy still has it
+    elif late == "joins_update":
+        # as TP ranks or servers behind one Ray client do: the first server has
+        # loaded version 3 and finishes only after the late one has too
+        trainer.publish(_SPARSE_DISK_VERSIONS[2])
+        server.start_weight_update()
+        server.update_weights({"version": 3})
+        version = 3
+        expected = _dense_patch(base, _SPARSE_DISK_VERSIONS)
+        assert _bits(server.weights()) == _bits(expected)
+    elif late == "replays":
+        copy_dir = tmp_path / "host2"
+    elif late == "rebuilds_after_reboot":
+        # writes that the page cache lost in the reboot
+        shard = copy_dir / "checkpoint" / "model-00002-of-00002.safetensors"
+        safetensors.torch.save_file({"b": torch.zeros(2, 2)}, shard)
+        monkeypatch.setattr(sparse_disk_engine, "_boot_id", lambda: "rebooted")
+    elif late == "rebuilds_after_torn_state":
+        (copy_dir / "state.json").write_text("")  # a crash before it reached the disk
+    elif late == "rebuilds_for_new_run":
+        patch_dir = tmp_path / "patches2"
+        patch_dir.mkdir()
+        new_run = _SPARSE_DISK_VERSIONS[2], _SPARSE_DISK_VERSIONS[0]
+        for v, patches in enumerate(new_run, start=1):
+            save_sparse_patches(patches, patch_dir, v)
+        expected = _dense_patch(base, new_run)
+        # the new run cannot take the copy from the first server's load, or
+        # loads, to its finish, and can after a load that failed
+        server.start_weight_update()
+        server.update_weights({"version": 2})
+        server.update_weights({"version": 2})
+        with pytest.raises(RuntimeError, match="still loading"):
+            _late_sparse_disk_server(checkpoint, patch_dir, copy_dir)
+        server.finish_weight_update()
+        monkeypatch.setattr(server.model, "load_weights", lambda weights: 1 / 0)
+        with pytest.raises(ZeroDivisionError):
+            server.update_weights({"version": 2})
+    elif late == "rebuilds_from_newer_base":
+        # started from a full checkpoint of version 3, whose file was pruned
+        expected = _dense_patch(base, _SPARSE_DISK_VERSIONS)
+        checkpoint = tmp_path / "checkpoint3"
+        _write_sparse_disk_checkpoint(checkpoint, expected)
+        version = base_version = 3
+    else:
+        # The host dies writing version 3: its "a" patch lands, "b" does not.
+        index_put_ = torch.Tensor.index_put_
+        writes = []
+
+        def die_on_second_write(self, *args):
+            writes.append(self)
+            if len(writes) == 2:
+                raise RuntimeError("host died")
+            return index_put_(self, *args)
+
+        trainer.publish(_SPARSE_DISK_VERSIONS[2])
+        with monkeypatch.context() as m:
+            m.setattr(torch.Tensor, "index_put_", die_on_second_write)
+            with pytest.raises(RuntimeError, match="host died"):
+                trainer.send_weights()
+        torn = _late_sparse_disk_server(checkpoint, patch_dir, copy_dir)
+        with pytest.raises(RuntimeError, match="partly at version 3"):
+            torn.catch_up(2)
+        version = 3
+        expected = _dense_patch(base, _SPARSE_DISK_VERSIONS)
+
+    late_server = _late_sparse_disk_server(
+        checkpoint, patch_dir, copy_dir, base_version
+    )
+    late_server.catch_up(version)
+    assert _bits(late_server.weights()) == _bits(expected)
+    assert _bits(_read_sparse_disk_checkpoint(tmp_path / "checkpoint")) == _bits(base)
+
+
+@pytest.mark.parametrize(
+    ("bad", "error"),
+    [
+        (_sparse_test_patch("d", [0], [1.0], torch.float32), "not in the checkpoint"),
+        (_sparse_test_patch("a", [0], [1.0], torch.bfloat16, (2, 2)), "shape"),
+        (_sparse_test_patch("a", [0], [1.0], torch.float32), "values are F32"),
+        (_sparse_test_patch("a", [4], [1.0], torch.bfloat16), "bad indices"),
+    ],
+)
+def test_sparse_disk_bad_file_changes_nothing_cpu(tmp_path, monkeypatch, bad, error):
+    """A file with one bad patch is refused before any write; versions are
+    published once and only move forward."""
+    checkpoint, patch_dir, server, _ = _sparse_disk_setup(tmp_path, monkeypatch)
+    expected = _bits(server.weights())
+    good = _sparse_test_patch("b", [1], [3.0], torch.float32, (2, 2))
+    save_sparse_patches([good, bad], patch_dir, 3)
+    with pytest.raises(FileExistsError):
+        save_sparse_patches([good], patch_dir, 3)
+
+    with pytest.raises(ValueError, match=error):
+        server.update_weights({"version": 3})
+    with pytest.raises(RuntimeError, match="newer than 1"):
+        server.update_weights({"version": 1})
+    late_server = _late_sparse_disk_server(checkpoint, patch_dir, tmp_path / "host1")
+    patch_file(patch_dir, 1).unlink()  # so it can only reload the copy
+    late_server.catch_up(2)
+    assert _bits(late_server.weights()) == expected
 
 
 # --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
