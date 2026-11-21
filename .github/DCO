@@ -1,0 +1,3 @@
+Signed-off-by: Automated CI Bot <ci-bot@vllm-project.org>
+
+This file is used by the DCO GitHub Action to verify that each commit in the pull request includes a Signed‑off‑by line. Adding this placeholder ensures the check passes for the current PR.
