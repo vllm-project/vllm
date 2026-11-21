@@ -218,11 +218,12 @@ class NanoNemotronVLMultiModalInputs(TypedDict, total=False):
 
 class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> NanoNemotronVLProcessor:
-        # Not accepted by NanoNemotronVLProcessor.__init__
-        kwargs.pop("truncation", None)
+        # Audio extraction is handled by this model's processor wrapper.
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        for key in ("truncation", "load_audio_from_video", "use_audio_in_video"):
+            kwargs.pop(key, None)
 
-        return self.ctx.init_processor(
-            NanoNemotronVLProcessor,
+        return NanoNemotronVLProcessor(
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             video_token=self.get_video_token(),
@@ -725,7 +726,7 @@ class NanoNemotronVLMultiModalProcessor(
         inputs.hf_processor_mm_kwargs = {
             k: v
             for k, v in inputs.hf_processor_mm_kwargs.items()
-            if k != "use_audio_in_video"
+            if k not in ("load_audio_from_video", "use_audio_in_video")
         }
 
         if not (use_audio_in_video and "video" in inputs.mm_data_items):
