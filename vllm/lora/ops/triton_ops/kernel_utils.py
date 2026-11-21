@@ -141,6 +141,7 @@ def do_expand_kernel(
     CAST_TYPE: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
     USE_GDC: tl.constexpr,
+    FP32_ADD_INPUTS: tl.constexpr = False,
 ):
     """Given an array of integers that identifies the rows of A, ram,
     a lora index that identifies which LoRA to use from lora_ptr, lora_index,
@@ -229,7 +230,13 @@ def do_expand_kernel(
 
     if ADD_INPUTS:
         tiled_out = tl.load(c_ptr, mask=c_mask)
-        tiled_c += tiled_out
+        if FP32_ADD_INPUTS:
+            # Round once: out = rnd(acc + out) instead of rnd(rnd(acc) + out).
+            tiled_c = (accumulator + tiled_out.to(tl.float32)).to(
+                out_ptr.dtype.element_ty
+            )
+        else:
+            tiled_c += tiled_out
     tl.store(c_ptr, tiled_c, mask=c_mask)
 
 
