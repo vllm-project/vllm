@@ -195,7 +195,17 @@ def _reconstruct_replayssm_state(
 )
 @pytest.mark.parametrize(
     "width,query_len,accepted",
-    [(1, 1, 1), (3, 3, 2), (4, 3, 2), (6, 6, 4), (8, 6, 4), (8, 8, 4)],
+    [
+        (1, 1, 1),
+        (2, 2, 1),
+        (3, 3, 2),
+        (4, 3, 2),
+        (5, 4, 3),
+        (6, 6, 4),
+        (7, 7, 5),
+        (8, 6, 4),
+        (8, 8, 4),
+    ],
 )
 @torch.inference_mode()
 def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
