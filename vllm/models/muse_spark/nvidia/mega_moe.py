@@ -243,11 +243,11 @@ class MuseSparkMegaMoEExperts(nn.Module):
             elif self.is_nvfp4:
                 self._prepare_native_nvfp4_weights()
             else:
-                l1, l2 = deep_gemm.transform_weights_for_mega_moe(
+                # L2 comes back as the parameter itself.
+                l1, _ = deep_gemm.transform_weights_for_mega_moe(
                     self.w13_weight.data, self.w2_weight.data
                 )
                 replace_parameter(self, "w13_weight", l1)
-                replace_parameter(self, "w2_weight", l2)
         # The kernel applies gamma verbatim; fold in the zero-centered gain.
         norm = self.post_expert_norm
         gamma = norm.weight.data.float()
@@ -261,7 +261,8 @@ class MuseSparkMegaMoEExperts(nn.Module):
             packed = sf.data.view(torch.uint8).contiguous().view(torch.int32)
             return packed.transpose(-1, -2).contiguous().transpose(-1, -2)
 
-        (w13, sf13), (w2, sf2) = _get_deep_gemm().transform_weights_for_mega_moe(
+        # The L2 weight comes back as the parameter itself.
+        (w13, sf13), (_, sf2) = _get_deep_gemm().transform_weights_for_mega_moe(
             (
                 self.w13_weight.data.view(torch.int8),
                 sf_to_kernel_layout(self.w13_weight_scale),
@@ -273,7 +274,6 @@ class MuseSparkMegaMoEExperts(nn.Module):
         )
         replace_parameter(self, "w13_weight", w13.view(torch.uint8))
         replace_parameter(self, "w13_weight_scale", sf13)
-        replace_parameter(self, "w2_weight", w2.view(torch.uint8))
         replace_parameter(self, "w2_weight_scale", sf2)
 
     def _prepare_trtllm_weights(self) -> None:
