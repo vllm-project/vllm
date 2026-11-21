@@ -236,12 +236,10 @@ def _digest_num_accepted_by_pos_samples(
     #   {idx: 1}, [5, 3, 1]
     # ]
     #
-    max_pos = 0
     values_by_labels: dict[frozenset[tuple[str, str]], dict[int, int]] = {}
 
     for s in samples:
         position = int(s.labels["position"])
-        max_pos = max(max_pos, position)
 
         labels_key = frozenset(_strip_label(s.labels, "position").items())
         if labels_key not in values_by_labels:
@@ -251,7 +249,7 @@ def _digest_num_accepted_by_pos_samples(
     output = []
     for labels_key, values_by_position in values_by_labels.items():
         labels = dict(labels_key)
-        values = [0] * (max_pos + 1)
+        values = [0] * (max(values_by_position) + 1)
         for pos, val in values_by_position.items():
             values[pos] = val
         output.append((labels, values))
