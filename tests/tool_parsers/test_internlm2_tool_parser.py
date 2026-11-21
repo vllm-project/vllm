@@ -10,29 +10,37 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from tests.tool_parsers.utils import run_tool_extraction_streaming
+from tests.tool_parsers.utils import (
+    run_tool_extraction_nonstreaming,
+    run_tool_extraction_streaming,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
 
 
+@pytest.fixture
+def internlm2_tokenizer(
+    default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
+) -> TokenizerLike:
+    """Add some internlm2 specific tokens to the default vocab."""
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    monkeypatch.setattr(
+        default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+    )
+    return default_tokenizer
+
+
 class TestInternLM2ToolParser(ToolParserTests):
     @pytest.fixture
-    def tokenizer(
-        self, default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
-    ) -> TokenizerLike:
-        """Add some internlm2 specific tokens to the default vocab."""
-        tokenizer_vocab = default_tokenizer.get_vocab()
-        tokenizer_vocab.update(
-            {
-                "<|action_start|>": 92540,
-                "<|plugin|>": 92541,
-                "<|action_end|>": 92542,
-            }
-        )
-        monkeypatch.setattr(
-            default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
-        )
-        return default_tokenizer
+    def tokenizer(self, internlm2_tokenizer: TokenizerLike) -> TokenizerLike:
+        return internlm2_tokenizer
 
     @pytest.fixture
     def test_config(self) -> ToolParserTestConfig:
@@ -44,10 +52,13 @@ class TestInternLM2ToolParser(ToolParserTests):
                 '<|action_start|><|plugin|>{"name": "get_weather", '
                 '"parameters": {"city": "Tokyo"}}<|action_end|>'
             ),
-            # InternLM2 doesn't support parallel calls
+            # A single InternLM2 turn normally holds one tool call, but the
+            # parser extracts every block the model emits.
             parallel_tool_calls_output=(
                 '<|action_start|><|plugin|>{"name": "get_weather", '
                 '"parameters": {"city": "Tokyo"}}<|action_end|>'
+                '<|action_start|><|plugin|>{"name": "get_time", '
+                '"parameters": {"timezone": "UTC"}}<|action_end|>'
             ),
             various_data_types_output="""<|action_start|><|plugin|>{
   "name": "test_function",
@@ -95,8 +106,8 @@ class TestInternLM2ToolParser(ToolParserTests):
             single_tool_call_expected_name="get_weather",
             single_tool_call_expected_args={"city": "Tokyo"},
             single_tool_call_expected_content=None,
-            parallel_tool_calls_count=1,  # InternLM2 only supports single tool calls
-            parallel_tool_calls_names=["get_weather"],
+            parallel_tool_calls_count=2,
+            parallel_tool_calls_names=["get_weather", "get_time"],
             # Parser-specific settings
             allow_empty_or_json_empty_args=True,
             # xfail markers
@@ -128,21 +139,10 @@ class TestInternLM2ToolParser(ToolParserTests):
 
 
 def test_streaming_arguments_in_single_delta(
-    default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
+    internlm2_tokenizer: TokenizerLike,
 ) -> None:
     """Arguments arriving whole in one delta must not be dropped."""
-    tokenizer_vocab = default_tokenizer.get_vocab()
-    tokenizer_vocab.update(
-        {
-            "<|action_start|>": 92540,
-            "<|plugin|>": 92541,
-            "<|action_end|>": 92542,
-        }
-    )
-    monkeypatch.setattr(
-        default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
-    )
-    parser = Internlm2ToolParser(default_tokenizer)
+    parser = Internlm2ToolParser(internlm2_tokenizer)
 
     deltas = [
         '<|action_start|><|plugin|>{"name": "get_weather"',
@@ -197,3 +197,86 @@ def test_streaming_arguments_match_final_arguments(
     streamed = reconstructor.tool_calls[0].function.arguments
     streamed += parser.get_remaining_unstreamed_args()
     assert streamed == '{"location": "Beijing", "days": 3}'
+
+
+TWO_TOOL_CALLS_OUTPUT = (
+    "Let me check both for you. "
+    '<|action_start|><|plugin|>{"name": "get_weather", '
+    '"parameters": {"city": "Tokyo"}}<|action_end|>'
+    '<|action_start|><|plugin|>{"name": "get_time", '
+    '"parameters": {"timezone": "UTC"}}<|action_end|>'
+)
+
+
+def test_multiple_blocks_extract_every_tool_call(
+    internlm2_tokenizer: TokenizerLike,
+) -> None:
+    """Regression for #44139.
+
+    Two `<|action_start|><|plugin|>` blocks used to raise
+    `ValueError: too many values to unpack`; guarding the split with a
+    `maxsplit` still silently dropped the second call. Every block must
+    become a tool call, and the leading text must stay content.
+    """
+    parser = Internlm2ToolParser(internlm2_tokenizer)
+
+    extracted = run_tool_extraction_nonstreaming(parser, TWO_TOOL_CALLS_OUTPUT)
+
+    assert extracted.tools_called
+    assert [call.function.name for call in extracted.tool_calls] == [
+        "get_weather",
+        "get_time",
+    ]
+    assert json.loads(extracted.tool_calls[0].function.arguments) == {"city": "Tokyo"}
+    assert json.loads(extracted.tool_calls[1].function.arguments) == {"timezone": "UTC"}
+    assert extracted.content == "Let me check both for you. "
+
+
+def test_multiple_blocks_stream_across_deltas(
+    internlm2_tokenizer: TokenizerLike,
+) -> None:
+    """Each block arriving in its own delta must yield its own tool call."""
+    parser = Internlm2ToolParser(internlm2_tokenizer)
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [
+            '<|action_start|><|plugin|>{"name": "get_weather", '
+            '"parameters": {"city": "Tokyo"}}<|action_end|>',
+            '<|action_start|><|plugin|>{"name": "get_time", '
+            '"parameters": {"timezone": "UTC"}}<|action_end|>',
+        ],
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_weather",
+        "get_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Tokyo"
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "timezone": "UTC"
+    }
+
+
+def test_multiple_blocks_stream_in_one_delta(
+    internlm2_tokenizer: TokenizerLike,
+) -> None:
+    """Both blocks arriving in one delta must still yield both tool calls."""
+    parser = Internlm2ToolParser(internlm2_tokenizer)
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [TWO_TOOL_CALLS_OUTPUT],
+        assert_one_tool_per_delta=False,
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_weather",
+        "get_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "timezone": "UTC"
+    }
+    assert reconstructor.other_content == "Let me check both for you. "
