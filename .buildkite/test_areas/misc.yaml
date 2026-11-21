@@ -180,7 +180,52 @@ steps:
   key: v1-kv-connectors
   automatic_shard: true
   timeout_in_minutes: 45
-  source_file_dependencies: *v1-core-kv-metrics-deps
+  # The shared list excludes kv_transfer, including the native offloading connector.
+  source_file_dependencies:
+    - vllm/config/
+    - vllm/distributed/__init__.py
+    - vllm/distributed/aux_output_connector/
+    - vllm/distributed/communication_op.py
+    - vllm/distributed/device_communicators/
+    - vllm/distributed/ec_transfer/
+    - vllm/distributed/elastic_ep/
+    - vllm/distributed/eplb/
+    - vllm/distributed/kv_events.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+    - vllm/distributed/localization.py
+    - vllm/distributed/mooncake_store.py
+    - vllm/distributed/nixl_utils.py
+    - vllm/distributed/parallel_state.py
+    - vllm/distributed/pp_transport/
+    - vllm/distributed/stateless_coordinator.py
+    - vllm/distributed/utils.py
+    - vllm/distributed/weight_transfer/
+    - vllm/engine/
+    - vllm/entrypoints/pooling/
+    - vllm/inputs/
+    - vllm/lora/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/outputs.py
+    - vllm/platforms/
+    - vllm/pooling_params.py
+    - vllm/profiler/
+    - vllm/sampling_params.py
+    - vllm/tokenizers/
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/core
+    - tests/v1/executor
+    - tests/v1/kv_offload
+    - tests/v1/simple_kv_offload
+    - tests/v1/worker
+    - tests/v1/streaming_input
+    - tests/v1/kv_connector/unit
+    - tests/v1/ec_connector/unit
+    - tests/v1/metrics
+    - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -196,9 +241,8 @@ steps:
       depends_on:
       - image-build-amd
 
-# The shared KV Connectors steps above exclude vllm/distributed/kv_transfer/ from
-# their triggers, and CUDA skips MoRIIO's mori/aiter-gated tests. Run the whole
-# MoRIIO suite on ROCm whenever the connector or its tests change.
+# The KV Connectors step excludes MoRIIO sources, and CUDA skips its mori/aiter-gated
+# tests. Run the whole MoRIIO suite on ROCm when the connector or its tests change.
 - label: ":amd: (MI355 DPX) MoRIIO Connector Unit Tests"
   key: amd-moriio-connector-unit-mi355
   automatic_shard: true
