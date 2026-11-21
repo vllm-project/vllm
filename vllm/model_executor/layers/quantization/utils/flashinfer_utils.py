@@ -468,6 +468,18 @@ def align_mxfp8_moe_weights_for_fi_trtllm(
     )
 
 
+def _deepseek_fp8_shuffle_rows(w: torch.Tensor, swap: bool) -> torch.Tensor:
+    """Row permutation of the BlockMajorK shuffle, shared by every expert; the
+    W13 to W31 swap rotates it by half."""
+    from flashinfer.utils import get_shuffle_matrix_a_row_indices
+
+    m = w.shape[1]
+    rows = get_shuffle_matrix_a_row_indices(w[0].view(torch.uint8), 64)
+    if swap:
+        rows = (rows + m // 2) % m
+    return rows.to(w.device)
+
+
 def _shuffle_deepseek_fp8_moe_weights(
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -478,11 +490,13 @@ def _shuffle_deepseek_fp8_moe_weights(
     Returns 4D weight tensors in BlockMajorK layout
     (E, K/block_k, Mn, block_k)
     """
-    return _shuffle_deepseek_fp8_moe_weights_(
-        w13.clone(memory_format=torch.contiguous_format),
-        w2.clone(memory_format=torch.contiguous_format),
-        swap_w13=False,
+    w13_out, w2_out = (
+        gather_rows(w, _deepseek_fp8_shuffle_rows(w, False), 128).view(
+            torch.float8_e4m3fn
+        )
+        for w in (w13, w2)
     )
+    return w13_out, w2_out
 
 
 def _shuffle_deepseek_fp8_moe_weights_(
@@ -492,19 +506,11 @@ def _shuffle_deepseek_fp8_moe_weights_(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """`_shuffle_deepseek_fp8_moe_weights` in place, returning BlockMajorK views
     of the inputs' storage; with `swap_w13`, also swaps W13 to W31 first."""
-    from flashinfer.utils import get_shuffle_matrix_a_row_indices
-
-    epilogue_tile_m = 64
     block_k = 128
 
     def shuffle_to_block_major_k(w: torch.Tensor, swap: bool) -> torch.Tensor:
-        # The shuffle is one row permutation for every expert; the W31 swap
-        # rotates its rows by half, so both fold into one gather.
         num_experts, m, k = w.shape
-        rows = get_shuffle_matrix_a_row_indices(w[0].view(torch.uint8), epilogue_tile_m)
-        if swap:
-            rows = (rows + m // 2) % m
-        rows = rows.to(w.device)
+        rows = _deepseek_fp8_shuffle_rows(w, swap)
         chunk = max(1, (1 << 30) // (m * k))  # bounds the scratch to ~1 GiB
         for start in range(0, num_experts, chunk):
             part = w[start : start + chunk]
@@ -594,6 +600,8 @@ def prepare_fp8_moe_layer_for_fi(
     Note that for per-tensor and for MXFP8 TRT-LLM, we update the layer's
     intermediate size (and for MXFP8 TRT-LLM its hidden size) if the weights
     needed padding.
+
+    Block-FP8 (DeepSeek-style) TRT-LLM shuffles `w13` and `w2` in place.
     """
     assert hasattr(layer.moe_config, "is_act_and_mul")
     block_quant = (

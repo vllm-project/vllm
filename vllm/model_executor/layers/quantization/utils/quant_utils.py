@@ -1026,10 +1026,9 @@ def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tens
 def gather_rows(
     t: torch.Tensor, index: torch.Tensor, block_k: int | None = None
 ) -> torch.Tensor:
-    """`t[:, index]` as bytes for a tensor [E, N, K]: one gather for every
-    expert, moving whole rows in the widest word that divides a row (a
-    byte-wise gather is far below bandwidth). With `block_k`, the result is
-    also in block layout [E, K // block_k, N, block_k] (bytes)."""
+    """`t[:, index]` as bytes for a tensor [E, N, K], moving whole rows in the
+    widest word that divides a row. With `block_k`, the result is in block
+    layout [E, K // block_k, N, block_k]."""
     t = t.view(torch.uint8)
     if block_k is not None:
         e, n, k = t.shape

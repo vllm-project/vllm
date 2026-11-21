@@ -989,11 +989,13 @@ def _maybe_convert_weights_for_experts(
         activation=SimpleNamespace(is_gated=True),
     )
 
+    # rank_weights views the shared master weights, which the TRT-LLM
+    # block-FP8 converter would shuffle in place.
     w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
         fp8_backend=backend,
         layer=mock_layer,
-        w13=rank_weights.w1,
-        w2=rank_weights.w2,
+        w13=rank_weights.w1.clone(),
+        w2=rank_weights.w2.clone(),
         w13_scale=rank_weights.w1_scale,
         w2_scale=rank_weights.w2_scale,
         w13_input_scale=None,
