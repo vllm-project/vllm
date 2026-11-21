@@ -281,6 +281,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 pooling_task=self.pooling_task,
                 prompts=prompts,
                 tokenization_kwargs=ctx.tokenization_kwargs,
+                add_special_tokens=ctx.add_special_tokens,
                 pooling_params=ctx.pooling_params,
                 lora_request=ctx.lora_request,
                 priorities=ctx.priorities,
@@ -1023,6 +1024,24 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     name = "jina-reranking-scoring"
     pooling_task: PoolingTask = "token_embed"
 
+    @staticmethod
+    def _extract_instruction(
+        *,
+        merged_chat_template_kwargs: dict[str, Any] | None,
+        extra_kwargs: dict[str, Any] | None,
+    ) -> str | None:
+        """Resolve instruction from merged chat template kwargs first, then
+        legacy top-level `extra_kwargs["instruction"]`."""
+        if isinstance(merged_chat_template_kwargs, dict):
+            instruction = merged_chat_template_kwargs.get("instruction")
+            if instruction is not None:
+                return instruction
+        if isinstance(extra_kwargs, dict):
+            instruction = extra_kwargs.get("instruction")
+            if instruction is not None:
+                return instruction
+        return None
+
     def get_request_factory_online(
         self, ctx: PoolingServeContext
     ) -> Sequence[AnyRenderParam]:
@@ -1047,8 +1066,12 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         chat_template_kwargs = (
             prompt_extras.get("chat_template_kwargs") if prompt_extras else None
         )
-        instruction = (
-            chat_template_kwargs.get("instruction") if chat_template_kwargs else None
+        extra_kwargs = (
+            ctx.pooling_params.extra_kwargs if ctx.pooling_params is not None else None
+        )
+        instruction = self._extract_instruction(
+            merged_chat_template_kwargs=chat_template_kwargs,
+            extra_kwargs=extra_kwargs,
         )
 
         if len(queries) == 1:
@@ -1088,15 +1111,16 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
             scoring_data = self._truncate_scoring_data(
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
-        prompt_extras = ctx.pooling_params.extra_kwargs
 
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
-        chat_template_kwargs = (
-            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
+        extra_kwargs = (
+            ctx.pooling_params.extra_kwargs if ctx.pooling_params is not None else None
         )
-        instruction = (
-            chat_template_kwargs.get("instruction") if chat_template_kwargs else None
+        merged_chat_template_kwargs = ctx.build_chat_template_kwargs(ctx.pooling_params)
+        instruction = self._extract_instruction(
+            merged_chat_template_kwargs=merged_chat_template_kwargs,
+            extra_kwargs=extra_kwargs,
         )
 
         if len(queries) == 1:
@@ -1119,6 +1143,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 pooling_task=self.pooling_task,
                 prompts=prompts,
                 tokenization_kwargs=ctx.tokenization_kwargs,
+                add_special_tokens=ctx.add_special_tokens,
                 pooling_params=ctx.pooling_params,
                 lora_request=ctx.lora_request,
                 priorities=ctx.priorities,
