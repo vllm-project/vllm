@@ -235,3 +235,29 @@ def test_budget_reflect_tags_do_not_break_adapter_pipeline(
     assert json.loads(tool_result.tool_calls[0].function.arguments) == {
         "city": "Barcelona"
     }
+
+
+class TestReasoningEndSeparator:
+    """The Seed-OSS template writes `</seed:think>\\n` before the answer, and
+    that newline is not part of the content."""
+
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            (f"Reasoning.{THINK_END}\nThe answer.", "The answer."),
+            (f"Reasoning.{THINK_END}The answer.", "The answer."),
+            # Only the separator is consumed
+            (f"Reasoning.{THINK_END}\n\nThe answer.", "\nThe answer."),
+        ],
+    )
+    def test_non_streaming(self, mock_tokenizer, output, expected):
+        parser = SeedOssParser(mock_tokenizer)
+        assert parser.extract_reasoning(output, None) == ("Reasoning.", expected)
+
+    def test_streaming(self, mock_tokenizer):
+        reasoning, content = simulate_reasoning_streaming(
+            SeedOssParser(mock_tokenizer),
+            ["Reasoning.", THINK_END, "\n", "The answer."],
+            [(_TEXT_ID,), (_THINK_END_ID,), (_TEXT_ID,), (_TEXT_ID,)],
+        )
+        assert (reasoning, content) == ("Reasoning.", "The answer.")

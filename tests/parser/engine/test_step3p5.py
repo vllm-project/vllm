@@ -67,9 +67,10 @@ def test_enable_thinking_false_is_ignored(mock_tokenizer):
 
 def test_newline_before_think_end_dropped(parser):
     text = "Line one.\nLine two.\n</think>\nThe answer."
+    # The template's `</think>\n` separator is not part of the content either
     assert parser.extract_reasoning(text, None) == (
         "Line one.\nLine two.",
-        "\nThe answer.",
+        "The answer.",
     )
 
 
@@ -80,7 +81,7 @@ def test_newline_before_think_end_dropped_streaming(parser):
         [(_TEXT_ID,), (_TEXT_ID,), (_THINK_END_ID,), (_TEXT_ID,)],
     )
     assert reasoning == "Line one.\nLine two."
-    assert content == "\nThe answer."
+    assert content == "The answer."
 
 
 class TestPriorTurnReasoning:

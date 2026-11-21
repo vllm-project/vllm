@@ -113,21 +113,23 @@ EMPTY_STREAMING = {
 NEW_LINE = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
     "reasoning": "\nThis is a reasoning section",
-    "content": "\nThis is the rest",
+    # The template's `</think>\n` separator is not part of the content
+    "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 NEW_LINE_STREAMING = {
     "output": "\n<think>This is a reasoning section\n</think>\nThis is the rest",
     "reasoning": "\nThis is a reasoning section",
-    "content": "\nThis is the rest",
+    "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 NEW_LINE_STREAMING_COMPLEX_CONTENT = {
     "output": "\n This is a \n reasoning section\n\n\n</think>\n\nThis is the rest",
     "reasoning": "\n This is a \n reasoning section",
-    "content": "\n\nThis is the rest",
+    # Only the one-newline separator is consumed
+    "content": "\nThis is the rest",
     "is_reasoning_end": True,
 }
 
