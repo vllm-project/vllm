@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 specialized decode: a CuTe decode executor over the stock backbone, enabled
-by `additional_config={"decode_backend": "latency_specialized"}`."""
+by default where the deployment supports it; `decode_backend=stock` disables it and
+`decode_backend=latency_specialized` requires it."""
 
 from dataclasses import dataclass
 
@@ -30,15 +31,22 @@ class DecodeConfig:
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     """The deployment's specialized decode settings, None for the stock decode.
-    Raises when the specialized decode is requested for an unsupported deployment."""
+    Auto falls back for an unsupported deployment; latency_specialized raises."""
     extra = vllm_config.additional_config
     backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
-    if backend == "auto":
+    if backend == "stock":
         return None
-    if backend != "latency_specialized":
-        raise ValueError("Supported decode_backend values are auto/latency_specialized")
+    if backend not in ("auto", SPECIALIZED):
+        raise ValueError(
+            "Supported decode_backend values are auto/stock/latency_specialized"
+        )
     reason = unsupported(vllm_config)
     if reason is not None:
+        if backend == "auto":
+            logger.info_once(
+                "Kimi K3 specialized decode off: no support for %s", reason
+            )
+            return None
         raise ValueError(f"Kimi K3 specialized decode does not support {reason}")
     spec = vllm_config.speculative_config
     if spec is not None:
@@ -130,6 +138,15 @@ def unsupported(vllm_config) -> str | None:
     ep = parallel.enable_expert_parallel
     checks = (
         (not current_platform.is_device_capability_family(100), "this GPU (SM100/103)"),
+        (
+            vllm_config.model_config.dtype != torch.bfloat16,
+            "activation dtypes but BF16",
+        ),
+        # The routed-expert kernels read the native MXFP4 checkpoint's weights.
+        (
+            vllm_config.model_config.quantization != "mxfp4",
+            "checkpoints other than the native MXFP4 one",
+        ),
         (
             moe != ("situ", 4.0, 25.0, 896, 16, 1, 1, "sigmoid"),
             "MoE configs but the one-group sigmoid top-16 SiTU MoE of Kimi K3",
