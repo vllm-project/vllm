@@ -328,7 +328,7 @@ def test_fused_post_conv_int64_token_offset():
         pytest.param(
             3,
             1,
-            (4,) * 7 + (2, 0),
+            (9,) + (4,) * 6 + (2, 0),
             torch.float16,
             torch.bfloat16,
             id="ratio3-9reqs-fp16",

@@ -136,6 +136,8 @@ MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
 # regression was at 272 tokens (27B BF16 TP8).
 _BA_PROJ_OVERLAP_MAX_TOKENS = 256
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16, torch.float16)
+# AITER's fused_gdn_decode_qkvz rejects FP16 state.
+AITER_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
 def supports_fused_mtp_decode() -> bool:
@@ -938,7 +940,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or self.norm.activation != "silu"
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
-            or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
+            or recurrent_state_dtype not in AITER_GDN_STATE_DTYPES
             # The kernel emits the normed output, so out_proj cannot quantize it.
             or not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
             or self.speculative_config is not None

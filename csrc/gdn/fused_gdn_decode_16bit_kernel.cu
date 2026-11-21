@@ -4,7 +4,8 @@
  *
  * Fused GDN MTP decode for BF16/FP16 recurrent state, used when V is not split
  * across CTAs (fused_gdn_decode_kernel.cu handles FP32 state and small
- * batches). Same semantics as that kernel, and bit-identical results.
+ * batches). Same semantics as that kernel, and bit-identical to its unsplit
+ * (SplitV == 1) path, the one it replaces.
  *
  * The lane layout, 128-bit register-direct state access, padded q/k shared
  * layout and packed f32x2 math are adapted from FlashInfer's cake_gdn
@@ -201,8 +202,9 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
   }
 
   const int key_head = value_head / ValueHeadsPerKeyHead;
-  __shared__ float shared_q[kMaxMtpTokens][kQkWidth];
-  __shared__ float shared_k[kMaxMtpTokens][kQkWidth];
+  // Read as float4 below.
+  __shared__ __align__(16) float shared_q[kMaxMtpTokens][kQkWidth];
+  __shared__ __align__(16) float shared_k[kMaxMtpTokens][kQkWidth];
   __shared__ __nv_bfloat16 shared_v[kMaxMtpTokens][kDim];
   __shared__ __nv_bfloat16 shared_out[kMaxMtpTokens][kDim];
   __shared__ float shared_decay[kMaxMtpTokens];
