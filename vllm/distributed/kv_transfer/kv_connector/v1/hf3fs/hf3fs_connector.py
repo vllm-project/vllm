@@ -111,9 +111,11 @@ class AsyncOperationManager:
         self._numjobs = connector._numjobs
         self._max_device_buffer_count = connector._max_device_buffer_count
 
-        # Operation tracking
+        # Operation tracking. Each load future keeps the block ids submitted
+        # with it so a failed result can be reported with finished_recving.
         self._save_futures: dict[str, list[Future]] = {}
-        self._load_futures: dict[str, Future] = {}
+        self._load_futures: dict[str, tuple[Future, list[int]]] = {}
+        self._load_error_block_ids: set[int] = set()
         self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
@@ -180,10 +182,14 @@ class AsyncOperationManager:
 
     def submit_load_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a load operation for async execution."""
+        # Copy so a caller that reuses the lists cannot change the ids this
+        # future will report if the load fails.
+        block_ids = list(block_ids)
+        block_hashes = list(block_hashes)
         future: Future[Any] = Future()
         task = (request_id, block_ids, block_hashes, future)
         self._load_queue.put(task)
-        self._load_futures[request_id] = future
+        self._load_futures[request_id] = (future, block_ids)
         return future
 
     def get_finished_operations(
@@ -226,13 +232,36 @@ class AsyncOperationManager:
         return completed
 
     def _check_completed_loads(self) -> set[str]:
-        """Check for completed load operations."""
+        """Check for completed load operations.
+
+        A failed load is still completed: the request is returned to the
+        scheduler, and its block ids stay available until
+        `get_block_ids_with_load_errors` drains them in the same pass.
+        """
         completed = set()
         for request_id in list(self._load_futures):
-            if self._load_futures[request_id].done():
+            future, block_ids = self._load_futures[request_id]
+            if future.done():
+                if not self._load_succeeded(future):
+                    self._load_error_block_ids.update(block_ids)
                 completed.add(request_id)
                 self._load_futures.pop(request_id)
         return completed
+
+    def take_load_error_block_ids(self) -> set[int]:
+        """Drain block ids from loads observed as unsuccessful."""
+        failed = self._load_error_block_ids
+        self._load_error_block_ids = set()
+        return failed
+
+    @staticmethod
+    def _load_succeeded(future: Future) -> bool:
+        """True only when the load future resolved to success."""
+        try:
+            return future.result() is True
+        except Exception:
+            logger.exception("HF3FS load future completed with an exception")
+            return False
 
     def _all_saves_done(self, request_id: str) -> bool:
         """Check if all save operations for a request are completed."""
@@ -668,6 +697,18 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
         return self._async_manager.get_finished_operations(finished_req_ids)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Block ids whose load failed, latched by the latest `get_finished`.
+
+        The worker reads `get_transfer_results` before this method. Failures
+        are recorded while that call collects `finished_recving`, so the ids
+        are visible in the same pass and are not dropped with the future.
+        """
+        manager = getattr(self, "_async_manager", None)
+        if manager is None:
+            return set()
+        return manager.take_load_error_block_ids()
 
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
         """Get the KV connector stats collected during the last interval."""

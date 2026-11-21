@@ -5,7 +5,10 @@
 - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
 """
 
+import contextlib
 import os
+import threading
+from collections.abc import Callable
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -13,7 +16,12 @@ import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    AsyncOperationManager,
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
+    AtomicCounter,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
@@ -231,3 +239,223 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+# ===========================================================================
+# Failed-load block ids (issue #69058)
+# ===========================================================================
+
+_PAGE_BYTES = 64
+
+
+class _CpuCudaStream:
+    def synchronize(self) -> None:
+        return None
+
+    def wait_event(self, event: object) -> None:
+        return None
+
+
+class _CpuCudaEvent:
+    def record(self, stream: object = None) -> None:
+        return None
+
+
+def _patch_cpu_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace CUDA stream setup. The load worker calls it even on CPU."""
+    monkeypatch.setattr(torch.cuda, "Stream", _CpuCudaStream)
+    monkeypatch.setattr(torch.cuda, "Event", _CpuCudaEvent)
+    monkeypatch.setattr(torch.cuda, "stream", lambda _stream: contextlib.nullcontext())
+    monkeypatch.setattr(
+        torch.accelerator, "set_device_index", lambda *_args, **_kwargs: None
+    )
+
+
+class _MetadataClient:
+    def __init__(self, locations: Callable[[list], list]):
+        self._locations = locations
+
+    def get_key_locations(self, rank: int, hashes: list) -> list:
+        return self._locations(hashes)
+
+
+class _FileClient:
+    def __init__(self, read_result: int | Callable):
+        self._read_result = read_result
+
+    def batch_read(self, offsets: list[int], buffers: list) -> list[int]:
+        result = self._read_result
+        if callable(result):
+            return result(offsets, buffers)
+        return [result] * len(offsets)
+
+
+class _LoadServices:
+    """External metadata and file clients used by one load manager."""
+
+    def __init__(self, locations: Callable[[list], list], read_result: int | Callable):
+        self._device = torch.device("cpu")
+        self._dtype = torch.uint8
+        self._shape_per_page = [_PAGE_BYTES]
+        self._bytes_per_page = _PAGE_BYTES
+        self._rank = 0
+        self._numjobs = 1
+        self._max_device_buffer_count = 4
+        self._metadata_client = _MetadataClient(locations)
+        self._clients = [_FileClient(read_result)]
+        self._ac = AtomicCounter(1)
+        self.scattered: list[list[int]] = []
+
+    def _gather_or_scatter_kv_caches(self, block_ids, buffers, operation: str) -> None:
+        self.scattered.append(list(block_ids))
+
+
+class _ReportingConnector(HF3FSKVConnector):
+    """Real get_finished / get_block_ids_with_load_errors without storage setup.
+
+    `HF3FSKVConnector.__init__` installs process signal handlers and
+    `register_kv_caches` opens the metadata server. Those are outside the
+    load-completion path this regression drives.
+    """
+
+    def __init__(self, manager: AsyncOperationManager) -> None:
+        self._async_manager = manager
+
+
+def _poll_load(connector: _ReportingConnector) -> tuple[set[str], set[int]]:
+    """Worker order: transfer results first, then load-error block ids."""
+    results = connector.get_transfer_results(set())
+    block_ids = connector.get_block_ids_with_load_errors()
+    return results.finished_recving, block_ids
+
+
+@pytest.mark.cpu_test
+class TestHF3FSLoadErrorBlockIds:
+    """Failed loads stay in finished_recving and return their block ids."""
+
+    @pytest.fixture
+    def open_loader(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_cpu_cuda(monkeypatch)
+        managers: list[AsyncOperationManager] = []
+
+        def _open(
+            locations: Callable[[list], list],
+            read_result: int | Callable = _PAGE_BYTES,
+        ):
+            services = _LoadServices(locations, read_result)
+            manager = AsyncOperationManager(services)
+            managers.append(manager)
+            return _ReportingConnector(manager), services
+
+        yield _open
+        for manager in managers:
+            manager.shutdown()
+
+    def test_missing_key_reports_block_after_finished(self, open_loader):
+        """A missing page is finished receiving and returns block 5."""
+        connector, services = open_loader(lambda _hashes: [None])
+        block_ids = [5]
+        future = connector._async_manager.submit_load_operation("B", block_ids, ["h"])
+        block_ids.append(99)
+        assert future.result(timeout=10) is False
+
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == {5}
+        assert connector.get_block_ids_with_load_errors() == set()
+        assert services.scattered == []
+
+    def test_metadata_exception_reports_block_after_finished(self, open_loader):
+        """A raised lookup, as after metadata /clear, still returns block 5."""
+
+        def _raise(_hashes: list) -> list:
+            raise ValueError("Rank 0 not initialized")
+
+        connector, services = open_loader(_raise)
+        future = connector._async_manager.submit_load_operation("B", [5], ["h"])
+        assert future.result(timeout=10) is False
+
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == {5}
+        assert services.scattered == []
+
+    @pytest.mark.parametrize("nbytes", [-1, _PAGE_BYTES - 1])
+    def test_short_read_reports_every_block(self, open_loader, nbytes: int):
+        """A short or failed read reports each block in that load."""
+        connector, services = open_loader(lambda _hashes: [0, 1], nbytes)
+        future = connector._async_manager.submit_load_operation(
+            "B", [5, 6], ["h0", "h1"]
+        )
+        assert future.result(timeout=10) is False
+
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == {5, 6}
+        assert services.scattered == []
+
+    def test_successful_load_reports_no_block_errors(self, open_loader):
+        """A full-page read is finished receiving and has no load errors."""
+        connector, services = open_loader(lambda _hashes: [0])
+        future = connector._async_manager.submit_load_operation("B", [7], ["h"])
+        assert future.result(timeout=10) is True
+
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == set()
+        assert services.scattered == [[7]]
+
+    def test_only_failed_blocks_in_a_mixed_pass(self, open_loader):
+        """One pass can finish a success and a failure; only the failure's ids."""
+
+        def _locations(hashes: list) -> list:
+            if hashes == ["missing"]:
+                return [None]
+            return [0]
+
+        connector, _services = open_loader(_locations)
+        manager = connector._async_manager
+        failed = manager.submit_load_operation("bad", [5], ["missing"])
+        loaded = manager.submit_load_operation("ok", [7], ["present"])
+        assert failed.result(timeout=10) is False
+        assert loaded.result(timeout=10) is True
+
+        finished, errors = _poll_load(connector)
+        assert finished == {"bad", "ok"}
+        assert errors == {5}
+
+    def test_errors_appear_on_the_pass_that_finishes_the_load(self, open_loader):
+        """An in-flight load contributes neither finished_recving nor errors."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _locations(_hashes: list) -> list:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("load gate was not released")
+            return [None]
+
+        connector, _services = open_loader(_locations)
+        future = connector._async_manager.submit_load_operation("B", [5], ["h"])
+        try:
+            assert entered.wait(timeout=5)
+            finished, errors = _poll_load(connector)
+            assert finished == set()
+            assert errors == set()
+            assert not future.done()
+        finally:
+            release.set()
+
+        assert future.result(timeout=10) is False
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == {5}
+
+    def test_connector_without_manager_returns_no_errors(self):
+        """Scheduler-side construction has no async manager."""
+
+        class _Unstarted(HF3FSKVConnector):
+            def __init__(self) -> None:
+                pass
+
+        assert _Unstarted().get_block_ids_with_load_errors() == set()
