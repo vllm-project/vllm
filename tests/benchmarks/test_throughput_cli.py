@@ -537,3 +537,51 @@ def test_get_requests_custom_audio_output_len(
     requests = get_requests(args, hf_tokenizer)
 
     assert [r.expected_output_len for r in requests] == [expected]
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("max_num_seqs", [1, 8])
+@pytest.mark.parametrize("async_engine", [False, True])
+def test_bench_throughput_counts_all_sequences(tmp_path, async_engine, max_num_seqs):
+    """Token totals include every generated sequence and exclude warmups."""
+    output_json = tmp_path / "throughput.json"
+    command = [
+        "vllm",
+        "bench",
+        "throughput",
+        "--model",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--input-len",
+        "32",
+        "--output-len",
+        "8",
+        "--num-prompts",
+        "4",
+        "--num-warmups",
+        "1",
+        "--n",
+        "2",
+        "--enforce-eager",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--gpu-memory-utilization",
+        "0.15",
+        "--kv-cache-memory-bytes",
+        "268435456",
+        "--max-model-len",
+        "128",
+        "--max-num-seqs",
+        str(max_num_seqs),
+        "--output-json",
+        str(output_json),
+    ]
+    if async_engine:
+        command.append("--async-engine")
+    result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(output_json.read_text())
+    assert data["num_requests"] == 4
+    assert "Total num prompt tokens:  128" in result.stdout
+    assert "Total num output tokens:  64" in result.stdout
+    assert data["total_num_tokens"] == 192
+    assert data["tokens_per_second"] == pytest.approx(192 / data["elapsed_time"])
