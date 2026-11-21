@@ -41,10 +41,12 @@ GraniteMoe's router has) will not work here.
 What it checks (a smoke test, not a numerical equivalence check):
   - generation CHANGES after the first sync — the weights really moved, so a
     silently-skipped sync fails instead of printing plausible text;
-  - generation is UNCHANGED by a second sync — replay is stable.
+  - generation is UNCHANGED by a second sync — the reused plan is stable.
 
 Run:
     python examples/rl/rlhf_sharded_rdt_small_ep.py
+
+The server runs with `VLLM_RELOAD_MODE=direct`; sharded RDT requires direct reload.
 
 Needs 4 GPUs on one node, each big enough for the whole model, since every rank
 builds it before `fully_shard` splits it: the default is ~29 GiB in bf16, so
@@ -88,8 +90,8 @@ MODEL_NAME = os.environ.get("RDT_MODEL", "Qwen/Qwen1.5-MoE-A2.7B")
 RAY_NAMESPACE = "sharded_rdt_small_ep_example"
 VLLM_PORT = int(os.environ.get("RDT_VLLM_PORT", "8100"))
 VLLM_ENDPOINT = f"http://127.0.0.1:{VLLM_PORT}"
-STAGING_DEVICE = os.environ.get("RDT_STAGING_DEVICE", "gpu")
-STAGES_IN_FLIGHT = int(os.environ.get("RDT_STAGES_IN_FLIGHT", "1"))
+BUFFER_BYTES = int(os.environ.get("RDT_BUFFER_BYTES", str(1 << 30)))
+NUM_BUFFERS = int(os.environ.get("RDT_NUM_BUFFERS", "2"))
 
 FSDP_WORLD_SIZE = 2
 INFERENCE_TP_SIZE = 1
@@ -128,21 +130,14 @@ class FSDPTrainWorker:
     def get_rank(self):
         return self.rank
 
-    def setup_engine(
-        self,
-        vllm_endpoint: str,
-        staging_device: str,
-        stages_in_flight: int,
-    ):
+    def setup_engine(self, vllm_endpoint: str, buffer_bytes: int, num_buffers: int):
         self.engine = WeightTransferTrainerFactory.trainer_init(
             ShardedRDTTrainerInitInfo(
                 rank=self.rank,
                 num_consumers=NUM_INFERENCE_CONSUMERS,
                 trainer_actor_namespace=RAY_NAMESPACE,
-                num_rdt_buffers=int(os.environ.get("NUM_RDT_BUFFERS", "2")),
-                buffer_presize_gb=float(os.environ.get("RDT_BUFFER_PRESIZE_GB", "0")),
-                staging_device=staging_device,
-                stages_in_flight=stages_in_flight,
+                buffer_bytes=buffer_bytes,
+                num_buffers=num_buffers,
             ),
             client=HTTPVLLMWeightSyncClient(vllm_endpoint),
             source=CheckpointNameSource(self.model),
@@ -182,8 +177,8 @@ def main():
 
     print(
         f"[init] model {MODEL_NAME}, {FSDP_WORLD_SIZE} trainer + "
-        f"{INFERENCE_DP_SIZE} inference GPUs, staging={STAGING_DEVICE}, "
-        f"stages_in_flight={STAGES_IN_FLIGHT}"
+        f"{INFERENCE_DP_SIZE} inference GPUs, buffer_bytes={BUFFER_BYTES}, "
+        f"num_buffers={NUM_BUFFERS}"
     )
 
     # Reserve the trainer's GPUs BEFORE launching the server, so the server's DP
@@ -238,19 +233,19 @@ def main():
         for p, t in zip(PROMPTS, before):
             print(f"  {p!r} -> {t!r}")
 
-        print("[sync] building trainer engines (bake on the sender)...")
+        print("[sync] building trainer engines...")
         t0 = time.perf_counter()
         ray.get(
             [
                 w.setup_engine.remote(
                     VLLM_ENDPOINT,
-                    STAGING_DEVICE,
-                    STAGES_IN_FLIGHT,
+                    BUFFER_BYTES,
+                    NUM_BUFFERS,
                 )
                 for w in workers
             ]
         )
-        print(f"[sync] engine setup (incl. bake) took {time.perf_counter() - t0:.2f}s")
+        print(f"[sync] engine setup took {time.perf_counter() - t0:.2f}s")
 
         pause_generation(VLLM_ENDPOINT)
         t0 = time.perf_counter()
@@ -263,7 +258,7 @@ def main():
         for p, t in zip(PROMPTS, after):
             print(f"  {p!r} -> {t!r}")
 
-        # Sync again; replay must be stable, so generation must not move.
+        # Sync again; the same weights again, so generation must not move.
         pause_generation(VLLM_ENDPOINT)
         t0 = time.perf_counter()
         ray.get([w.sync_weights.remote() for w in workers])
@@ -277,10 +272,9 @@ def main():
             f"moved nothing: {before!r}"
         )
         assert again == after, (
-            f"a second sync changed generation, so replay is not stable: "
-            f"{after!r} then {again!r}"
+            f"a second sync changed generation: {after!r} then {again!r}"
         )
-        print("[ok] weights moved on sync 0 and replay was stable on sync 1")
+        print("[ok] weights moved on sync 0 and were stable on sync 1")
     finally:
         shutdown_server(server)
 

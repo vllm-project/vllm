@@ -40,7 +40,6 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
-    WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
@@ -2095,45 +2094,6 @@ class TestParamMetaOwnership:
                 metadata = wrap(lambda self: [])
 
 
-class TestDeferredProcessingContract:
-    """`defers_processing` and `drain_pending` are two halves of one contract: a
-    caller that takes over the update tail (running its own
-    `finalize_layerwise_reload` instead of going through `finish_weight_update`)
-    reads the flag and calls the method. Both must be answerable on any engine, or
-    that caller ends up reaching through a getattr."""
-
-    def _engines(self):
-        registry = dict(WeightTransferEngineFactory._registry)
-        # ModelExpress is an optional, separately installed package, but its
-        # backend is always registered. Skip it when the package is missing.
-        if importlib.util.find_spec("modelexpress") is None:
-            registry.pop("modelexpress")
-        return {name: loader() for name, loader in registry.items()}
-
-    def test_every_engine_declares_whether_it_defers(self):
-        for name, cls in self._engines().items():
-            assert isinstance(cls.defers_processing, bool), name
-
-    def test_every_engine_can_be_drained(self):
-        """The default is a no-op, so a caller never has to check whether the
-        method exists before calling it."""
-        for name, cls in self._engines().items():
-            assert callable(cls.drain_pending), name
-
-    def test_the_default_is_not_to_defer(self):
-        assert WeightTransferEngine.defers_processing is False
-
-    def test_a_synchronous_engine_drains_as_a_no_op(self):
-        engine = object.__new__(WeightTransferEngineFactory._registry["nccl"]())
-        engine.drain_pending()  # must not raise, and must not need any state
-
-    def test_the_rdt_engine_defers_and_overrides_the_drain(self):
-        """The one engine the contract exists for."""
-        cls = WeightTransferEngineFactory._registry["sharded_rdt"]()
-        assert cls.defers_processing is True
-        assert cls.drain_pending is not WeightTransferEngine.drain_pending
-
-
 class TestTrainerFactory:
     """WeightTransferTrainerFactory registry mechanics."""
 
@@ -3336,3 +3296,16 @@ def test_plugin_does_not_replace_native_backend(mx_client):
     register_plugin_weight_transfer_engine()
     assert WeightTransferEngineFactory._registry["modelexpress"] is native_loader
     assert type(_make_modelexpress_engine()) is ModelExpressWeightTransferEngine
+
+
+def test_deprecated_deferral_and_layer_groups_still_answer():
+    from vllm.distributed.weight_transfer.base import layerwise_groups
+
+    engine = object.__new__(WeightTransferEngineFactory._registry["nccl"]())
+    assert engine.defers_processing is False
+    with pytest.warns(DeprecationWarning):
+        engine.drain_pending()
+    names = ["embed", "model.layers.1.w", "model.layers.0.w", "norm"]
+    with pytest.warns(DeprecationWarning):
+        groups = layerwise_groups(names)
+    assert groups == [["embed"], ["model.layers.0.w"], ["model.layers.1.w"], ["norm"]]

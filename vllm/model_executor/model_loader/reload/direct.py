@@ -88,10 +88,6 @@ def direct_reload_refusal(config: VllmConfig) -> str | None:
         # after `begin` the draft's quantized lm_head is a view of the target
         # lm_head's storage: post-load processing would write it there
         return "draft_lm_head_quantization"
-    transfer = config.weight_transfer_config
-    if transfer is not None and transfer.backend == "sharded_rdt":
-        # its replay plan is baked by a layerwise (meta) dry run
-        return "the sharded_rdt weight-transfer backend"
     return None
 
 

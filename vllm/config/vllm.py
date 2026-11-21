@@ -1316,14 +1316,30 @@ class VllmConfig:
 
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
-        # imported only in direct mode: it loads the model loaders
-        if envs.VLLM_RELOAD_MODE != "direct":
+        transfer = self.weight_transfer_config
+        needs_direct = transfer is not None and transfer.backend == "sharded_rdt"
+        mode = envs.VLLM_RELOAD_MODE
+        if needs_direct and mode == "layerwise":
+            raise ValueError(
+                "The sharded_rdt weight-transfer backend requires direct reload "
+                "(VLLM_RELOAD_MODE=auto or direct)."
+            )
+        # imported only when needed: it loads the model loaders
+        if mode != "direct" and not needs_direct:
             return
         from vllm.model_executor.model_loader.reload.direct import (
             direct_reload_refusal,
         )
 
-        if reason := direct_reload_refusal(self):
+        reason = direct_reload_refusal(self)
+        if reason is None and mode == "auto" and self.lora_config is not None:
+            reason = "LoRA"  # `auto` reloads LoRA models layerwise
+        if reason and needs_direct:
+            raise ValueError(
+                "The sharded_rdt weight-transfer backend requires direct "
+                f"reload, which does not support {reason}."
+            )
+        if reason:
             raise ValueError(
                 f"Direct reload does not support {reason}. Use "
                 "VLLM_RELOAD_MODE=auto or layerwise."

@@ -3,6 +3,7 @@
 """Base class for weight transfer engines."""
 
 import math
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -33,12 +34,6 @@ WeightTransferUpdatePayload = dict[str, Any] | list[dict[str, Any]]
 
 
 def _stack_key(name: str) -> tuple[str, int] | None:
-    """`(prefix, index)` of the OUTERMOST integer segment, or None if there is
-    none.
-
-    Outermost is what keeps a MoE layer whole:
-    `model.layers.3.mlp.experts.7.w1` keys on the layer, not the expert.
-    """
     parts = name.split(".")
     for i, part in enumerate(parts):
         if part.isdigit():
@@ -47,35 +42,18 @@ def _stack_key(name: str) -> tuple[str, int] | None:
 
 
 def layerwise_groups(names: list[str]) -> list[list[str]]:
-    """Partition flat parameter names into one group per decoder layer, keyed on
-    the outermost index segment of each name.
+    """Deprecated: no weight transfer backend groups by layer any more.
 
-    This defines what a *group index* means for backends that transfer a layer
-    at a time: index *g* names the same group on every trainer rank and every
-    consumer, because it is derived from `metadata` order, which every rank
-    shares.
-
-    Keying on the index rather than a literal prefix needs no per-architecture
-    naming table: `model.layers.0.`, `model.language_model.layers.0.`,
-    `transformer.h.0.`, `backbone.layers.0.` and a vision tower's
-    `visual.blocks.0.` all partition alike. Matching one fixed prefix does not,
-    and its failure is silent — every name lands in a single group holding the
-    whole model, which defeats the per-layer bound below.
-
-    Un-indexed names split by POSITION relative to the first indexed one: the pre
-    block (embeddings) and the post block (the final norm, `lm_head`, and any
-    inter-stack projector). Post lands last however early it arrived, which is
-    what a pipeline-parallel source needs — Megatron-Bridge streams the last
-    stage's output block *before* its layers.
-
-    Stacks come out in first-appearance order of their prefix and ascending index
-    within it, whatever order the source yielded them, so a source can normalize
-    an arbitrary export order by flattening this partition.
-
-    Backends that gather and free per group (sharded RDT) also use it as the unit
-    of transfer, which bounds their buffer sizes: without it a whole model becomes
-    one chunk.
+    Partition parameter names into one group per decoder layer, keyed on the
+    outermost integer segment of each name; un-indexed names before the first
+    indexed one form a leading group, the rest a trailing one.
     """
+    warnings.warn(
+        "layerwise_groups is deprecated and will be removed in a future "
+        "release: no weight transfer backend uses it.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     pre: list[str] = []
     post: list[str] = []
     stacks: dict[tuple[str, int], list[str]] = {}
@@ -89,12 +67,10 @@ def layerwise_groups(names: list[str]) -> list[list[str]]:
             stacks[key] = []
             order.append(key)
         stacks[key].append(name)
-
     prefix_rank: dict[str, int] = {}
     for key in order:
         prefix_rank.setdefault(key[0], len(prefix_rank))
     order.sort(key=lambda key: (prefix_rank[key[0]], key[1]))
-
     groups: list[list[str]] = [pre] if pre else []
     groups += [stacks[key] for key in order]
     if post:
@@ -451,29 +427,17 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     supports_draft_weight_update: bool = True
 
     defers_processing: bool = False
-    """Whether `update_weights` returns before the weights are on the device.
-
-    An engine that pipelines its GPU post-processing onto background threads
-    cannot let `update_weights` synchronize the device — that would block on those
-    threads and serialize the pipeline. Such an engine sets this True, omits the
-    per-update sync, and guarantees completion in `finish_weight_update` instead.
-
-    Callers that go through `finish_weight_update` need do nothing: the engine
-    drains there. A caller that instead drives the tail itself — running its own
-    `finalize_layerwise_reload`, say — must read this flag and call
-    `drain_pending()` first, because with it set a returned `update_weights` means
-    "queued", not "applied".
-    """
+    """Deprecated, always False: every engine applies its updates by the time
+    `update_weights` returns."""
 
     def drain_pending(self) -> None:
-        """Block until every deferred update has been applied to the model.
-
-        The companion to `defers_processing`: a caller that has taken over the
-        update tail calls this to re-establish the guarantee that
-        `finish_weight_update` would otherwise have given it. Idempotent, and a
-        no-op by default — an engine that processes synchronously has nothing to
-        drain, so this is always safe to call.
-        """
+        """Deprecated no-op: no engine defers its updates any more."""
+        warnings.warn(
+            "WeightTransferEngine.drain_pending is deprecated and will be "
+            "removed in a future release: it has nothing to drain.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def __init__(
         self,
