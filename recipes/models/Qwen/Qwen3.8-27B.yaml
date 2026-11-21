@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
-  date_updated: 2026-10-15
+  date_updated: 2026-11-21
   tasks:
     - multimodal
     - text
@@ -19,12 +19,9 @@ meta:
     # Blackwell B200, verified 2026-09-20: the RedHatAI MXFP4 variant (true W4A4, TP1) booted,
     # served and answered on 1x B200 — the same hardware used for the checkpoint's own eval.
     b200: verified
-    # Consumer Blackwell (sm120), verified 2026-08-15 on vLLM
-    # 0.26.1rc1.dev608+g99a10304d. Each entry was booted, served and answered a
-    # verifiable prompt, with MTP acceptance read from /metrics rather than
-    # inferred from throughput. rtx_5090 is NVFP4 on one card and requires
-    # --enforce-eager; rtx_5090_2x covers FP8 and both NVFP4 builds at TP2.
+    # Single-card Inferact NVFP4 retested on vLLM 2f170a0fe (2026-11-21).
     rtx_5090: verified
+    # TP2 FP8 and NVFP4 verified on 0.26.1rc1.dev608+g99a10304d.
     rtx_5090_2x: verified
     rtx_pro_6000: verified
     dgx_spark_gb10: verified
@@ -39,8 +36,8 @@ model:
   # and the Install header would take the kv_store YAMLs' "0.21.0" instead, understating the
   # requirement.
   #
-  # 0.17.0 is where `Qwen3_5ForConditionalGeneration` is already registered. The runs behind
-  # this recipe all used the Docker image pinned below (a fork build in the 0.27 range), so
+  # 0.17.0 is where `Qwen3_5ForConditionalGeneration` is already registered. The original runs
+  # used the Docker image pinned below (a fork build in the 0.27 range), so
   # older releases are unverified rather than known-good — and `spec_decoding` in particular
   # wants the gated-delta-net speculative fix (vllm-project/vllm#51812 / #51674), which no
   # released tag carries yet.
@@ -195,16 +192,23 @@ variants:
     vram_minimum_gb: 32
     supported_hardware: [b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x]
     description: "NVFP4 build for NVIDIA Blackwell — 24.6 GiB, the smallest footprint: 1 GPU."
-    # The verified 1x RTX 5090 launch from the guide: CUDA graph capture OOMs on 31.4 GiB
-    # usable, so --enforce-eager is required, and the KV pool holds a 32K context.
     hardware_overrides:
       rtx_5090:
+        docker_image: "vllm/vllm-openai:nightly"
+        install:
+          pip:
+            command: |
+              uv venv --python 3.12
+              source .venv/bin/activate
+              uv pip install "vllm==0.34.0rc1.dev1105+g2f170a0fe" \
+                --extra-index-url https://wheels.vllm.ai/2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e
         extra_args:
           - "--max-model-len"
           - "32768"
           - "--kv-cache-dtype"
           - "fp8"
-          - "--enforce-eager"
+          - "--max-num-seqs"
+          - "8"
   nvfp4_nvidia:
     model_id: "nvidia/Qwen3.8-27B-NVFP4"
     precision: nvfp4
@@ -381,29 +385,24 @@ guide: |
   `vllm:spec_decode_num_{accepted,draft}_tokens_total`, since throughput alone cannot
   distinguish a working drafter from one that loaded and was ignored.
 
-  ### 1x RTX 5090 — NVFP4 needs `--enforce-eager`
+  ### 1x RTX 5090 — 32K NVFP4 with CUDA graphs
 
-  One card has **31.4 GiB usable**, not 32, and NVFP4 fits only with CUDA graphs off:
+  On vLLM `2f170a0fe`, the [Inferact NVFP4 checkpoint](https://huggingface.co/Inferact/Qwen3.8-27B-NVFP4/tree/6128240ebaf4eaa7bad2b3d1c72c37d677c5f462)
+  served 32,704 input tokens plus 64 output tokens with FP8 KV, the vision tower loaded,
+  and speculative decoding disabled.
+  The default limit of 256 sequences exceeded the 102 Mamba cache blocks available at
+  startup. With `--max-num-seqs 8`, graph capture took 0.21 GiB and the KV cache held
+  50,244 tokens shared across requests.
 
-  ```bash
-  vllm serve Inferact/Qwen3.8-27B-NVFP4 \
-    --tensor-parallel-size 1 \
-    --max-model-len 32768 \
-    --kv-cache-dtype fp8 \
-    --enforce-eager \
-    --reasoning-parser qwen3
-  ```
+  At the same eight-sequence limit, single-request decode time fell from 56.11 ms/token
+  in eager mode to 15.55 ms/token with graphs. Four-request output throughput rose from
+  68.34 to 219.70 tokens/s (128 input and 128 output tokens per request). Time to first token
+  for the 32K workload was about 4.35 seconds in both configurations.
 
-  Without `--enforce-eager`, startup dies in CUDA graph capture with
-  `torch.OutOfMemoryError: Tried to allocate 784.00 MiB`. **Raising or lowering
-  `--gpu-memory-utilization` does not help** — 0.80 and 0.93 both leave the same 47.06 MiB
-  free, because that budget covers weights and KV while graph capture allocates outside it.
-
-  KV pool at 32K context: 91,022 tokens with `--enforce-eager` alone; 135,926 adding
-  `--language-model-only`; 152,917 also capping `--max-num-seqs 8`; 76,458 with bf16 KV
-  instead of fp8 — so fp8 KV is a choice here, not a requirement. The MTP head still fits
-  (90,112 tokens, 0.754 acceptance). Those two flags are levers for a bigger pool, not fixes
-  for the OOM: only `--enforce-eager` decides whether the server starts.
+  On the older `0.26.1rc1.dev608+g99a10304d` build, graph capture ran out of memory. The verified
+  fallback was `--enforce-eager` with 91,022 FP8 KV tokens at 32K (76,458 with BF16 KV).
+  Language-model-only mode held 135,926 FP8 KV tokens, or 152,917 at the eight-sequence limit.
+  The MTP run on that build held 90,112 KV tokens with 0.754 acceptance.
 
   ### Intel XPU B60 / B70
 
