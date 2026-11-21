@@ -16,8 +16,9 @@ pytestmark = [
 ]
 
 
+@pytest.mark.parametrize("stop_kwargs", [{}, {"grace_period": 1.0}])
 @pytest.mark.parametrize("parent_exits", [False, True])
-def test_stop_cleans_up_server_process_group(parent_exits: bool):
+def test_stop_cleans_up_server_process_group(parent_exits: bool, stop_kwargs):
     """Sweep cleanup must terminate workers even if the server already exited."""
     script = """
 import os
@@ -27,6 +28,8 @@ import sys
 
 with socket.create_connection(("127.0.0.1", int(sys.argv[1]))) as connection:
     if os.fork() == 0:
+        # A graceful stop should signal the parent and allow it to drain workers.
+        signal.signal(signal.SIGTERM, lambda *_: connection.sendall(b"T"))
         connection.sendall(b"R")
         connection.recv(1)
     elif sys.argv[2] == "True":
@@ -49,6 +52,7 @@ with socket.create_connection(("127.0.0.1", int(sys.argv[1]))) as connection:
             [],
             show_stdout=True,
         )
+        assert server.stop() is False
         try:
             with server:
                 process = server._server_process
@@ -58,7 +62,9 @@ with socket.create_connection(("127.0.0.1", int(sys.argv[1]))) as connection:
                     assert connection.recv(1) == b"R"
                     if parent_exits:
                         assert process.wait(timeout=10) == 1
-                    server.stop()
+                    forced = server.stop(**stop_kwargs)
+                    assert forced is ("grace_period" not in stop_kwargs)
+                    assert server.stop() is False
                     assert connection.recv(1) == b"", "Server worker is still alive"
                     assert process.returncode is not None, "Server was not reaped"
         finally:
