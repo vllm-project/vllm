@@ -29,6 +29,7 @@ from vllm.distributed.aux_output_connector.connector import (
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
+from vllm.distributed.ec_transfer.ec_events import AllECCleared
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -5356,6 +5357,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_cache_manager.take_events.return_value = None
     scheduler.kv_cache_manager.estimate_cached_tokens.return_value = 0
     scheduler.kv_event_publisher = Mock()
+    scheduler.encoder_cache_manager = Mock()
+    scheduler.encoder_cache_manager.take_events.return_value = []
+    scheduler.ec_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
@@ -7031,6 +7035,7 @@ def test_scheduler_ec_connector_stats():
         )
         scheduler.ec_connector = Mock()
         scheduler.ec_connector.take_unavailable_requests.return_value = set()
+        scheduler.ec_connector.take_events.return_value = ()
         scheduler.ec_connector.get_ec_connector_stats.return_value = (
             scheduler_stats if worker_stats is None else None
         )
@@ -9263,3 +9268,23 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+def test_reset_encoder_cache_publishes_clear_event_while_idle():
+    """An idle engine must publish `AllECCleared` on reset.
+
+    `update_from_output` is the only place that normally drains EC events, and
+    it never runs while the engine is idle, so the reset has to flush its own.
+    """
+    scheduler = create_scheduler()
+    scheduler.encoder_cache_manager = EncoderCacheManager(
+        cache_size=100, enable_events=True
+    )
+    publisher = Mock()
+    scheduler.ec_event_publisher = publisher
+
+    scheduler.reset_encoder_cache()
+
+    publisher.publish.assert_called_once()
+    batch = publisher.publish.call_args.args[0]
+    assert batch.events == [AllECCleared()]

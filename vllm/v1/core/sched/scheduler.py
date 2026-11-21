@@ -21,6 +21,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
+from vllm.distributed.ec_transfer.ec_events import ECEventBatch
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
@@ -112,6 +113,7 @@ class Scheduler(SchedulerInterface):
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
+        self.ec_events_config = vllm_config.ec_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
@@ -212,6 +214,10 @@ class Scheduler(SchedulerInterface):
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
+            self.parallel_config.data_parallel_index,
+        )
+        self.ec_event_publisher = EventPublisherFactory.create(
+            self.ec_events_config,
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
@@ -2751,6 +2757,17 @@ class Scheduler(SchedulerInterface):
 
         # Updates dropped at turn end follow the turn's final output.
         self._emit_dropped_streaming_updates(outputs)
+        # collect encoder cache events from cache manager and connector
+        ec_events = self.encoder_cache_manager.take_events()
+        if self.ec_connector is not None:
+            ec_events.extend(self.ec_connector.take_events())
+
+        # publish collected encoder cache events
+        if ec_events:
+            batch = ECEventBatch(ts=time.time(), events=ec_events)
+            self.ec_event_publisher.publish(batch)
+
+        self._publish_ec_events()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -2791,6 +2808,16 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _publish_ec_events(self) -> None:
+        """Publish the encoder cache events queued by the cache manager and the
+        EC connector."""
+        ec_events = self.encoder_cache_manager.take_events()
+        if self.ec_connector is not None:
+            ec_events.extend(self.ec_connector.take_events())
+        if ec_events:
+            batch = ECEventBatch(ts=time.time(), events=ec_events)
+            self.ec_event_publisher.publish(batch)
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
@@ -3442,6 +3469,9 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.reset()
         if self.ec_connector is not None:
             self.ec_connector.reset()
+        # An idle engine does not call `update_from_output`, so publish the
+        # queued `AllECCleared` here instead of on the next request.
+        self._publish_ec_events()
 
     def make_stats(
         self,
@@ -3513,6 +3543,8 @@ class Scheduler(SchedulerInterface):
         logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.ec_event_publisher:
+            self.ec_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
 
@@ -3532,7 +3564,9 @@ class Scheduler(SchedulerInterface):
         return self.ec_connector
 
     def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
-        return self.kv_event_publisher.get_publisher_config()
+        config = self.kv_event_publisher.get_publisher_config()
+        assert config is None or isinstance(config, KVEventsConfig)
+        return config
 
     def _connector_finished(
         self, request: Request

@@ -25,7 +25,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         PromMetric,
         PromMetricT,
     )
+    from vllm.distributed.ec_transfer.ec_events import ECCacheEvent
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -247,6 +248,16 @@ class ECConnectorBase(ABC):
         gathered during scheduling decisions.
         """
         return None
+
+    def take_events(self) -> Iterable["ECCacheEvent"]:
+        """Take the encoder cache events collected since the last call.
+
+        Returns:
+            New encoder cache events. Connectors that do not publish events
+            return nothing.
+
+        """
+        return ()
 
     # ==============================
     # Scheduler-side methods
