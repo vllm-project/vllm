@@ -2255,7 +2255,10 @@ def mamba_capacity_model_config(tmp_path: Path) -> ModelConfig:
 
 
 def _mamba_capacity_vllm_config(
-    model_config: ModelConfig, gpu_memory_utilization: float = 0.9
+    model_config: ModelConfig,
+    gpu_memory_utilization: float = 0.9,
+    *,
+    num_gpu_blocks_override: int | None = None,
 ) -> VllmConfig:
     return VllmConfig(
         model_config=model_config,
@@ -2264,25 +2267,32 @@ def _mamba_capacity_vllm_config(
             is_encoder_decoder=model_config.is_encoder_decoder,
             max_num_seqs=256,
         ),
-        cache_config=CacheConfig(gpu_memory_utilization=gpu_memory_utilization),
+        cache_config=CacheConfig(
+            gpu_memory_utilization=gpu_memory_utilization,
+            num_gpu_blocks_override=num_gpu_blocks_override,
+        ),
     )
 
 
 @pytest.mark.parametrize(
-    ("graph_mode", "gpu_memory_utilization"),
+    ("graph_mode", "gpu_memory_utilization", "num_gpu_blocks_override"),
     [
-        (CUDAGraphMode.FULL, 0.9),
-        (CUDAGraphMode.FULL_DECODE_ONLY, 1.0),
-        (CUDAGraphMode.FULL_AND_PIECEWISE, 0.9),
+        (CUDAGraphMode.FULL, 0.9, None),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1.0, None),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, 0.9, None),
+        pytest.param(CUDAGraphMode.FULL_DECODE_ONLY, 0.9, 227, id="block-override"),
     ],
 )
 def test_mamba_block_capacity_raises_when_max_num_seqs_exceeds_blocks(
     mamba_capacity_model_config: ModelConfig,
     graph_mode: CUDAGraphMode,
     gpu_memory_utilization: float,
+    num_gpu_blocks_override: int | None,
 ):
     vllm_config = _mamba_capacity_vllm_config(
-        mamba_capacity_model_config, gpu_memory_utilization
+        mamba_capacity_model_config,
+        gpu_memory_utilization,
+        num_gpu_blocks_override=num_gpu_blocks_override,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=227,
@@ -2309,9 +2319,12 @@ def test_mamba_block_capacity_raises_when_max_num_seqs_exceeds_blocks(
     msg = str(exc_info.value)
     assert "3 Mamba block(s) across 1 device group(s)" in msg
     assert "--max-num-seqs to 227 or lower" in msg
-    assert "reduce --max-model-len" in msg
+    assert ("reduce --max-model-len" in msg) == (num_gpu_blocks_override is None)
+    assert ("increase or remove --num-gpu-blocks-override" in msg) == (
+        num_gpu_blocks_override is not None
+    )
     assert ("increase --gpu-memory-utilization" in msg) == (
-        gpu_memory_utilization < 1.0
+        gpu_memory_utilization < 1.0 and num_gpu_blocks_override is None
     )
 
 

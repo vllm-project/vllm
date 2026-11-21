@@ -8,7 +8,7 @@ from contextlib import contextmanager, nullcontext
 import pytest
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from tests.utils import multi_gpu_test
+from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
@@ -425,6 +425,39 @@ def test_mamba_eager_runs_with_fewer_cache_blocks_than_max_num_seqs(vllm_runner)
         [(token_ids, _)] = model.generate_greedy(["Hello"], max_tokens=1)
 
     assert len(token_ids) == 1
+
+
+@create_new_process_for_each_test(method="spawn")
+def test_mamba_full_decode_reports_block_override(monkeypatch):
+    # Surface the initialization error directly instead of wrapping it in the
+    # engine subprocess failure.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0")
+    with pytest.raises(
+        ValueError,
+        match=r"max_num_seqs \(32\) exceeds available Mamba cache blocks \(16\)",
+    ) as exc_info:
+        LLM(
+            model=SSM_MODELS[0],
+            enable_prefix_caching=False,
+            enable_extensible_kv_cache=False,
+            max_model_len=128,
+            max_num_batched_tokens=128,
+            max_num_seqs=32,
+            num_gpu_blocks_override=16,
+            gpu_memory_utilization=0.7,
+            compilation_config={
+                "mode": 0,
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "decode_cudagraph_capture_request_sizes": [1, 2, 4],
+            },
+        )
+
+    message = str(exc_info.value)
+    assert "set --max-num-seqs to 16 or lower" in message
+    assert "increase or remove --num-gpu-blocks-override" in message
+    assert "--max-model-len" not in message
+    assert "--gpu-memory-utilization" not in message
 
 
 @pytest.mark.parametrize("model", FULL_CUDA_GRAPH_MODELS)

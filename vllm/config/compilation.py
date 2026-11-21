@@ -268,13 +268,15 @@ def validate_mamba_cudagraph_capacity(
             f"{len(mamba_groups)} device group(s)."
         )
         cache_config = vllm_config.cache_config
-        if (
-            cache_config.resolved_gpu_memory_utilization < 1.0
-            and cache_config.kv_cache_memory_bytes is None
-            and cache_config.num_gpu_blocks_override is None
-        ):
-            suggestions.append("increase --gpu-memory-utilization")
-        suggestions.append("reduce --max-model-len")
+        if cache_config.num_gpu_blocks_override is not None:
+            suggestions.append("increase or remove --num-gpu-blocks-override")
+        else:
+            if (
+                cache_config.resolved_gpu_memory_utilization < 1.0
+                and cache_config.kv_cache_memory_bytes is None
+            ):
+                suggestions.append("increase --gpu-memory-utilization")
+            suggestions.append("reduce --max-model-len")
     raise ValueError(f"{message} To proceed, {'; or '.join(suggestions)}.")
 
 
