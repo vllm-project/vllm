@@ -25,6 +25,8 @@ pub enum Error {
     InvalidReasoningEffort(String),
     #[error("{message}")]
     InvalidReasoningControl { message: String },
+    #[error("{message}")]
+    InvalidToolMessage { message: String },
     #[error("chat role `{role}` is not supported by this chat renderer")]
     UnsupportedChatRole { role: String },
     #[error(
@@ -144,6 +146,7 @@ impl Error {
             | Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningEffort(_)
             | Self::InvalidReasoningControl { .. }
+            | Self::InvalidToolMessage { .. }
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }

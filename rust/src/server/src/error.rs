@@ -370,6 +370,21 @@ mod tests {
     }
 
     #[test]
+    fn invalid_tool_message_maps_to_invalid_request() {
+        let error = vllm_chat::Error::InvalidToolMessage {
+            message: "Tool messages need a resolvable tool name".to_string(),
+        };
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(
+            response.error.message,
+            "Tool messages need a resolvable tool name"
+        );
+    }
+
+    #[test]
     fn chat_template_render_failure_stays_internal() {
         let error = vllm_chat::Error::ChatTemplate(
             "failed to render jinja template: unknown function".to_string(),
