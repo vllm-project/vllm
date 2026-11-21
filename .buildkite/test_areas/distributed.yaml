@@ -569,6 +569,16 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/models/deepseek_v32/
+  - vllm/models/deepseek_v4/
+  - vllm/model_executor/layers/fused_moe/runner/moe_runner.py
+  - vllm/forward_context.py
+  - vllm/distributed/parallel_state.py
+  - vllm/v1/worker/gpu/attn_utils.py
+  - vllm/v1/worker/gpu/dsa_sequence_parallel.py
+  - vllm/v1/worker/gpu/model_states/default.py
+  - vllm/v1/worker/utils.py
+  - vllm/v1/attention/backend.py
+  - vllm/config/vllm.py
   - vllm/models/hy_v4/nvidia/attention.py
   - vllm/models/hy_v4/nvidia/flashmla_sparse.py
   - vllm/models/hy_v4/nvidia/model.py
@@ -583,12 +593,16 @@ steps:
   - vllm/config/speculative.py
   - vllm/config/attention.py
   - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  - tests/models/test_deepseek_v4_dsa_sequence_parallel.py
+  - tests/v1/worker/test_dsa_sequence_parallel.py
   - tests/models/hy_v4/test_shardq_sinks.py
   - tests/models/hy_v4/test_sequence_parallel.py
   commands:
   - >-
     pytest -v -s
     tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+    tests/models/test_deepseek_v4_dsa_sequence_parallel.py
+    tests/v1/worker/test_dsa_sequence_parallel.py
     tests/models/hy_v4/test_shardq_sinks.py
     tests/models/hy_v4/test_sequence_parallel.py
 

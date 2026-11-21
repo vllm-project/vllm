@@ -347,7 +347,7 @@ class AttentionGroup:
     ) -> Any:
         return self.get_metadata_builder(ubatch_idx).build(
             common_prefix_len,
-            self._with_kernel_block_table(common_attn_metadata, ubatch_idx),
+            self.with_kernel_block_table(common_attn_metadata, ubatch_idx),
             **kwargs,
         )
 
@@ -355,10 +355,10 @@ class AttentionGroup:
         self, common_attn_metadata: CommonAttentionMetadata, ubatch_idx: int = 0
     ) -> Any:
         return self.get_metadata_builder(ubatch_idx).build_for_cudagraph_capture(
-            self._with_kernel_block_table(common_attn_metadata, ubatch_idx)
+            self.with_kernel_block_table(common_attn_metadata, ubatch_idx)
         )
 
-    def _with_kernel_block_table(
+    def with_kernel_block_table(
         self, common_attn_metadata: CommonAttentionMetadata, ubatch_idx: int = 0
     ) -> CommonAttentionMetadata:
         if self.kernel_block_size is None:

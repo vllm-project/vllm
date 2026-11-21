@@ -51,6 +51,7 @@ if TYPE_CHECKING:
         BatchExecutionDescriptor,
         CudaGraphManager,
     )
+    from vllm.v1.worker.gpu.dsa_sequence_parallel import DSAQueryLayout
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,6 +487,9 @@ def build_attn_metadata(
     ubatch_idx: int = 0,
     fast_prefill: FastPrefillBatchMetadata | None = None,
     req_idx: np.ndarray | None = None,
+    dsa_sp_layout: "DSAQueryLayout | None" = None,
+    dsa_sp_buffers: dict[int, dict[str, torch.Tensor]] | None = None,
+    max_num_reqs: int = 0,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if rswa_prefix_lens is not None and rswa_prefix_lens.shape[0] < num_reqs:
@@ -571,22 +575,29 @@ def build_attn_metadata(
                 metadata = attn_metadata_builder.update_block_table(
                     cached_metadata[reuse_key], block_table, slot_mapping
                 )
-            elif for_cudagraph_capture:
-                metadata = attn_group.build_metadata_for_cudagraph_capture(
+            else:
+                cm = attn_group.with_kernel_block_table(
                     common_attn_metadata, ubatch_idx
                 )
-            else:
-                attn_metadata_extra_kwargs = (
-                    model_specific_attn_metadata.get_extra_attn_kwargs(
-                        attn_metadata_builder,
-                        num_reqs,
+                if dsa_sp_layout is not None:
+                    buffers = (
+                        dsa_sp_buffers.setdefault(id(attn_metadata_builder), {})
+                        if dsa_sp_buffers is not None
+                        else None
                     )
-                    if model_specific_attn_metadata is not None
-                    else {}
-                )
-                metadata = attn_group.build_metadata(
-                    common_attn_metadata, ubatch_idx, **attn_metadata_extra_kwargs
-                )
+                    cm = dsa_sp_layout.local_metadata(cm, buffers, max_num_reqs)
+                if for_cudagraph_capture:
+                    metadata = attn_metadata_builder.build_for_cudagraph_capture(cm)
+                else:
+                    extra = (
+                        model_specific_attn_metadata.get_extra_attn_kwargs(
+                            attn_metadata_builder,
+                            num_reqs,
+                        )
+                        if model_specific_attn_metadata is not None
+                        else {}
+                    )
+                    metadata = attn_metadata_builder.build(0, cm, **extra)
             if reuse_key is not None and reuse_key not in cached_metadata:
                 cached_metadata[reuse_key] = metadata
             for layer_name in attn_group.layer_names:

@@ -140,9 +140,7 @@ class FlashAttnMLASparseMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        num_q_heads = self.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
+        num_q_heads = self.num_heads
         threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
         self._init_reorder_batch_threshold(threshold, supports_spec_as_decode=True)
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
@@ -336,6 +334,8 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
             num_heads = vllm_config.model_config.get_num_attention_heads(
                 vllm_config.parallel_config
             )
+            if vllm_config.attention_config.dsa_sequence_parallel:
+                num_heads = hf_config.num_attention_heads
             # 128 gathered heads take FA's prefill kernel, unvalidated under DCP.
             head_counts = (8, 16, 32, 64) if dcp_size > 1 else (8, 16, 32, 64, 128)
             if num_heads * dcp_size not in head_counts:

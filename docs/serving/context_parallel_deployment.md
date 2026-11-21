@@ -34,6 +34,37 @@ This configuration requires PP=DP=DCP=1 and does not support microbatching,
 speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
 monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
 
+## DSA sequence parallelism within a TP group
+
+On NVIDIA GPUs, the DeepSeek-V3.2, GLM MoE DSA and DeepSeek-V4 text
+models can distribute an entire batch of queries (prefill and decode) over
+the tensor parallel group. Each rank runs all query heads for its local
+tokens. Ranks gather cache inputs so that each paged KV cache contains
+the original requests in global token order. Some projection and FFN
+weights are replicated, which can reduce the memory available for KV cache.
+
+Set `MODEL` to the checkpoint path or Hugging Face repository and `TP` to
+the number of GPUs needed for its weights and KV cache. For example:
+
+```bash
+vllm serve "$MODEL" --tensor-parallel-size "$TP" \
+    --attention-config '{"dsa_sequence_parallel":"zigzag"}'
+```
+
+`contiguous` assigns one contiguous token range to each rank. `zigzag`
+assigns each rank an early and a late range to balance causal prefill
+work. At TP=2 with eight tokens, rank 0 processes rows 0, 1, 6, 7 and
+rank 1 processes rows 2, 3, 4, 5. Both layouts restore global row order
+for sampling. Leaving this option unset uses the model's usual attention
+configuration, including prefill ShardQ where supported.
+
+Use TP greater than one and PCP=DCP=1. For expert parallelism with DP=1,
+select `--all2all-backend allgather_reducescatter`. The whole-batch mode
+supports eager execution and piecewise graphs, with full graph capture
+limited to single-token decode batches. Speculative decoding, LoRA,
+HiSparse, returning routed expert IDs, KV-sharing fast prefill and microbatching
+(including dual batch overlap) are incompatible.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

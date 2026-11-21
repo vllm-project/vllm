@@ -85,6 +85,7 @@ class DPMetadata:
         parallel_config: ParallelConfig,
         num_tokens: int,
         num_tokens_across_dp_cpu: torch.Tensor,
+        dsa_sequence_parallel: str | None = None,
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
         assert (
@@ -100,6 +101,15 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
+        if dsa_sequence_parallel:
+            # Experts consume equal-sized TP windows, including the padding in
+            # both windows per rank for zigzag. Keep scheduler counts intact.
+            alignment = parallel_config.tensor_parallel_size
+            if dsa_sequence_parallel == "zigzag":
+                alignment *= 2
+            num_tokens_across_dp_cpu = (
+                (num_tokens_across_dp_cpu + alignment - 1) // alignment * alignment
+            )
         return DPMetadata(num_tokens_across_dp_cpu)
 
     @contextmanager
@@ -320,7 +330,10 @@ def set_forward_context(
             assert num_tokens is not None
             num_tokens_across_dp = torch.tensor([num_tokens], dtype=torch.int32)
         dp_metadata = DPMetadata.make(
-            vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
+            vllm_config.parallel_config,
+            num_tokens or 0,
+            num_tokens_across_dp,
+            vllm_config.attention_config.dsa_sequence_parallel,
         )
 
     # Preserve the batch size before model-level sequence parallelism.

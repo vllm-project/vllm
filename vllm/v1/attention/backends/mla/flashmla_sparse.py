@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
     flat_kv_row_view,
+    max_local_query_requests,
     neutralize_dcp_empty_rows_,
     request_row_bounds,
     triton_convert_req_index_to_global_index,
@@ -373,7 +374,7 @@ class FlashMLASparseMetadataBuilder(
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
 
-        num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
+        num_q_heads = self.num_heads
         if current_platform.is_device_capability_family(100):
             threshold = {8: 128, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
                 num_q_heads, 1024
@@ -391,7 +392,6 @@ class FlashMLASparseMetadataBuilder(
 
         sm_count = num_compute_units(device.index)
 
-        self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         # FP8 decode kernel only supports h_q = 64 or 128, so we need to pad
         self.fp8_decode_padded_heads = (
             FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
@@ -400,7 +400,7 @@ class FlashMLASparseMetadataBuilder(
         self.use_fp8_kv_cache = (
             cache_config.cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
         )
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_seqs = max_local_query_requests(vllm_config)
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
             (max_num_seqs,), self.topk_tokens, device=device, dtype=torch.int32

@@ -321,3 +321,62 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
         name_0="TP",
         name_1="TP with extended ShardQ",
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expert_parallel", "enforce_eager"),
+    [("contiguous", False, True), ("zigzag", True, False)],
+)
+def test_dsa_sequence_parallel_preserves_generation(
+    vllm_runner, shardq_checkpoint, mode, expert_parallel, enforce_eager
+):
+    """Preserve sampled rows across chunked prefills and mixed decode batches."""
+    prompts = [
+        {"prompt_token_ids": [16 + (i + n) % 700 for i in range(n)]}
+        for n in (513, 23, 7)
+    ]
+    sampling = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True, logprobs=16)
+    outputs = []
+    for split in (None, mode):
+        with vllm_runner(
+            shardq_checkpoint,
+            tensor_parallel_size=2,
+            enable_expert_parallel=expert_parallel,
+            all2all_backend="allgather_reducescatter",
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            enforce_eager=enforce_eager,
+            compilation_config=None
+            if enforce_eager
+            else {
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                "prefill_cudagraph_capture_token_sizes": [64, 128, 255],
+                "decode_cudagraph_capture_request_sizes": [1, 2, 4],
+            },
+            max_model_len=1024,
+            max_num_batched_tokens=255,
+            max_num_seqs=4,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            block_size=64,
+            kv_cache_dtype="fp8_ds_mla",
+            attention_config={
+                "backend": "FLASHMLA_SPARSE",
+                "dsa_sequence_parallel": split,
+            },
+            gpu_memory_utilization=0.1,
+        ) as runner:
+            runs = runner.llm.generate(prompts, sampling, use_tqdm=False)
+            runs += runner.llm.generate(prompts[:1], sampling, use_tqdm=False)
+            outputs.append(
+                [
+                    (list(r.outputs[0].token_ids), "", r.outputs[0].logprobs)
+                    for r in runs
+                ]
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="TP",
+        name_1=f"DSA SP ({mode})",
+    )

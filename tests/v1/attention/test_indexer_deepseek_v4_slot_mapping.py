@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.attention.utils import create_vllm_config
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import SpeculativeConfig
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
@@ -33,6 +37,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
     get_max_prefill_buffer_size,
 )
+from vllm.v1.attention.backends.mla.sparse_swa import ComputePrefillMetadataKernel
 from vllm.v1.attention.backends.mla.sparse_utils import (
     ConvertReqIndexToGlobalIndexKernel,
 )
@@ -623,7 +628,10 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
 
 
 @requires_accelerator
-def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
+@pytest.mark.parametrize("shard_queries", [False, True])
+def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states(
+    shard_queries,
+):
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
     compressed positions, not reuse the uncompressed common metadata mapping.
     """
@@ -637,7 +645,9 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         dtype=torch.bfloat16,
         tokens_per_state=4,
     )
-    vllm_config = create_vllm_config(max_model_len=1024)
+    vllm_config = create_vllm_config(max_model_len=1024, max_num_seqs=1)
+    if shard_queries:
+        vllm_config.attention_config.dsa_sequence_parallel = "zigzag"
     group = new_kv_cache_group(["layer"], kv_cache_spec)
     max_num_blocks = group.max_num_blocks_per_req(vllm_config, 1024)
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
@@ -677,8 +687,22 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         causal=True,
     )
 
+    if shard_queries:
+        from vllm.v1.worker.gpu.dsa_sequence_parallel import DSAQueryLayout
+
+        layout = DSAQueryLayout.from_offsets(
+            query_start_loc_cpu.numpy(),
+            model_num_tokens=40,
+            tp=2,
+            rank=0,
+            zigzag=True,
+            full_decode=False,
+        )
+        common = layout.local_metadata(common, buffers=None, capacity=40)
     md = builder.build(common_prefix_len=0, common_attn_metadata=common)
 
+    # Each rank scores its own queries but publishes all 40 cache rows.
+    assert md.num_prefill_tokens == (20 if shard_queries else 40)
     # The compressed slot_mapping retains the original uncompressed size (40).
     # Only every compress_ratio-th position gets a valid slot; the rest are -1.
     assert md.slot_mapping.numel() == 40
@@ -706,6 +730,61 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         device=device,
     )
     torch.testing.assert_close(valid_slots, expected)
+
+
+@pytest.mark.parametrize(
+    "mode, max_prefills", [(None, 1), ("contiguous", 1), ("zigzag", 2)]
+)
+def test_swa_warmup_covers_local_prefill_requests(mode, max_prefills):
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(dsa_sequence_parallel=mode),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=40),
+    )
+    kernel = ComputePrefillMetadataKernel()
+    keys = kernel.get_warmup_keys(config)
+    assert {key.block_size for key in keys} == set(range(1, max_prefills + 1))
+
+
+@requires_accelerator
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+def test_indexer_zigzag_single_request_can_supply_two_decode_rows(compress_ratio):
+    from vllm.v1.worker.gpu.dsa_sequence_parallel import DSAQueryLayout
+
+    device = torch.device(DEVICE_TYPE)
+    config = create_vllm_config(max_num_seqs=1)
+    config.attention_config.dsa_sequence_parallel = "zigzag"
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[260], query_lens=[4]),
+        256,
+        device,
+        arange_block_indices=True,
+    )
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            tokens_per_state=compress_ratio,
+        ),
+        layer_names=["dummy"],
+        vllm_config=config,
+        device=device,
+        block_table_width=common.block_table_tensor.shape[1],
+    )
+    # Rank 0 owns positions 256 and 259, with distinct causal context lengths.
+    layout = DSAQueryLayout.from_offsets(
+        common.query_start_loc_cpu.numpy(), 4, 2, 0, True, False
+    )
+    local = layout.local_metadata(common, buffers=None, capacity=0)
+    assert builder.expanded_block_table_buffer.shape[0] >= local.num_reqs == 2
+    md = builder.build(0, local)
+    assert md.num_decode_tokens == md.num_decodes == 2
+    assert md.decode is not None
+    assert md.decode.seq_lens.flatten().tolist() == [
+        257 // compress_ratio,
+        260 // compress_ratio,
+    ]
 
 
 @pytest.mark.parametrize("compress_ratio", [1, 4])

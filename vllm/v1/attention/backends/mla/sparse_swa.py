@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import max_local_query_requests
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
@@ -404,7 +405,7 @@ class ComputePrefillMetadataKernel(
         max_prefills = max(
             1,
             min(
-                scheduler_config.max_num_seqs,
+                max_local_query_requests(vllm_config),
                 scheduler_config.max_num_batched_tokens,
             ),
         )
@@ -761,6 +762,11 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             query_start_loc_cpu=query_start_loc_cpu,
             block_table=block_table,
             slot_mapping=slot_mapping,
+            cache_slot_mapping=(
+                common_attn_metadata.dsa_sp_global.slot_mapping
+                if common_attn_metadata.dsa_sp_global is not None
+                else None
+            ),
             is_valid_token=is_valid_token,
             token_to_req_indices=token_to_req_indices,
             decode_swa_indices=decode_swa_indices[:num_decode_tokens],

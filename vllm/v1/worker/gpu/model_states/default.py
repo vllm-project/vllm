@@ -7,13 +7,16 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_transferred_mrope_position_delta,
 )
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.dsa_sequence_parallel import DSAQueryLayout
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
@@ -42,6 +45,7 @@ class DefaultModelState(ModelState):
     ):
         super().__init__(vllm_config, model, encoder_cache, device)
 
+        self.dsa_sp_buffers: dict[int, dict[str, torch.Tensor]] = {}
         self.prompt_embeds_state: PromptEmbedsState | None = None
         if self.model_config.enable_prompt_embeds:
             self.prompt_embeds_state = PromptEmbedsState(
@@ -217,6 +221,14 @@ class DefaultModelState(ModelState):
             model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
         return model_inputs
 
+    def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
+        if self.vllm_config.attention_config.dsa_sequence_parallel is not None:
+            return (
+                AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE,
+                "DSA sequence parallelism",
+            )
+        return super().get_additional_cg_support()
+
     def prepare_attn(
         self,
         input_batch: InputBatch,
@@ -261,7 +273,22 @@ class DefaultModelState(ModelState):
             dcp_local_seq_lens_cpu_upper_bound = (
                 input_batch.pcp.dcp_local_seq_lens_cpu_upper_bound
             )
+        dsa_layout = None
+        dsa_mode = self.vllm_config.attention_config.dsa_sequence_parallel
+        full_decode = for_capture or cudagraph_mode == CUDAGraphMode.FULL
+        if dsa_mode is not None:
+            dsa_layout = DSAQueryLayout.from_offsets(
+                query_start_loc_cpu.numpy(),
+                input_batch.num_tokens_after_padding,
+                self.vllm_config.parallel_config.tensor_parallel_size,
+                get_tensor_model_parallel_rank(),
+                dsa_mode == "zigzag",
+                full_decode,
+            )
         attn_metadata = build_attn_metadata(
+            dsa_sp_layout=dsa_layout,
+            dsa_sp_buffers=self.dsa_sp_buffers if dsa_layout and full_decode else None,
+            max_num_reqs=self.max_num_reqs,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
