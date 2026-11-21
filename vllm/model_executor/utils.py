@@ -81,6 +81,16 @@ _BYTE_CONTAINERS = frozenset(
     {torch.uint8, torch.int8, torch.float8_e8m0fnu, torch.float4_e2m1fn_x2}
 )
 
+_FLOAT8_VALUES = frozenset(
+    {
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    }
+)
+_WIDE_FLOATS = frozenset({torch.bfloat16, torch.float16, torch.float32})
+
 
 def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     """`dst.copy_(src)` for weight loaders.
@@ -99,6 +109,14 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     a CPU temporary. Sources with at most one element are skipped: they count
     as contiguous with any stride, which `view(torch.uint8)` rejects.
     """
+    if dst.dtype in _FLOAT8_VALUES and src.dtype in _WIDE_FLOATS:
+        raise ValueError(
+            f"Refusing to cast a {src.dtype} checkpoint tensor into a {dst.dtype} "
+            "parameter without its scales. The checkpoint stores this weight "
+            "unquantized, but its layer was built quantized; usually a fused "
+            "layer the quantization config resolved without its checkpoint shard "
+            "names (see `packed_modules_mapping`)."
+        )
     if (
         src.dtype != dst.dtype
         and src.dtype in _BYTE_CONTAINERS
