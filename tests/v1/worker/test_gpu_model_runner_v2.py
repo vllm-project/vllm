@@ -228,6 +228,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     runner.supports_mm_inputs = False
     runner.is_last_pp_rank = False
     runner.max_num_tokens = 8
+    runner.pcp_manager = None
     runner.encoder_cache = None
     runner.pooling_runner = None
     runner.ec_connector = NO_OP_EC_CONNECTOR
