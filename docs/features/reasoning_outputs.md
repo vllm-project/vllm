@@ -270,6 +270,8 @@ Some models, such as [Qwen3](https://qwen.readthedocs.io/en/latest/getting_start
 
 Token counting starts from `reasoning_start_str`. Once the reasoning token count reaches the configured `thinking_token_budget`, vLLM forces the model to produce `reasoning_end_str`, effectively terminating the reasoning block.
 
+Reasoning the prompt leaves open, such as a partial assistant message sent with `continue_final_message`, counts against the budget. When the chat template ends each turn with an end-of-sequence token, as Qwen3 does with `<|im_end|>`, a `reasoning_start_str` that only appears in an earlier message (e.g. a system prompt that mentions the `<think>` tag) doesn't count.
+
 To use this feature:
 
 - `--reasoning-parser` enables reasoning extraction.

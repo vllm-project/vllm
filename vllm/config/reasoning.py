@@ -6,7 +6,7 @@ from dataclasses import field
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
 from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
 
 @config
@@ -39,6 +39,8 @@ class ReasoningConfig:
         default=None, init=False, repr=False
     )
     """Token IDs that naturally terminate reasoning, as defined by the parser."""
+    _turn_end_token_ids: list[int] | None = field(default=None, init=False, repr=False)
+    """Private backing field for `turn_end_token_ids`."""
 
     _enabled: bool = field(default=False, init=False, repr=False)
     """Private field indicating whether reasoning token IDs have been initialized.
@@ -65,6 +67,15 @@ class ReasoningConfig:
     def natural_reasoning_end_token_ids(self) -> list[int] | None:
         """Token IDs that indicate the model naturally ended reasoning."""
         return self._natural_reasoning_end_token_ids
+
+    @property
+    def turn_end_token_ids(self) -> list[int]:
+        """The model's end-of-sequence token IDs, which also end a chat turn.
+
+        A reasoning start in the prompt that is followed by one of these was
+        quoted in an earlier message, so the thinking budget doesn't count it.
+        """
+        return self._turn_end_token_ids or []
 
     def initialize_token_ids(self, model_config: ModelConfig) -> None:
         """Initialize reasoning token IDs from strings using the tokenizer."""
@@ -122,4 +133,20 @@ class ReasoningConfig:
                 f"reasoning_end_str='{self.reasoning_end_str}'. "
                 "Ensure the strings are valid tokens in the model's vocabulary."
             )
+        self._turn_end_token_ids = _get_eos_token_ids(tokenizer, model_config)
         self._enabled = True
+
+
+def _get_eos_token_ids(
+    tokenizer: TokenizerLike, model_config: ModelConfig
+) -> list[int]:
+    """EOS IDs from the tokenizer and the generation config, as generation uses."""
+    eos_token_ids: set[int] = set()
+    if (eos_token_id := getattr(tokenizer, "eos_token_id", None)) is not None:
+        eos_token_ids.add(eos_token_id)
+    generation_eos = model_config.try_get_generation_config().get("eos_token_id")
+    if isinstance(generation_eos, int):
+        eos_token_ids.add(generation_eos)
+    elif isinstance(generation_eos, list):
+        eos_token_ids.update(generation_eos)
+    return sorted(eos_token_ids)

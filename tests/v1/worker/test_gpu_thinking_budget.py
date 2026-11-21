@@ -34,18 +34,21 @@ class MockReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END]
     natural_reasoning_end_token_ids = [END]
+    turn_end_token_ids: list[int] = []
 
 
 class MockMultiTokenEndReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END_A, END_B]
     natural_reasoning_end_token_ids = [END_A, END_B]
+    turn_end_token_ids: list[int] = []
 
 
 class MockDistinctEndReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END_A, END_B]
     natural_reasoning_end_token_ids = [END]
+    turn_end_token_ids: list[int] = []
 
 
 def _make_req_states(tokens: list[int], prompt_len: int = 1) -> RequestState:
@@ -311,3 +314,77 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 
     assert out[0, END_B] == pytest.approx(1.0e9)
     assert out[0, END_A] == 0
+
+
+EOT = 94
+
+
+class MockTurnEndReasoningConfig(MockReasoningConfig):
+    turn_end_token_ids: list[int] = [EOT]
+
+
+@pytest.mark.parametrize("num_filler", [3, 1500])
+def test_v2_thinking_budget_ignores_start_marker_in_earlier_prompt_turn(num_filler):
+    """A start marker quoted in an earlier message, closed by an end-of-turn
+    token, must not count the rest of the prompt against the budget. 1500
+    puts the marker in an earlier cold-scan block than the turn end."""
+    tokens = [1, START, *([10] * num_filler), EOT, 13, 14]
+    req_states = _make_req_states(tokens, prompt_len=len(tokens))
+    state = ThinkingBudgetState(req_states, MockTurnEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[14], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_counts_generated_start_after_quoted_marker():
+    """After a quoted marker is ignored, the model's own reasoning is still
+    limited by the budget."""
+    tokens = [1, START, 10, 11, 12, EOT, 13]
+    req_states = _make_req_states(tokens, prompt_len=len(tokens))
+    state = ThinkingBudgetState(req_states, MockTurnEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [13], [0])
+    assert torch.all(out == 0)
+
+    generated = [START, 20, 21, 22]
+    req_states.all_token_ids.stage_write(3, len(tokens), generated)
+    req_states.total_len.stage_write_elem(3, len(tokens) + len(generated))
+    req_states.apply_staged_writes()
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [22], [0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_counts_start_marker_after_prompt_turn_end():
+    """Reasoning left open in the final turn of the prompt, such as a
+    resumed partial assistant message, still counts against the budget."""
+    tokens = [1, EOT, 2, START, *([10] * 1500)]
+    req_states = _make_req_states(tokens, prompt_len=len(tokens))
+    state = ThinkingBudgetState(req_states, MockTurnEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[10], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_ignores_turn_end_token_in_output():
+    """Only prompt turn ends close reasoning. A generated end-of-turn token,
+    e.g. with ignore_eos, must not stop enforcing the budget."""
+    tokens = [1, START, 10, EOT, 11, 12]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockTurnEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[12], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
