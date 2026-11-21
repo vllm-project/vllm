@@ -145,13 +145,19 @@ single loop handles chunked prefill, prefix caching and speculative decoding.
 
 ### Scheduling Policies
 
-Two policies are supported via `--scheduling-policy`:
+Three policies are supported via `--scheduling-policy`:
 
 - **FCFS** (default): requests are scheduled first-come, first-served. When
     the KV cache is exhausted, the last-admitted running request is preempted.
 - **Priority**: requests carry an integer `priority` field. When the KV cache
     is exhausted, the running request with the lowest priority (highest
     `priority` value, then latest arrival time) is preempted.
+- **Shortest prefill first**: before each step, requests whose remaining
+    prefill length is known are ordered shortest first within each queue:
+    running prefills, requests holding KV blocks (e.g. loaded from a KV
+    connector), and waiting requests whose KV connector lookup has finished.
+    Other requests keep their positions. Preemption takes the last running
+    request, as under FCFS, which is then the one with the most prefill left.
 
 ### Preemption
 
