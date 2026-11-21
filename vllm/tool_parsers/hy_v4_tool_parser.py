@@ -160,6 +160,9 @@ _TYPE_ALIASES: dict[str, str] = {
 _INTEGER_PREFIXES: tuple[str, ...] = ("int", "uint", "long", "short", "unsigned")
 _NUMBER_PREFIXES: tuple[str, ...] = ("num", "float")
 _SCHEMA_TYPE_KEYS: tuple[str, ...] = ("type", "anyOf", "oneOf")
+# `allOf` carries type information too. It stays out of `_SCHEMA_TYPE_KEYS` so
+# that a `$ref` with a sibling `allOf` is still resolved through the `$ref`.
+_SCHEMA_TYPE_KEYS_WITH_ALL_OF: tuple[str, ...] = (*_SCHEMA_TYPE_KEYS, "allOf")
 _MAX_REF_HOPS = 3
 _MAX_ANCHOR_DEPTH = 8
 
@@ -287,7 +290,9 @@ def _resolve_ref_type(
         return {}
 
     type_schema = {
-        key: copy.deepcopy(target[key]) for key in _SCHEMA_TYPE_KEYS if target.get(key)
+        key: copy.deepcopy(target[key])
+        for key in _SCHEMA_TYPE_KEYS_WITH_ALL_OF
+        if target.get(key)
     }
     if type_schema:
         return (
@@ -307,9 +312,9 @@ def _resolve_union_ref_types(
     seen_refs: frozenset[str] = frozenset(),
     ref_hops: int = 0,
 ) -> dict[str, Any] | None:
-    """Resolve reference-only branches of `anyOf` and `oneOf`."""
+    """Resolve reference-only branches of `anyOf`, `oneOf` and `allOf`."""
     resolved_schema: dict[str, Any] | None = None
-    for union_key in ("anyOf", "oneOf"):
+    for union_key in ("anyOf", "oneOf", "allOf"):
         branches = schema.get(union_key)
         if not isinstance(branches, list):
             continue
@@ -369,6 +374,7 @@ def _get_schema_options(arg_schema: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize any property schema into a list of sub-schemas.
     - has type (single type) → return [arg_schema]
     - anyOf / oneOf → recursively expand union branches
+    - allOf → the types that every typed branch allows
     - fallback → [{"type": "string"}]
 
     Note: single `type` has the highest priority.
@@ -391,6 +397,28 @@ def _get_schema_options(arg_schema: dict[str, Any]) -> list[dict[str, Any]]:
                 for branch in arg_schema[union_key]
                 for option in _get_schema_options(branch)
             ]
+
+    all_of = arg_schema.get("allOf")
+    if isinstance(all_of, list):
+        # A value has to satisfy every branch, so only the types that all
+        # branches allow remain. A branch without type information (e.g. only
+        # a description) does not narrow them.
+        common_types: set[str] | None = None
+        for branch in all_of:
+            if not isinstance(branch, dict) or not any(
+                key in branch for key in _SCHEMA_TYPE_KEYS_WITH_ALL_OF
+            ):
+                continue
+            branch_types = {
+                _normalize_type(option.get("type", "string"))
+                for option in _get_schema_options(branch)
+            }
+            if common_types is None:
+                common_types = branch_types
+            else:
+                common_types &= branch_types
+        if common_types:
+            return [{"type": type_name} for type_name in common_types]
 
     return [{"type": "string"}]
 
@@ -476,7 +504,7 @@ def _parse_value(
     arg_key: str,
     tools: list[ToolSchema] | None,
 ) -> Any:
-    """Unified argument value parser with anyOf/oneOf support.
+    """Unified argument value parser with anyOf/oneOf/allOf support.
 
     Fallthrough chain:
         null → bool → int → number(wildcard_number)
