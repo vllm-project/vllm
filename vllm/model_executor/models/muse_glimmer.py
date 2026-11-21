@@ -43,7 +43,7 @@ from torch import nn
 from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     divide,
@@ -70,6 +70,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.utils import copy_weight_
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -874,6 +875,87 @@ class MuseGlimmerMLP(nn.Module):
         return x
 
 
+def _fuse_qkv_output_gate(vllm_config: VllmConfig) -> bool:
+    """Run qkv_proj and the attention output gate as one GEMM.
+
+    Only for unquantized models without LoRA: quantized checkpoints carry
+    separate q and gate scales, and LoRA expects the q/k/v slices of qkv_proj.
+    """
+    return vllm_config.quant_config is None and vllm_config.lora_config is None
+
+
+class MuseGlimmerQKVGateParallelLinear(QKVParallelLinear):
+    """qkv_proj with the attention output gate folded in as extra query heads.
+
+    Per-rank layout is `[q | gate | k | v]`, so the parent's k/v offsets and
+    KV-head replication apply unchanged. q and gate come from separate
+    checkpoint tensors and are loaded here.
+    """
+
+    shard_ids = ("q", "g", "k", "v")
+
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: int,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            hidden_size,
+            head_size,
+            2 * total_num_heads,
+            total_num_kv_heads,
+            bias=False,
+            prefix=prefix,
+        )
+
+    def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
+        if loaded_shard_id == "g":
+            return self.num_heads // 2 * self.head_size
+        return super()._get_shard_offset_mapping(loaded_shard_id)
+
+    def _get_shard_size_mapping(self, loaded_shard_id: str) -> int | None:
+        if loaded_shard_id in ("q", "g"):
+            return self.num_heads // 2 * self.head_size
+        return super()._get_shard_size_mapping(loaded_shard_id)
+
+    def _load_q_or_gate(
+        self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
+    ) -> None:
+        self.validate_shard_id(shard_id, param)
+        offset = self._get_shard_offset_mapping(shard_id)
+        rows = self._get_shard_size_mapping(shard_id)
+        assert offset is not None and rows is not None
+        copy_weight_(
+            param.data.narrow(0, offset, rows),
+            loaded_weight.narrow(0, self.tp_rank * rows, rows),
+        )
+
+    def weight_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: str | None = None,
+    ) -> None:
+        assert loaded_shard_id is not None, "pre-fused qkv checkpoints unsupported"
+        if loaded_shard_id in ("q", "g"):
+            return self._load_q_or_gate(param, loaded_weight, loaded_shard_id)
+        return super().weight_loader(param, loaded_weight, loaded_shard_id)
+
+    def weight_loader_v2(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: str | None = None,
+    ) -> None:
+        assert loaded_shard_id is not None, "pre-fused qkv checkpoints unsupported"
+        if loaded_shard_id in ("q", "g"):
+            return self._load_q_or_gate(param, loaded_weight, loaded_shard_id)
+        return super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+
+
 class MuseGlimmerAttention(nn.Module):
     def __init__(
         self,
@@ -912,30 +994,39 @@ class MuseGlimmerAttention(nn.Module):
         self.qk_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
         self.scale_query_by = config.qk_scale_factor
 
-        self.qkv_proj = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
+        self.fuse_output_gate = _fuse_qkv_output_gate(get_current_vllm_config())
+        if self.fuse_output_gate:
+            self.qkv_proj = MuseGlimmerQKVGateParallelLinear(
+                self.hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                prefix=f"{prefix}.qkv_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                self.hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.output_gate_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=False,
+                gather_output=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.output_gate_proj",
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
-        )
-
-        self.output_gate_proj = ColumnParallelLinear(
-            self.hidden_size,
-            self.total_num_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output_gate_proj",
         )
 
         self.rotary_emb = (
@@ -971,7 +1062,14 @@ class MuseGlimmerAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.fuse_output_gate:
+            q, gate, k, v = qkv.split(
+                [self.q_size, self.q_size, self.kv_size, self.kv_size], dim=-1
+            )
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            # Gate reads the layer input hidden states (not the attn output).
+            gate, _ = self.output_gate_proj(hidden_states)
 
         # QK-norm over head_dim, fp32, applied BEFORE RoPE; then pre-scale q.
         q = q.reshape(-1, self.head_dim)
@@ -985,9 +1083,6 @@ class MuseGlimmerAttention(nn.Module):
             q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
-
-        # Gate reads the layer input hidden states (not the attn output).
-        gate, _ = self.output_gate_proj(hidden_states)
         attn_output = torch.sigmoid(gate) * attn_output
 
         output, _ = self.o_proj(attn_output)
@@ -1232,6 +1327,7 @@ class MuseGlimmerForCausalLM(
         self.config = config
         self.text_config = text_config
         self.quant_config = quant_config
+        self.fuse_output_gate = _fuse_qkv_output_gate(vllm_config)
         self.has_vision = _muse_glimmer_has_vision(config)
 
         with self._mark_language_model(vllm_config):
@@ -1374,7 +1470,12 @@ class MuseGlimmerForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if self.fuse_output_gate:
+            mapper = mapper | WeightsMapper(
+                orig_to_new_stacked={".output_gate_proj": (".qkv_proj", "g")}
+            )
+        return loader.load_weights(weights, mapper=mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models"""
