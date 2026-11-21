@@ -43,8 +43,20 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
     if vllm_config.lora_config is not None:
         raise ValueError("HYV4 Flash does not support LoRA")
     kv_transfer = vllm_config.kv_transfer_config
-    if kv_transfer is not None and kv_transfer.kv_connector != "HiSparseConnector":
-        raise ValueError("HYV4 Flash supports only the HiSparseConnector KV connector")
+    if kv_transfer is not None:
+        connector = kv_transfer.kv_connector
+        is_nixl_pull = (
+            connector in ("NixlConnector", "NixlPullConnector")
+            and kv_transfer.kv_connector_module_path is None
+            and (
+                connector == "NixlPullConnector"
+                or kv_transfer.get_from_extra_config("transfer_mode", "pull") == "pull"
+            )
+        )
+        if connector != "HiSparseConnector" and not is_nixl_pull:
+            raise ValueError(
+                "HYV4 Flash supports only HiSparseConnector or NIXL pull KV transfer"
+            )
     spec = vllm_config.speculative_config
     if spec is not None and spec.method != "dfly":
         raise ValueError("HYV4 Flash supports only DFly speculative decoding")
