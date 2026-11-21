@@ -824,6 +824,36 @@ def test_gfx942_copies_dense_linears_at_load(monkeypatch, make, copied):
         assert linear.mono942 == ("copy", linear.weight, linear.weight_scale)
 
 
+def test_gfx942_copies_the_checkpoint_before_online_requantization(monkeypatch):
+    """With `--quantization-config`, an online method requantizes the MXFP8
+    checkpoint at load and replaces its weights. The kernels read the MXFP8
+    weights, so the copy is made from the checkpoint before the method runs.
+    The layerwise loader runs the method as each layer loads and the model
+    loader calls it again at the end, which keeps the first copies."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    weights942 = ModuleType("vllm.models.deepseek_v41.amd.mono.weights942")
+    weights942.linear_copy = lambda w, s: ("copy", w, s)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, weights942.__name__, weights942)
+
+    def requantize(layer):
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+        layer.weight, layer.weight_scale = object(), object()
+        layer._already_called_process_weights_after_loading = True
+
+    layer = _decoder_layer()
+    linear = layer.attn.wq_b
+    linear.quant_method = SimpleNamespace(
+        requantization_source=object(), process_weights_after_loading=requantize
+    )
+    assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    checkpoint = (linear.weight, linear.weight_scale)
+    for _ in range(2):
+        linear.quant_method.process_weights_after_loading(linear)
+        assert linear.weight is not checkpoint[0]
+        assert linear.mono942 == ("copy", *checkpoint)
+
+
 def test_gfx942_reload_writes_the_copies_in_place(monkeypatch):
     """A reload of the weights (reload_weights, or a weight update in RL) runs
     process_weights_after_loading again. The kernels and captured CUDA graphs

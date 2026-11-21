@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepseekV4 MLA Attention Layer"""
 
+import copy
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -297,6 +298,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # path to pre-reserve that workspace.
     PREFILL_CHUNK_SIZE: ClassVar[int] = 4
 
+    def _wo_a_keeps_checkpoint_quant(self) -> bool:
+        """True when the subclass computes wo_a from its checkpoint weights
+        itself, so online quantization (`--quantization-config`) must leave
+        it alone."""
+        return False
+
     # ---- attention-interface contract, declared by the platform subclass ----
 
     @property
@@ -482,12 +489,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
+        wo_a_quant_config = quant_config
+        if (
+            self._wo_a_keeps_checkpoint_quant()
+            and getattr(quant_config, "online_quantization_config", None) is not None
+        ):
+            wo_a_quant_config = copy.copy(quant_config)
+            wo_a_quant_config.online_quantization_config = None
         self.wo_a = DeepseekV4GroupedWoA(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
             n_groups=self.n_groups,
             bias=False,
-            quant_config=quant_config,
+            quant_config=wo_a_quant_config,
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )

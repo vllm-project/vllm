@@ -695,6 +695,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV41ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
 
+    def _wo_a_keeps_checkpoint_quant(self) -> bool:
+        # CDNA3's einsum path dequantizes the MXFP8 wo_a itself. CDNA4
+        # shares this class and keeps the online requant.
+        from vllm.platforms.rocm import get_cdna_version
+
+        return get_cdna_version() == 3
+
     def _indexer_cls(
         self, k_cache: DeepseekV4IndexerCache | None
     ) -> type[DeepseekV4Indexer]:
