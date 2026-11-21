@@ -930,7 +930,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 
         intermediate_alignment = (
             128
-            if aiter_w4a4 or (is_situ_or_silu and (aiter_uses_128 or triton_uses_128))
+            if (aiter_w4a4 and activation != MoEActivation.RELU2_NO_MUL)
+            or (is_situ_or_silu and (aiter_uses_128 or triton_uses_128))
             else 256
         )
         # W4A4 stage 1 still requires a 256-aligned hidden dimension.
@@ -1308,6 +1309,17 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         return (w13_data, w2_data, w13_scale, w2_scale, w13_bias, w2_bias)
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        activation = getattr(layer, "activation", None)
+        if activation == MoEActivation.RELU2_NO_MUL:
+            raise ValueError(
+                "AITER_MXFP4_MXFP4 (W4A4) does not support relu2 "
+                "(MoEActivation.RELU2_NO_MUL): no fp4-activation relu2 "
+                "kernel exists in AITER, and this branch's plain W4A4 "
+                "weight shuffle is incompatible with the BF16-only relu2 "
+                "kernel's expected gate/up-interleaved a16w4 shuffle. Use "
+                "AITER_MXFP4_BF16 instead."
+            )
+
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
@@ -1362,23 +1374,27 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
         e, n, k = w13_weight.shape
 
-        # De-interleave w13 rows: gate/up pairs -> contiguous gate, up blocks
-        w13_weight.view(torch.uint8).copy_(
-            w13_weight.data.view(torch.uint8)
-            .view(e, n // 2, 2, k)
-            .permute(0, 2, 1, 3)
-            .contiguous()
-            .view(e, n, k)
-        )
-        # New tensors, not `.data` rebinds: `_setup_kernel` writes them into
-        # the params' storage, which captured CUDA graphs read across reloads.
-        w13_scale = (
-            w13_weight_scale.data.view(e, n // 2, 2, -1)
-            .permute(0, 2, 1, 3)
-            .contiguous()
-            .view(e, n, -1)
-        )
+        # relu2 (non-gated) has no gate/up row pairing to de-interleave,
+        # unlike gpt-oss-style gated activations.
+        is_relu2 = getattr(layer, "activation", None) == MoEActivation.RELU2_NO_MUL
 
+        if is_relu2:
+            w13_scale = w13_weight_scale.data
+        else:
+            # De-interleave w13 rows: gate/up pairs -> contiguous gate, up blocks
+            w13_weight.view(torch.uint8).copy_(
+                w13_weight.data.view(torch.uint8)
+                .view(e, n // 2, 2, k)
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .view(e, n, k)
+            )
+            w13_scale = (
+                w13_weight_scale.data.view(e, n // 2, 2, -1)
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .view(e, n, -1)
+            )
         # Shuffle weights (as native FP4) and scales for AITER CK kernel layout
         w13 = rocm_aiter_ops.shuffle_weight_a16w4(
             w13_weight.data.view(torch.float4_e2m1fn_x2), 16, True
@@ -1398,8 +1414,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             False,
         )
 
-        # Permute bias to match de-interleaved weight layout
-        if w13_bias is not None:
+        # Permute bias to match de-interleaved weight layout (skip for
+        # relu2, which has no gate/up pairing to de-interleave).
+        if w13_bias is not None and not is_relu2:
             w13_bias = (
                 w13_bias.data.view(-1, n // 2, 2)
                 .permute(0, 2, 1)
