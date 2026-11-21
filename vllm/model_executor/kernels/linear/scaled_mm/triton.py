@@ -128,6 +128,13 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             x.contiguous(), i_s, i_zp, symmetric=symmetric
         )
 
+        if azp_adj is not None and current_platform.is_rocm():
+            # A static per-tensor azp is already folded into azp_adj.
+            azp = x_zp if i_zp is None else None
+            return torch.ops.vllm.int8_scaled_mm_func(
+                x_q, w_q, x_s, w_s, x.dtype, bias, azp_adj, azp
+            )
+
         out = torch.ops.vllm.int8_scaled_mm_func(x_q, w_q, x_s, w_s, x.dtype, bias)
 
         if azp_adj is not None:
@@ -222,6 +229,8 @@ def _int8_scaled_mm_func(
     weight_scale: torch.Tensor,
     output_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
+    azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return triton_scaled_mm(
         qx,
@@ -230,6 +239,8 @@ def _int8_scaled_mm_func(
         scale_b=weight_scale,
         out_dtype=output_dtype,
         bias=bias,
+        azp=azp,
+        azp_adj=azp_adj,
     )
 
 
@@ -240,6 +251,8 @@ def _int8_scaled_mm_fake(
     weight_scale: torch.Tensor,
     output_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
+    azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty(
         (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device
