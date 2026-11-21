@@ -7,5 +7,5 @@ class LiLiCorrSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.lilicorr.speculator.LiLiCorrSpeculator"
     )
-    # Draft-side watermarking doesn't cover candidate-head drafting yet.
+    # Draft-side watermarking isn't validated for LiLiCorr drafting yet.
     supports_watermarking = False

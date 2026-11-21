@@ -138,6 +138,43 @@ class GumbelWatermarker(Watermarker):
             include_prompt=state.deduplicate_contexts == "all",
         )
 
+    def _try_sample_candidates(
+        self,
+        scores: torch.Tensor,
+        candidate_ids: torch.Tensor,
+        random_sampler: RandomSampler,
+        state: DraftContextState,
+        draft_tokens: torch.Tensor,
+        realized_scores: torch.Tensor,
+    ) -> bool:
+        if type(self.prf) is not PhiloxPRF or scores.device.type != "cuda":
+            return False
+
+        from vllm.v1.worker.gpu.sample.watermark import draft_philox_candidate_sample
+
+        draft_philox_candidate_sample(
+            scores,
+            candidate_ids,
+            state.contexts,
+            self.prf.key,
+            expanded_idx_mapping=random_sampler.expanded_idx_mapping,
+            temperatures=random_sampler.temperatures,
+            seeds=random_sampler.seeds,
+            positions=random_sampler.positions,
+            enabled=state.enabled,
+            draft_tokens=draft_tokens,
+            realized_scores=realized_scores,
+            use_fp64=random_sampler.use_fp64,
+            prior_contexts=state.prior_contexts,
+            all_token_ids=state.all_token_ids,
+            prompt_lens=state.prompt_lens,
+            total_lens=state.total_lens,
+            deduplicate=state.deduplicate_contexts != "none",
+            max_history=state.deduplicate_contexts_max_history,
+            include_prompt=state.deduplicate_contexts == "all",
+        )
+        return True
+
 
 class DualKeyGumbelWatermarker(Watermarker, SupportsSpeculativeDecoding):
     def __init__(

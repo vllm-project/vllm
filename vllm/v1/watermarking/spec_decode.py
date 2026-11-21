@@ -227,6 +227,43 @@ class DraftWatermarker:
             )
         return sampled.view(-1)
 
+    def sample_candidates(
+        self,
+        candidate_ids: torch.Tensor,
+        scores: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        sample_pos: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        realized_scores: torch.Tensor,
+        use_fp64: bool = False,
+    ) -> None:
+        """Sample a candidate-head draft block, writing `draft_tokens` and the
+        picked score rows to `realized_scores`."""
+        # sample_pos is the predicted token's position P. Sampling keys a draw
+        # by the position before the sampled token, P-1.
+        random_sampler = RandomSampler(
+            expanded_idx_mapping=idx_mapping,
+            temperatures=temperature,
+            seeds=seed,
+            positions=sample_pos - 1,
+            use_fp64=use_fp64,
+            is_drafting=True,
+        )
+        if not self.watermarker._try_sample_candidates(
+            scores,
+            candidate_ids,
+            random_sampler,
+            self.state,
+            draft_tokens,
+            realized_scores,
+        ):
+            raise NotImplementedError(
+                f"{type(self.watermarker).__name__} cannot watermark "
+                "candidate-head drafts on this device."
+            )
+
 
 def create_speculative_target_watermarker(watermarker: Watermarker) -> Watermarker:
     if isinstance(watermarker, SupportsSpeculativeDecoding):

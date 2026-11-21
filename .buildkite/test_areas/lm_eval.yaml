@@ -63,9 +63,11 @@ steps:
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
+  - tests/watermarking/test_watermarking.py
   - tests/watermarking/test_watermarking_e2e.py
   - vllm/config/vllm.py
   - vllm/config/watermarking.py
+  - vllm/model_executor/models/qwen3_dflash2.py
   - vllm/sampling_params.py
   - vllm/v1/engine/core.py
   - vllm/v1/engine/input_processor.py
@@ -75,6 +77,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
   - pytest -s -v watermarking/test_watermarking_e2e.py
+  - pytest -s -v watermarking/test_watermarking.py -k "dflash2_candidate_walk"
   mirror:
     amd:
       automatic_shard: true
