@@ -1185,7 +1185,7 @@ class RoutedExperts(PluggableLayer):
         """
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
         prefix = "base_layer." if has_base_layer else ""
-        # These loaders index ``params_dict[full_name]``, so both sides get it.
+        # LoRA moves the params under `base_layer.`; checkpoint names never have it.
         mapping = RoutedExperts.build_expert_params_mapping(
             ckpt_gate_proj_name,
             ckpt_down_proj_name,
@@ -1193,7 +1193,6 @@ class RoutedExperts(PluggableLayer):
             num_experts,
             num_redundant_experts,
             routed_experts_prefix,
-            lora_base_layer_prefix=prefix,
             lora_base_layer_prefix_on_param_name=prefix,
         )
 
