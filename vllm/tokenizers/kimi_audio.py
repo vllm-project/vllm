@@ -20,6 +20,17 @@ from vllm.transformers_utils.repo_utils import hf_api
 
 logger = init_logger(__name__)
 
+# Special tokens the Kimi-Audio chat template emits. Registered even when
+# tokenizer_config.json does not list them.
+KIMIAUDIO_SPECIAL_TOKENS: dict[str, int] = {
+    "<|im_media_begin|>": 151661,
+    "<|im_media_end|>": 151663,
+    "<|im_kimia_text_blank|>": 151666,
+    "<|im_msg_end|>": 151645,
+    "<|im_kimia_user_msg_start|>": 151670,
+    "<|im_kimia_assistant_msg_start|>": 151671,
+}
+
 
 def _load_tiktoken_encoding(
     vocab_file: Path, special_tokens: dict[str, int]
@@ -161,6 +172,10 @@ class KimiAudioTokenizer(TokenizerLike):
         # Add Kimi-Audio special tokens
         self._add_kimiaudio_special_tokens()
 
+        # `decode()` skips every token listed in tokenizer_config.json; keep the
+        # same set of ids here so `convert_ids_to_tokens()` skips them too.
+        self._special_ids = frozenset(self._special_tokens.values())
+
         # Set default special token IDs (will be updated when special tokens are added)
         self._bos_token_id = 151643  # Kimi-Audio BOS
         self._eos_token_id = 151644  # Kimi-Audio EOS
@@ -175,16 +190,7 @@ class KimiAudioTokenizer(TokenizerLike):
         """Add Kimi-Audio special tokens to the tokenizer."""
         # Tokens should already be in self._special_tokens from tokenizer_config.json
         # Just add them to added_tokens_decoder for compatibility
-        kimiaudio_special_tokens = {
-            "<|im_media_begin|>": 151661,
-            "<|im_media_end|>": 151663,
-            "<|im_kimia_text_blank|>": 151666,
-            "<|im_msg_end|>": 151645,
-            "<|im_kimia_user_msg_start|>": 151670,
-            "<|im_kimia_assistant_msg_start|>": 151671,
-        }
-
-        for token_str, token_id in kimiaudio_special_tokens.items():
+        for token_str, token_id in KIMIAUDIO_SPECIAL_TOKENS.items():
             # Only add if not already present
             if token_id not in self._added_tokens_decoder:
                 self._added_tokens_decoder[token_id] = AddedToken(
@@ -201,7 +207,9 @@ class KimiAudioTokenizer(TokenizerLike):
 
     @property
     def all_special_tokens(self) -> list[str]:
-        return list(self._added_tokens_decoder.values())
+        # `added_tokens_decoder` stores AddedToken objects, which never compare
+        # equal to (or hash like) the token strings used by callers.
+        return [str(token) for token in self._added_tokens_decoder.values()]
 
     @property
     def all_special_ids(self) -> list[int]:
@@ -287,14 +295,9 @@ class KimiAudioTokenizer(TokenizerLike):
         # Allow Kimi-Audio special tokens to be encoded
         tokens = self._tokenizer.encode(
             text,
-            allowed_special={
-                "<|im_media_begin|>",
-                "<|im_media_end|>",
-                "<|im_kimia_text_blank|>",
-                "<|im_msg_end|>",
-                "<|im_kimia_user_msg_start|>",
-                "<|im_kimia_assistant_msg_start|>",
-            },
+            # Any special token from tokenizer_config.json can appear in the
+            # rendered prompt; tiktoken raises on anything not listed here.
+            allowed_special=set(self._special_tokens) | KIMIAUDIO_SPECIAL_TOKENS.keys(),
         )
         if truncation:
             tokens = self._maybe_truncate(tokens, max_length)
@@ -307,9 +310,7 @@ class KimiAudioTokenizer(TokenizerLike):
         if isinstance(ids, int):
             ids = [ids]
         if skip_special_tokens:
-            # Skip tokens that are in special_tokens (loaded from config)
-            special_ids = set(self._special_tokens.values())
-            ids = [token_id for token_id in ids if token_id not in special_ids]
+            ids = [token_id for token_id in ids if token_id not in self._special_ids]
         return self._tokenizer.decode(ids)
 
     @overload
@@ -328,7 +329,7 @@ class KimiAudioTokenizer(TokenizerLike):
     ) -> list[str]:
         tokens = []
         for token_id in ids:
-            if skip_special_tokens and token_id in self._added_tokens_decoder:
+            if skip_special_tokens and token_id in self._special_ids:
                 continue
             tokens.append(self._id_to_token.get(token_id, "<|unk|>"))
         return tokens
