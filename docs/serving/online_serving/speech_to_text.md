@@ -142,12 +142,36 @@ speaker segments. Supported models include
 }
 ```
 
+### Streaming
+
+Set `stream=true` to receive `transcription.chunk` events over SSE. Every chunk
+carries the input audio `duration` in seconds, matching the `duration` field of
+the `verbose_json` response, so clients that bill by audio length do not need to
+decode the file themselves:
+
+```json
+{
+  "id": "transcribe-...",
+  "object": "transcription.chunk",
+  "created": 1750000000,
+  "model": "openai/whisper-large-v3-turbo",
+  "choices": [{"delta": {"content": "Hello"}, "finish_reason": null}],
+  "duration": 5.42
+}
+```
+
+Set `stream_include_usage=true` to receive a final chunk carrying token usage;
+that chunk reports `duration` as well. `/v1/audio/translations` streams
+`translation.chunk` events with the same `duration` field.
+
+#### Streaming diarized transcriptions
+
 With `stream=true`, `diarized_json` returns server-sent events. Each finalized
 segment produces a `transcript.text.delta` event with a `segment_id`, followed
 by a `transcript.text.segment` event with the same `id` and speaker information.
 Concatenating the deltas, including their language-dependent separators, gives
 the full text in the final `transcript.text.done` event, which also includes
-token usage.
+token usage and the input audio `duration`.
 These deltas are emitted per segment, not per token.
 `OpenMOSS-Team/MOSS-Transcribe-Diarize` sends each segment once the model starts
 the next one, and the last segment when generation ends. The Transformers
@@ -164,7 +188,7 @@ data: {"type":"transcript.text.delta","delta":" Hi, how are you?","segment_id":"
 
 data: {"type":"transcript.text.segment","id":"seg_1","start":3.1,"end":5.9,"text":"Hi, how are you?","speaker":"S02"}
 
-data: {"type":"transcript.text.done","text":"Hello. Hi, how are you?","usage":{"type":"tokens","input_tokens":96,"output_tokens":31,"total_tokens":127}}
+data: {"type":"transcript.text.done","text":"Hello. Hi, how are you?","usage":{"type":"tokens","input_tokens":96,"output_tokens":31,"total_tokens":127},"duration":5.9}
 
 data: [DONE]
 ```
