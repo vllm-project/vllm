@@ -106,21 +106,16 @@ class OnComputeStoreHandler(StoreTriggerHandler):
     def _advance_stored_idx(
         self, req_status: RequestOffloadState, num_offloadable_tokens: int
     ) -> None:
-        # max(): at the prefill->decode transition of a chunk-aligned prompt,
-        # storable_chunks drops by one (the eagle exclusion kicks in), and the
-        # index must not move backwards past already-stored chunks.
-        apply_eagle_drop = not self._config.num_hash_lookahead_tokens
         next_idxs = self._next_idxs(req_status)
         for config_group_idx, (group_config, group_state) in enumerate(
             zip(self._config.kv_group_configs, req_status.group_states)
         ):
+            # max(): the finish-time clamp can lower num_offloadable_tokens, and
+            # the index must not move back past chunks already stored.
             next_idxs[config_group_idx] = max(
                 next_idxs[config_group_idx],
                 req_status.storable_chunks(
-                    group_config,
-                    group_state,
-                    num_offloadable_tokens,
-                    apply_eagle_drop,
+                    group_config, group_state, num_offloadable_tokens
                 ),
             )
 
