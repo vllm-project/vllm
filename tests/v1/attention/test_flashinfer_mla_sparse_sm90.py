@@ -569,6 +569,52 @@ def test_supports_combination_gates(monkeypatch, default_vllm_config):
     assert "requires FlashInfer" in (call() or "")
 
 
+@pytest.mark.parametrize(
+    ("kv_dtype", "rope_dim", "enabled", "expected"),
+    [
+        ("auto", 0, True, True),
+        ("bfloat16", 0, True, True),
+        ("fp8", 0, True, False),
+        ("fp8_e4m3", 0, True, False),
+        ("auto", 64, True, False),
+        ("auto", 0, False, False),
+    ],
+)
+def test_shardq_impl_eligibility(
+    monkeypatch, default_vllm_config, kv_dtype, rope_dim, enabled, expected
+):
+    """Only eligible NoPE layers can opt into the shared ShardQ path."""
+    config = default_vllm_config
+    config.parallel_config.tensor_parallel_size = 8
+    config.attention_config.sparse_mla_shard_q = enabled
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.attention.sparse_mla_attention."
+        "get_tensor_model_parallel_world_size",
+        lambda: 8,
+    )
+    impl = FlashInferMLASparseSM90Impl(
+        num_heads=8,
+        head_size=HEAD + rope_dim,
+        scale=256**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_dtype,
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        topk_indices_buffer=torch.empty((1, TOPK), dtype=torch.int32),
+        q_lora_rank=None,
+        kv_lora_rank=HEAD,
+        qk_nope_head_dim=256 - rope_dim,
+        qk_rope_head_dim=rope_dim,
+        qk_head_dim=256,
+        v_head_dim=256,
+        kv_b_proj=None,
+    )
+    assert impl.use_shardq is expected
+
+
 def test_shardq_reads_rank_local_topk_after_decodes(monkeypatch):
     """All heads attend the rank's compact indices after the decode prefix."""
     monkeypatch.setattr(
