@@ -214,11 +214,12 @@ def k_group_partials(
     tokens, hidden = x.shape
     n = weight.shape[0]
     sm120 = current_platform.is_device_capability_family(120)
-    if tokens >= TMA_MIN_TOKENS and not sm120:
+    if tokens >= TMA_MIN_TOKENS:
         from triton.tools.tensor_descriptor import TensorDescriptor
 
         out = torch.empty((1, tokens, n), dtype=out_dtype, device=x.device)
-        block_n = 64 if tokens < 4096 else 128
+        # SM12x allows ~99 KiB of shared memory per block: two 48 KiB stages fit.
+        block_n = 64 if tokens < 4096 or sm120 else 128
         _k_group_tma_kernel[(triton.cdiv(n, block_n), triton.cdiv(tokens, 128))](
             TensorDescriptor.from_tensor(x, [128, 128]),
             TensorDescriptor.from_tensor(weight, [block_n, 128]),
@@ -231,7 +232,7 @@ def k_group_partials(
             128,
             launch_dependents,
             num_warps=4 if block_n == 64 else 8,
-            num_stages=4 if block_n == 64 else 3,
+            num_stages=2 if sm120 else 4 if block_n == 64 else 3,
             enable_fp_fusion=False,
             launch_pdl=True,
         )
