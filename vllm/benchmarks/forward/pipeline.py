@@ -15,6 +15,7 @@ import torch.distributed as dist
 from vllm.benchmarks.forward.capture import (
     ForwardBench,
     _compare,
+    as_dispatched,
     check_sampled,
     write_input_ids,
 )
@@ -127,6 +128,7 @@ class PipelineBench(ForwardBench):
 
         runner.prepare_inputs = prepare_and_check
         model.forward = self._prepare_stage
+        self._cudagraph_mode, undo_dispatch = as_dispatched(runner)
         try:
             runner.execute_model(
                 self.batch.scheduler_output,
@@ -134,6 +136,7 @@ class PipelineBench(ForwardBench):
             )
         finally:
             del runner.prepare_inputs, model.forward
+            undo_dispatch()
             runner.execute_model_state = None
         self._capture_stage()
         self._stream()
@@ -188,7 +191,7 @@ class PipelineBench(ForwardBench):
         self.graph.replay()
         torch.accelerator.synchronize()
         comparisons = {
-            key: _compare(value, self.reference[key])
+            key: _compare(self._real_rows(value), self._real_rows(self.reference[key]))
             for key, value in _tensors(self.output).items()
         }
         self.result.update(
@@ -305,11 +308,12 @@ class PipelineBench(ForwardBench):
             }
             return
         self.result["pipeline_vs_eager"] = {
-            key: _compare(value, self.reference[key])
+            key: _compare(self._real_rows(value), self._real_rows(self.reference[key]))
             for key, value in _tensors(self.output).items()
         }
         self.result["finite"] = all(
-            bool(t.isfinite().all()) for t in _tensors(self.output).values()
+            bool(self._real_rows(t).isfinite().all())
+            for t in _tensors(self.output).values()
         )
         end_clock = PipelineClock()
         assert clock is not None

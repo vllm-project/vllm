@@ -130,36 +130,25 @@ class RoutingFixture:
         self._biases: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._fired = [0] * len(layers)
         self._layers = layers
-        # Per-rank rows, with headroom for padding; every rank generates the
-        # same global fixture and takes its slice.
-        rows = -(-num_tokens // 256) * 256 + 256
+        self._dp_rank, self._dp_size, self._ep_size = dp_rank, dp_size, ep_size
+        self._device, self._mode = device, mode
+        # Per layer: (num_experts, top_k, rng seed).
+        self._specs: list[tuple[int, int, list[int]]] = []
+        # Per layer: (logits, ids), each cast to the dtype a hook saw.
+        self._tables: list[dict[str, torch.Tensor]] = []
+        self._rows = 0
         for layer, (module, gate) in enumerate(layers):
             if (getattr(module, "num_expert_group", None) or 1) > 1:
                 raise NotImplementedError("Synthetic routing with grouped top-k.")
-            num_experts = gate.weight.shape[0]
             top_k = _top_k(module)
             assert top_k is not None
             layer_seed = layer
             if mode == "zipf" and gate.prefix:
                 # Preserve layer popularity when pipeline stages change.
                 layer_seed = zlib.crc32(gate.prefix.encode())
-            rng = np.random.default_rng([seed, layer_seed])
-            if mode == "zipf":
-                ids = zipf_topk_ids(rows * dp_size, num_experts, top_k, rng)
-            else:
-                ids = balanced_topk_ids(
-                    rows * dp_size, num_experts, top_k, ep_size, rng
-                )
-            ids = ids[dp_rank * rows : (dp_rank + 1) * rows]
-            logits = torch.full((rows, num_experts), _OTHER_LOGIT, dtype=torch.float32)
-            logits.scatter_(1, torch.from_numpy(ids), _CHOSEN_LOGIT)
-            # Distinct values: no ties for any top-k implementation.
-            logits += torch.from_numpy(rng.uniform(0, 0.5, logits.shape)).float()
-            self._hooks.append(
-                gate.register_forward_hook(
-                    self._substitute(logits.to(device), self._fired, layer)
-                )
-            )
+            self._specs.append((gate.weight.shape[0], top_k, [seed, layer_seed]))
+            self._tables.append({})
+            self._hooks.append(gate.register_forward_hook(self._substitute(layer)))
             bias = getattr(gate, "e_score_correction_bias", None)
             if bias is None:
                 bias = getattr(module, "e_score_correction_bias", None)
@@ -174,40 +163,60 @@ class RoutingFixture:
                 if "topk_ids" in params:
                     self._hooks.append(
                         experts.register_forward_pre_hook(
-                            self._substitute_ids(
-                                torch.from_numpy(ids).to(device),
-                                params.index("topk_ids"),
-                                self._fired,
-                                layer,
-                            ),
+                            self._substitute_ids(params.index("topk_ids"), layer),
                             with_kwargs=True,
                         )
                     )
+        self._build(num_tokens)
 
-    @staticmethod
-    def _substitute(fixture: torch.Tensor, fired: list[int], layer: int):
-        cast = [fixture]
+    def _build(self, num_tokens: int) -> None:
+        """Generate per-rank rows with headroom for padding; every rank
+        generates the same global fixture and takes its slice."""
+        rows = -(-num_tokens // 256) * 256 + 256
+        for (num_experts, top_k, layer_seed), tables in zip(self._specs, self._tables):
+            rng = np.random.default_rng(layer_seed)
+            total = rows * self._dp_size
+            if self._mode == "zipf":
+                ids = zipf_topk_ids(total, num_experts, top_k, rng)
+            else:
+                ids = balanced_topk_ids(total, num_experts, top_k, self._ep_size, rng)
+            ids = ids[self._dp_rank * rows : (self._dp_rank + 1) * rows]
+            logits = torch.full((rows, num_experts), _OTHER_LOGIT, dtype=torch.float32)
+            logits.scatter_(1, torch.from_numpy(ids), _CHOSEN_LOGIT)
+            # Distinct values: no ties for any top-k implementation.
+            logits += torch.from_numpy(rng.uniform(0, 0.5, logits.shape)).float()
+            tables.clear()
+            tables["logits"] = logits.to(self._device)
+            tables["ids"] = torch.from_numpy(ids).to(self._device)
+        self._rows = rows
 
+    def _rows_for(
+        self, layer: int, name: str, num_tokens: int, dtype: torch.dtype
+    ) -> torch.Tensor:
+        if num_tokens > self._rows:
+            # CUDA graph padding can exceed the headroom; the eager warmup pass
+            # sees the padded shape first.
+            assert not torch.cuda.is_current_stream_capturing()
+            self._build(num_tokens)
+        tables = self._tables[layer]
+        if tables[name].dtype != dtype:
+            tables[name] = tables[name].to(dtype)  # Once, at warmup.
+        return _fixture_rows(tables[name], num_tokens)
+
+    def _substitute(self, layer: int):
         def hook(module, inputs, output):
-            fired[layer] += 1
+            self._fired[layer] += 1
             logits = output[0] if isinstance(output, tuple) else output
-            if cast[0].dtype != logits.dtype:
-                cast[0] = fixture.to(logits.dtype)  # Once, at warmup.
-            replaced = _fixture_rows(cast[0], logits.shape[0])
+            replaced = self._rows_for(layer, "logits", logits.shape[0], logits.dtype)
             return (replaced, *output[1:]) if isinstance(output, tuple) else replaced
 
         return hook
 
-    @staticmethod
-    def _substitute_ids(fixture: torch.Tensor, index: int, fired, layer: int):
-        cast = [fixture]
-
+    def _substitute_ids(self, index: int, layer: int):
         def hook(module, args, kwargs):
-            fired[layer] += 1
+            self._fired[layer] += 1
             ids = kwargs["topk_ids"] if "topk_ids" in kwargs else args[index]
-            if cast[0].dtype != ids.dtype:
-                cast[0] = fixture.to(ids.dtype)  # Once, at warmup.
-            replaced = _fixture_rows(cast[0], ids.shape[0])
+            replaced = self._rows_for(layer, "ids", ids.shape[0], ids.dtype)
             replaced = torch.where(ids == -1, ids, replaced)
             if "topk_ids" in kwargs:
                 return args, {**kwargs, "topk_ids": replaced}
