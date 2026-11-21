@@ -298,6 +298,68 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
         assert request_output.num_cached_tokens == len(prompt_tokens) - 1
 
 
+def test_parallel_sampling_skips_child_without_prefill_stats():
+    """An n>1 child that fails before prefill reports no prefill stats; it must
+    not pull the parent's num_cached_tokens down to 0."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+
+    def make_request(request_id: str, params: SamplingParams) -> EngineCoreRequest:
+        return EngineCoreRequest(
+            request_id=request_id,
+            external_req_id="parent",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=params,
+            pooling_params=None,
+        )
+
+    parent_req = ParentRequest(
+        make_request(
+            "parent-int",
+            SamplingParams(
+                n=2, detokenize=False, output_kind=RequestOutputKind.FINAL_ONLY
+            ),
+        )
+    )
+    child_ids = []
+    for idx in range(2):
+        child_id, child_params = parent_req.get_child_info(idx)
+        output_processor.add_request(
+            make_request(child_id, child_params), None, parent_req, idx
+        )
+        child_ids.append(child_id)
+
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=len(prompt_tokens),
+        num_local_cached_tokens=4,
+        num_external_cached_tokens=0,
+    )
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=child_ids[0],
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+            ),
+            EngineCoreOutput(
+                request_id=child_ids[1],
+                new_token_ids=[42],
+                finish_reason=FinishReason.LENGTH,
+                prefill_stats=prefill_stats,
+            ),
+        ]
+    )
+
+    [request_output] = processed.request_outputs
+    assert request_output.num_cached_tokens == 4
+
+
 def test_request_stream_interval_raises_but_not_below_engine_default(
     dummy_test_vectors,
 ):
