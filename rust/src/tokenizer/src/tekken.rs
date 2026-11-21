@@ -11,9 +11,18 @@ use crate::{Result, Tokenizer};
 /// Mistral Tekken tokenizer from a `tekken.json` file.
 pub struct TekkenTokenizer {
     inner: Tekkenizer,
+    max_token_len: usize,
 }
 
 impl TekkenTokenizer {
+    fn from_inner(inner: Tekkenizer) -> Self {
+        let max_token_len = inner.vocab().iter().map(|s| s.len()).max().unwrap_or(0);
+        Self {
+            inner,
+            max_token_len,
+        }
+    }
+
     /// Load a Mistral Tekken tokenizer from a `tekken.json` file.
     pub fn new(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with Mistral Tekken");
@@ -24,7 +33,7 @@ impl TekkenTokenizer {
                 path.display()
             )
         })?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
     }
 }
 
@@ -72,6 +81,10 @@ impl Tokenizer for TekkenTokenizer {
     fn is_special_id(&self, token_id: u32) -> bool {
         self.inner.is_special_token(token_id)
     }
+
+    fn estimate_max_token(&self, text: &str) -> usize {
+        text.len().checked_div(self.max_token_len).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +118,18 @@ mod tests {
             None,
         )
         .expect("build Tekken tokenizer");
-        TekkenTokenizer { inner }
+        TekkenTokenizer::from_inner(inner)
+    }
+
+    #[test]
+    fn estimate_max_token_uses_max_token_len_in_vocabulary() {
+        let tokenizer = test_tokenizer();
+        // In test_tokenizer, vocab tokens are 1 byte each, but "<control>" special token is 9 bytes.
+        // Therefore max_token_len = 9.
+        assert_eq!(tokenizer.estimate_max_token(""), 0);
+        assert_eq!(tokenizer.estimate_max_token("12345678"), 0);
+        assert_eq!(tokenizer.estimate_max_token("123456789"), 1);
+        assert_eq!(tokenizer.estimate_max_token("123456789012345678"), 2);
     }
 
     #[test]

@@ -318,6 +318,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         max_n_sequences: None,
+                        max_tokenize_tokens: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2383,6 +2384,7 @@ fn frontend_args_accept_json() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         max_n_sequences: None,
+                        max_tokenize_tokens: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3475,6 +3477,7 @@ fn serve_args_accept_handshake_aliases() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         max_n_sequences: None,
+                        max_tokenize_tokens: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3783,6 +3786,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                max_tokenize_tokens: None,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {
@@ -3921,6 +3925,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                max_tokenize_tokens: None,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {
@@ -4172,6 +4177,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                max_tokenize_tokens: None,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {

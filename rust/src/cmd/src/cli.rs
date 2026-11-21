@@ -773,6 +773,18 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub max_n_sequences: Option<i64>,
 
+    /// Maximum number of tokens allowed for /tokenize, /detokenize, and
+    /// /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
+    /// set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
+    #[arg(
+        long,
+        env = "VLLM_MAX_TOKENIZE_TOKENS",
+        value_parser = parse_int,
+        allow_negative_numbers = true
+    )]
+    #[serde(default)]
+    pub max_tokenize_tokens: Option<i64>,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -1027,6 +1039,13 @@ impl SharedRuntimeArgs {
                 .map_err(|error| format!("invalid VLLM_MAX_N_SEQUENCES: {error}"))?;
             self.max_n_sequences = Some(max_n_sequences);
         }
+        if let Some(value) = lookup("VLLM_MAX_TOKENIZE_TOKENS")
+            && !value.trim().is_empty()
+        {
+            let max_tokenize_tokens = parse_int(&value)
+                .map_err(|error| format!("invalid VLLM_MAX_TOKENIZE_TOKENS: {error}"))?;
+            self.max_tokenize_tokens = Some(max_tokenize_tokens);
+        }
         Ok(())
     }
 
@@ -1259,6 +1278,7 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+            max_tokenize_tokens: self.max_tokenize_tokens,
         }
     }
 
