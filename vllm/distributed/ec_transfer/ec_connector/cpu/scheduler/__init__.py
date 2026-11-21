@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.cpu.data.base import DataTransport
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ECConnectorOutput
@@ -85,9 +86,11 @@ class ECCPUScheduler:
         )
 
         self._ec_config = ec_config
-        # NIXL p2p is an option of this connector, not engine-wide behavior, so
-        # it lives in extra config. Extra config is not type coerced, so a value
-        # that arrived as a JSON/CLI string is parsed, not truth-tested.
+        # P2P is an option of this connector, not engine-wide behavior, so it
+        # lives in extra config. The key keeps its original name ("nixl")
+        # although it now switches P2P on for every ec_transport. Extra config
+        # is not type coerced, so a value that arrived as a JSON/CLI string is
+        # parsed, not truth-tested.
         raw_nixl = ec_config.get_from_extra_config("ec_enable_nixl", False)
         self._nixl_enabled = (
             raw_nixl
@@ -96,6 +99,9 @@ class ECCPUScheduler:
         )
         # NIXL fields default to None/empty so the gate-off path is untouched.
         self._data: Any = None
+        # Set at teardown if the data transport may still write into the
+        # region; shutdown() then leaves the region mapped.
+        self._region_in_use = False
         self._compat_hash: str | None = None
         self._first_in_batch = True
         self._transport: Any = None
@@ -122,15 +128,49 @@ class ECCPUScheduler:
                 self.shutdown()
                 raise
 
+    def _create_data_transport(self, engine_id: str) -> "DataTransport":
+        """Build the P2P data plane named by `ec_transport` (default nixl)."""
+        name = str(self._ec_config.get_from_extra_config("ec_transport", "nixl"))
+        if name == "nixl":
+            from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
+                NixlDataTransport,
+            )
+            from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+
+            if NixlWrapper is None or nixl_agent_config is None:
+                raise RuntimeError(
+                    "ec_transport='nixl' (the default) requires NIXL; install the "
+                    "`nixl` package or set ec_transport to another transport."
+                )
+            return NixlDataTransport(
+                agent_name=engine_id,
+                base_ptr=self._region.blocks.data_ptr(),
+                num_blocks=self._region.num_blocks,
+                block_size_bytes=self._region.block_size_bytes,
+                total_size_bytes=self._region.num_blocks
+                * self._region.block_size_bytes,
+            )
+        if name == "moriio":
+            from vllm import envs
+            from vllm.distributed.ec_transfer.ec_connector.cpu.data.moriio import (
+                MoRIIODataTransport,
+            )
+            from vllm.utils.network_utils import get_ip
+
+            return MoRIIODataTransport(
+                agent_name=engine_id,
+                region=self._region.blocks,
+                block_size_bytes=self._region.block_size_bytes,
+                host=envs.VLLM_EC_SIDE_CHANNEL_HOST or get_ip(),
+            )
+        raise ValueError(f"Unknown ec_transport {name!r}; expected nixl or moriio")
+
     def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
         # Lazy imports keep nixl/zmq off the gate-off path.
         from vllm import envs
         from vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq import (
             ZmqClientTransport,
             ZmqServerTransport,
-        )
-        from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
-            NixlDataTransport,
         )
         from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
             compute_ec_compatibility_hash,
@@ -139,15 +179,9 @@ class ECCPUScheduler:
             PRODUCER_PIN_LEASE_S,
             ProducerSession,
         )
-        from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
         from vllm.utils.network_utils import get_ip
         from vllm.version import __version__ as VLLM_VERSION
 
-        if NixlWrapper is None or nixl_agent_config is None:
-            raise RuntimeError(
-                "ec_enable_nixl requires NIXL; install the `nixl` package or "
-                "remove ec_enable_nixl from ec_connector_extra_config."
-            )
         engine_id = self._ec_config.engine_id
         assert engine_id is not None
         dp_index = vllm_config.parallel_config.data_parallel_index
@@ -165,13 +199,7 @@ class ECCPUScheduler:
             dtype=str(self._dtype),
             block_size_bytes=self._region.block_size_bytes,
         )
-        self._data = NixlDataTransport(
-            agent_name=f"{engine_id}_dp{dp_index}",
-            base_ptr=self._region.blocks.data_ptr(),
-            num_blocks=self._region.num_blocks,
-            block_size_bytes=self._region.block_size_bytes,
-            total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
-        )
+        self._data = self._create_data_transport(f"{engine_id}_dp{dp_index}")
         if self._is_producer:
             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST or get_ip()
             if self._peer_host in ("0.0.0.0", "::", "*"):
@@ -663,7 +691,7 @@ class ECCPUScheduler:
             self._teardown_nixl()
 
         try:
-            self._region.cleanup()
+            self._region.cleanup(keep_mapping=self._region_in_use)
         except Exception:
             logger.debug("ec: region cleanup failed", exc_info=True)
 
@@ -700,4 +728,10 @@ class ECCPUScheduler:
                 self._data.deregister()
             except Exception:
                 logger.debug("ec: deregister failed", exc_info=True)
+            # A transfer it could not cancel may still write into the region;
+            # the transport keeps itself alive, shutdown() keeps the mapping.
+            try:
+                self._region_in_use = self._data.region_in_use()
+            except Exception:
+                logger.debug("ec: region_in_use check failed", exc_info=True)
             self._data = None

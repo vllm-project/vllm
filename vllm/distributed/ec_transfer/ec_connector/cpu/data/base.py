@@ -65,3 +65,13 @@ class DataTransport(ABC):
     @abstractmethod
     def deregister(self) -> None:
         """Deregister all memory and tear down the NIXL agent."""
+
+    def region_in_use(self) -> bool:
+        """True if, after deregister(), a transfer the transport could not
+        cancel may still write into its registered memory.
+
+        The owner of that memory must then keep it mapped until the process
+        exits. Transports whose deregister() leaves nothing in flight keep
+        this default.
+        """
+        return False

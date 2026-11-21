@@ -74,7 +74,7 @@ def test_missing_nixl_releases_shared_region(monkeypatch):
     cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = True
 
     try:
-        with pytest.raises(RuntimeError, match="ec_enable_nixl requires NIXL"):
+        with pytest.raises(RuntimeError, match="ec_transport='nixl'.*requires NIXL"):
             ECCPUScheduler(cfg)
 
         assert not Path(region._mmap_path).exists()

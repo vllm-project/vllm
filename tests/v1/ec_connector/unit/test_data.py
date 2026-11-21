@@ -1,13 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for DataTransport ABC and NixlDataTransport."""
+"""Tests for DataTransport ABC, NixlDataTransport and MoRIIODataTransport."""
 
+import gc
+import os
+import time
+import uuid
+import weakref
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
+import vllm.distributed.ec_transfer.ec_connector.cpu.data.moriio as moriio_mod
 from vllm.distributed.ec_transfer.ec_connector.cpu.data.base import (
     DataTransport,
+)
+from vllm.distributed.ec_transfer.ec_connector.cpu.data.moriio import (
+    MoRIIODataTransport,
+    _merge_segments,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     serialize_mem_descriptor,
@@ -182,3 +194,461 @@ def test_deregister_swallows_exceptions():
     t = _make_transport()
     t._nixl.deregister_memory.side_effect = RuntimeError("already gone")
     t.deregister()  # must not raise
+
+
+# ── MoRIIODataTransport ───────────────────────────────────────────────────────
+# MoRI-IO is replaced by an in-process fake whose sessions copy bytes between
+# registered tensors, so the tests check the bytes a READ moves, the block
+# offsets it uses and the completion notification the producer receives.
+
+_BS = 16
+_N = 8
+
+
+class _Status:
+    def __init__(self, done: bool = True) -> None:
+        self.done = done
+        # Completes the transfer when the transport waits for it (deregister()).
+        self.complete_on_wait = False
+
+    def Succeeded(self) -> bool:
+        return self.done
+
+    def Failed(self) -> bool:
+        return False
+
+    def InProgress(self) -> bool:
+        return not self.done
+
+    def WaitFor(self, timeout_ms: int) -> int:
+        if self.complete_on_wait:
+            self.done = True
+        return 0
+
+
+class _MemoryDesc:
+    def __init__(self, key: str, tensor: torch.Tensor) -> None:
+        self.engine_key = key
+        self.data = tensor.data_ptr()
+
+    def pack(self) -> bytes:
+        return f"{self.engine_key}|{self.data}".encode()
+
+    @staticmethod
+    def unpack(raw: bytes) -> "_MemoryDesc":
+        key, data = raw.decode().split("|")
+        desc = _MemoryDesc.__new__(_MemoryDesc)
+        desc.engine_key, desc.data = key, int(data)
+        return desc
+
+
+class _EngineDesc:
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+    def pack(self) -> bytes:
+        return self.key.encode()
+
+    @staticmethod
+    def unpack(raw: bytes) -> "_EngineDesc":
+        return _EngineDesc(raw.decode())
+
+
+class _Session:
+    def __init__(self, local: torch.Tensor, remote: torch.Tensor, pending: bool):
+        self.local = local.view(-1)
+        self.remote = remote.view(-1)
+        self.pending = pending
+        self.calls: list[tuple[list[int], list[int], list[int]]] = []
+
+    def batch_read(self, local_offsets, remote_offsets, sizes, uid):
+        self.calls.append((list(local_offsets), list(remote_offsets), list(sizes)))
+        for lo, ro, n in zip(local_offsets, remote_offsets, sizes):
+            self.local[lo : lo + n] = self.remote[ro : ro + n]
+        return _Status(done=not self.pending)
+
+
+class _FakeMori:
+    """Registry shared by every fake engine in a test."""
+
+    def __init__(self) -> None:
+        self.tensors: dict[str, torch.Tensor] = {}
+        self.remote_engines: dict[str, set[str]] = {}
+        self.pending = False
+        self.sessions: list[_Session] = []
+        fake = self
+
+        class IOEngine:
+            def __init__(self, key, config):
+                self.key = key
+                fake.remote_engines[key] = set()
+
+            def create_backend(self, backend_type, config):
+                pass
+
+            def get_engine_desc(self):
+                return _EngineDesc(self.key)
+
+            def register_torch_tensor(self, tensor):
+                fake.tensors[self.key] = tensor
+                return _MemoryDesc(self.key, tensor)
+
+            def deregister_memory(self, desc):
+                fake.tensors.pop(desc.engine_key, None)
+
+            def register_remote_engine(self, desc):
+                fake.remote_engines[self.key].add(desc.key)
+
+            def deregister_remote_engine(self, desc):
+                fake.remote_engines[self.key].discard(desc.key)
+
+            def create_session(self, local, remote):
+                session = _Session(
+                    fake.tensors[local.engine_key],
+                    fake.tensors[remote.engine_key],
+                    fake.pending,
+                )
+                fake.sessions.append(session)
+                return session
+
+            def allocate_transfer_uid(self):
+                return 0
+
+        self.IOEngine = IOEngine
+
+
+@pytest.fixture
+def fake_mori(monkeypatch) -> _FakeMori:
+    """Stand in for the `mori.io` module, so the tests run without MoRI."""
+    fake = _FakeMori()
+    # Unsettled transports live for the whole process; keep them per test.
+    monkeypatch.setattr(moriio_mod, "_UNSETTLED", [])
+    monkeypatch.setattr(
+        moriio_mod,
+        "mori_io",
+        SimpleNamespace(
+            IOEngine=fake.IOEngine,
+            IOEngineConfig=lambda host, port: None,
+            BackendType=SimpleNamespace(RDMA=2),
+            PollCqMode=SimpleNamespace(POLLING=0),
+            RdmaBackendConfig=lambda *args, **kwargs: (args, kwargs),
+            EngineDesc=_EngineDesc,
+            MemoryDesc=_MemoryDesc,
+        ),
+    )
+    return fake
+
+
+def _transport(name: str, fill: int) -> MoRIIODataTransport:
+    region = torch.full((_N, _BS), fill, dtype=torch.int8)
+    return MoRIIODataTransport(
+        agent_name=name,
+        region=region,
+        block_size_bytes=_BS,
+        host="127.0.0.1",
+    )
+
+
+def _drain(producer: MoRIIODataTransport, timeout_s: float = 2.0) -> list[bytes]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        notifs = producer.get_new_notifs()
+        if notifs:
+            return [m for msgs in notifs.values() for m in msgs]
+        time.sleep(0.01)
+    return []
+
+
+def test_merge_segments_coalesces_runs_contiguous_on_both_sides():
+    assert _merge_segments([0, 16, 32, 80], [64, 80, 96, 0], 16) == (
+        [0, 80],
+        [64, 0],
+        [48, 16],
+    )
+
+
+def test_merge_segments_splits_when_only_one_side_is_contiguous():
+    assert _merge_segments([0, 16], [32, 0], 16) == ([0, 16], [32, 0], [16, 16])
+
+
+def test_read_moves_requested_blocks_and_notifies_producer(fake_mori):
+    producer = _transport("enc", 0)
+    consumer = _transport("pf", 0)
+    try:
+        src = fake_mori.tensors[producer._engine.key]
+        for i in range(_N):
+            src[i] = i + 1
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+
+        handle = consumer.post_read([0, 1, 5], agent, [3, 4, 7], notif_msg=b"s:h1")
+
+        dst = fake_mori.tensors[consumer._engine.key]
+        assert dst[0].eq(4).all() and dst[1].eq(5).all() and dst[5].eq(8).all()
+        assert dst[2].eq(0).all()
+        assert fake_mori.sessions[0].calls == [([0, 80], [48, 112], [32, 16])]
+        assert consumer.check_xfer_state(handle) == "DONE"
+        assert consumer.check_xfer_state(handle) == "DONE"
+        assert _drain(producer) == [b"s:h1"]
+        assert _drain(producer, timeout_s=0.2) == []
+    finally:
+        consumer.deregister()
+        producer.deregister()
+
+
+def test_released_in_flight_handle_is_kept_until_it_finishes(fake_mori):
+    fake_mori.pending = True
+    producer = _transport("enc", 1)
+    consumer = _transport("pf", 0)
+    try:
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+        handle = consumer.post_read([0], agent, [0], notif_msg=b"s:h1")
+        assert consumer.check_xfer_state(handle) == "PROC"
+
+        consumer.release_xfer_handle(handle)
+        assert consumer._parked == [handle]
+
+        handle.status.done = True
+        consumer.get_new_notifs()
+        assert consumer._parked == []
+    finally:
+        consumer.deregister()
+        producer.deregister()
+
+
+def test_remove_remote_peer_deregisters_engine_and_rejects_reads(fake_mori):
+    producer = _transport("enc", 1)
+    consumer = _transport("pf", 0)
+    try:
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+        notify = consumer._peers[agent].notify
+        consumer.remove_remote_peer(agent)
+        assert agent not in fake_mori.remote_engines[consumer._engine.key]
+        assert notify.closed
+        with pytest.raises(KeyError):
+            consumer.post_read([0], agent, [0], notif_msg=b"s:h1")
+    finally:
+        consumer.deregister()
+        producer.deregister()
+
+
+def test_reregistering_restarted_producers_leaves_no_stale_sockets(fake_mori):
+    """Each producer restart advertises a new endpoint; old sockets must go."""
+    consumer = _transport("pf", 0)
+    producers = []
+    try:
+        sockets = []
+        for _ in range(3):
+            producer = _transport("enc", 1)
+            producers.append(producer)
+            agent = consumer.add_remote_peer(
+                producer.get_agent_metadata(), producer.get_mem_descriptor()
+            )
+            sockets.append(consumer._peers[agent].notify)
+            consumer.remove_remote_peer(agent)
+        assert consumer._peers == {}
+        assert all(sock.closed for sock in sockets)
+    finally:
+        consumer.deregister()
+        for producer in producers:
+            producer.deregister()
+
+
+def test_deregister_waits_for_parked_read_before_releasing_memory(fake_mori):
+    fake_mori.pending = True
+    producer = _transport("enc", 1)
+    consumer = _transport("pf", 0)
+    try:
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+        handle = consumer.post_read([0], agent, [0], notif_msg=b"s:h1")
+        consumer.release_xfer_handle(handle)
+        handle.status.complete_on_wait = True
+
+        consumer.deregister()
+
+        assert consumer._engine.key not in fake_mori.tensors
+        assert consumer._parked == []
+        assert not consumer.region_in_use()
+        assert moriio_mod._UNSETTLED == []
+    finally:
+        producer.deregister()
+
+
+def test_deregister_keeps_region_registered_while_read_is_in_flight(fake_mori):
+    fake_mori.pending = True
+    producer = _transport("enc", 1)
+    consumer = _transport("pf", 0)
+    try:
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+        handle = consumer.post_read([0], agent, [0], notif_msg=b"s:h1")
+        consumer.release_xfer_handle(handle)
+
+        consumer.deregister()
+
+        # The DMA may still target the region: registration and handle stay.
+        assert consumer._engine.key in fake_mori.tensors
+        assert consumer._parked == [handle]
+        assert consumer.region_in_use()
+
+        # ...and outlive every reference the caller holds.
+        alive = weakref.ref(consumer)
+        status = weakref.ref(handle.status)
+        del consumer, handle
+        gc.collect()
+        assert alive() is not None and status() is not None
+        (kept,) = moriio_mod._UNSETTLED
+        assert kept is alive()
+    finally:
+        producer.deregister()
+
+
+def test_rejects_region_above_validated_size(fake_mori, monkeypatch):
+    monkeypatch.setattr(moriio_mod, "_MAX_REGION_BYTES", _N * _BS - 1)
+    with pytest.raises(ValueError, match="ec_cpu_bytes up to"):
+        _transport("enc", 0)
+
+
+def test_scheduler_builds_moriio_transport_from_extra_config(fake_mori, monkeypatch):
+    """ec_transport=moriio must reach the scheduler's data plane."""
+    import uuid
+
+    import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+    from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+    from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+        ECSharedRegion,
+    )
+    from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import (
+        ECCPUScheduler,
+    )
+
+    region = ECSharedRegion(
+        engine_id="eng-" + str(uuid.uuid4()), num_blocks=_N, block_size_bytes=_BS
+    )
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
+    monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_HOST", "127.0.0.1")
+    cfg = create_ec_vllm_config(ec_role="ec_consumer")
+    cfg.model_config.hf_config = None
+    cfg.model_config.get_inputs_embeds_size.return_value = 8
+    cfg.model_config.model = "test-model"
+    cfg.ec_transfer_config.ec_connector_extra_config.update(
+        ec_enable_nixl=True, ec_transport="moriio"
+    )
+
+    s = ECCPUScheduler(cfg)
+    try:
+        assert isinstance(s._data, MoRIIODataTransport)
+        assert fake_mori.tensors[s._data._engine.key].data_ptr() == (
+            region.blocks.data_ptr()
+        )
+    finally:
+        s.shutdown()
+
+
+def _moriio_scheduler(monkeypatch, region):
+    import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+    from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+    from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import (
+        ECCPUScheduler,
+    )
+
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
+    monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_HOST", "127.0.0.1")
+    cfg = create_ec_vllm_config(ec_role="ec_consumer")
+    cfg.model_config.hf_config = None
+    cfg.model_config.get_inputs_embeds_size.return_value = 8
+    cfg.model_config.model = "test-model"
+    cfg.ec_transfer_config.ec_connector_extra_config.update(
+        ec_enable_nixl=True, ec_transport="moriio"
+    )
+    return ECCPUScheduler(cfg)
+
+
+def _region():
+    from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+        ECSharedRegion,
+    )
+
+    return ECSharedRegion(
+        engine_id="eng-" + str(uuid.uuid4()), num_blocks=_N, block_size_bytes=_BS
+    )
+
+
+def test_scheduler_shutdown_unmaps_region_once_reads_settle(fake_mori, monkeypatch):
+    region = _region()
+    s = _moriio_scheduler(monkeypatch, region)
+    s.shutdown()
+    assert region._mmap_obj is None
+    assert moriio_mod._UNSETTLED == []
+
+
+def test_scheduler_shutdown_keeps_unsettled_read_target_alive(fake_mori, monkeypatch):
+    """A READ still in flight at shutdown must not lose its transport, status
+    or destination memory when the scheduler lets go of them."""
+    from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
+        XferAck,
+        XferStatus,
+    )
+    from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
+        ConsumerSession,
+    )
+
+    fake_mori.pending = True
+    producer = _transport("enc", 7)
+    region = _region()
+    s = _moriio_scheduler(monkeypatch, region)
+    try:
+        # A consumer session with one READ in flight, as admission leaves it.
+        session = ConsumerSession(
+            addr=("127.0.0.1", 1),
+            zmq_conn=MagicMock(),
+            transport=MagicMock(),
+            data=s._data,
+            compat_hash=s._compat_hash,
+        )
+        s._sessions[session.addr] = session
+        session.start_xfer("h1", [2], deadline=time.monotonic() + 60)
+        session._dispatch_ack(
+            XferAck(
+                mm_hash="h1",
+                status=XferStatus.OK,
+                session_id=session._session_id,
+                src_block_indices=[0],
+                agent_metadata=producer.get_agent_metadata(),
+                mem_descriptor=producer.get_mem_descriptor(),
+            )
+        )
+        (xfer,) = session._xfers.values()
+        transport = weakref.ref(s._data)
+        status = weakref.ref(xfer.transfer_handle.status)
+        path = region._mmap_path
+        del session, xfer
+
+        s.shutdown()
+        del s
+        gc.collect()
+
+        # The transport, the READ's status and its target memory all survive.
+        assert transport() is not None and status() is not None
+        (kept,) = moriio_mod._UNSETTLED
+        assert kept is transport()
+        assert region._mmap_obj is not None and not region._mmap_obj.closed
+        assert region.blocks[2].eq(7).all()  # still readable, not unmapped
+        # Only the file name is gone.
+        assert not os.path.exists(path)
+    finally:
+        # Let the test process release what a real one would keep until exit.
+        moriio_mod._UNSETTLED.clear()
+        fake_mori.sessions.clear()  # the fake's sessions hold views of the region
+        fake_mori.tensors.clear()
+        gc.collect()
+        region.cleanup()
+        producer.deregister()
