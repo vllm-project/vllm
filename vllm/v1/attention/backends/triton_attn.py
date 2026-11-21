@@ -162,7 +162,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
         headdim_padded = next_power_of_2(self.headdim)
         max_query_len_3d = 1
-        speculative_config = vllm_config.speculative_config
+        speculative_config = vllm_config.runner_speculative_config
         # The INT4 launcher runs multi-query batches in 2D only.
         if (
             speculative_config is not None

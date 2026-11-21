@@ -381,8 +381,9 @@ class StructuredOutputManager:
         if not structured_output_request_ids:
             return None
 
-        # Covers both speculative decoding and diffusion LLMs (canvas_length).
-        max_num_spec_tokens = self.vllm_config.num_speculative_tokens
+        # Match the locally executed decode width: a prefill instance that
+        # skips its drafter schedules one token per request.
+        max_num_spec_tokens = self.vllm_config.uniform_decode_query_len - 1
         is_diffusion = self.vllm_config.model_config.is_diffusion
         mask_stride = max_num_spec_tokens + (0 if is_diffusion else 1)
 

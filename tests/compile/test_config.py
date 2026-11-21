@@ -780,6 +780,7 @@ def _mock_config_for_cudagraph_sizes(
         if num_speculative_tokens
         else None
     )
+    config.runner_speculative_config = config.speculative_config
     config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)
     config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(config)
     config.get_decode_cudagraph_query_lens = lambda decode_query_len: (

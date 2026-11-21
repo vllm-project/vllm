@@ -28,6 +28,7 @@ class _SpecConfig:
 class _VllmConfig:
     def __init__(self, spec_config: _SpecConfig | None) -> None:
         self.speculative_config = spec_config
+        self.runner_speculative_config = spec_config
 
 
 @pytest.mark.parametrize(

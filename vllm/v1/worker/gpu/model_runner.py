@@ -216,7 +216,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.speculative_config = vllm_config.speculative_config
+        self.speculative_config = vllm_config.runner_speculative_config
         self._draft_workspace_lane = int(
             self.speculative_config is not None
             and self.speculative_config.uses_separate_workspace_lane
@@ -289,7 +289,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache = EncoderCache()
         self.ec_connector = get_ec_connector(vllm_config, self.encoder_cache)
 
-        self.num_speculative_steps = vllm_config.num_speculative_tokens
+        self.num_speculative_steps = vllm_config.uniform_decode_query_len - 1
         num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
         use_dense_all_token_ids = (
             self.speculative_config is not None

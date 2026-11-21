@@ -58,6 +58,7 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=4)
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
+    vllm_config.runner_speculative_config = None
     vllm_config.num_speculative_tokens = 0
     vllm_config.use_cumem_cudagraph_pool = False
     return vllm_config
@@ -359,6 +360,7 @@ def _create_decode_vllm_config(
         speculative_config.num_speculative_tokens_per_batch_size = dynamic_spec_schedule
         speculative_config.enable_adaptive_verification = False
         vllm_config.speculative_config = speculative_config
+    vllm_config.runner_speculative_config = vllm_config.speculative_config
     _split_capture_sizes(vllm_config, legacy_sizes=decode_sizes is None)
     return vllm_config
 

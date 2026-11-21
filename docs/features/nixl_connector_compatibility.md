@@ -99,10 +99,14 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
 - `prefill_context_kv_only` in the speculative config, set on the prefill instance
-  only (DFlash-based drafters such as DSpark, Model Runner V2): its drafter only
-  writes the context K/V the decode instance reads, so it drafts nothing,
-  reserves no lookahead KV slots and, for draft models that support it, frees
-  the draft weights only drafting reads
+  only (Model Runner V2). DFlash-based drafters such as DSpark write the context
+  K/V needed on decode and can free weights used only for drafting. Drafters
+  that read all prompt K/V from the target, such as Gemma 4 assistants, read
+  only the drafter's config on prefill; the prefill worker loads the target
+  alone. Both modes reserve zero draft lookahead slots, and the decode worker
+  loads and runs the full drafter. Drafters that use target hidden states are
+  hashed by the connector: point the prefill instance at the same draft
+  checkpoint as the decode instance.
 
 ### KV cache layout
 

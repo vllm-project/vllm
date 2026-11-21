@@ -695,6 +695,18 @@ class VllmConfig:
         return 0
 
     @property
+    def runner_speculative_config(self) -> SpeculativeConfig | None:
+        """Speculator to execute locally. KV transfer uses the full config."""
+        spec = self.speculative_config
+        if (
+            spec is not None
+            and spec.prefill_context_kv_only
+            and spec.speculator_config.uses_only_target_kv_for_context
+        ):
+            return None
+        return spec
+
+    @property
     def num_scheduled_spec_tokens(self) -> int:
         """See `SpeculatorConfig.num_scheduled_spec_tokens`."""
         speculative_config = self.speculative_config
@@ -713,7 +725,7 @@ class VllmConfig:
         rather than re-deriving their own per-method lookahead, so the
         scheduler and warmup cannot drift apart.
         """
-        speculative_config = self.speculative_config
+        speculative_config = self.runner_speculative_config
         if speculative_config is None:
             return 0
         return speculative_config.speculator_config.num_lookahead_tokens
@@ -730,7 +742,7 @@ class VllmConfig:
         than re-deriving their own per-method lookahead, so those components
         cannot drift apart.
         """
-        speculative_config = self.speculative_config
+        speculative_config = self.runner_speculative_config
         if speculative_config is None:
             return 0
         return speculative_config.speculator_config.num_prefill_lookahead_tokens
@@ -751,6 +763,7 @@ class VllmConfig:
             and not self.cache_config.enable_prefix_caching
         ):
             return 0
+        # P and D must hash identical blocks even when only D runs the drafter.
         return self.speculative_config.speculator_config.num_hash_lookahead_tokens
 
     @property
@@ -772,6 +785,11 @@ class VllmConfig:
         from the other would under-size EAGLE by a full request width, which is
         the failure this property exists to prevent.
         """
+        if (
+            self.speculative_config is not None
+            and self.runner_speculative_config is None
+        ):
+            return 1
         return 1 + self.num_speculative_tokens
 
     def get_decode_cudagraph_query_lens(self, decode_query_len: int) -> dict[int, int]:
@@ -813,7 +831,7 @@ class VllmConfig:
         draft steps would run eagerly and pay their host launch time on every
         step, while their graphs are small. Empty without such steps or decode
         graphs."""
-        speculative_config = self.speculative_config
+        speculative_config = self.runner_speculative_config
         sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
         if (
             not sizes
@@ -2072,10 +2090,8 @@ class VllmConfig:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.kv_sharing_fast_prefill:
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.uses_target_hidden_states
-            ):
+            spec = self.runner_speculative_config
+            if spec is not None and spec.uses_target_hidden_states:
                 raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
                     "compatible with EAGLE as EAGLE requires correct logits "
@@ -2402,7 +2418,8 @@ class VllmConfig:
         """In most cases, the scheduler may schedule a batch with as many tokens as the
         worker is configured to handle.
         """
-        if self.speculative_config is not None:
+        spec = self.runner_speculative_config
+        if spec is not None:
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = max_num_batched_tokens
@@ -2435,7 +2452,6 @@ class VllmConfig:
                     f" Got {max_num_batched_tokens=} and"
                     f" num_lookahead_tokens={self.num_lookahead_tokens}."
                 )
-            spec = self.speculative_config
             max_draft_seqs = spec.speculator_config.max_num_draft_seqs(
                 max_num_batched_tokens
             )
