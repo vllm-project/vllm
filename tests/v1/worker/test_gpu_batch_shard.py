@@ -533,9 +533,9 @@ def test_gather_sampler_output_kernels(tp_size: int):
 # request gets from a speculative-decoding batch), and token ids wider than top-k.
 @pytest.mark.parametrize("logprobs_dims", [(2, 0), (0, 2), (1, 2)])
 def test_gather_sampler_output_logprobs_and_nans(logprobs_dims: tuple[int, int]):
-    """num_nans is reduced per request and gathered; LogprobsTensors are
-    packed into fixed per-request blocks, width-aligned across ranks (pad
-    and truncate paths), and restored to global row order."""
+    """Per-request num_nans is gathered; LogprobsTensors are packed into
+    fixed per-request blocks, width-aligned across ranks (pad and truncate
+    paths), and restored to global row order."""
     from dataclasses import replace as dc_replace
 
     from vllm.v1.outputs import LogprobsTensors
@@ -582,7 +582,7 @@ def test_gather_sampler_output_logprobs_and_nans(logprobs_dims: tuple[int, int])
         ids = rows[:, None] * 10 + torch.arange(local_cols)[None, :]
         logprobs = ids.float() * 0.5
         ranks_t = rows + 7
-        nans = (rows % 4).to(torch.int32)
+        nans = torch.from_numpy((owned * 3 + 1) % 5).to(torch.int32)
         local_outputs.append(
             SamplerOutput(
                 sampled_token_ids=torch.zeros(
@@ -607,9 +607,7 @@ def test_gather_sampler_output_logprobs_and_nans(logprobs_dims: tuple[int, int])
         expected_ids[rows, :copy_cols] = ids[:, :copy_cols]
         expected_logprobs[rows, :copy_cols] = logprobs[:, :copy_cols]
         expected_ranks[rows] = ranks_t
-        for j in owned:
-            in_req = (rows >= int(cu[j])) & (rows < int(cu[j + 1]))
-            expected_nans[j] = int(nans[in_req].sum())
+        expected_nans[owned] = nans
 
     recorded: dict[int, list[torch.Tensor]] = {}
     gathered_full: list[torch.Tensor] = []
