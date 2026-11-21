@@ -622,3 +622,22 @@ PYTHONHASHSEED=<shared-value> vllm serve ...
 Set `kv_load_failure_policy="recompute"` in the KV transfer configuration to
 recompute failed remote loads locally. The existing `"fail"` policy terminates
 affected requests. Transfer completion is reported after synchronous SDK return.
+
+### Store Key Layout
+
+Every key is
+
+```text
+[<cache_prefix>@]<model dir name>[<store namespace>]@cfg:<fingerprint>@tp_rank:<r>@pcp<r>@dcp<r>@pp_rank:<r>@group:<g>@<block hash>
+```
+
+`<fingerprint>` is a 12-hex-digit digest of the settings that change a block's
+bytes or shape: KV cache dtype, model dtype, quantization, Mamba cache dtypes,
+the resolved hash block size, every stored cache group's full spec and layer
+count, the resolved KV cache layout, and the parallel layout (TP/PP/PCP/DCP sizes
+for rank-local keys; PCP/DCP only for TP-shared namespaces, whose store TP and PP
+are already in the namespace). Instances of the same model directory that differ
+in any of these therefore never read each other's blocks, and the worker logs the
+digest at startup. Because the digest is part of the key, changing any of these
+settings, or upgrading from a vLLM that did not compute it, leaves existing store
+contents unreachable: the first requests miss.
