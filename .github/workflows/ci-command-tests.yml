@@ -3,6 +3,8 @@ name: CI command tests
 on:
   pull_request:
     paths:
+      - .buildkite/image_build/amd_rocm_cache.yaml
+      - .github/CODEOWNERS
       - .github/workflows/ci-command-tests.yml
       - .github/workflows/scripts/run_ci_command.py
       - .github/workflows/scripts/test_run_ci_command.py
