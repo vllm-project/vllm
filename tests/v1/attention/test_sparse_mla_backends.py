@@ -3208,6 +3208,62 @@ def test_hisparse_resident_rows_bypass_hot_lru():
 
 
 @requires_hisparse_ops
+def test_hisparse_resident_rows_pack_valid_rows_to_front():
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width = 64, 8
+    cache_handle = _make_hisparse_cache_handle(
+        top_k=4,
+        device_buffer_size=5,
+        max_num_reqs=1,
+        row_width=row_width,
+        block_size=block_size,
+    )
+    raw = cache_handle.runtime.hot.cache.view(torch.int8)
+    resident_table = torch.tensor([[1]], dtype=torch.int32, device=device)
+    resident_slots = torch.tensor([block_size], dtype=torch.int64, device=device)
+    cache_handle.bind_cache(
+        raw,
+        byte_offset=0,
+        block_stride=block_size * row_width * torch.float32.itemsize,
+        num_blocks=2,
+        block_size=block_size,
+        block_table=resident_table,
+        slot_mapping=resident_slots,
+    )
+
+    host = torch.randn(1, block_size, row_width).pin_memory()
+    cache_handle.runtime.bind_source_cache(host)
+    resident_rows = host[0].to(device).add(7)
+    cache_handle.runtime.hot.cache[1].copy_(resident_rows)
+    source_table = torch.tensor([[5]], dtype=torch.int32, device=device)
+    request_ids = torch.zeros(1, dtype=torch.int32, device=device)
+    topk = torch.tensor([[1, -1, 3, 4]], dtype=torch.int32, device=device)
+
+    cache_handle.runtime.begin_forward()
+    indices, valid_counts = cache_handle.swap_in(
+        req_id_per_token=request_ids,
+        block_table=source_table,
+        logical_topk_indices=topk,
+        block_size=block_size,
+        num_valid_rows=_valid_rows(request_ids.numel()),
+        return_valid_counts=True,
+    )
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(
+        indices,
+        torch.tensor(
+            [[block_size + 1, block_size + 3, block_size + 4, -1]],
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
+    torch.testing.assert_close(
+        valid_counts, torch.tensor([3], dtype=torch.int32, device=device)
+    )
+
+
+@requires_hisparse_ops
 @pytest.mark.parametrize(
     ("row_width", "kv_dtype"),
     [(64, torch.float32), (528, torch.uint8), (656, torch.uint8)],
@@ -3282,6 +3338,127 @@ def test_hisparse_swap_in_preserves_rows_across_eviction(row_width, kv_dtype):
     assert hits >= valid_rows_per_step
     assert misses > 3 * valid_rows_per_step
     assert hits + misses == 5 * valid_rows_per_step
+
+
+@requires_hisparse_ops
+def test_hisparse_swap_in_packs_valid_rows_to_front():
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width, top_k = 64, 64, 128
+    kv_pool = torch.randn(9, block_size, row_width).pin_memory()
+    flat_pool = kv_pool.reshape(-1, row_width)
+    runtime = _make_hisparse_runtime(
+        top_k=top_k, device_buffer_size=256, max_num_reqs=2, row_width=row_width
+    )
+    runtime.bind_source_cache(kv_pool)
+    cache = HiSparseCacheHandle(runtime)
+    cache.all_context_pages_resident = False
+
+    block_table = torch.arange(1, 9, dtype=torch.int32, device=device).view(2, 4)
+    req_ids = torch.arange(2, dtype=torch.int32, device=device)
+    topk = torch.arange(top_k, dtype=torch.int32, device=device).repeat(2, 1)
+    topk[1] += 3
+    topk[0, ::3] = -1
+    topk[1, 40:] = -1
+    topk[1, 7] = -1
+
+    cache.runtime.begin_forward()
+    indices, valid_counts = cache.swap_in(
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        logical_topk_indices=topk.clone(),
+        block_size=block_size,
+        num_valid_rows=_valid_rows(req_ids.numel()),
+        return_valid_counts=True,
+    )
+    torch.accelerator.synchronize()
+
+    global_ref = _triton_convert_reference_impl(
+        req_ids, block_table, topk, block_size, top_k
+    ).cpu()
+    assert isinstance(indices, torch.Tensor)
+    attention_rows = cache.runtime.hot.attention_cache.reshape(-1, row_width)
+    for row in range(2):
+        expected = global_ref[row][global_ref[row] >= 0]
+        count = expected.numel()
+        assert valid_counts[row].item() == count
+        packed = indices[row, :count]
+        assert bool((packed >= 0).all())
+        assert bool((indices[row, count:] == -1).all())
+        torch.testing.assert_close(
+            attention_rows[packed.to(torch.long)].cpu(),
+            flat_pool[expected.to(torch.long)],
+            rtol=0,
+            atol=0,
+        )
+
+
+@requires_hisparse_ops
+def test_hisparse_kv_sharing_reader_with_wider_topk_uses_owner_hot_rows():
+    """A KV-sharing reader may select more rows than its target (HY4 DFly)."""
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width, num_blocks = 64, 64, 16
+    kv_pool = torch.randn(num_blocks + 1, block_size, row_width).pin_memory()
+    owner = _make_hisparse_runtime(
+        top_k=128, device_buffer_size=256, max_num_reqs=1, row_width=row_width
+    )
+    owner.bind_source_cache(kv_pool)
+    reader = HiSparseRuntime(
+        config=ResolvedHiSparseConfig(
+            top_k=192, device_buffer_size=384, max_union_rows=192
+        ),
+        max_num_reqs=1,
+        row_width=row_width,
+        kv_dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    reader.bind_hot_cache(
+        owner.hot_backing,
+        byte_offset=0,
+        block_stride=block_size * row_width * torch.float32.itemsize,
+        num_blocks=owner.hot.cache.shape[0],
+        block_size=block_size,
+        block_table=owner.hot_block_table,
+        owner=owner,
+    )
+    reader.bind_source_cache(kv_pool)
+    reader.request_state_indices = owner.request_state_indices
+
+    source_table = torch.arange(
+        1, num_blocks + 1, dtype=torch.int32, device=device
+    ).view(1, -1)
+    req_ids = torch.zeros(1, dtype=torch.int32, device=device)
+    topk = torch.arange(0, 192 * 5, 5, dtype=torch.int32, device=device).view(1, -1)
+
+    def swap_in(runtime: HiSparseRuntime, indices: torch.Tensor) -> torch.Tensor:
+        cache = HiSparseCacheHandle(runtime)
+        cache.all_context_pages_resident = False
+        runtime.begin_forward()
+        hot_indices = cache.swap_in(
+            req_id_per_token=req_ids,
+            block_table=source_table,
+            logical_topk_indices=indices.clone(),
+            block_size=block_size,
+            num_valid_rows=_valid_rows(1),
+        )
+        torch.accelerator.synchronize()
+        expected = kv_pool.view(-1, row_width)[
+            _triton_convert_reference_impl(
+                req_ids, source_table, indices, block_size, indices.shape[1]
+            )
+            .cpu()
+            .long()
+        ]
+        gathered = runtime.hot.attention_cache.reshape(-1, row_width)[
+            hot_indices.long()
+        ].cpu()
+        torch.testing.assert_close(gathered, expected, rtol=0, atol=0)
+        return hot_indices
+
+    swap_in(reader, topk)
+    hits_before, _ = owner.index_group.swap_stats.tolist()
+    swap_in(owner, topk[:, :128])
+    hits, _ = owner.index_group.swap_stats.tolist()
+    assert hits - hits_before == 128
 
 
 @requires_hisparse_ops

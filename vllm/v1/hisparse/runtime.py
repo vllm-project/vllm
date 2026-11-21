@@ -738,7 +738,15 @@ class HiSparseRuntime:
         """
         if owner is not None:
             assert self.is_group_leader and not self.index_group.followers
+            if self.max_union_rows > owner.region_stride:
+                raise ValueError(
+                    "HiSparse KV-sharing layer selects up to "
+                    f"{self.max_union_rows} rows per request, more than its "
+                    f"target's device_buffer_size={owner.region_stride}."
+                )
+            self.region_stride = owner.region_stride
             group, owner_group = self.index_group, owner.index_group
+            group.lru_init = owner_group.lru_init
             group.device_global_indices = owner_group.device_global_indices
             group.lru_slots = owner_group.lru_slots
             group.swap_stats = owner_group.swap_stats

@@ -14,7 +14,6 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -115,8 +114,9 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
                 "DFly draft and target must use the same MLA KV cache dtype; "
                 "omit speculative_config.kv_cache_dtype to inherit the target"
             )
-        if vllm_config.kv_transfer_config is not None:
-            raise ValueError("DFly does not support PD disaggregation")
+        kv_transfer = vllm_config.kv_transfer_config
+        if kv_transfer is not None and kv_transfer.kv_connector != "HiSparseConnector":
+            raise ValueError("DFly supports only the HiSparseConnector KV connector")
         if (
             vllm_config.lora_config is not None
             or vllm_config.parallel_config.use_ubatching
@@ -167,7 +167,6 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
         self.cudagraph_manager: CudaGraphManager | None = None
         self.reuse: HYV4DFlyTargetReuse | None = None
         self._storage_validated = False
-        self._slot_mappings: torch.Tensor | None = None
 
     def load_draft_model(
         self, target_model: nn.Module, target_attn_layer_names: set[str]
@@ -251,12 +250,6 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
         assert self.reuse is not None
         self.reuse.validate_groups(kv_cache_config)
         self._storage_validated = False
-        self._slot_mappings = torch.full(
-            (len(kv_cache_config.kv_cache_groups), self.max_num_tokens),
-            PAD_SLOT_ID,
-            dtype=torch.int64,
-            device=self.device,
-        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         query_width = self.num_query_per_req
@@ -412,11 +405,10 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
             padded_batch=padded_batch,
         )
         if write_slots:
-            assert self._slot_mappings is not None
-            for gid, groups in enumerate(self.attn_groups):
-                if groups:
+            for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+                if group.uses_slot_mapping:
                     write_dfly_query_slots(
-                        self._slot_mappings[gid],
+                        self.block_tables.slot_mappings[gid],
                         self.input_buffers.positions,
                         self.active_requests,
                         self.block_tables.input_block_tables[gid],
@@ -453,7 +445,6 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
     def _query_attention_state(
         self, desc: BatchExecutionDescriptor, seq_lens_cpu_upper_bound: torch.Tensor
     ) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
-        assert self._slot_mappings is not None
         count = desc.num_tokens
         batch = count // self.num_query_per_req
         metadata = self._build_attn_metadata(
@@ -463,10 +454,10 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             step=self.num_query_per_req,
             causal=True,
-            slot_mappings=self._slot_mappings[:, :count],
+            slot_mappings=self.block_tables.slot_mappings[:, :count],
         )
         slots = build_slot_mappings_by_layer(
-            self._slot_mappings[:, :count], self.kv_cache_config
+            self.block_tables.slot_mappings[:, :count], self.kv_cache_config
         )
         return metadata, slots
 
