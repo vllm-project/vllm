@@ -314,6 +314,9 @@ class StreamingParserEngine:
             ParserState.TOOL_ARGS,
             ParserState.TOOL_PARAM_NAME,
             ParserState.TOOL_PARAM_VALUE,
+            ParserState.TOOL_PARAM_VALUE_NESTED,
+            ParserState.TOOL_PARAM_VALUE_FUNC,
+            ParserState.TOOL_PARAM_VALUE_FUNC_NESTED,
             ParserState.TOOL_NAME,
             ParserState.TOOL_BETWEEN,
         ):
@@ -379,6 +382,9 @@ class StreamingParserEngine:
             ParserState.TOOL_ARGS,
             ParserState.TOOL_PARAM_NAME,
             ParserState.TOOL_PARAM_VALUE,
+            ParserState.TOOL_PARAM_VALUE_NESTED,
+            ParserState.TOOL_PARAM_VALUE_FUNC,
+            ParserState.TOOL_PARAM_VALUE_FUNC_NESTED,
             ParserState.TOOL_BETWEEN,
         }
     )

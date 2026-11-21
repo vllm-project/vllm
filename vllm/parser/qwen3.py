@@ -387,11 +387,48 @@ def _legacy_param_value_extender(
 # absorbed as value text (issue 58147) instead of ending the value or the
 # call. The malformed-input recoveries of TOOL_ARGS are mirrored on the
 # name state, and ``</function>`` / the converter's call-end recovery still
-# close a genuinely unclosed value (issue 67923). TOOL_PARAM_VALUE has no
-# parameter-tag transitions on purpose: a flat state machine cannot tell an
-# inner closer from the value's own, so parameter tags stay value text and
-# the converter's parameter tree owns their segmentation.
+# close a genuinely unclosed value (issue 67923).
+#
+# Inside a value the engine tracks a bounded nesting depth with states, so
+# that the closer of a complete call block quoted inside a value (a file
+# that documents the format) is not taken for the real call's end:
+#
+#   TOOL_PARAM_VALUE         top-level value
+#   TOOL_PARAM_VALUE_NESTED  a ``<parameter=`` span inside it
+#   TOOL_PARAM_VALUE_FUNC    a ``<function=`` block quoted inside it
+#   TOOL_PARAM_VALUE_FUNC_NESTED  a ``<parameter=`` span inside that block
+#
+# Every tag inside a value is still value text (ARG_VALUE_CHUNK); the
+# states only decide which ``</function>`` / ``</parameter>`` is the real
+# one. A ``</function>`` at top-level or nested-parameter depth ends the
+# call as before, so a genuinely missing ``</parameter>`` (issue 67923)
+# still recovers through the converter. Deeper nesting is value text and
+# degrades to the previous behaviour. The converter's parameter tree still
+# owns the segmentation of the argument text.
+_V = ParserState.TOOL_PARAM_VALUE
+_VN = ParserState.TOOL_PARAM_VALUE_NESTED
+_VF = ParserState.TOOL_PARAM_VALUE_FUNC
+_VFN = ParserState.TOOL_PARAM_VALUE_FUNC_NESTED
+_TEXT = (EventType.ARG_VALUE_CHUNK,)
 _NESTED_PARAM_TRANSITIONS: dict[tuple[ParserState, str], Transition] = {
+    # Depth tracking inside a value: all of it is value text.
+    (_V, "PARAM_START"): Transition(_VN, _TEXT),
+    (_V, "PARAM_END"): Transition(ParserState.TOOL_ARGS, _TEXT),
+    (_V, "FUNC_PREFIX"): Transition(_VF, _TEXT),
+    (_VN, "PARAM_END"): Transition(_V, _TEXT),
+    (_VN, "FUNC_END"): Transition(
+        ParserState.TOOL_BETWEEN,
+        (EventType.TOOL_CALL_END,),
+    ),
+    (_VF, "PARAM_START"): Transition(_VFN, _TEXT),
+    (_VF, "FUNC_END"): Transition(_V, _TEXT),
+    # A bare in-value ``<function=`` mention: the value's own closer.
+    (_VF, "PARAM_END"): Transition(ParserState.TOOL_ARGS, _TEXT),
+    (_VFN, "PARAM_END"): Transition(_VF, _TEXT),
+    (_VFN, "FUNC_END"): Transition(
+        ParserState.TOOL_BETWEEN,
+        (EventType.TOOL_CALL_END,),
+    ),
     (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
         ParserState.TOOL_PARAM_NAME,
         (EventType.ARG_VALUE_CHUNK,),

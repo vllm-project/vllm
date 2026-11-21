@@ -852,6 +852,96 @@ class TestStreaming:
             ),
         }
 
+    # A complete call block quoted inside a value (a file documenting the
+    # format): its own </parameter> / </function> closers are value text.
+    _QUOTED_BLOCK = (
+        "<tool_call>\n<function=function_name>\n<parameter=parameter_name>\n"
+        "value\n</parameter>\n</function>\n</tool_call>\n"
+    )
+    _QUOTED_BLOCK_CALL_CHUNKS = [
+        "<tool_call>\n",
+        "<function=write>\n",
+        "<parameter=path>\n",
+        "notes.md\n",
+        "</parameter>\n",
+        "<parameter=content>\n",
+        # The in-value wrapper tags are special tokens: each arrives as its
+        # own chunk, as from a real tokenizer.
+        "The format is:\n",
+        "<tool_call>",
+        "\n<function=function_name>\n",
+        "<parameter=parameter_name>\n",
+        "value\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+        "\nend\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    _QUOTED_BLOCK_ARGS = {
+        "path": "notes.md",
+        "content": "The format is:\n" + _QUOTED_BLOCK + "end",
+    }
+
+    def test_quoted_call_block_inside_parameter_value(self, parser, mock_request):
+        """Regression issue 58147 (complete call block quoted in a value)."""
+        text = "".join(self._QUOTED_BLOCK_CALL_CHUNKS)
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write"
+        assert json.loads(result.tool_calls[0].function.arguments) == (
+            self._QUOTED_BLOCK_ARGS
+        )
+
+    def test_streaming_quoted_call_block_inside_parameter_value(
+        self, parser, mock_request
+    ):
+        """Streaming path of the quoted-call-block regression."""
+        results = simulate_tool_streaming(
+            parser, mock_request, self._QUOTED_BLOCK_CALL_CHUNKS
+        )
+
+        assert collect_function_name(results) == "write"
+        assert json.loads(collect_tool_arguments(results)) == self._QUOTED_BLOCK_ARGS
+
+    def test_quoted_call_block_then_second_call(self, parser, mock_request):
+        """The real call still ends at its own </function>: a following call
+        parses on its own."""
+        text = "".join(self._QUOTED_BLOCK_CALL_CHUNKS) + (
+            "\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+            "</parameter>\n</function>\n</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "write",
+            "get_weather",
+        ]
+        assert json.loads(result.tool_calls[0].function.arguments) == (
+            self._QUOTED_BLOCK_ARGS
+        )
+        assert json.loads(result.tool_calls[1].function.arguments) == {"city": "Paris"}
+
+    def test_bare_function_mention_in_value_then_close(self, parser, mock_request):
+        """An unclosed in-value <function= mention does not hold the value
+        open past its own </parameter>."""
+        text = (
+            "<tool_call>\n<function=write>\n<parameter=content>\n"
+            "use <function=NAME> to call\n</parameter>\n"
+            "<parameter=path>\nn.md\n</parameter>\n</function>\n</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert len(result.tool_calls) == 1
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "use <function=NAME> to call",
+            "path": "n.md",
+        }
+
     def test_streaming_nested_parameter_closed_before_in_value_function(
         self, parser, mock_request
     ):
