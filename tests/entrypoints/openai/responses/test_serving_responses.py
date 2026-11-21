@@ -225,6 +225,15 @@ def test_safety_identifier_defaults_to_none() -> None:
     assert _echoed_response()["safety_identifier"] is None
 
 
+def test_null_service_tier_echoes_default() -> None:
+    assert _echoed_response(service_tier=None)["service_tier"] == "auto"
+
+
+def test_service_tier_request_schema_accepts_null() -> None:
+    schema = ResponsesRequest.model_json_schema()["properties"]["service_tier"]
+    assert {"type": "null"} in schema["anyOf"]
+
+
 @pytest.mark.parametrize(
     "sent, echoed",
     [("in_memory", "in_memory"), ("in-memory", "in_memory"), ("24h", "24h")],
