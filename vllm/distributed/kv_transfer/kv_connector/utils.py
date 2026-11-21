@@ -173,6 +173,7 @@ class KVOutputAggregator:
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         mrope_position_deltas: dict[str, int] = {}
+        failed_sync_recving = set[str]()
 
         salvaged, self._salvaged_outputs = self._salvaged_outputs, []
 
@@ -243,6 +244,7 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
+            failed_sync_recving |= kv_output.failed_sync_recving
             self._failed_recving_pending |= kv_output.failed_recving
             # Every rank computes the same deltas for the requests it adds.
             if kv_output.mrope_position_deltas:
@@ -264,6 +266,7 @@ class KVOutputAggregator:
             invalid_block_ids=invalid_block_ids,
             failed_recving=failed_recving,
             mrope_position_deltas=mrope_position_deltas or None,
+            failed_sync_recving=failed_sync_recving,
             expected_finished_count=self._expected_finished_count,
         )
 

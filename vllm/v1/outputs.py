@@ -231,6 +231,8 @@ class KVConnectorOutput:
     # added this step. The scheduler forwards it in kv_transfer_params so a
     # decode instance without the multimodal inputs can still place its tokens.
     mrope_position_deltas: dict[str, int] | None = None
+    # Requests whose synchronous load failed this step, reported by any worker.
+    failed_sync_recving: set[str] = field(default_factory=set)
     # Configuration describing how many finished sending/receiving
     # notifications should be expected for each request. This allows
     # handshake-based connectors like Nixl to update the KVOutputAggregator.
@@ -246,6 +248,7 @@ class KVConnectorOutput:
             and not self.kv_cache_events
             and not self.invalid_block_ids
             and not self.failed_recving
+            and not self.failed_sync_recving
             and not self.kv_connector_worker_meta
             and not self.mrope_position_deltas
         )
