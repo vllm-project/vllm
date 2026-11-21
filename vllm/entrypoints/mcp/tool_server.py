@@ -129,15 +129,15 @@ class MCPToolServer(ToolServer):
                     for tool in list_tools_response.tools
                 ],
             )
-            self.harmony_tool_descriptions[tool_from_mcp.name] = tool_from_mcp
-            if tool_from_mcp.name not in self.urls:
-                self.urls[tool_from_mcp.name] = url
-            else:
+            if tool_from_mcp.name in self.harmony_tool_descriptions:
                 logger.warning(
                     "Tool %s already exists. Ignoring duplicate tool server %s",
                     tool_from_mcp.name,
                     url,
                 )
+                continue
+            self.harmony_tool_descriptions[tool_from_mcp.name] = tool_from_mcp
+            self.urls[tool_from_mcp.name] = url
         logger.info(
             "MCPToolServer initialized with tools: %s",
             list(self.harmony_tool_descriptions.keys()),
