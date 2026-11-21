@@ -16,6 +16,13 @@ graph capture:
    one token count per AITER tuned-GEMM bucket above the captured sizes, and so
    does the grouped wo_a; no collectives, so each rank runs it on its own;
 2. whole-model dummy steps at a few prefill sizes, the same on every rank.
+
+`reserve_serving_transient` (same call site) floors the torch growth the
+extensible KV cache keeps free at `amd_kernels.serving_transient_gib`. Its
+sizing steps measured 10.65 GiB of growth with the routes on (stock 14.55),
+which left 17.5 GiB after sizing; a DEP8 step with a 32k-token prefill chunk
+beside 96 decodes reached 16.7 GiB (8 GiB of it reserved but unallocated) and
+failed to allocate wq_b's 2 GiB output.
 """
 
 import time
@@ -119,6 +126,21 @@ def _warm_wo_a(models: list[torch.nn.Module], sizes: list[int], device) -> int:
                 rocm_mxfp8_wo_a_bmm(a[:m], s[:m], wo_a, groups, rank)
                 calls += 1
     return calls
+
+
+def reserve_serving_transient(worker: "Worker") -> None:
+    if not akr_hooks.loaded:
+        return
+    kv_cache = getattr(worker.model_runner, "extensible_kv_cache", None)
+    gib = worker.vllm_config.kernel_config.amd_kernels.serving_transient_gib
+    floor = int(gib * (1 << 30))
+    if kv_cache is None or floor <= kv_cache.torch_reserve_growth_bytes:
+        return
+    kv_cache.torch_reserve_growth_bytes = floor
+    logger.info(
+        "amd_kernels: KV cache sizing keeps %.1f GiB free for serving transients",
+        gib,
+    )
 
 
 @torch.inference_mode()

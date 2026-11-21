@@ -597,7 +597,8 @@ COPY --link --from=install /out /
 COPY --link benchmarks /app/vllm/benchmarks
 COPY --link examples /app/vllm/examples
 ARG AMD_KERNELS_REPO="https://github.com/Inferact/amd-kernels.git"
-ARG AMD_KERNELS_TAG="v20261114.00+fd233ef"
+# head of Inferact/amd-kernels#12 (DeepSeek-V4.1 kernels) until a release tag has it
+ARG AMD_KERNELS_TAG="688870e09b668dbc1123b3139233ecdb26e312d9"
 RUN pip install --no-cache-dir --no-deps \
     "amd-kernels @ git+${AMD_KERNELS_REPO}@${AMD_KERNELS_TAG}"
 ARG CI_ARCH

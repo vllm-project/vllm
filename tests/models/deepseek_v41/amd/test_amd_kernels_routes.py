@@ -290,3 +290,31 @@ def test_prefill_warmup_sizes():
     assert akr_warmup.model_sizes(32768, 1024)[0] == 1536
     assert akr_warmup.model_sizes(8192, 1024)[-1] == 8192
     assert akr_warmup.model_sizes(1024, 1024) == []
+
+
+def test_serving_transient_floor(monkeypatch):
+    """With routes on, KV cache sizing keeps at least `serving_transient_gib`
+    free for serving transients; a larger measured value is kept."""
+    from vllm.models.deepseek_v41.amd import akr_hooks
+
+    gib = 1 << 30
+    kv_cache = types.SimpleNamespace(torch_reserve_growth_bytes=int(10.65 * gib))
+    worker = types.SimpleNamespace(
+        model_runner=types.SimpleNamespace(extensible_kv_cache=kv_cache),
+        vllm_config=types.SimpleNamespace(kernel_config=KernelConfig()),
+    )
+    monkeypatch.setattr(akr_hooks, "loaded", False)
+    akr_warmup.reserve_serving_transient(worker)
+    assert kv_cache.torch_reserve_growth_bytes == int(10.65 * gib)
+    monkeypatch.setattr(akr_hooks, "loaded", True)
+    akr_warmup.reserve_serving_transient(worker)
+    assert kv_cache.torch_reserve_growth_bytes == 20 * gib
+    kv_cache.torch_reserve_growth_bytes = 25 * gib
+    akr_warmup.reserve_serving_transient(worker)
+    assert kv_cache.torch_reserve_growth_bytes == 25 * gib
+    worker.vllm_config.kernel_config = KernelConfig(
+        amd_kernels={"serving_transient_gib": 0}
+    )
+    kv_cache.torch_reserve_growth_bytes = gib
+    akr_warmup.reserve_serving_transient(worker)
+    assert kv_cache.torch_reserve_growth_bytes == gib
