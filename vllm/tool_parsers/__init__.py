@@ -250,6 +250,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "xlam_tool_parser",
         "xLAMToolParser",
     ),
+    "xing4_0": (
+        "xing4_0_tool_parser",
+        "Xing4_0ToolParser",
+    ),
     "gigachat3": (
         "gigachat3_tool_parser",
         "GigaChat3ToolParser",
