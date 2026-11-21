@@ -324,6 +324,7 @@ def _selective_scan_update_kernel(
     USE_RS_ROUNDING: tl.constexpr,
     PHILOX_ROUNDS: tl.constexpr,
 ):
+    """SSM state update; an accepted count past the state row zeroes the output."""
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
     pid_h = tl.program_id(axis=2)
@@ -347,7 +348,11 @@ def _selective_scan_update_kernel(
     if HAS_STATE_BATCH_INDICES:
         if IS_SPEC_DECODING:
             num_accepted = tl.load(num_accepted_tokens_ptr + pid_b).to(tl.int64)
+            # Bound the lookup by the row stride (columns per request), not
+            # stride_state_indices_T, which is 1 for a contiguous [batch, T]
+            # tensor and would reject every accepted count > 1.
             init_token_idx = tl.maximum(num_accepted - 1, 0)
+            valid_initial_token = init_token_idx < stride_state_indices_batch
         else:
             init_token_idx = 0
 
@@ -361,9 +366,17 @@ def _selective_scan_update_kernel(
                 dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
             )
 
-        state_batch_indices_ptr += (
-            pid_b * stride_state_indices_batch + init_token_idx * stride_state_indices_T
-        )
+        state_batch_indices_ptr += pid_b * stride_state_indices_batch
+        if IS_SPEC_DECODING and not valid_initial_token:
+            offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            zero = tl.zeros([BLOCK_SIZE_M], dtype=tl.float32)
+            out_ptr += bos * stride_out_batch + pid_h * stride_out_head
+            for _ in range(seq_len):
+                tl.store(out_ptr + offs_m * stride_out_dim, zero, mask=offs_m < dim)
+                out_ptr += stride_out_batch
+            return
+
+        state_batch_indices_ptr += init_token_idx * stride_state_indices_T
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     else:
