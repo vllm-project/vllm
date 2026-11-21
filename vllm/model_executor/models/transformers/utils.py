@@ -35,7 +35,8 @@ from typing import (
 
 import torch
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModel, PreTrainedModel
+from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.models.transformers.fx_utils import forward_parameters
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
@@ -517,3 +519,84 @@ def get_default_seq_pooling_type(model_config: "ModelConfig") -> "SequencePoolin
             model_config.hf_config, trust_remote_code=model_config.trust_remote_code
         )
     return "CLS" if has_bidirectional_attention(model) else "LAST"
+
+
+_HEAD_FORWARD_KWARGS = {
+    "return_dict": True,
+    "use_cache": False,
+    "output_router_logits": False,
+}
+"""Head `forward` arguments which must not ask the base model for more."""
+
+
+class _BaseModelOutput(BaseModelOutputWithPast):
+    """Has every other output a head may read (e.g. `cross_attentions`), as
+    `None`."""
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return None
+
+
+class OpaqueBaseModel(nn.Module):
+    """Stands in for `module`, the base model, and for its submodules (e.g. OPT's
+    `model.decoder`), returning `inputs_embeds` as its output."""
+
+    def __init__(self, module: nn.Module):
+        super().__init__()
+        # Not registered, so the head doesn't own the base model's parameters
+        self.__dict__["module"] = module
+
+    def forward(self, *args, inputs_embeds: torch.Tensor, **kwargs):
+        return _BaseModelOutput(last_hidden_state=inputs_embeds)
+
+    def __getattr__(self, name: str):
+        module = self.__dict__.get("module")
+        if module is not None and name in module._modules:
+            return OpaqueBaseModel(module._modules[name])
+        return super().__getattr__(name)
+
+
+@contextmanager
+def stub_base_model(base_model: nn.Module) -> Iterator[None]:
+    """Make the class of `base_model` build `OpaqueBaseModel(base_model)` instead,
+    so that a head can be built without building its base model again."""
+    cls = type(base_model)
+    original = cls.__dict__.get("__new__")
+
+    def new(c, *args, **kwargs):
+        return OpaqueBaseModel(base_model) if c is cls else object.__new__(c)
+
+    cls.__new__ = new  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        if original is None:
+            del cls.__new__
+        else:
+            cls.__new__ = original
+
+
+def replace_base_model(model: nn.Module, base_model_cls: type[nn.Module]) -> bool:
+    """Replace the submodule of `model` of type `base_model_cls` with
+    `OpaqueBaseModel` (unless it already is one), so that `model(inputs_embeds=h)`
+    applies only what `model` applies after its base model. Returns whether the
+    base model was found."""
+    base_model_name = next(
+        (n for n, m in model.named_modules() if n and isinstance(m, base_model_cls)),
+        None,
+    )
+    if base_model_name is None:
+        return False
+    parent_name, _, child_name = base_model_name.rpartition(".")
+    parent = model.get_submodule(parent_name)
+    if not isinstance(base_model := getattr(parent, child_name), OpaqueBaseModel):
+        setattr(parent, child_name, OpaqueBaseModel(base_model))
+    return True
+
+
+def head_forward_kwargs(model: PreTrainedModel) -> dict[str, bool]:
+    """The `_HEAD_FORWARD_KWARGS` which `model.forward` takes."""
+    parameters = forward_parameters(type(model))
+    return {k: v for k, v in _HEAD_FORWARD_KWARGS.items() if k in parameters}

@@ -221,6 +221,8 @@ class Base(
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
+        # Apply mapping to quantization config if needed
+        self._maybe_apply_model_mapping()
         # Remove layers not on this pipeline parallel rank
         self.start_layer, self.end_layer = self._pp_indices()
         self.pipeline_parallel()
@@ -386,7 +388,6 @@ class Base(
         - Transformers weight renaming from `WeightRenaming`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
-        - Any quantization config specific mappings
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
@@ -429,9 +430,6 @@ class Base(
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
         )
-
-        # Apply mapping to quantization config if needed
-        self._maybe_apply_model_mapping()
 
     def _weight_conversions(self) -> list[WeightTransform]:
         """The Transformers weight conversions that apply to `self.model`."""
@@ -590,7 +588,12 @@ class Base(
         return embeddings
 
     def recursive_replace(self):
-        """Recursively replace modules in the model as needed.
+        """Recursively replace modules in `self.model` as needed (see
+        `replace_modules`)."""
+        self.replace_modules(self.model, prefix="model")
+
+    def replace_modules(self, root: nn.Module, prefix: str):
+        """Recursively replace modules in `root`, at `prefix`, as needed.
 
         Currently, this replaces:
 
@@ -629,7 +632,7 @@ class Base(
 
             if (
                 isinstance(fuser, AttentionFuser)
-                and (index := fuser.layer_index(module)) is not None
+                and (index := fuser.layer_index(module, prefix)) is not None
             ):
                 if index in self.attention_fusers:
                     other, _ = self.attention_fusers[index]
@@ -657,7 +660,7 @@ class Base(
                 type(self.model).__name__,
             )
         # Decoder layers are detected as they are built, after their pre-replace hook
-        fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
+        fusers = Fusers(root, self.vllm_config, skip=decoder_layers)
 
         def _materialise(module: nn.Module, prefix: str) -> nn.Module:
             """Initialise `module` as `__init__` would, so it can be offloaded early."""
@@ -749,7 +752,7 @@ class Base(
                 setattr(module, child_name, new_module)
                 log_replacement(qual_name, child_module, new_module)
 
-        _recursive_replace(self.model, prefix="model")
+        _recursive_replace(root, prefix=prefix)
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
@@ -845,7 +848,11 @@ class Base(
 
                 # Handle interleaved sliding window attention
                 if layer_types and layer_types[i] == "sliding_attention":
-                    kwargs["per_layer_sliding_window"] = text_config.sliding_window
+                    sliding_window = text_config.sliding_window
+                    # Transformers' bidirectional window includes both boundaries
+                    if attn_cls is EncoderOnlyAttention:
+                        sliding_window += 1
+                    kwargs["per_layer_sliding_window"] = sliding_window
                 # Handle attention sinks
                 if (sinks := attn_fuser.sinks(attn_module)) is not None:
                     kwargs["sinks"] = sinks

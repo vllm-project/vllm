@@ -35,6 +35,7 @@ from vllm.model_executor.models.transformers.multimodal import (
 from vllm.model_executor.models.transformers.pooling import (
     EmbeddingMixin,
     SequenceClassificationMixin,
+    TokenClassificationMixin,
 )
 from vllm.model_executor.models.transformers.transcription import (
     TranscriptionMixin,
@@ -204,6 +205,10 @@ class TransformersMoEForSequenceClassification(
 class TransformersMultiModalForSequenceClassification(
     SequenceClassificationMixin, MultiModalMixin
 ): ...
+
+
+# Token classification models
+class TransformersForTokenClassification(TokenClassificationMixin, LegacyMixin): ...
 
 
 def __getattr__(name: str):

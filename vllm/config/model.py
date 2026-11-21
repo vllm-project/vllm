@@ -1205,7 +1205,9 @@ class ModelConfig:
         if runner == "pooling" and task in {"embed", "classify"}:
             if task == "embed":
                 cls += "EmbeddingModel"
-            elif task == "classify":
+            elif is_token_classification(self.architectures[0]):
+                cls += "ForTokenClassification"
+            else:
                 cls += "ForSequenceClassification"
         elif cls == "TransformersMultiModal" and processor_has_attr(
             self.model,
@@ -1645,6 +1647,8 @@ class ModelConfig:
         )
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is None and self.using_transformers_backend():
+            cls = MODELS_CONFIG_MAP.get(self._model_info.architecture, None)
         if cls is not None:
             cls.verify_and_update_model_config(self)
 
@@ -2130,10 +2134,10 @@ class ModelConfig:
                     f"Supported tasks: {supported_tasks}"
                 )
 
-        if "token_classify" in supported_tasks:
-            for architecture in self.architectures:
-                if "ForTokenClassification" in architecture:
-                    return "token_classify"
+        if "token_classify" in supported_tasks and any(
+            is_token_classification(arch) for arch in self.architectures
+        ):
+            return "token_classify"
 
         priority: list[PoolingTask] = [
             "embed&token_classify",
@@ -2597,6 +2601,10 @@ def try_match_architecture_defaults(
             return suffix, (default_runner_type, default_convert_type)
 
     return None
+
+
+def is_token_classification(architecture: str) -> bool:
+    return architecture.endswith("ForTokenClassification")
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

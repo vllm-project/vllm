@@ -44,6 +44,7 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | ✅︎ | |
+| `DistilBertForTokenClassification` | DistilBERT-based | `dslim/distilbert-NER`, etc. | | |
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
 | `OpenAIPrivacyFilterForTokenClassification` | gpt-oss-based encoder | `openai/privacy-filter` | | |
 | `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |
