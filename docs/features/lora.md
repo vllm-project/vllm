@@ -481,3 +481,9 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+
+### Configuring `max_cpu_loras`
+
+`--max-cpu-loras` is the number of adapters kept loaded in CPU memory; it defaults to `--max-loras`. When it is exceeded, the least recently used adapter is evicted, and it is read from its path again the next time a request needs it. Adapters that running requests use are never evicted.
+
+If an adapter cannot be loaded when a request needs it, for example because its files were removed, that request fails with an HTTP 500 error and the server keeps serving other requests.

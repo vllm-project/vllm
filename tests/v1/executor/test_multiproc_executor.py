@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
-from collections import deque
+from collections import Counter, deque
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -90,6 +90,7 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
 
     executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
     executor.is_failed = False
+    executor.unread_replies = Counter()
     executor.output_rank = 1
     executor.futures_queue = deque()
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)

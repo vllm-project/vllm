@@ -9,7 +9,7 @@ import threading
 import time
 import traceback
 import weakref
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Sequence, Sized
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from contextlib import suppress
@@ -152,6 +152,8 @@ class MultiprocExecutor(Executor):
 
     def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
         self.monitor_workers = monitor_workers
+        # Per rank, replies left in the queue by RPCs that raised early.
+        self.unread_replies = Counter[int]()
         super().__init__(vllm_config)
 
     def _init_executor(self) -> None:
@@ -517,27 +519,36 @@ class MultiprocExecutor(Executor):
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
+        ranks: Sequence[int] = range(len(response_mqs))
         if output_rank is not None:
             response_mqs = (response_mqs[output_rank],)
+            ranks = (output_rank,)
 
         def get_response():
             responses = []
             has_failure = False
 
-            for mq in response_mqs:
-                dequeue_timeout = (
-                    None if deadline is None else max(0.0, deadline - time.monotonic())
-                )
-                try:
-                    status, result = mq.dequeue(timeout=dequeue_timeout)
-                except TimeoutError as e:
-                    raise TimeoutError(f"RPC call to {method} timed out.") from e
+            for i, mq in enumerate(response_mqs):
+                while True:
+                    dequeue_timeout = (
+                        None
+                        if deadline is None
+                        else max(0.0, deadline - time.monotonic())
+                    )
+                    try:
+                        status, result = mq.dequeue(timeout=dequeue_timeout)
+                    except TimeoutError as e:
+                        raise TimeoutError(f"RPC call to {method} timed out.") from e
+                    if not self.unread_replies[ranks[i]]:
+                        break
+                    self.unread_replies[ranks[i]] -= 1
 
                 if status == WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT:
                     if (
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
                     ):
+                        self.unread_replies.update(ranks[i + 1 :])
                         raise RuntimeError("Worker failed with KV connector output")
                     has_failure = True
                     assert isinstance(result, KVConnectorOutput)
@@ -547,6 +558,7 @@ class MultiprocExecutor(Executor):
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
                     ):
+                        self.unread_replies.update(ranks[i + 1 :])
                         raise RuntimeError(
                             f"Worker failed with error '{result}', please check the"
                             " stack trace above for the root cause"
