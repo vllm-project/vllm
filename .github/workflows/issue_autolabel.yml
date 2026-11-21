@@ -133,12 +133,12 @@ jobs:
               },
               kimi: {
                 keywords: [
-                  { term: "Kimi",     searchIn: "both" },
-                  { term: "Moonshot", searchIn: "both" },
+                  { term: "Kimi",     searchIn: "title" },
+                  { term: "Moonshot", searchIn: "title" },
                   { term: "K3",       searchIn: "title" },
                 ],
                 substrings: [
-                  { term: "moonshotai/", searchIn: "both" },
+                  { term: "moonshotai/", searchIn: "title" },
                   { term: "kimi",        searchIn: "title" },
                 ],
               },
@@ -186,8 +186,11 @@ jobs:
               // Model labels. Title-only by design: issue bodies carry pasted
               // collect_env output, tracebacks and configs that name unrelated
               // models, hardware and libraries.
+              cohere: {
+                keywords: [{ term: "Cohere", searchIn: "title" }],
+              },
               deepseek: {
-                keywords: [{ term: "DeepSeek", searchIn: "title" }],
+                substrings: [{ term: "DeepSeek", searchIn: "title" }],
                 // DSv4 / DSv4.1 fold into the vendor label; we no longer track
                 // per-version DeepSeek labels.
                 regexPatterns: [{ pattern: "(?:\\bDSv4\\b|deepseek[-\\s_]?v4)", flags: "gi", searchIn: "title" }],
@@ -201,35 +204,26 @@ jobs:
                 }],
               },
               llama: {
-                keywords: [{ term: "Llama", searchIn: "title" }],
+                regexPatterns: [{ pattern: "\\bm?llama(?!(?:index|stack))", searchIn: "title" }],
               },
               mistral: {
-                keywords: [
-                  { term: "Mistral",   searchIn: "title" },
-                  { term: "Ministral", searchIn: "title" },
-                  { term: "Voxtral",   searchIn: "title" },
-                  { term: "Mixtral",   searchIn: "title" },
-                  { term: "Pixtral",   searchIn: "title" },
-                ],
+                regexPatterns: [{ pattern: "(?:mistral|ministral|voxtral|mixtral|pixtral)", searchIn: "title" }],
               },
               qwen: {
-                keywords: [{ term: "Qwen", searchIn: "title" }],
+                substrings: [{ term: "Qwen", searchIn: "title" }],
               },
               "gpt-oss": {
                 keywords: [{ term: "harmony", searchIn: "title" }],
-                substrings: [{ term: "gpt-oss", searchIn: "title" }],
+                regexPatterns: [{ pattern: "gpt[-_]?oss", searchIn: "title" }],
               },
               glm: {
-                keywords: [
-                  { term: "GLM",     searchIn: "title" },
-                  { term: "ChatGLM", searchIn: "title" },
-                ],
+                regexPatterns: [{ pattern: "\\b(?:chat)?glm", searchIn: "title" }],
               },
               minimax: {
                 substrings: [{ term: "minimax", searchIn: "title" }],
               },
               inkling: {
-                keywords: [{ term: "Inkling", searchIn: "title" }],
+                substrings: [{ term: "Inkling", searchIn: "title" }],
               },
               // Hardware backends, mirroring the cpu/rocm/intel-gpu rules above.
               nvidia: {

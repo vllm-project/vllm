@@ -5,19 +5,23 @@
 Mergify silently ignores a condition that can never match, so a file-path
 condition keeps passing review long after the file it names has moved or been
 deleted. This walks every `files=` / `files~=` condition in `.github/mergify.yml`
-and fails if one matches nothing in the tree.
+and fails if one matches nothing in the tree. Model-family examples also cover
+version names, file moves, and unrelated names that must not match.
 
 Usage:
     python tools/pre_commit/check_label_rules.py
 """
 
+import json
 import subprocess
 import sys
+from pathlib import Path
 
 import regex as re
 import yaml
 
 MERGIFY = ".github/mergify.yml"
+MODEL_CASES = Path("tools/pre_commit/model_label_cases.json")
 
 
 def tracked_files() -> list[str]:
@@ -79,11 +83,60 @@ def check(files: list[str]) -> list[tuple[str, str, str]]:
     return dead
 
 
+def check_model_examples() -> list[tuple[str, str, str]]:
+    rules = {
+        rule["name"]: rule
+        for rule in yaml.safe_load(Path(MERGIFY).read_text())["pull_request_rules"]
+    }
+    failures = []
+    for family, cases in json.loads(MODEL_CASES.read_text()).items():
+        name = f"label-{family}"
+        conditions = rules[name]["conditions"]
+        # These family rules intentionally OR file and title matchers together.
+        if len(conditions) != 2 or conditions[0] != "label != stale":
+            failures.append((name, "", "update examples for changed rule structure"))
+            continue
+        matchers = conditions[1]["or"]
+        for key, attr, expected in (
+            ("paths", "files", True),
+            ("not_paths", "files", False),
+            ("titles", "title", True),
+            ("not_titles", "title", False),
+        ):
+            for value in cases.get(key, []):
+                matched = any(
+                    bool(re.search(cond[len(attr) + 2 :], value))
+                    if cond.startswith(f"{attr}~=")
+                    else cond[len(attr) + 1 :] == value
+                    for cond in matchers
+                    if cond.startswith((f"{attr}~=", f"{attr}="))
+                )
+                if matched != expected:
+                    failures.append((name, value, f"expected match={expected}"))
+    return failures
+
+
 def main() -> int:
-    dead = check(tracked_files())
+    if "--issues" in sys.argv[1:]:
+        workflow = yaml.safe_load(
+            Path(".github/workflows/issue_autolabel.yml").read_text()
+        )
+        steps = workflow["jobs"]["add-labels"]["steps"]
+        script = next(
+            step["with"]["script"] for step in steps if step.get("id") == "label-step"
+        )
+        return subprocess.run(
+            ["node", ".github/workflows/scripts/test_model_labels.cjs"],
+            input=json.dumps(
+                {"script": script, "families": json.loads(MODEL_CASES.read_text())}
+            ),
+            text=True,
+            check=False,
+        ).returncode
+    dead = check(tracked_files()) + check_model_examples()
     if not dead:
         return 0
-    print(f"{len(dead)} label condition(s) match nothing:\n", file=sys.stderr)
+    print(f"{len(dead)} labeling check(s) failed:\n", file=sys.stderr)
     for name, cond, why in dead:
         print(f"  [{name}] {cond}\n      {why}", file=sys.stderr)
     print(

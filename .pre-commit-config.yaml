@@ -240,7 +240,7 @@ repos:
     name: Check auto-label rules still match real files
     language: python
     entry: python tools/pre_commit/check_label_rules.py
-    files: ^\.github/mergify\.yml$
+    always_run: true
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
   - id: check-agent-files

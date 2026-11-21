@@ -1,0 +1,140 @@
+{
+  "cohere": {
+    "paths": [
+      "rust/src/parser/cohere.rs",
+      "configs/COHERE.yaml",
+      "future/models/cohere99/model.cc"
+    ],
+    "titles": [
+      "Cohere Command R crashes"
+    ]
+  },
+  "deepseek": {
+    "paths": [
+      "vllm/models/deepseek_v41/nvidia/model.py",
+      "future/deepseek99/config.toml"
+    ],
+    "titles": [
+      "DeepSeekV4.1 loading fails",
+      "DeepSeek99 model support",
+      "DSv4.1 crashes"
+    ]
+  },
+  "llama": {
+    "paths": [
+      "templates/MLlama.jinja",
+      "future/llama99/model.rs"
+    ],
+    "not_paths": [
+      "docs/llamaindex.md",
+      "docs/llamastack.md",
+      "vllm/quantization/exllama.py"
+    ],
+    "titles": [
+      "MLlama vision regression",
+      "Llama99 model support"
+    ],
+    "not_titles": [
+      "LlamaIndex integration",
+      "LlamaStack setup",
+      "ExLlama kernel"
+    ]
+  },
+  "mistral": {
+    "paths": [
+      "recipes/models/mistralai/Ministral.yaml",
+      "future/mistral99/model.rs",
+      "templates/voxtral.jinja"
+    ],
+    "titles": [
+      "MistralLarge4 loading fails",
+      "Ministral99 model support",
+      "Voxtral99 parser fix",
+      "Mixtral99 config",
+      "Pixtral99 renderer"
+    ]
+  },
+  "qwen": {
+    "paths": [
+      "configs/QWEN.yaml",
+      "future/qwen99/model.rs"
+    ],
+    "titles": [
+      "Qwen3.8 loading fails",
+      "Qwen99 model support"
+    ]
+  },
+  "minimax": {
+    "paths": [
+      "vllm/models/minimax_m3/model.py",
+      "future/MiniMax99/config.toml"
+    ],
+    "titles": [
+      "MiniMax99 model support"
+    ]
+  },
+  "gpt-oss": {
+    "paths": [
+      "vllm/parser/harmony.py",
+      "vllm/reasoning/gptoss_reasoning_parser.py",
+      "future/GPT-OSS-99/config.toml"
+    ],
+    "titles": [
+      "GPT_OSS response parsing",
+      "GPT-OSS-99 model support",
+      "Harmony rendering"
+    ]
+  },
+  "glm": {
+    "paths": [
+      "vllm/models/glm5next/nvidia/model.py",
+      "rust/src/parser/glm_xml/mod.rs",
+      "recipes/models/zai-org/GLM-99.yaml"
+    ],
+    "not_paths": [
+      "vllm/model_executor/models/midashenglm.py"
+    ],
+    "titles": [
+      "GLM5 inference error",
+      "ChatGLM99 model support"
+    ],
+    "not_titles": [
+      "midashenglm loading fails"
+    ]
+  },
+  "inkling": {
+    "paths": [
+      "vllm/parser/inkling.py",
+      "future/Inkling99/config.toml"
+    ],
+    "titles": [
+      "Inkling99 audio output fails"
+    ]
+  },
+  "kimi": {
+    "paths": [
+      "future/kimi99/model.rs",
+      "vllm/models/kimi_k3/common/model.py"
+    ],
+    "titles": [
+      "Kimi99 model support",
+      "Moonshot model support",
+      "K3 parsing fix"
+    ]
+  },
+  "beam": {
+    "paths": [
+      "vllm/models/beam/nvidia/model.py"
+    ],
+    "not_paths": [
+      "vllm/beam_search.py"
+    ],
+    "titles": [
+      "Beam-99 loading fails",
+      "Reflection Beam support"
+    ],
+    "not_titles": [
+      "Beam search returns wrong result"
+    ]
+  }
+}
