@@ -26,20 +26,32 @@ def simulate_tool_streaming(
     parser,
     request,
     chunks: list[str],
+    delta_token_ids_per_chunk: list[tuple[int, ...]] | None = None,
 ) -> list[tuple[DeltaMessage | None, str]]:
-    """Feed text chunks through `extract_tool_calls_streaming()`."""
-    token_id_map = _build_token_id_map(parser)
+    """Feed text chunks through `extract_tool_calls_streaming()`.
+
+    By default each chunk's delta token ids are synthesized from the marker
+    texts it contains. Pass `delta_token_ids_per_chunk` (one entry per
+    chunk) to stream explicit per-chunk ids instead (e.g. the full per-token
+    ids serving sends), mirroring `simulate_reasoning_streaming`.
+    """
+    token_id_map = (
+        _build_token_id_map(parser) if delta_token_ids_per_chunk is None else {}
+    )
 
     results: list[tuple[Any, str]] = []
     previous_text = ""
     previous_token_ids: list[int] = []
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         current_text = previous_text + chunk
 
-        delta_token_ids: list[int] = [
-            tid for text, tid in token_id_map.items() if text in chunk
-        ]
+        if delta_token_ids_per_chunk is None:
+            delta_token_ids: list[int] = [
+                tid for text, tid in token_id_map.items() if text in chunk
+            ]
+        else:
+            delta_token_ids = list(delta_token_ids_per_chunk[i])
 
         current_token_ids = previous_token_ids + delta_token_ids
 
