@@ -29,6 +29,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -480,7 +481,15 @@ def unified_attention_diffkv(
     )
 
     spec_tile: int | None = None
-    if use_3d and spec_3d and _SPEC_3D_BLOCK_M > BLOCK_M:
+    # One query token per program re-reads each KV tile per token but keeps
+    # more SMs busy; group the verify once that grid exceeds a few waves.
+    if (
+        use_3d
+        and spec_3d
+        and _SPEC_3D_BLOCK_M > BLOCK_M
+        and q.shape[0] * num_kv_heads * num_par_softmax_segments
+        > 4 * num_compute_units(q.device.index)
+    ):
         spec_bm = min(
             _SPEC_3D_BLOCK_M,
             triton.next_power_of_2(max_seqlen_q * num_queries_per_kv),
