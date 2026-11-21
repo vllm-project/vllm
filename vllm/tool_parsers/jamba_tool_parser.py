@@ -189,11 +189,13 @@ class JambaToolParser(ToolParser):
             elif (
                 len(tool_call_arr) > 0 and len(tool_call_arr) > self.current_tool_id + 1
             ):
+                delta_tool_calls: list[DeltaToolCall] = []
+
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
                 # streamed to the client yet.
-                if self.current_tool_id >= 0:
+                if self.current_tool_id >= 0 and self.current_tool_name_sent:
                     diff: str | None = current_tool_call.get("arguments")
 
                     if diff:
@@ -204,27 +206,68 @@ class JambaToolParser(ToolParser):
                             if diff.startswith(streamed)
                             else diff.replace(streamed, "", 1)
                         )
-                        delta = DeltaMessage(
-                            tool_calls=[
+                        if diff:
+                            delta_tool_calls.append(
                                 DeltaToolCall(
                                     index=self.current_tool_id,
                                     function=DeltaFunctionCall(
                                         arguments=diff
                                     ).model_dump(exclude_none=True),
                                 )
-                            ]
+                            )
+                            self.streamed_args_for_tool[self.current_tool_id] += diff
+
+                # a single delta may have completed several tools at once
+                # (e.g. the whole message arrived in one delta with async
+                # scheduling or stream_interval > 1); emit every newly
+                # completed call in full, since no further deltas may
+                # arrive for the earlier ones
+                array_complete = is_complete_json(parsable_arr)
+                first = (
+                    self.current_tool_id + 1
+                    if self.current_tool_name_sent
+                    else max(self.current_tool_id, 0)
+                )
+                # at most the last element of a partially parsed array can
+                # be incomplete, so every element below the last one is
+                # complete
+                last = len(tool_call_arr) - 1
+                end = last if array_complete else last - 1
+                emitted_last = False
+                for index in range(first, end + 1):
+                    new_tool_call = tool_call_arr[index]
+                    function_name = new_tool_call.get("name")
+                    if not function_name or "arguments" not in new_tool_call:
+                        break
+                    arguments = json.dumps(
+                        new_tool_call["arguments"], ensure_ascii=False
+                    )
+                    delta_tool_calls.append(
+                        DeltaToolCall(
+                            index=index,
+                            type="function",
+                            id=make_tool_call_id(),
+                            function=DeltaFunctionCall(
+                                name=function_name,
+                                arguments=arguments,
+                            ).model_dump(exclude_none=True),
                         )
-                        self.streamed_args_for_tool[self.current_tool_id] += diff
-                    else:
-                        delta = None
-                else:
-                    delta = None
+                    )
+                    while len(self.streamed_args_for_tool) <= index:
+                        self.streamed_args_for_tool.append("")
+                    self.streamed_args_for_tool[index] = arguments
+                    emitted_last = index == last
+
                 # re-set stuff pertaining to progress in the current tool
-                self.current_tool_id = len(tool_call_arr) - 1
-                self.current_tool_name_sent = False
-                self.streamed_args_for_tool.append("")
+                self.current_tool_id = last
+                self.current_tool_name_sent = emitted_last
+                self.prev_tool_call_arr = tool_call_arr
+                while len(self.streamed_args_for_tool) <= last:
+                    self.streamed_args_for_tool.append("")
                 logger.debug("starting on new tool %d", self.current_tool_id)
-                return delta
+                if delta_tool_calls:
+                    return DeltaMessage(tool_calls=delta_tool_calls)
+                return None
 
             # case: update an existing tool - this is handled below
 
@@ -233,6 +276,18 @@ class JambaToolParser(ToolParser):
             if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
+                    function_arguments = None
+                    cur_arguments = current_tool_call.get("arguments")
+                    if cur_arguments and is_complete_json(parsable_arr):
+                        # the array is already complete, so no further
+                        # deltas may arrive; send the arguments together
+                        # with the name
+                        function_arguments = json.dumps(
+                            cur_arguments, ensure_ascii=False
+                        )
+                        self.streamed_args_for_tool[self.current_tool_id] += (
+                            function_arguments
+                        )
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
@@ -240,7 +295,8 @@ class JambaToolParser(ToolParser):
                                 type="function",
                                 id=make_tool_call_id(),
                                 function=DeltaFunctionCall(
-                                    name=function_name
+                                    name=function_name,
+                                    arguments=function_arguments,
                                 ).model_dump(exclude_none=True),
                             )
                         ]
@@ -321,17 +377,23 @@ class JambaToolParser(ToolParser):
                     else:
                         argument_diff = ""
                     logger.debug("got arguments diff: %s", argument_diff)
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=argument_diff
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
+                    if argument_diff:
+                        delta = DeltaMessage(
+                            tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_id,
+                                    function=DeltaFunctionCall(
+                                        arguments=argument_diff
+                                    ).model_dump(exclude_none=True),
+                                )
+                            ]
+                        )
+                        self.streamed_args_for_tool[self.current_tool_id] += (
+                            argument_diff
+                        )
+                    else:
+                        # an empty diff carries nothing; skip the chunk
+                        delta = None
                 else:
                     # try parsing it with regular JSON - if it works we're
                     # at the end, and we need to send the difference between
