@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import array
 import contextlib
+import inspect
 import os
 import random
+import re
 import sys
 import threading
 from collections.abc import Callable, Collection, Sequence
+from types import FunctionType
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -1006,6 +1009,93 @@ def supports_xpu_graph() -> bool:
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
+def _named_tuple_params(op_func: Callable) -> dict[str, type]:
+    return {
+        p.name: p.annotation
+        for p in inspect.signature(op_func).parameters.values()
+        if isinstance(p.annotation, type)
+        and issubclass(p.annotation, tuple)
+        and hasattr(p.annotation, "_fields")
+    }
+
+
+def _restore_named_tuple_args(
+    func: Callable, named_tuple_params: dict[str, type]
+) -> Callable:
+    """Rebuild NamedTuple arguments from the plain tuples the dispatcher
+    passes for tuple-typed schema parameters.
+    """
+    param_names = list(inspect.signature(func).parameters)
+    positions = {
+        i: named_tuple_params[name]
+        for i, name in enumerate(param_names)
+        if name in named_tuple_params
+    }
+
+    def wrapper(*args, **kwargs):
+        args = list(args)
+        for i, named_tuple in positions.items():
+            if i < len(args):
+                args[i] = named_tuple(*args[i])
+            elif (name := param_names[i]) in kwargs:
+                kwargs[name] = named_tuple(*kwargs[name])
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def _infer_op_schema(
+    op_func: Callable, mutates_args: list[str], named_tuple_params: dict[str, type]
+) -> str:
+    """Infer an operator schema, mapping NamedTuple parameters to tuple
+    schemas, which torch's `infer_schema` rejects on its own.
+    """
+
+    def annotation_schema_str(annotation: Any) -> str:
+        def scalar(v: annotation) -> None:
+            pass
+
+        # e.g. "(int v) -> ()" -> "int"
+        args = infer_schema(scalar, mutates_args=[]).split(" -> ")[0]
+        return args[1:-1].rsplit(" ", 1)[0]
+
+    if not named_tuple_params:
+        return infer_schema(op_func, mutates_args=mutates_args)
+
+    # Replace NamedTuple annotations with int so `infer_schema` accepts the
+    # signature, then patch each placeholder into an equivalent tuple schema.
+    annotations = dict(op_func.__annotations__)
+    annotations.update(dict.fromkeys(named_tuple_params, int))
+    placeholder = FunctionType(
+        op_func.__code__,
+        op_func.__globals__,
+        op_func.__name__,
+        op_func.__defaults__,
+        op_func.__closure__,
+    )
+    placeholder.__annotations__ = annotations
+    placeholder.__module__ = op_func.__module__
+    placeholder.__kwdefaults__ = op_func.__kwdefaults__
+    schema = infer_schema(placeholder, mutates_args=mutates_args)
+    for name, named_tuple in named_tuple_params.items():
+        # Only `_fields` entries are constructor fields; subclass annotations
+        # can carry unrelated class-level entries (e.g. ClassVar aliases), and
+        # inherited fields live on base-class annotations.
+        field_annotations: dict[str, Any] = {}
+        for klass in reversed(named_tuple.__mro__):
+            annotations_ = getattr(klass, "__annotations__", None)
+            if annotations_:
+                field_annotations.update(annotations_)
+        fields = ", ".join(
+            annotation_schema_str(field_annotations[field_name])
+            for field_name in named_tuple._fields
+        )
+        # `infer_schema` renders int placeholders as SymInt, so match any
+        # single type token preceding the parameter name.
+        schema = re.sub(rf"\b\S+ {name}\b", f"({fields}) {name}", schema)
+    return schema
+
+
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
@@ -1037,7 +1127,13 @@ def direct_register_custom_op(
 
         dispatch_key = current_platform.dispatch_key
 
-    schema_str = infer_schema(op_func, mutates_args=mutates_args)
+    named_tuple_params = _named_tuple_params(op_func)
+    schema_str = _infer_op_schema(op_func, mutates_args, named_tuple_params)
+
+    if named_tuple_params:
+        op_func = _restore_named_tuple_args(op_func, named_tuple_params)
+        if fake_impl is not None:
+            fake_impl = _restore_named_tuple_args(fake_impl, named_tuple_params)
 
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
