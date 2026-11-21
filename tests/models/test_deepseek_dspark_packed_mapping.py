@@ -39,15 +39,21 @@ PACKED_MAPPING_CASES = [
     pytest.param(V4XPU, TargetV4XPU, id="v4_xpu"),
     pytest.param(V41Nvidia, TargetV41Nvidia, id="v41_nvidia"),
 ]
+CONTEXT_WKV_CASES = [
+    pytest.param(dsv4_dspark, id="v4"),
+    pytest.param(dsv41_dspark, id="v41"),
+]
 
 # Importing the ROCm platform on x86 CPU loads a second _C extension.
 if current_platform.is_rocm():
+    from vllm.models.deepseek_v4.amd import dspark as dsv4_amd_dspark
     from vllm.models.deepseek_v4.amd.dspark import (
         DSparkDeepseekV4ForCausalLM as V4AMD,
     )
     from vllm.models.deepseek_v4.amd.model import (
         DeepseekV4ForCausalLM as TargetV4AMD,
     )
+    from vllm.models.deepseek_v41.amd import dspark as dsv41_amd_dspark
     from vllm.models.deepseek_v41.amd.dspark import (
         DSparkDeepseekV4ForCausalLM as V41AMD,
     )
@@ -59,6 +65,12 @@ if current_platform.is_rocm():
         [
             pytest.param(V4AMD, TargetV4AMD, id="v4_amd"),
             pytest.param(V41AMD, TargetV41AMD, id="v41_amd"),
+        ]
+    )
+    CONTEXT_WKV_CASES.extend(
+        [
+            pytest.param(dsv4_amd_dspark, id="v4_amd"),
+            pytest.param(dsv41_amd_dspark, id="v41_amd"),
         ]
     )
 
@@ -99,9 +111,9 @@ def test_deepseek_dspark_packed_modules_mapping(model_cls, target_cls):
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("dspark_mod", [dsv4_dspark, dsv41_dspark], ids=["v4", "v41"])
+@pytest.mark.parametrize("dspark_mod", CONTEXT_WKV_CASES)
 @pytest.mark.parametrize("skip_wkv", [True, False])
-def test_nvidia_dspark_context_wkv_proj_respects_ignored_layers(
+def test_dspark_context_wkv_proj_respects_ignored_layers(
     monkeypatch: pytest.MonkeyPatch,
     dspark_mod,
     skip_wkv: bool,
@@ -116,14 +128,17 @@ def test_nvidia_dspark_context_wkv_proj_respects_ignored_layers(
         captured_quant_configs.append(kwargs.get("quant_config"))
         return DummyModule()
 
-    monkeypatch.setattr(dspark_mod, "VocabParallelEmbedding", DummyModule)
+    for name in ("VocabParallelEmbedding", "HCHeadOp"):
+        if hasattr(dspark_mod, name):
+            monkeypatch.setattr(dspark_mod, name, DummyModule)
     monkeypatch.setattr(dspark_mod, "ReplicatedLinear", DummyModule)
     monkeypatch.setattr(dspark_mod, "RMSNorm", DummyModule)
     monkeypatch.setattr(dspark_mod, "DeepseekV4DecoderLayer", DummyModule)
     monkeypatch.setattr(dspark_mod, "MergedColumnParallelLinear", capture_merged_linear)
     monkeypatch.setattr(dspark_mod, "DSparkMarkovHead", DummyModule)
     monkeypatch.setattr(dspark_mod, "DSparkConfidenceHead", DummyModule)
-    monkeypatch.setattr(dspark_mod, "_use_sequence_parallel", lambda _: False)
+    if hasattr(dspark_mod, "_use_sequence_parallel"):
+        monkeypatch.setattr(dspark_mod, "_use_sequence_parallel", lambda _: False)
     monkeypatch.setattr(
         dspark_mod, "get_current_vllm_config", lambda: SimpleNamespace()
     )

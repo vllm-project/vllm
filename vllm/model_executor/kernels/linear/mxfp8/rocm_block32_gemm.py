@@ -664,6 +664,9 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (8192, _tiled(128, 256, 128, 1, True, 2, 2, 32, 0)),
     ],
 }
+# stacked DSpark context wkv (replicated); the fused wq_a|wkv tiers (same K)
+# beat _default_config at this shape on MI355X
+_TUNED[(1536, 5120)] = _TUNED[(1792, 5120)]
 
 
 def _default_config(M: int, N: int, K: int) -> _Config:
@@ -701,6 +704,7 @@ _TUNED_FUSED_QUANT: dict[
     # (N, K): [(max_m, (block_m, block_n, warps, stages, waves)), ...]
     # DeepSeek-V4.1-Flash TP4 decode shapes:
     (1152, 5120): [(8, (8, 32, 4, 2, 0))],  # shared_gate_up
+    (1536, 5120): [(8, (8, 16, 4, 3, 1))],  # stacked DSpark context wkv
     (1792, 5120): [(8, (8, 16, 4, 3, 1))],  # fused_wqa_wkv
     (4096, 1280): [(8, (8, 16, 4, 2, 0))],  # indexer_wq_b
     (5120, 576): [(8, (8, 16, 4, 2, 0))],  # shared_down
