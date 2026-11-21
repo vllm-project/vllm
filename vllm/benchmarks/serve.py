@@ -24,11 +24,13 @@ import contextlib
 import importlib.util
 import json
 import math
+import netrc
 import os
 import random
 import shutil
 import ssl
 import time
+import urllib.request
 import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Iterator
@@ -817,6 +819,28 @@ def calculate_metrics(
     return metrics, actual_output_lens
 
 
+def env_configured() -> bool:
+    """Whether the environment sets a proxy or has netrc credentials.
+
+    With `trust_env=True`, aiohttp looks up netrc and the proxy in worker
+    threads for every request, which inflates TTFT at high concurrency.
+    Any proxy or netrc entry keeps it on, because a redirect can reach a
+    host that needs them, so those runs still include this delay. The netrc
+    path follows aiohttp: `$NETRC`, else `~/.netrc` (`~/_netrc` on Windows).
+    """
+    proxies = urllib.request.getproxies()
+    if any(scheme in proxies for scheme in ("http", "https", "ws", "wss")):
+        return True
+    path = os.environ.get("NETRC")
+    if path is None:
+        name = "_netrc" if os.name == "nt" else ".netrc"
+        path = os.path.join(os.path.expanduser("~"), name)
+    try:
+        return bool(netrc.netrc(path).hosts)
+    except (OSError, netrc.NetrcParseError):
+        return False
+
+
 async def benchmark(
     task_type: TaskType,
     endpoint_type: str,
@@ -871,7 +895,7 @@ async def benchmark(
         )
         return aiohttp.ClientSession(
             connector=connector,
-            trust_env=True,
+            trust_env=env_configured(),
             timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
         )
 
