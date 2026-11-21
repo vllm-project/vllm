@@ -11,13 +11,24 @@
 import torch
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from .chunk_o import chunk_fwd_o
-from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from .chunk_o import _chunk_fwd_o_launch, chunk_fwd_o
+from .chunk_scaled_dot_kkt import _chunk_scaled_dot_kkt_launch, chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
-from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL, input_guard
-from .wy_fast import recompute_w_u_fwd
+from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL, input_guard, is_cdna3
+from .wy_fast import _recompute_w_u_launch, recompute_w_u_fwd
+
+
+def register_gdn_prefill_warmup(
+    *, dtype: torch.dtype, H: int, Hg: int, K: int, V: int, BT: int = FLA_CHUNK_SIZE
+) -> None:
+    """Compile the gfx942 per-launch prefill configs in vLLM's JIT warmup."""
+    if not is_cdna3:
+        return
+    _chunk_fwd_o_launch.register_warmup(dtype=dtype, H=H, Hg=Hg, K=K, V=V, BT=BT)
+    _chunk_scaled_dot_kkt_launch.register_warmup(dtype=dtype, H=H, Hg=Hg, K=K, BT=BT)
+    _recompute_w_u_launch.register_warmup(dtype=dtype, H=H, Hg=Hg, K=K, V=V, BT=BT)
 
 
 def chunk_gated_delta_rule_fwd(
