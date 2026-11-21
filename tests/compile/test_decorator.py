@@ -284,3 +284,27 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         # num_cudagraph_sizes * num cudagraphable graphs to capture
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
+
+
+def test_instance_built_before_decoration_keeps_plain_call():
+    # The Transformers modeling backend decorates the Transformers decoder class
+    # itself, so a model of that class built earlier in the same process (e.g. a
+    # colocated trainer's policy) must keep working as a plain nn.Module.
+    class Decoder(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(MLP_SIZE, MLP_SIZE)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.proj(x)
+
+    trainer_model = Decoder()
+    calls = []
+    trainer_model.register_forward_pre_hook(lambda module, args: calls.append(1))
+    x = torch.randn(2, MLP_SIZE)
+    expected = trainer_model(x)
+
+    support_torch_compile(Decoder)
+
+    torch.testing.assert_close(trainer_model(x), expected)
+    assert len(calls) == 2
