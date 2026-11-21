@@ -61,6 +61,7 @@ hyper-util = { version = "0.1.20", features = [
 image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
 indexmap = { version = "2.13.0", features = ["serde"] }
 indicatif = "0.18.4"
+ipnet = "2.12.0"
 itertools = "0.14.0"
 libc = "0.2.177"
 llm-multimodal = { git = "https://github.com/smg-project/smg", rev = "2787f7cde21e0a2511f481994d731c98109020af", default-features = false }

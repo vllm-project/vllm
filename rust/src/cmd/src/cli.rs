@@ -41,7 +41,7 @@ use vllm_server::{
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
     DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
     HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
-    ReasoningEffort, RenderConfig, RendererSelection,
+    ReasoningEffort, RenderConfig, RendererSelection, TrustedProxies,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -739,6 +739,13 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub http_max_request_body_size: Option<usize>,
 
+    /// Comma-separated proxy addresses or networks, or `*`, whose
+    /// `X-Forwarded-For` gives the client in the access log (default
+    /// "127.0.0.1,::1"). Like uvicorn, it is set through `FORWARDED_ALLOW_IPS`.
+    #[arg(long, hide = true, env = "FORWARDED_ALLOW_IPS")]
+    #[serde(skip)]
+    pub forwarded_allow_ips: Option<String>,
+
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter. Like Python, it is set only through
     /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
@@ -1009,6 +1016,9 @@ impl SharedRuntimeArgs {
         if let Some(value) = lookup("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH") {
             self.keep_alive_on_engine_death = parse_int_flag(&value)
                 .map_err(|error| format!("invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: {error}"))?;
+        }
+        if let Some(value) = lookup("FORWARDED_ALLOW_IPS") {
+            self.forwarded_allow_ips = Some(value);
         }
         if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
             let size = parse_byte_count(&value)
@@ -1282,6 +1292,9 @@ impl SharedRuntimeArgs {
                 .filter(|path| !path.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            trusted_proxies: TrustedProxies::parse(
+                (self.forwarded_allow_ips.as_deref()).unwrap_or(TrustedProxies::DEFAULT),
+            ),
         }
     }
 
