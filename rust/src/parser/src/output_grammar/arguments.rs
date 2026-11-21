@@ -25,14 +25,71 @@
 //! - `minProperties` and `maxProperties` are not enforced.
 //! - `allOf` with more than one schema accepts any value.
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use xgrammar_structural_tag::format::{EndBoundary, Format, JsonSchemaFormat, TokenFormat};
 
+use super::{OutputGrammarError, Result};
 pub use crate::schema::JsonType;
 use crate::schema::{self, OptionSource, SchemaOption, SchemaRoot};
 
 /// The schema accepting any value.
 static ANY_SCHEMA: Value = Value::Bool(true);
+
+const MAX_TOOL_GRAMMAR_WORK: usize = 8192;
+const MAX_TOOL_GRAMMAR_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
+
+/// Shared by all tool arguments rendered into one output grammar.
+pub(crate) struct ToolGrammarBudget {
+    work_left: usize,
+    schema_bytes_left: usize,
+}
+
+impl Default for ToolGrammarBudget {
+    fn default() -> Self {
+        Self {
+            work_left: MAX_TOOL_GRAMMAR_WORK,
+            schema_bytes_left: MAX_TOOL_GRAMMAR_SCHEMA_BYTES,
+        }
+    }
+}
+
+impl ToolGrammarBudget {
+    fn charge_work(&mut self, work: usize) -> Result<()> {
+        self.work_left = self
+            .work_left
+            .checked_sub(work)
+            .ok_or(OutputGrammarError::ToolSchemaTooComplex)?;
+        Ok(())
+    }
+
+    fn charge_bytes(&mut self, bytes: usize) -> Result<()> {
+        self.schema_bytes_left = self
+            .schema_bytes_left
+            .checked_sub(bytes)
+            .ok_or(OutputGrammarError::ToolSchemaTooComplex)?;
+        Ok(())
+    }
+
+    /// Estimate the cost of copying JSON into the grammar before any cloning.
+    pub(crate) fn charge_schema(&mut self, value: &Value) -> Result<()> {
+        // Account for container and value overhead as well as text.
+        self.charge_bytes(64)?;
+        match value {
+            Value::Object(object) => self.charge_object(object),
+            Value::Array(values) => values.iter().try_for_each(|value| self.charge_schema(value)),
+            Value::String(text) => self.charge_bytes(text.len()),
+            _ => Ok(()),
+        }
+    }
+
+    fn charge_object(&mut self, object: &Map<String, Value>) -> Result<()> {
+        for (key, value) in object {
+            self.charge_bytes(key.len())?;
+            self.charge_schema(value)?;
+        }
+        Ok(())
+    }
+}
 
 /// How one protocol renders the parameters of a call.
 pub trait ArgumentSyntax {
@@ -179,14 +236,35 @@ impl ArgumentContext<'_> {
     }
 
     /// Every option of a value under `schema`.
-    fn value_options<'s>(&'s self, schema: &'s Value) -> Vec<ValueOption<'s>> {
+    fn value_options<'s>(
+        &'s self,
+        schema: &'s Value,
+        budget: &mut ToolGrammarBudget,
+    ) -> Result<Vec<ValueOption<'s>>> {
         let root: SchemaRoot<'s> = self.root;
-        root.options(schema)
+        let options = root
+            .options_with_budget(schema, &mut budget.work_left)
+            .ok_or(OutputGrammarError::ToolSchemaTooComplex)?;
+        options
             .into_iter()
-            .map(|SchemaOption { ty, source }| ValueOption {
-                ty,
-                source,
-                cx: self,
+            .map(|SchemaOption { ty, source }| {
+                match source {
+                    OptionSource::Schema(schema) => budget.charge_object(schema)?,
+                    OptionSource::Literal(value) => budget.charge_schema(value)?,
+                    OptionSource::Any => (),
+                }
+                if ty != JsonType::String {
+                    for key in ["$defs", "definitions"] {
+                        if let Some(definitions) = root.schema().get(key) {
+                            budget.charge_schema(definitions)?;
+                        }
+                    }
+                }
+                Ok(ValueOption {
+                    ty,
+                    source,
+                    cx: self,
+                })
             })
             .collect()
     }
@@ -194,12 +272,17 @@ impl ArgumentContext<'_> {
 
 /// Build the grammar of one call's arguments under `schema`, the tool's
 /// parameters schema, rendering each parameter with `syntax`.
-pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &ArgumentOptions) -> Format {
-    parameter_list(
+pub(crate) fn arguments(
+    schema: &Value,
+    syntax: &dyn ArgumentSyntax,
+    options: &ArgumentOptions,
+    budget: &mut ToolGrammarBudget,
+) -> Result<Format> {
+    Ok(parameter_list(
         options,
         syntax.separator(),
-        parameters(schema, syntax, options),
-    )
+        parameters(schema, syntax, options, budget)?,
+    ))
 }
 
 /// The parameters of one call, each rendered by an [`ArgumentSyntax`], for a
@@ -220,46 +303,51 @@ pub struct Parameter {
 
 /// The parameters of one call under `schema`, the tool's parameters schema,
 /// rendering each parameter with `syntax`.
-pub fn parameters(
+pub(crate) fn parameters(
     schema: &Value,
     syntax: &dyn ArgumentSyntax,
     options: &ArgumentOptions,
-) -> Parameters {
+    budget: &mut ToolGrammarBudget,
+) -> Result<Parameters> {
     let cx = ArgumentContext {
         options,
         root: SchemaRoot::new(schema),
     };
-    let parameter =
-        |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema));
+    let resolved = cx.root.resolved();
+    let required = resolved.get("required").and_then(Value::as_array);
+    budget.charge_work(1 + required.map_or(0, Vec::len))?;
+    let mut parameter = |key: ParameterKey<'_>, schema: &Value| -> Result<Option<Format>> {
+        if let ParameterKey::Declared(key) = key {
+            budget.charge_bytes(key.len())?;
+        }
+        Ok(syntax.parameter(key, &cx.value_options(schema, budget)?))
+    };
 
-    match cx.root.resolved() {
+    Ok(match resolved {
         Value::Object(schema) => {
             let additional = match schema.get("additionalProperties") {
                 Some(Value::Bool(false)) => None,
-                Some(additional) => parameter(ParameterKey::Free, additional),
+                Some(additional) => parameter(ParameterKey::Free, additional)?,
                 // Strict schemas allow no undeclared properties, and a schema
                 // without declared properties allows any.
                 None if schema.contains_key("properties") => None,
-                None => parameter(ParameterKey::Free, &ANY_SCHEMA),
+                None => parameter(ParameterKey::Free, &ANY_SCHEMA)?,
             };
-            let required = schema
-                .get("required")
-                .and_then(Value::as_array)
-                .map(|required| required.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-                .unwrap_or_default();
-            let declared = schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-                .filter_map(|(key, schema)| {
-                    Some(Parameter {
+            let required =
+                required.into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>();
+            let mut declared = Vec::new();
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (key, schema) in properties {
+                    let Some(format) = parameter(ParameterKey::Declared(key), schema)? else {
+                        continue;
+                    };
+                    declared.push(Parameter {
                         key: key.clone(),
-                        format: parameter(ParameterKey::Declared(key), schema)?,
+                        format,
                         required: required.contains(&key.as_str()),
-                    })
-                })
-                .collect();
+                    });
+                }
+            }
             Parameters {
                 declared,
                 additional,
@@ -271,9 +359,9 @@ pub fn parameters(
         },
         _ => Parameters {
             declared: vec![],
-            additional: parameter(ParameterKey::Free, &ANY_SCHEMA),
+            additional: parameter(ParameterKey::Free, &ANY_SCHEMA)?,
         },
-    }
+    })
 }
 
 /// Parameters in declared order, required ones mandatory, followed by any
@@ -426,7 +514,9 @@ mod tests {
         options: &ArgumentOptions,
         expected: Expect,
     ) {
-        expected.assert_eq(&outline(&arguments(&schema, syntax, options)));
+        let grammar =
+            arguments(&schema, syntax, options, &mut ToolGrammarBudget::default()).unwrap();
+        expected.assert_eq(&outline(&grammar));
     }
 
     fn weather_schema() -> Value {
@@ -534,7 +624,13 @@ mod tests {
             },
             "required": ["place", "name"]
         });
-        let arguments = arguments(&schema, &Typed, &ArgumentOptions::default());
+        let arguments = arguments(
+            &schema,
+            &Typed,
+            &ArgumentOptions::default(),
+            &mut ToolGrammarBudget::default(),
+        )
+        .unwrap();
         expect![[r#"
             sequence
               tag `<arg key="place" type="object">` json({ city?: string } where place = { city?: string }, name = string) `</arg>`
@@ -575,6 +671,23 @@ mod tests {
                     `\n`
             "#]],
         );
+    }
+
+    #[test]
+    fn argument_building_charges_copied_schema_data_before_rendering() {
+        let schema = json!({
+            "$defs": { "item": { "type": "integer" } },
+            "properties": { "item": { "$ref": "#/$defs/item" } }
+        });
+        let mut budget = ToolGrammarBudget {
+            work_left: 16,
+            schema_bytes_left: 128,
+        };
+        let grammar = arguments(&schema, &Typed, &ArgumentOptions::default(), &mut budget);
+        assert!(matches!(
+            grammar,
+            Err(OutputGrammarError::ToolSchemaTooComplex)
+        ));
     }
 
     #[test]

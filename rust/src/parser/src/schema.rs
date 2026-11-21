@@ -26,11 +26,31 @@ pub(crate) struct SchemaRoot<'a> {
 }
 
 /// Reference targets expanded while collecting one value's options.
-#[derive(Default)]
-struct Expansion {
+struct Expansion<'a, 'b> {
+    options: Vec<SchemaOption<'a>>,
+    work_left: &'b mut usize,
     expanded: HashSet<*const Value>,
     /// Whether a reference was skipped because its target already expanded.
     skipped: bool,
+}
+
+impl<'a> Expansion<'a, '_> {
+    fn charge(&mut self, work: usize) -> Option<()> {
+        *self.work_left = self.work_left.checked_sub(work)?;
+        Some(())
+    }
+
+    fn push(&mut self, option: SchemaOption<'a>) -> Option<()> {
+        self.charge(1)?;
+        self.options.push(option);
+        Some(())
+    }
+
+    fn extend(&mut self, options: impl ExactSizeIterator<Item = SchemaOption<'a>>) -> Option<()> {
+        self.charge(options.len())?;
+        self.options.extend(options);
+        Some(())
+    }
 }
 
 /// Roots are equal when they are the same schema, which a pointer compare
@@ -126,30 +146,43 @@ impl<'a> SchemaRoot<'a> {
     /// in the nesting. A schema that constrains nothing, or whose references
     /// only lead back into it, yields [`Self::any`].
     pub(crate) fn options(&self, schema: &'a Value) -> Vec<SchemaOption<'a>> {
-        let mut expansion = Expansion::default();
-        let mut options = self.options_at(schema, 0, &mut expansion);
-        if options.is_empty() && expansion.skipped {
-            options = Self::any();
+        let mut work_left = usize::MAX;
+        self.options_with_budget(schema, &mut work_left)
+            .expect("in-memory schema expansion cannot exhaust usize::MAX work")
+    }
+
+    /// Collect options, charging for each visited schema and emitted option.
+    pub(crate) fn options_with_budget(
+        &self,
+        schema: &'a Value,
+        work_left: &mut usize,
+    ) -> Option<Vec<SchemaOption<'a>>> {
+        let mut expansion = Expansion {
+            options: Vec::new(),
+            work_left,
+            expanded: HashSet::new(),
+            skipped: false,
+        };
+        self.options_at(schema, 0, &mut expansion)?;
+        if expansion.options.is_empty() && expansion.skipped {
+            expansion.extend(Self::any())?;
         }
         let nullable = schema.get("nullable").and_then(Value::as_bool) == Some(true);
-        if nullable && !options.iter().any(|option| option.ty == JsonType::Null) {
-            options.push(SchemaOption {
+        if nullable && !expansion.options.iter().any(|option| option.ty == JsonType::Null) {
+            expansion.push(SchemaOption {
                 ty: JsonType::Null,
                 source: OptionSource::Any,
-            });
+            })?;
         }
-        options
+        Some(expansion.options)
     }
 
     /// One option per JSON value type, each accepting any value of the type.
-    pub(crate) fn any() -> Vec<SchemaOption<'a>> {
-        JsonType::VALUE_TYPES
-            .into_iter()
-            .map(|ty| SchemaOption {
-                ty,
-                source: OptionSource::Any,
-            })
-            .collect()
+    fn any() -> impl ExactSizeIterator<Item = SchemaOption<'a>> {
+        JsonType::VALUE_TYPES.into_iter().map(|ty| SchemaOption {
+            ty,
+            source: OptionSource::Any,
+        })
     }
 
     fn resolve_ref(&self, reference: &str) -> Option<&'a Value> {
@@ -160,65 +193,68 @@ impl<'a> SchemaRoot<'a> {
         &self,
         schema: &'a Value,
         depth: usize,
-        expansion: &mut Expansion,
-    ) -> Vec<SchemaOption<'a>> {
+        expansion: &mut Expansion<'a, '_>,
+    ) -> Option<()> {
+        expansion.charge(1)?;
         let schema = match schema {
-            _ if depth > MAX_SCHEMA_DEPTH => return Self::any(),
-            Value::Bool(false) => return vec![],
+            _ if depth > MAX_SCHEMA_DEPTH => return expansion.extend(Self::any()),
+            Value::Bool(false) => return Some(()),
             Value::Object(schema) => schema,
-            _ => return Self::any(),
+            _ => return expansion.extend(Self::any()),
         };
         if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
             let Some(target) = self.resolve_ref(reference) else {
-                return Self::any();
+                return expansion.extend(Self::any());
             };
             if !expansion.expanded.insert(std::ptr::from_ref(target)) {
                 expansion.skipped = true;
-                return vec![];
+                return Some(());
             }
             return self.options_at(target, depth + 1, expansion);
         }
         if let Some(value) = schema.get("const") {
-            return vec![SchemaOption::literal(value)];
+            return expansion.push(SchemaOption::literal(value));
         }
         if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-            return values.iter().map(SchemaOption::literal).collect();
+            return expansion.extend(values.iter().map(SchemaOption::literal));
         }
         if let Some(options) =
             schema.get("anyOf").or_else(|| schema.get("oneOf")).and_then(Value::as_array)
         {
-            return options
-                .iter()
-                .flat_map(|option| self.options_at(option, depth + 1, expansion))
-                .collect();
+            for option in options {
+                self.options_at(option, depth + 1, expansion)?;
+            }
+            return Some(());
         }
         if let Some(schemas) = schema.get("allOf").and_then(Value::as_array) {
             return match schemas.as_slice() {
                 [schema] => self.options_at(schema, depth + 1, expansion),
-                _ => Self::any(),
+                _ => expansion.extend(Self::any()),
             };
         }
         match schema.get("type") {
-            Some(Value::String(name)) => JsonType::parse(name)
-                .map(|ty| SchemaOption::typed(schema, ty))
-                .into_iter()
-                .collect(),
-            Some(Value::Array(names)) => names
-                .iter()
-                .filter_map(Value::as_str)
-                .filter_map(JsonType::parse)
-                .map(|ty| SchemaOption::typed(schema, ty))
-                .collect(),
-            Some(_) => Self::any(),
+            Some(Value::String(name)) => expansion.extend(
+                JsonType::parse(name).map(|ty| SchemaOption::typed(schema, ty)).into_iter(),
+            ),
+            Some(Value::Array(names)) => {
+                for name in names {
+                    expansion.charge(1)?;
+                    if let Some(ty) = name.as_str().and_then(JsonType::parse) {
+                        expansion.push(SchemaOption::typed(schema, ty))?;
+                    }
+                }
+                Some(())
+            }
+            Some(_) => expansion.extend(Self::any()),
             None if schema.contains_key("properties")
                 || schema.contains_key("additionalProperties") =>
             {
-                vec![SchemaOption::typed(schema, JsonType::Object)]
+                expansion.push(SchemaOption::typed(schema, JsonType::Object))
             }
             None if schema.contains_key("items") => {
-                vec![SchemaOption::typed(schema, JsonType::Array)]
+                expansion.push(SchemaOption::typed(schema, JsonType::Array))
             }
-            None => Self::any(),
+            None => expansion.extend(Self::any()),
         }
     }
 }

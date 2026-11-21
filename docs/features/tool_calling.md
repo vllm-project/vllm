@@ -138,6 +138,11 @@ For best compatibility with strict schema enforcement, define tool parameter sch
 
 vLLM also provides a global toggle via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable (defaults to `true`). When set to `false`, vLLM does not attach structural tags for tool calling regardless of the per-tool `strict` field. This environment variable only affects structural-tag based tool calling; it does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
 
+The Rust frontend limits option expansion and copied parameter-schema data
+across the tools in a Beam or Kimi K3 grammar. Requests that exceed the limit
+return a bad request error for `tools`. Reduce the number of tools or simplify
+their parameter schemas if a request exceeds this limit.
+
 ```bash
 VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
 ```

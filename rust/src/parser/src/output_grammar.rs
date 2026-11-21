@@ -142,6 +142,9 @@ pub struct OutputGrammarContext<'a> {
 /// Errors produced while building an output grammar.
 #[derive(Debug, Error)]
 pub enum OutputGrammarError {
+    /// Tool parameter schemas exceeded the request's grammar construction budget.
+    #[error("tool parameter schemas are too complex to build an output grammar")]
+    ToolSchemaTooComplex,
     /// A model-specific structural-tag builder rejected its inputs.
     #[error("failed to build output grammar")]
     Build(#[from] xgrammar_structural_tag::Error),
