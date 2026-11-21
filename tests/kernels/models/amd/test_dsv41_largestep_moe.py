@@ -178,67 +178,10 @@ def test_pick_sort_skips_padding_rows(rows: int, pad: int):
 
 
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
-@pytest.mark.parametrize("tp", [8, 4])
-@pytest.mark.parametrize("rows", [16, 96, 144])
-def test_shared_expert_matches_reference(tp: int, rows: int):
-    """The shared expert's two launches (`shared.py`) with the h quantization
-    between them, against `dsv41_largestep_ref.ref_shared`, on random MXFP8 weights made
-    into the gfx942 copies by `weights942.linear_copy` as at model load."""
-    pytest.importorskip("flydsl")
-    from tests.kernels.models.amd import dsv41_largestep_ref as H
-    from vllm.models.deepseek_v41.amd.largestep.moe_small import build_quant_h
-    from vllm.models.deepseek_v41.amd.largestep.shared import (
-        build_shared_down,
-        build_shared_gate_up,
-    )
-    from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
-
-    dev = torch.device("cuda:0")
-    g = torch.Generator(device=dev).manual_seed(rows + 10 * tp)
-    inter = 2304 // tp
-
-    def mxfp8(n, k):
-        w = torch.randn(n, k, generator=g, device=dev).clamp(-6, 6)
-        w8 = w.to(torch.float8_e4m3fn).view(torch.uint8)
-        sc = torch.randint(
-            118, 123, (n // 32, k // 32), generator=g, device=dev, dtype=torch.uint8
-        )
-        return w8, sc
-
-    gu8, gu_s = mxfp8(2 * inter, HID)
-    d8, d_s = mxfp8(HID, inter)
-    cgu, cgu_s = linear_copy(gu8.view(torch.float8_e4m3fn), gu_s)
-    cd, cd_s = linear_copy(d8.view(torch.float8_e4m3fn), d_s)
-    x = (torch.randn(rows, HID, generator=g, device=dev) * 0.5).to(torch.bfloat16)
-    xb, xs = H.quant_rows_natural(x)
-    sh = torch.zeros(rows, inter, dtype=torch.bfloat16, device=dev)
-    hb = torch.zeros(rows, inter, dtype=torch.uint8, device=dev)
-    hs = torch.zeros(rows, inter // 32, dtype=torch.uint8, device=dev)
-    out = torch.zeros(rows, HID, dtype=torch.bfloat16, device=dev)
-    build_shared_gate_up(tp)(
-        cgu.data_ptr(), cgu_s.data_ptr(), xb.data_ptr(), xs.data_ptr(), rows,
-        sh.data_ptr(),
-    )  # fmt: skip
-    build_quant_h(inter, even_odd=False)(
-        sh.data_ptr(), hb.data_ptr(), hs.data_ptr(), rows * (inter // 32)
-    )
-    build_shared_down(tp)(
-        cd.data_ptr(), cd_s.data_ptr(), hb.data_ptr(), hs.data_ptr(), rows,
-        out.data_ptr(),
-    )  # fmt: skip
-    torch.accelerator.synchronize()
-    ref = H.ref_shared(x, gu8, gu_s, d8, d_s)
-    got = out.float()
-    assert not torch.isnan(got).any()
-    err = ((got - ref).norm() / ref.norm()).item()
-    assert err < 2e-2, f"TP{tp}, {rows} rows: relative L2 error {err:.3e}"
-
-
-@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
 @pytest.mark.parametrize("rows", [1, 48, 256])
 def test_quant_x_matches_host(rows: int):
     """`moe_xq.build_quant_x` writes the bytes and codes of
-    `dsv41_largestep_ref.quant_rows` and `quant_rows_natural` exactly."""
+    `dsv41_largestep_ref.quant_rows` exactly."""
     pytest.importorskip("flydsl")
     from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_xq import build_quant_x
@@ -248,12 +191,11 @@ def test_quant_x_matches_host(rows: int):
     x = (torch.randn(rows, HID, generator=g, device=dev) * 3).to(torch.bfloat16)
     x[0, :32] = 0  # an all-zero block: the 1e-10 floor
     bufs = [torch.zeros(rows, n, dtype=torch.uint8, device=dev)
-            for n in (HID, HID // 32, HID, HID // 32)]  # fmt: skip
+            for n in (HID, HID // 32)]  # fmt: skip
     build_quant_x()(x.data_ptr(), *[b.data_ptr() for b in bufs], rows)
     torch.accelerator.synchronize()
     xb, xs = H.quant_rows(x)
-    xbn, xsn = H.quant_rows_natural(x)
-    for got, want in zip(bufs, (xb, xs, xbn, xsn), strict=True):
+    for got, want in zip(bufs, (xb, xs), strict=True):
         assert torch.equal(got, want)
 
 

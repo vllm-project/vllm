@@ -10,7 +10,7 @@ token's 6 weighted rows summed in f32 in top-k order, to bf16.
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.deepseek_v41.amd.mono.attention.device import kernel_symbol
@@ -29,13 +29,12 @@ _STREAM = fx.Stream(None)
 THREADS = 256
 
 
-def build_quant_h(inter: int, even_odd: bool = True):
+def build_quant_h(inter: int):
     """MXFP8 of h [P, I]: grid (P * I / 32 / 4,), 4 waves a CTA, a wave a
-    32-column block. `even_odd`: each 8-value chunk even K first, for the
-    routed experts' FP4 weights (`fp4x8_fnuz` order); False keeps natural
-    order, for the shared expert's FP8 copies (`linear_copy`)."""
+    32-column block. Each 8-value chunk even K first, for the routed experts'
+    FP4 weights (`fp4x8_fnuz` order)."""
     groups = inter // 32
-    name = kernel_symbol("dsv41_ls_quant_h", i=inter, eo=int(even_odd))
+    name = kernel_symbol("dsv41_ls_quant_h", i=inter)
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kernel(h: Int64, hq: Int64, hqs: Int64, n_blocks: Int32):
@@ -71,12 +70,8 @@ def build_quant_h(inter: int, even_odd: bool = True):
                 for i in range(8)
             ]
             if (lane < 32) & (lane % 8 == 0):
-                if const_expr(even_odd):
-                    lo = fp8_pack4(got[0], got[2], got[4], got[6])
-                    hi = fp8_pack4(got[1], got[3], got[5], got[7])
-                else:
-                    lo = fp8_pack4(got[0], got[1], got[2], got[3])
-                    hi = fp8_pack4(got[4], got[5], got[6], got[7])
+                lo = fp8_pack4(got[0], got[2], got[4], got[6])
+                hi = fp8_pack4(got[1], got[3], got[5], got[7])
                 at = (p * inter + gi * 32 + lane) // 4
                 bo.buffer_store(lo, rsrc(hq), at)
                 bo.buffer_store(hi, rsrc(hq), at + 1)

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The MoE block's input rows to MXFP8 FNUZ, in both orders from one read of
-x: each 8-value chunk even K first for the routed FP4 weights, and natural
-order for the shared expert's FP8 copies.
+"""The MoE block's input rows to MXFP8 FNUZ, each 8-value chunk even K first
+for the routed FP4 weights (`fp4x8_fnuz` order).
 """
 
 import flydsl.compiler as flyc
@@ -30,7 +29,7 @@ def build_quant_x():
     name = kernel_symbol("dsv41_ls_quant_x", h=HIDDEN)
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
-    def kernel(x: Int64, xb: Int64, xs: Int64, xbn: Int64, xsn: Int64, s: Int32):
+    def kernel(x: Int64, xb: Int64, xs: Int64, s: Int32):
         tid = fx.thread_idx.x
         lane = tid % 64
         blk = fx.block_idx.x * 4 + tid // 64
@@ -65,13 +64,8 @@ def build_quant_x():
                 eo_hi = fp8_pack4(got[1], got[3], got[5], got[7])
                 bo.buffer_store(eo_lo, rsrc(xb), at)
                 bo.buffer_store(eo_hi, rsrc(xb), at + 1)
-                nat_lo = fp8_pack4(got[0], got[1], got[2], got[3])
-                nat_hi = fp8_pack4(got[4], got[5], got[6], got[7])
-                bo.buffer_store(nat_lo, rsrc(xbn), at)
-                bo.buffer_store(nat_hi, rsrc(xbn), at + 1)
             if lane == 0:
                 bo.buffer_store(code.to(fx.Int8), rsrc(xs), t * GROUPS + gi)
-                bo.buffer_store(code.to(fx.Int8), rsrc(xsn), t * GROUPS + gi)
         return
 
     @flyc.jit
@@ -79,12 +73,10 @@ def build_quant_x():
         x: Int64,
         xb: Int64,
         xs: Int64,
-        xbn: Int64,
-        xsn: Int64,
         s: Int32,
         stream: fx.Stream = _STREAM,
     ):
-        kernel(x, xb, xs, xbn, xsn, s).launch(
+        kernel(x, xb, xs, s).launch(
             grid=((s * GROUPS + 3) // 4,), block=(THREADS,), stream=stream
         )
 

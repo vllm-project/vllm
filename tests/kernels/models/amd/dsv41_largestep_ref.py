@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Torch references of the gfx942 large-step MoE, for its tests: the pick
 groups (`pick_groups`, the table `moe_sort` writes), the activation
-quantization the kernels use (`quant_rows`), and the routed and shared
-experts. Host versions of the device helpers in `mono/common/mx`.
+quantization the kernels use (`quant_rows`), and the routed experts. Host
+versions of the device helpers in `mono/common/mx`.
 """
 
 import torch
@@ -175,52 +175,3 @@ def ref_routed(
         for p in (topk_ids.reshape(-1) == e).nonzero().flatten().tolist():
             y[p] = (topk_w.reshape(-1)[p] * (down @ hq[p])).to(torch.bfloat16).float()
     return y.view(s, k, -1).sum(1).to(torch.bfloat16).float()
-
-
-def quant_rows_natural(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """`quant_rows` with natural chunk order: the dense (shared expert) copies
-    keep K in order (`weights942.linear_copy`)."""
-    s, h = x.shape
-    b, codes = quant_rows(x)
-    inv = torch.argsort(torch.tensor(EVEN_ODD))
-    return b.view(s, h // 8, 8)[..., inv].reshape(s, h).contiguous(), codes
-
-
-def dequant_mxfp8_blocks(w8: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """OCP e4m3 bytes [N, K] with E8M0 codes a 32 x 32 block [N / 32, K / 32]
-    -> float32 [N, K]."""
-    n, k = w8.shape
-    sc = torch.exp2(scale.float() - 127.0)
-    sc = sc.repeat_interleave(32, 0).repeat_interleave(32, 1)
-    return w8.view(torch.float8_e4m3fn).float() * sc
-
-
-def ref_shared(
-    x: torch.Tensor,
-    gu8: torch.Tensor,
-    gu_s: torch.Tensor,
-    d8: torch.Tensor,
-    d_s: torch.Tensor,
-) -> torch.Tensor:
-    """The shared expert with the kernels' rounding points: x to MXFP8, gate
-    and up rounded to bf16, vLLM's silu_and_mul_with_clamp (gate <= 10, silu
-    rounded to bf16, up in [-10, 10]), bf16, to MXFP8, down, bf16.
-    gu8 [2 I, H] / d8 [H, I] are OCP e4m3 bytes with 32 x 32 block codes."""
-    i2 = gu8.shape[0]
-    xb, xs = quant_rows_natural(x)
-    xq = dequant_rows_natural(xb, xs)
-    gu = (xq @ dequant_mxfp8_blocks(gu8, gu_s).T).to(torch.bfloat16).float()
-    g, u = gu[:, : i2 // 2], gu[:, i2 // 2 :]
-    g = g.clamp(max=LIMIT).to(torch.bfloat16).float()
-    act = (g * torch.sigmoid(g)).to(torch.bfloat16).float()
-    sh = (act * u.clamp(-LIMIT, LIMIT)).to(torch.bfloat16)
-    hb, hs = quant_rows_natural(sh)
-    hq = dequant_rows_natural(hb, hs)
-    return (hq @ dequant_mxfp8_blocks(d8, d_s).T).to(torch.bfloat16).float()
-
-
-def dequant_rows_natural(b: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
-    """`quant_rows_natural`' output back to float32."""
-    s, h = b.shape
-    vals = b.view(torch.float8_e4m3fnuz).float().view(s, h // 32, 32)
-    return (vals * torch.exp2(codes.float() - 127.0)[..., None]).view(s, h)

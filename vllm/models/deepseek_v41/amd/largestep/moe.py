@@ -5,8 +5,10 @@ this rank's unreduced output. The router and the TP all-reduce stay vLLM's.
 
 Launches, all graph-capturable: pick sort (`moe_sort`), x to MXFP8
 (`moe_xq`), routed stage 1 (`moe_ug`), h to MXFP8, routed stage 2
-(`moe_down`), combine (`moe_small`), shared expert (`shared`). The weights
-are the mono decode layer's gfx942 copies (`mono942`).
+(`moe_down`), combine (`moe_small`). The routed weights are the mono decode
+layer's gfx942 copies (`mono942`). The shared expert is the layer's own
+(`shared_experts`), which was as fast as MXFP8 kernels of its own at 96 rows
+(about 31 us a layer at TP4 on MI300X).
 """
 
 import weakref
@@ -22,7 +24,6 @@ from .moe_sort import MAX_ROWS, build_moe_sort
 from .moe_ug import build_moe_ug
 from .moe_xq import build_quant_x
 from .shapes import EXPERTS, GROUP, HIDDEN, TOPK
-from .shared import build_shared_down, build_shared_gate_up
 
 
 class _Scratch:
@@ -47,14 +48,8 @@ class _Scratch:
         self.hqs = z(p, i // 32, dtype=torch.uint8)
         self.y = z(p, HIDDEN, dtype=torch.bfloat16)
         self.routed = z(m, HIDDEN, dtype=torch.bfloat16)
-        self.sh = z(m, i, dtype=torch.bfloat16)
-        self.shq = z(m, i, dtype=torch.uint8)
-        self.shqs = z(m, i // 32, dtype=torch.uint8)
-        self.shared = z(m, HIDDEN, dtype=torch.bfloat16)
         self.xb = z(m, HIDDEN, dtype=torch.uint8)
         self.xs = z(m, HIDDEN // 32, dtype=torch.uint8)
-        self.xbn = z(m, HIDDEN, dtype=torch.uint8)
-        self.xsn = z(m, HIDDEN // 32, dtype=torch.uint8)
 
 
 _SCRATCH: dict[tuple[int, torch.device], _Scratch] = {}
@@ -68,21 +63,16 @@ def _scratch(tp: int, device: torch.device) -> _Scratch:
 
 
 class LargeStepMoE:
-    def __init__(self, experts, shared, tp: int, device: torch.device):
+    def __init__(self, experts, tp: int, device: torch.device):
         self.tp = tp
         self.inter = MOE_INTER // tp
         self.w13, self.w13_s, self.w2, self.w2_s = experts.mono942
-        self.sgu, self.sgu_s = shared.gate_up_proj.mono942
-        self.sw2, self.sw2_s = shared.down_proj.mono942
         self.ug = build_moe_ug(tp)
         self.down = build_moe_down(tp)
         self.qh = build_quant_h(self.inter)
-        self.qh_nat = build_quant_h(self.inter, even_odd=False)
         self.combine = build_combine()
         self.sort = build_moe_sort()
         self.qx = build_quant_x()
-        self.sgu_k = build_shared_gate_up(tp)
-        self.sdown_k = build_shared_down(tp)
         self.scratch = _scratch(tp, device)
 
     def __call__(
@@ -98,12 +88,9 @@ class LargeStepMoE:
         b = self.scratch
         tab, cnt = b.table.data_ptr(), b.count.data_ptr()
         self.sort(ids.data_ptr(), p, tab, cnt, st)
-        xb, xs, xbn, xsn = b.xb, b.xs, b.xbn, b.xsn
+        xb, xs = b.xb, b.xs
         x = x.contiguous()
-        self.qx(
-            x.data_ptr(), xb.data_ptr(), xs.data_ptr(), xbn.data_ptr(),
-            xsn.data_ptr(), s, st,
-        )  # fmt: skip
+        self.qx(x.data_ptr(), xb.data_ptr(), xs.data_ptr(), s, st)
         self.ug(
             self.w13.data_ptr(), self.w13_s.data_ptr(), xb.data_ptr(),
             xs.data_ptr(), tab, cnt, b.h.data_ptr(), st,
@@ -117,19 +104,7 @@ class LargeStepMoE:
             b.hqs.data_ptr(), wts.data_ptr(), tab, cnt, b.y.data_ptr(), st,
         )  # fmt: skip
         self.combine(b.y.data_ptr(), b.routed.data_ptr(), s, st)
-        self.sgu_k(
-            self.sgu.data_ptr(), self.sgu_s.data_ptr(), xbn.data_ptr(),
-            xsn.data_ptr(), s, b.sh.data_ptr(), st,
-        )  # fmt: skip
-        self.qh_nat(
-            b.sh.data_ptr(), b.shq.data_ptr(), b.shqs.data_ptr(),
-            s * (self.inter // 32), st,
-        )  # fmt: skip
-        self.sdown_k(
-            self.sw2.data_ptr(), self.sw2_s.data_ptr(), b.shq.data_ptr(),
-            b.shqs.data_ptr(), s, b.shared.data_ptr(), st,
-        )  # fmt: skip
-        return (b.routed[:s].float() + b.shared[:s].float()).to(torch.bfloat16)
+        return b.routed[:s]
 
 
 # Smaller steps run the mono decode layer.
@@ -156,9 +131,7 @@ class LargeStepHook:
         # Calls that took the block, for tests. A CUDA graph replay does not
         # count, so it counts eager and capture calls only.
         self.steps = 0
-        self.block = LargeStepMoE(
-            moe_layer.experts.routed_experts, moe_layer.shared_experts, tp, device
-        )
+        self.block = LargeStepMoE(moe_layer.experts.routed_experts, tp, device)
 
     def takes(self, x: torch.Tensor) -> bool:
         if x.dim() != 2 or not MIN_ROWS <= x.shape[0] <= MAX_ROWS:
@@ -177,4 +150,7 @@ class LargeStepHook:
             x, logits, input_ids=input_ids
         )
         self.steps += 1
-        return tensor_model_parallel_all_reduce(self.block(x, topk_ids, topk_w))
+        # The routed sum in bf16 plus the shared expert in bf16, as the
+        # original path adds them before its all-reduce.
+        out = self.block(x, topk_ids, topk_w) + moe_layer.shared_experts(x)
+        return tensor_model_parallel_all_reduce(out)
