@@ -1,22 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from dataclasses import dataclass
 
 import pytest
 import torch
+import torch.multiprocessing as mp
 from transformers import LlamaConfig
 
 import vllm.config.parallel as parallel_config_module
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.parallel import EPLBConfig
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     init_distributed_environment,
     initialize_model_parallel,
 )
 from vllm.distributed.eplb.async_worker import run_rebalance_experts
-from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
+from vllm.distributed.eplb.eplb_communicator import (
+    TorchDistGlooStagedEplbCommunicator,
+    TorchDistNcclEplbCommunicator,
+)
 from vllm.distributed.eplb.eplb_state import (
     EplbModelState,
     EplbState,
@@ -24,8 +30,13 @@ from vllm.distributed.eplb.eplb_state import (
     compute_logical_maps,
 )
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.placement import write_placement_snapshot
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
-from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
+from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbLayerResult,
+    rearrange_expert_weights_inplace,
+    transfer_layer,
+)
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform, PlatformEnum
@@ -183,13 +194,22 @@ def cpu_group(tmp_path):
 class _ExpertModel(torch.nn.Module):
     """Small real expert weight owner for control-plane and transfer checks."""
 
-    def __init__(self):
+    def __init__(self, num_local_experts=4, device="cpu", expert_offset=0):
         super().__init__()
         self.weight = torch.nn.Parameter(
-            torch.arange(16).reshape(4, 2, 2).float(), False
+            torch.arange(
+                expert_offset * 4,
+                (expert_offset + num_local_experts) * 4,
+                device=device,
+            )
+            .reshape(num_local_experts, 2, 2)
+            .float(),
+            False,
         )
         self.expert_weights = [[self.weight]]
         self.num_moe_layers = 1
+        self.num_logical_experts = 4
+        self.num_redundant_experts = 0
 
 
 class _ModelState(EplbModelState):
@@ -224,12 +244,12 @@ class _State(EplbState):
         return self.selected_policy
 
 
-@pytest.fixture
-def model_state(cpu_group):
-    model = _ExpertModel()
-    mapping = torch.arange(4).reshape(1, 4)
+def _create_model_state(cpu_group, device="cpu"):
+    local_experts = 4 // cpu_group.size()
+    model = _ExpertModel(local_experts, device, cpu_group.rank() * local_experts)
+    mapping = torch.arange(4, device=device).reshape(1, 4)
     logical, replicas = compute_logical_maps(mapping, 4)
-    loads = torch.zeros(1, 4, dtype=torch.int64)
+    loads = torch.zeros(1, 4, dtype=torch.int64, device=device)
     return _State.model_state_cls(
         physical_to_logical_map=mapping,
         physical_to_logical_map_buffer=mapping,
@@ -237,8 +257,8 @@ def model_state(cpu_group):
         logical_replica_count=replicas,
         expert_load_pass=loads,
         expert_load_pass_buffer=loads,
-        expert_load_window=torch.zeros(4, 1, 4, dtype=torch.int64),
-        last_expert_load=torch.ones(1, 4, dtype=torch.int64),
+        expert_load_window=torch.zeros(4, 1, 4, dtype=torch.int64, device=device),
+        last_expert_load=torch.ones(1, 4, dtype=torch.int64, device=device),
         model_name="expert-test",
         model=model,
         expert_buffer=[torch.empty_like(model.weight)],
@@ -246,6 +266,226 @@ def model_state(cpu_group):
         eplb_stats=None,
         device_index=None,
         communicator=TorchDistGlooStagedEplbCommunicator(cpu_group),
+    )
+
+
+@pytest.fixture
+def model_state(cpu_group):
+    return _create_model_state(cpu_group)
+
+
+def test_placement_export_waits_for_all_models(model_state, cpu_group, tmp_path):
+    """A partial target/draft cycle must not replace the complete snapshot."""
+    path = tmp_path / "placement.json"
+    write_placement_snapshot(str(path), {"previous": True})
+    state = _State()
+    state.enable_placement_export(str(path))
+    draft = _create_model_state(cpu_group)
+    state.model_states.update(target=model_state, draft=draft)
+    model_state.rebalanced = draft.rebalanced = True
+    target_map = torch.tensor([[1, 0, 3, 2]])
+    model_state._commit_eplb_maps(target_map)
+    model_state.rebalanced = False
+
+    state.export_committed_placement()
+
+    assert json.loads(path.read_text()) == {"previous": True}
+    draft_map = torch.tensor([[3, 2, 1, 0]])
+    draft._commit_eplb_maps(draft_map)
+    draft.rebalanced = False
+    state.export_committed_placement()
+    snapshot = json.loads(path.read_text())
+    assert snapshot["version"] == 1
+    assert snapshot["ep_size"] == 1
+    assert set(snapshot["models"]) == {"target", "draft"}
+    assert (
+        snapshot["models"]["target"]["physical_to_logical_map"] == target_map.tolist()
+    )
+    assert snapshot["models"]["draft"]["physical_to_logical_map"] == draft_map.tolist()
+    assert snapshot["models"]["target"]["num_logical_experts"] == 4
+
+
+def test_placement_snapshot_precedes_later_map_commits(cpu_group, tmp_path):
+    """The queued host snapshot retains the layout at its commit boundary."""
+    device = (
+        current_platform.device_type
+        if current_platform.is_cuda_alike() or current_platform.is_xpu()
+        else "cpu"
+    )
+    model = _create_model_state(cpu_group, device)
+    state = EplbState(ParallelConfig(), torch.device(device))
+    path = tmp_path / "placement.json"
+    state.enable_placement_export(str(path))
+    state.model_states["target"] = model
+    model.model_id = "checkpoint"
+    model.model_revision = "revision"
+    first = torch.tensor([[1, 0, 3, 2]])
+    model._commit_eplb_maps(first)
+
+    state.export_committed_placement()
+    model._commit_eplb_maps(torch.tensor([[3, 2, 1, 0]]))
+    state.stop_async_loop()
+
+    exported = json.loads(path.read_text())["models"]["target"]
+    assert exported["physical_to_logical_map"] == first.tolist()
+    assert exported["model"] == "checkpoint"
+    assert exported["revision"] == "revision"
+
+
+def test_placement_export_rejects_late_registration(model_state, tmp_path):
+    state = _State()
+    state.enable_placement_export(str(tmp_path / "placement.json"))
+    state.model_states["target"] = model_state
+    state.export_committed_placement()
+    config_path = tmp_path / "model-config"
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(config_path)
+    model_config = ModelConfig(model=str(config_path), skip_tokenizer_init=True)
+
+    with pytest.raises(RuntimeError, match="after placement export starts"):
+        state.add_model(model_state.model, model_config)
+
+
+def test_placement_export_rejects_duplicate_model_hash(model_state, tmp_path):
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    model_config = ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
+    state = _State()
+    state.enable_placement_export(str(tmp_path / "placement.json"))
+    state.model_states[hash_config_cached(model_config)] = model_state
+
+    with pytest.raises(ValueError, match="distinct model configuration hashes"):
+        state.add_model(model_state.model, model_config)
+
+
+def test_atomic_placement_write_preserves_previous_snapshot(tmp_path):
+    path = tmp_path / "nested" / "placement.json"
+    write_placement_snapshot(str(path), {"version": 1, "placement": [0, 1]})
+    previous = path.read_bytes()
+
+    with pytest.raises(TypeError):
+        write_placement_snapshot(str(path), {"unserializable": {1, 2}})
+
+    assert path.read_bytes() == previous
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_placement_write_failure_preserves_snapshot_without_retrying(
+    model_state, tmp_path, monkeypatch
+):
+    state = _State()
+    path = tmp_path / "exports" / "placement.json"
+    state.enable_placement_export(str(path))
+    state.model_states["target"] = model_state
+    write_placement_snapshot(str(path), {"previous": True})
+
+    replace_calls = 0
+
+    def replace_fails(self, target):
+        nonlocal replace_calls
+        replace_calls += 1
+        raise OSError("filesystem unavailable")
+
+    monkeypatch.setattr(type(path), "replace", replace_fails)
+    state.export_committed_placement()
+    state.stop_async_loop()
+
+    assert json.loads(path.read_text()) == {"previous": True}
+    assert replace_calls == 1
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_placement_export_requires_eplb(vllm_runner, tmp_path):
+    """The serving entry point rejects export when EPLB is disabled."""
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    with pytest.raises(ValueError, match="requires enable_eplb"):
+        vllm_runner(
+            str(tmp_path),
+            skip_tokenizer_init=True,
+            eplb_config=EPLBConfig(placement_export_path=str(tmp_path / "map.json")),
+        )
+
+
+@pytest.mark.parametrize("path", ["", " "])
+def test_placement_export_rejects_empty_path(path):
+    with pytest.raises(ValueError, match="nonempty file path"):
+        EPLBConfig(placement_export_path=path)
+
+
+@pytest.mark.parametrize(
+    "parallel_kwargs", [{"pipeline_parallel_size": 2}, {"enable_fault_tolerance": True}]
+)
+def test_placement_export_rejects_unsupported_lifecycles(parallel_kwargs, tmp_path):
+    config = ParallelConfig(distributed_executor_backend="uni", **parallel_kwargs)
+    state = EplbState(config, torch.device("cpu"))
+    with pytest.raises(ValueError, match="fault tolerance disabled"):
+        state.enable_placement_export(str(tmp_path / "placement.json"))
+
+
+def _placement_export_worker(rank, directory, tp_size, pcp_size):
+    with set_current_vllm_config(VllmConfig()):
+        init_distributed_environment(
+            world_size=2,
+            rank=rank,
+            local_rank=rank,
+            distributed_init_method=f"file://{directory}/distributed-store",
+            backend="gloo",
+        )
+        initialize_model_parallel(
+            tensor_model_parallel_size=tp_size,
+            prefill_context_model_parallel_size=pcp_size,
+            backend="gloo",
+        )
+        try:
+            state = _State()
+            path = directory / f"rank-{rank}.json"
+            if tp_size * pcp_size != 2:
+                with pytest.raises(ValueError, match="one EP group"):
+                    state.enable_placement_export(str(path))
+                assert not path.exists()
+                return
+            state.enable_placement_export(str(path))
+            model = _create_model_state(get_ep_group().cpu_group)
+            model.communicator = TorchDistNcclEplbCommunicator(get_ep_group().cpu_group)
+            state.model_states["target"] = model
+            target = torch.tensor([[2, 1, 0, 3]])
+            rearrange_expert_weights_inplace(
+                model.physical_to_logical_map,
+                target,
+                model.model.expert_weights,
+                model.expert_buffer,
+                get_ep_group().device_group,
+                model.communicator,
+            )
+            model._commit_eplb_maps(target)
+            expected_weights = torch.arange(16).reshape(4, 2, 2).float()
+            torch.testing.assert_close(
+                model.model.weight,
+                expected_weights[target[0, rank * 2 : rank * 2 + 2]],
+                rtol=0,
+                atol=0,
+            )
+            state.export_committed_placement()
+            state.stop_async_loop()
+            if rank == 0:
+                exported = json.loads(path.read_text())
+                assert exported["ep_size"] == 2
+                assert exported["models"]["target"]["physical_to_logical_map"] == (
+                    target.tolist()
+                )
+            else:
+                assert not path.exists()
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("tp_size,pcp_size", [(2, 1), (1, 2), (1, 1)])
+def test_placement_export_uses_one_global_writer(tmp_path, tp_size, pcp_size):
+    """Cover TP/PCP EP groups and reject multiple independent EP groups."""
+    mp.spawn(
+        _placement_export_worker,
+        args=(tmp_path, tp_size, pcp_size),
+        nprocs=2,
+        join=True,
     )
 
 

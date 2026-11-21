@@ -244,6 +244,7 @@ def _make_eplb_state() -> EplbState:
         num_redundant_experts=0,
         policy="default",
         communicator="torch_gloo",
+        placement_export_path=None,
     )
     parallel_config.enable_elastic_ep = False
     parallel_config.num_ubatches = 1

@@ -69,6 +69,24 @@ steps:
       tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
   parallelism: 2
 
+- label: CPU-EPLB Control Tests
+  key: cpu-eplb-control-tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/distributed/eplb/
+  - vllm/config/parallel.py
+  - tests/distributed/test_eplb_extension_hooks.py
+  - tests/distributed/test_eplb_utils.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m
+      "pytest -v -s
+      tests/distributed/test_eplb_extension_hooks.py
+      tests/distributed/test_eplb_utils.py
+      -m cpu_test"
+
 # Speculative decoding under a CPU platform. The unit tests already pass on
 # CPU but no CPU job runs them; the e2e tests gate the engine path itself,
 # which unit tests cannot reach.
