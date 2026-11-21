@@ -65,11 +65,11 @@ Watermark contexts use generated tokens only. The first `context_width` tokens
 use ordinary sampling, independently of context deduplication. Prompt tokens
 are not needed for detection.
 
-`allow_target_only_watermarking` defaults to false and only has an effect when
-speculative decoding is enabled. It permits speculative decoding with a
+`allow_target_only_watermarking` defaults to false and only has an effect with
+probabilistic speculative drafts. It permits probabilistic drafting with a
 watermarking algorithm that does not support it natively, at the cost of
-weaker detectability. See
-[Speculative decoding](#speculative-decoding).
+weaker detectability. Greedy drafts, the default, work with every algorithm and
+do not need it. See [Speculative decoding](#speculative-decoding).
 
 ## Monitoring
 
@@ -141,21 +141,27 @@ generation.
 
 ## Speculative decoding
 
-Watermarking requires speculative decoding to use probabilistic draft sampling,
-standard rejection sampling, and a model-based method (`dflash`, `dspark`,
-`eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dflash`
-and `dspark`. DFlash drafters with a candidate head (`DFlash2DraftModel`,
-`LiLiCorrDraftModel`) are not supported.
+Watermarking requires speculative decoding to use standard rejection sampling
+and a model-based method (`dflash`, `dspark`, `eagle`, `eagle3`, or `mtp`).
+Parallel drafting is supported only by `dflash` and `dspark`. DFlash drafters
+with a candidate head (`DFlash2DraftModel`, `LiLiCorrDraftModel`) are not
+supported.
 
-A watermarking algorithm without native speculative-decoding support is
-rejected before model loading. Set
+With greedy drafts, which are the default, a draft is accepted only when it
+equals the token that non-speculative watermarked decoding would sample. Every
+output token is that sample, so the watermark is as strong as without
+speculative decoding, for every algorithm. `temperature=0` and non-watermarked
+requests use ordinary verification.
+
+With `"draft_sample_method": "probabilistic"`, a watermarking algorithm without
+native speculative-decoding support is rejected before model loading. Set
 `"allow_target_only_watermarking": true` to allow it: accepted draft tokens are
 not watermarked, while target-side rejection recovery and bonus sampling remain
 watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
 because their recovery tokens are watermarked.
 
-For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
+For `dual_key_gumbel` with probabilistic drafting, `alpha` has no effect. The
 speculative protocol selects the key for each token instead.
 
 ## Context deduplication
@@ -227,14 +233,16 @@ key. During ordinary generation, each token uses key A with probability
 `1 - alpha` and key B with probability `alpha`. The algorithm-specific `alpha`
 parameter defaults to 0.1. Detection scores every token against both keys.
 
-The same two key streams support speculative decoding without changing its
-acceptance rate. In this mode, the speculative protocol selects the key instead
-of `alpha`: draft tokens use key A, while rejection recovery and bonus tokens
-use key B. The ordinary target-to-draft probability-ratio test remains unchanged,
-implementing [SynthID-Text Supplementary Algorithm
+With greedy drafts, speculative decoding keeps this per-token selection.
+
+The same two key streams also support probabilistic drafting without changing
+its acceptance rate. In this mode, the speculative protocol selects the key
+instead of `alpha`: draft tokens use key A, while rejection recovery and bonus
+tokens use key B. The ordinary target-to-draft probability-ratio test remains
+unchanged, implementing [SynthID-Text Supplementary Algorithm
 6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
 
-Select `dual_key_gumbel` together with probabilistic drafting:
+To use `dual_key_gumbel` with probabilistic drafting:
 
 ```bash
 vllm serve MODEL \
@@ -321,7 +329,8 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 ## Limitations
 
-- Not all watermarking algorithms have native speculative-decoding support.
+- With probabilistic drafts, not all watermarking algorithms have native
+  speculative-decoding support. Greedy drafts work with every algorithm.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
 - Global custom logits processors are not supported.

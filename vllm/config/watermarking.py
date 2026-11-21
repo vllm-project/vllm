@@ -83,7 +83,7 @@ class WatermarkConfig:
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
     allow_target_only_watermarking: bool = False
-    """Allow speculative decoding without watermarking draft tokens."""
+    """Allow probabilistic speculative drafts without watermarking draft tokens."""
     enforce: bool = False
     """Override request-level opt-outs; unsupported decoding remains unwatermarked."""
 

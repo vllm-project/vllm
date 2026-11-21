@@ -234,6 +234,17 @@ def create_speculative_target_watermarker(watermarker: Watermarker) -> Watermark
     return watermarker
 
 
+def create_sampler_watermarker(
+    watermarker: Watermarker, draft_sample_method: str | None
+) -> Watermarker:
+    """Probabilistic drafts carry their own watermark, so the sampler keeps only
+    the target role. Greedy drafts are verified against the sampler's own
+    sample, which therefore keeps the full algorithm."""
+    if draft_sample_method == "probabilistic":
+        return create_speculative_target_watermarker(watermarker)
+    return watermarker
+
+
 def create_speculative_draft_watermarker(
     watermarker: Watermarker,
     max_num_reqs: int,
@@ -256,8 +267,9 @@ def create_speculative_draft_watermarker(
         return None
     raise ValueError(
         f"The {type(watermarker).__name__} watermarking algorithm does not support "
-        "speculative decoding. Set allow_target_only_watermarking=true to "
-        "leave draft tokens unwatermarked."
+        "speculative decoding with probabilistic drafts. Use "
+        "draft_sample_method='greedy', or set allow_target_only_watermarking=true "
+        "to leave draft tokens unwatermarked."
     )
 
 
