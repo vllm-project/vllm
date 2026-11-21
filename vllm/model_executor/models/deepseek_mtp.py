@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -316,7 +317,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             + (self.config.n_shared_experts if fused_shared_expert_layers else 0),
         )
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

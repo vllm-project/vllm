@@ -85,6 +85,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    checkpoint_params_dict,
     extract_layer_index,
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
@@ -1108,7 +1109,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             )
         else:
             expert_params_mapping = []
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
 
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from

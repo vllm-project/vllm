@@ -55,6 +55,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_moe_expert_param_name,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -1133,7 +1134,7 @@ class Llama4ForConditionalGeneration(
             (".feed_forward.gate_up_proj", ".feed_forward.gate_proj", 0),
             (".feed_forward.gate_up_proj", ".feed_forward.up_proj", 1),
         ]
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         updated_params: set[str] = set()
 
         # Stream thelanguage-model weights straight into

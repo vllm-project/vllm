@@ -68,6 +68,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
 )
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
@@ -469,7 +470,7 @@ class FlashModel(nn.Module):
         expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

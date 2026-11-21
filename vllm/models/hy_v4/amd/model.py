@@ -51,6 +51,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    checkpoint_params_dict,
     compute_skip_topk_layers,
     copy_pp_buffers,
     is_pp_missing_parameter,
@@ -458,7 +459,7 @@ class HYV4Model(nn.Module):
         # kernel-specific expert weights via `replace_parameter`, and a cache
         # outliving this call would pin the pre-shuffle storage (OOM on large
         # MoE) and make a later reload target orphaned tensors.
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         # Split per-expert mapping (V3 style): experts.0.gate_proj.weight
         split_expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()

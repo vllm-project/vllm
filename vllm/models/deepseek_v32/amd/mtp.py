@@ -31,6 +31,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
+    checkpoint_params_dict,
     extract_layer_index,
     get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
@@ -273,7 +274,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             + (self.config.n_shared_experts if fused_shared_expert_layers else 0),
         )
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):

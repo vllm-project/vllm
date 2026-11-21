@@ -37,7 +37,7 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
     DSparkMarkovHead,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import checkpoint_params_dict, maybe_prefix
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -449,7 +449,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             ("attn.fused_wqa_wkv", "attn.wkv", 1),
         ]
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:

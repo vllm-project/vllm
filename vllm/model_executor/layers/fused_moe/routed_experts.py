@@ -1175,17 +1175,14 @@ class RoutedExperts(PluggableLayer):
         num_redundant_experts: int = 0,
         routed_experts_prefix: str = "routed_experts",
     ) -> list[tuple[str, str, int, str]]:
-        """Build the expert mapping, detecting the LoRA `base_layer.` prefix by
-        scanning `model`'s parameters.
+        """Build the expert mapping for models that still hand-roll `load_weights`.
 
-        Legacy entry point for models that still hand-roll `load_weights`; the
+        Plain checkpoint names on both sides: those loaders look parameters up in
+        `checkpoint_params_dict`, which drops LoRA's `base_layer.` segment. The
         `RoutedExperts` weight loader uses `get_expert_mapping` /
-        `build_expert_params_mapping` instead (which take the prefix directly).
+        `build_expert_params_mapping` instead.
         See `build_expert_params_mapping` for the returned tuple format.
         """
-        has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
-        prefix = "base_layer." if has_base_layer else ""
-        # LoRA moves the params under `base_layer.`; checkpoint names never have it.
         mapping = RoutedExperts.build_expert_params_mapping(
             ckpt_gate_proj_name,
             ckpt_down_proj_name,
@@ -1193,7 +1190,6 @@ class RoutedExperts(PluggableLayer):
             num_experts,
             num_redundant_experts,
             routed_experts_prefix,
-            lora_base_layer_prefix_on_param_name=prefix,
         )
 
         # All MoE layers of a model share the same FSE and quantization setup.

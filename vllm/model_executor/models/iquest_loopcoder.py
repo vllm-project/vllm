@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.llama import LlamaMLP
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -456,7 +457,7 @@ class IQuestLoopCoderModel(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

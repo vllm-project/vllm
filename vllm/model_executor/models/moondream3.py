@@ -47,6 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -1321,7 +1322,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights with remapping from HuggingFace format."""
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
 
         # Get expert intermediate size for fc1 splitting

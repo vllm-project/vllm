@@ -40,6 +40,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
+    checkpoint_params_dict,
     get_draft_quant_config,
     maybe_prefix,
 )
@@ -310,7 +311,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
             (".gate_up_proj", ".up_proj", 1),
         ]
         expert_params_mapping = list(self.get_expert_mapping())
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
         loaded_params: set[str] = set()
 
         def load_param(

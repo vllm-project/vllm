@@ -54,7 +54,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_moe_expert_param_name,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.models.utils import (
+    checkpoint_params_dict,
+    sequence_parallel_chunk,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -580,7 +583,7 @@ class Llama4Model(LlamaModel):
             num_experts=1,
         )
         # All the module parameters.
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         # The module parameters that have been loaded.
         loaded_params: set[str] = set()
         weight_loader: Callable[..., object]

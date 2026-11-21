@@ -26,6 +26,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
+    checkpoint_params_dict,
     get_spec_layer_idx_from_weight_name,
     maybe_prefix,
 )
@@ -362,7 +363,7 @@ class Step5MTP(nn.Module, MixtureOfExperts, SupportsMultiModal):
         validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self)
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
 
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:

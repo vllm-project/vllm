@@ -56,6 +56,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -587,7 +588,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         return final_output
 
     def load_weights(self, weights) -> set[str]:
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
@@ -863,7 +864,7 @@ class VariableResolutionResamplerModel(nn.Module):
         return x
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:

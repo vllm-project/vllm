@@ -43,6 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -590,56 +591,53 @@ class Step3p5Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
-        base_layer = (
-            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
-        )
 
         # Old packed 3D format: .moe.gate_proj.weight [num_experts, out, in]
         expert_params_mapping: list[tuple[str, str, str]] = [
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.experts.routed_experts.w13_weight",
                 ".moe.gate_proj.weight",
                 "w1",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.experts.routed_experts.w13_weight",
                 ".moe.up_proj.weight",
                 "w3",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w2_weight",
+                ".moe.experts.routed_experts.w2_weight",
                 ".moe.down_proj.weight",
                 "w2",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
+                ".moe.experts.routed_experts.w13_weight_scale_2",
                 ".moe.gate_proj.weight_scale_2",
                 "w1",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
+                ".moe.experts.routed_experts.w13_weight_scale_2",
                 ".moe.up_proj.weight_scale_2",
                 "w3",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w2_weight_scale_2",
+                ".moe.experts.routed_experts.w2_weight_scale_2",
                 ".moe.down_proj.weight_scale_2",
                 "w2",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
+                ".moe.experts.routed_experts.w13_weight_scale",
                 ".moe.gate_proj.weight_scale",
                 "w1",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
+                ".moe.experts.routed_experts.w13_weight_scale",
                 ".moe.up_proj.weight_scale",
                 "w3",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w2_weight_scale",
+                ".moe.experts.routed_experts.w2_weight_scale",
                 ".moe.down_proj.weight_scale",
                 "w2",
             ),
@@ -647,17 +645,17 @@ class Step3p5Model(nn.Module):
             # input scales are stored as moe.{gate,up,down}_proj.input_scale
             # rather than the standard per-expert format handled generically.
             (
-                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
+                ".moe.experts.routed_experts.w13_input_scale",
                 ".moe.gate_proj.input_scale",
                 "w1",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
+                ".moe.experts.routed_experts.w13_input_scale",
                 ".moe.up_proj.input_scale",
                 "w3",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w2_input_scale",
+                ".moe.experts.routed_experts.w2_input_scale",
                 ".moe.down_proj.input_scale",
                 "w2",
             ),

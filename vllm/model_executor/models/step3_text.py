@@ -37,6 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.step3_vl import Step3TextConfig
 
@@ -414,25 +415,22 @@ class Step3TextModel(nn.Module):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
-        base_layer = (
-            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
-        )
 
         expert_params_mapping: list[tuple[str, str, str]] = [
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.experts.routed_experts.w13_weight",
                 ".moe.gate_proj.weight",
                 "w1",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.experts.routed_experts.w13_weight",
                 ".moe.up_proj.weight",
                 "w3",
             ),
             (
-                f".moe.experts.routed_experts.{base_layer}w2_weight",
+                ".moe.experts.routed_experts.w2_weight",
                 ".moe.down_proj.weight",
                 "w2",
             ),

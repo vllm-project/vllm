@@ -52,6 +52,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
@@ -424,7 +425,7 @@ class FalconModel(nn.Module):
         else:
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             # Skip loading extra bias for GPTQ models.

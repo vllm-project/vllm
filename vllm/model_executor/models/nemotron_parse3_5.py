@@ -46,6 +46,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
 )
 from vllm.model_executor.models.radio import RadioModel, radio_config_from_args
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -360,7 +361,7 @@ class MBartDecoderNoPos(nn.Module, EagleModelMixin):
             (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
             (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
         ]
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.startswith("embed_positions"):

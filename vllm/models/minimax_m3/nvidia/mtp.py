@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import (
+    checkpoint_params_dict,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
@@ -243,7 +244,7 @@ class MiniMaxM3MTP(nn.Module):
             num_experts=self.config.num_local_experts,
         )
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             mapped_name = self._map_checkpoint_name(name)

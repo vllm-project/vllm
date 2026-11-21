@@ -19,6 +19,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import DeepseekV2DecoderLayer
@@ -209,7 +210,7 @@ class LongCatFlashMTP(nn.Module):
             "model.mtp.norm.weight": "final_layernorm.weight",
         }
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

@@ -28,6 +28,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.model_executor.utils import refill_derived
 from vllm.multimodal.inputs import NestedTensors
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
@@ -227,7 +228,7 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if self.quant_config is not None:
             weights = self.quant_config.get_cache_scale_mapper().apply(weights)
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "scale" in name:

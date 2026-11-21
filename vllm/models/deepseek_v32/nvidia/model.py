@@ -32,6 +32,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    checkpoint_params_dict,
     copy_pp_buffers,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -378,7 +379,7 @@ class DeepseekV32Model(torch.nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

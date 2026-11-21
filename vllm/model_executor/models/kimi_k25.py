@@ -45,6 +45,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
     MoonViT3dPretrainedModel,
     vision_tower_forward,
 )
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -693,7 +694,7 @@ class KimiK25ForConditionalGeneration(
         if self.quant_config is not None:
             scale_mapper |= self.quant_config.get_cache_scale_mapper()
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
 
         def non_scale_weights():

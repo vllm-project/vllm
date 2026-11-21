@@ -68,6 +68,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    checkpoint_params_dict,
     extract_layer_index,
     is_pp_missing_parameter,
     make_layers,
@@ -2193,7 +2194,7 @@ class Step5Model(nn.Module):
                 "(num_attention_groups > 1)."
             )
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         # Quantized expert wrappers insert base_layer into parameter names.
         base_layer = (

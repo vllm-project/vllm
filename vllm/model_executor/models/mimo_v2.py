@@ -50,7 +50,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     make_attention_sink,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.models.utils import (
+    checkpoint_params_dict,
+    sequence_parallel_chunk,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
@@ -888,7 +891,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
 
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         # Pro-format fused qkv_proj arrives as two tensors (weight and

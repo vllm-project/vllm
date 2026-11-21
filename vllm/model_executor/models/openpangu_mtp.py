@@ -42,7 +42,7 @@ from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMultiTokenPredictorLayer,
     SharedHead,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import checkpoint_params_dict, maybe_prefix
 from vllm.sequence import IntermediateTensors
 
 from .openpangu import OpenPanguDecoderLayer
@@ -159,7 +159,7 @@ class OpenPanguMTP(nn.Module):
             num_experts=self.config.n_routed_experts,
         )
 
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

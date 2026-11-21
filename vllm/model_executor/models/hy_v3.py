@@ -66,6 +66,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
@@ -565,7 +566,7 @@ class HYV3Model(nn.Module, MixtureOfExperts):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        params_dict = dict(self.named_parameters())
+        params_dict = checkpoint_params_dict(self)
         expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
