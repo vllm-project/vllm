@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import socket
+import subprocess
+import sys
 import threading
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import zmq
 
+from tests.utils import spawn_new_process_for_each_test
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    HandshakeError,
     MoRIIOMode,
     MoRIIOTransferAck,
     TransferError,
+    zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnector,
@@ -25,6 +32,145 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+from vllm.utils.network_utils import make_zmq_path
+
+
+@pytest.mark.cpu_test
+@pytest.mark.timeout(10)
+def test_notify_listener_bind_failure_reaches_caller():
+    """A notification bind failure must stop startup, not just its thread."""
+    wrapper = MoRIIOWrapper()
+
+    with socket.socket() as occupied_port:
+        occupied_port.bind(("", 0))
+        occupied_port.listen()
+        wrapper.notify_port = occupied_port.getsockname()[1]
+
+        try:
+            with pytest.raises(HandshakeError, match="Address already in use"):
+                wrapper.async_wait_reqid()
+        finally:
+            # Hold the port until the listener has attempted to bind.
+            if wrapper.notify_thread is not None:
+                wrapper.notify_thread.join(timeout=5)
+                assert not wrapper.notify_thread.is_alive()
+
+    assert wrapper.notify_thread is None
+
+
+@pytest.mark.cpu_test
+def test_notify_listener_exit_before_ready_reaches_caller():
+    """A listener that exits without a startup result must not hang its caller."""
+    script = """
+from unittest.mock import patch
+
+import zmq
+
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    HandshakeError,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWrapper,
+)
+
+def exit_context(*args, **kwargs):
+    print("EXIT_BEFORE_STARTUP_RESULT", flush=True)
+    raise SystemExit("injected ZeroMQ initialization exit")
+
+wrapper = MoRIIOWrapper()
+wrapper.notify_port = 0
+with patch.object(zmq, "Context", side_effect=exit_context):
+    try:
+        wrapper.async_wait_reqid()
+    except HandshakeError as error:
+        assert "exited before reporting startup status" in str(error), str(error)
+    else:
+        raise AssertionError("Startup returned without reporting listener exit")
+assert wrapper.notify_thread is None
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = (error.stdout or b"").decode(errors="replace")
+        assert "EXIT_BEFORE_STARTUP_RESULT" in output, output
+        pytest.fail("Listener exited, but startup did not report it before timeout")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "EXIT_BEFORE_STARTUP_RESULT" in result.stdout
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
+
+
+def _port_is_bound(port: int) -> bool:
+    with socket.socket() as sock:
+        try:
+            sock.bind(("", port))
+        except OSError:
+            return True
+        return False
+
+
+@pytest.mark.cpu_test
+@pytest.mark.timeout(30)
+@spawn_new_process_for_each_test
+def test_notify_listener_retry_after_bind_failure_starts_listener():
+    """A failed start must not make later calls a no-op: on main,
+    `notify_thread` stayed set and every later call skipped the listener."""
+    wrapper = MoRIIOWrapper()
+    with socket.socket() as occupied_port:
+        occupied_port.bind(("", 0))
+        occupied_port.listen()
+        wrapper.notify_port = occupied_port.getsockname()[1]
+        with pytest.raises(HandshakeError):
+            wrapper.async_wait_reqid()
+
+    wrapper.notify_port = _free_port()
+    wrapper.async_wait_reqid()
+
+    assert wrapper.notify_thread is not None
+    assert wrapper.notify_thread.is_alive()
+    assert _port_is_bound(wrapper.notify_port)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.timeout(30)
+@spawn_new_process_for_each_test
+def test_notify_listener_is_bound_and_receives_when_startup_returns():
+    """On main the bind happened after async_wait_reqid returned; it must be
+    done by then, and the listener must still deliver messages."""
+    wrapper = MoRIIOWrapper()
+    wrapper.notify_port = _free_port()
+    got_message = threading.Event()
+    received: list[bytes] = []
+
+    def _record(msg: bytes):
+        received.append(msg)
+        got_message.set()
+
+    wrapper._forward_to_stages = lambda _msg: None  # type: ignore[method-assign]
+    wrapper._handle_message = _record  # type: ignore[method-assign]
+    wrapper.async_wait_reqid()
+    assert _port_is_bound(wrapper.notify_port)
+
+    first = wrapper.notify_thread
+    # start_load_kv calls this every step; it must keep the running listener.
+    wrapper.async_wait_reqid()
+    assert wrapper.notify_thread is first
+
+    path = make_zmq_path("tcp", "127.0.0.1", wrapper.notify_port)
+    with zmq_ctx(zmq.DEALER, path) as sock:
+        sock.send(b"transfer-1")
+        assert got_message.wait(5)
+    assert received == [b"transfer-1"]
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():

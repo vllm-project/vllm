@@ -2974,7 +2974,16 @@ class MoRIIOConnectorWorker:
             name="moriio_handshake_listener",
         )
         self._moriio_handshake_listener_t.start()
-        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+        # Wait for the listener's ZMQ socket. If the bind fails, the thread
+        # dies without setting the event; fail startup instead of hanging.
+        while not ready_event.wait(timeout=0.1):
+            if not self._moriio_handshake_listener_t.is_alive():
+                self._moriio_handshake_listener_t = None
+                raise HandshakeError(
+                    "Failed to start MoRIIO handshake listener on port "
+                    f"{self.side_channel_port}; see the moriio_handshake_listener "
+                    "traceback above"
+                )
         self.moriio_wrapper.async_wait_reqid()
 
     def _record_slice_layouts(self, kv_caches: dict[str, torch.Tensor]) -> None:
