@@ -143,6 +143,8 @@ Priority is **1 = highest** (tried first).
 
 --8<-- "gen:priority-standard"
 
+> On SM 8.9 with a quantized (e.g. FP8) KV cache, `TRITON_ATTN` is tried before `FLASHINFER`.
+
 ### MLA Attention (DeepSeek-style)
 
 --8<-- "gen:priority-mla"

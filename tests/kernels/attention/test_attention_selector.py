@@ -700,6 +700,28 @@ def test_sm120_sparse_mla_has_no_hisparse_backend(sm120):
 
 
 @blackwell_only
+@pytest.mark.parametrize(
+    ("capability", "kv_cache_dtype", "expected"),
+    [
+        (DeviceCapability(8, 9), "fp8", "TRITON_ATTN"),
+        (DeviceCapability(8, 9), None, "FLASH_ATTN"),
+        (DeviceCapability(8, 6), "fp8", "FLASHINFER"),
+    ],
+)
+def test_sm89_fp8_kv_cache_prefers_triton(capability, kv_cache_dtype, expected):
+    """FA2 has no FP8 KV cache. On SM89, Triton takes it ahead of FlashInfer;
+    below SM89 Triton cannot run it, so FlashInfer stays."""
+    with (
+        patch.object(
+            type(current_platform), "get_device_capability", return_value=capability
+        ),
+        set_current_vllm_config(VllmConfig()),
+    ):
+        backend = get_attn_backend(128, torch.bfloat16, kv_cache_dtype)
+    assert backend.get_name() == expected
+
+
+@blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("flash_attn_version", [None, 3, 4])
 def test_hopper_mm_prefix_selects_triton_flash_attn(
