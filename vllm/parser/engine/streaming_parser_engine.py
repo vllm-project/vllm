@@ -719,11 +719,6 @@ class StreamingParserEngine:
                 return []
             return self._bail_json_collection_to_content(ch)
         if ch == "{":
-            if (
-                self._json_collection_had_element
-                and not self._json_collection_separator_seen
-            ):
-                return self._bail_json_collection_to_content(ch)
             self._json_collection_started = True
             self._json_collection_separator_seen = False
             return self._start_json_element(ch)
