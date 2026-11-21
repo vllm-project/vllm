@@ -550,6 +550,13 @@ class SpeculativeConfig:
     activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
     own head, so only the acceptance length can change."""
+    hierarchical_lm_head_router_path: str | None = None
+    """Local router sidecar for a hierarchical draft LM head (.pt or .safetensors).
+    Overrides checkpoint router tensors and requires hierarchical_lm_head_top_k.
+    The original target and MTP checkpoints do not need to be repackaged."""
+    hierarchical_lm_head_top_k: int | None = Field(default=None, ge=1)
+    """Override the number of vocabulary clusters selected by the draft head.
+    Defaults to the draft checkpoint setting when using an embedded router."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -749,6 +756,7 @@ class SpeculativeConfig:
             "code_revision",
             "index_share_for_mtp_iteration",
             "draft_lm_head_quantization",
+            "hierarchical_lm_head_router_path",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
             "prompt_lookup_min",
@@ -1898,6 +1906,24 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        router_path = self.hierarchical_lm_head_router_path
+        top_k = self.hierarchical_lm_head_top_k
+        if router_path is not None and top_k is None:
+            raise ValueError(
+                "hierarchical_lm_head_top_k is required when "
+                "hierarchical_lm_head_router_path is provided"
+            )
+        if router_path is None and top_k is not None:
+            config = (
+                self.draft_model_config.hf_config
+                if self.draft_model_config is not None
+                else None
+            )
+            if not getattr(config, "use_ordered_embeddings", False):
+                raise ValueError(
+                    "hierarchical_lm_head_top_k requires a checkpoint router "
+                    "or hierarchical_lm_head_router_path"
+                )
         if self.tensor_parallel_size is not None:
             raise ValueError(
                 "'tensor_parallel_size' is not a valid argument in the "

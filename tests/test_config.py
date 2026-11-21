@@ -5759,3 +5759,47 @@ def test_layer_range_with_prefill_context_parallel(monkeypatch):
         for rank in range(8)
     ]
     assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
+
+
+def test_hierarchical_router_sidecar_requires_explicit_top_k():
+    with pytest.raises(ValueError, match="hierarchical_lm_head_top_k is required"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=2,
+            hierarchical_lm_head_router_path="router.pt",
+        )
+
+
+@pytest.mark.parametrize("top_k", [0, -1])
+def test_hierarchical_router_top_k_must_be_positive(top_k):
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=2,
+            hierarchical_lm_head_top_k=top_k,
+        )
+
+
+def test_hierarchical_top_k_requires_a_router():
+    with pytest.raises(ValueError, match="requires a checkpoint router"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=2,
+            hierarchical_lm_head_top_k=2,
+        )
+
+
+def test_hierarchical_router_options_are_model_agnostic():
+    target = ModelConfig(model="facebook/opt-125m")
+    config = SpeculativeConfig(
+        method="draft_model",
+        model="facebook/opt-125m",
+        num_speculative_tokens=2,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+        hierarchical_lm_head_router_path="router.pt",
+        hierarchical_lm_head_top_k=2,
+    )
+    assert config.draft_model_config.hf_config.model_type == "opt"
+    assert config.hierarchical_lm_head_router_path == "router.pt"
+    assert config.hierarchical_lm_head_top_k == 2
