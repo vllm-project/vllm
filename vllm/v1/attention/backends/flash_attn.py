@@ -1074,8 +1074,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
 
         # Compute mm_prefix range tensor if the batch contains
-        # multimodal tokens with bidirectional ranges.  Built for every FA
-        # group; Gemma4 nulls the field for its non-sliding layers.
+        # multimodal tokens with bidirectional ranges.  Groups whose layers
+        # opt out of the ranges get metadata without them.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
             # The upper bound is exact for prefill rows, which is where

@@ -274,6 +274,10 @@ class AttentionGroup:
     # Persistent per ubatch: CUDA graphs capture the mapped block table.
     kernel_block_table: torch.Tensor | None = None
     kernel_block_offsets: torch.Tensor | None = None
+    # False when the layers opt out of multimodal PrefixLM ranges
+    # (`Attention(mm_prefix_ranges=False)`); their metadata is then built without
+    # them. Layers are grouped by this flag, draft layers by their own.
+    applies_mm_prefix_ranges: bool = True
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
@@ -347,7 +351,7 @@ class AttentionGroup:
     ) -> Any:
         return self.get_metadata_builder(ubatch_idx).build(
             common_prefix_len,
-            self._with_kernel_block_table(common_attn_metadata, ubatch_idx),
+            self._for_group(common_attn_metadata, ubatch_idx),
             **kwargs,
         )
 
@@ -355,20 +359,25 @@ class AttentionGroup:
         self, common_attn_metadata: CommonAttentionMetadata, ubatch_idx: int = 0
     ) -> Any:
         return self.get_metadata_builder(ubatch_idx).build_for_cudagraph_capture(
-            self._with_kernel_block_table(common_attn_metadata, ubatch_idx)
+            self._for_group(common_attn_metadata, ubatch_idx)
         )
 
-    def _with_kernel_block_table(
+    def _for_group(
         self, common_attn_metadata: CommonAttentionMetadata, ubatch_idx: int = 0
     ) -> CommonAttentionMetadata:
-        if self.kernel_block_size is None:
-            return common_attn_metadata
-        return replace(
-            common_attn_metadata,
-            block_table_tensor=self.map_to_kernel_block_table(
+        changes: dict[str, Any] = {}
+        if self.kernel_block_size is not None:
+            changes["block_table_tensor"] = self.map_to_kernel_block_table(
                 common_attn_metadata.block_table_tensor, ubatch_idx
-            ),
-        )
+            )
+        if (
+            not self.applies_mm_prefix_ranges
+            and common_attn_metadata.mm_req_doc_ranges is not None
+        ):
+            changes["mm_req_doc_ranges"] = None
+        if not changes:
+            return common_attn_metadata
+        return replace(common_attn_metadata, **changes)
 
     def map_to_kernel_block_table(
         self, block_table: torch.Tensor, ubatch_idx: int = 0

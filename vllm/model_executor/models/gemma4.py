@@ -575,6 +575,10 @@ class Gemma4Attention(nn.Module):
             # window; the runner keeps the full range and the kernel bounds it
             # per-query here.
             mm_prefix_clamp_sliding_window=self.is_sliding,
+            # With use_bidirectional_attention="vision", images attend
+            # bidirectionally on the sliding layers only, as in HF.
+            mm_prefix_ranges=self.is_sliding
+            or getattr(config, "use_bidirectional_attention", None) != "vision",
             prefix=f"{prefix}.attn",
         )
 

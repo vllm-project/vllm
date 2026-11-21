@@ -453,6 +453,59 @@ def test_no_attn_metadata_layers_keep_their_layout_without_builders(monkeypatch)
     assert attn_metadata == {"target": "Target"}
 
 
+class _MMPrefixRangesRecorder:
+    supports_update_block_table = False
+
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        self.mm_req_doc_ranges = common_attn_metadata.mm_req_doc_ranges
+        return self
+
+
+def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them():
+    """Gemma 4 with use_bidirectional_attention="vision" and the hybrid KV cache
+    manager off: its sliding-window and full-attention layers share a KV cache
+    group, but only the sliding-window layers take the image ranges."""
+    spec = new_kv_cache_spec()
+    recorders = {
+        "sliding": _MMPrefixRangesRecorder(),
+        "full": _MMPrefixRangesRecorder(),
+    }
+    groups = [
+        AttentionGroup(
+            _TargetBackend,
+            [name],
+            spec,
+            0,
+            applies_mm_prefix_ranges=name == "sliding",
+            metadata_builders=[recorders[name]],  # type: ignore[list-item]
+        )
+        for name in recorders
+    ]
+    ranges = {0: [(1, 2)], 1: []}
+    query_start_loc = torch.tensor([0, 3, 4], dtype=torch.int32)
+    attn_utils.build_attn_metadata(
+        attn_groups=[groups],
+        num_reqs=2,
+        num_tokens=4,
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        max_query_len=3,
+        seq_lens=torch.tensor([8, 5], dtype=torch.int32),
+        max_seq_len=8,
+        block_tables=[torch.zeros((2, 1), dtype=torch.int32)],
+        slot_mappings=torch.zeros((1, 4), dtype=torch.int64),
+        kv_cache_config=KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[],
+            kv_cache_groups=[new_kv_cache_group(list(recorders), spec)],
+        ),
+        mm_req_doc_ranges=ranges,
+    )
+
+    assert recorders["sliding"].mm_req_doc_ranges is ranges
+    assert recorders["full"].mm_req_doc_ranges is None
+
+
 def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
     """ALWAYS passes without a bound, other builders need one at least as wide as
     the requested length, and NEVER fails whatever bound a builder reports."""
