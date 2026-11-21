@@ -38,6 +38,7 @@ applies, else [layerwise reload](../layerwise.md).
 | [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
+| [sparse_disk](sparse_disk.md) | Shared storage and a host-local checkpoint copy | Sparse weight patches without an NCCL group, applied by a full reload |
 | [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 | [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
 | [ModelExpress](modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
