@@ -24,15 +24,19 @@ impl DeepSeekV41ChatRenderer {
             default_template_kwargs,
         }
     }
+
+    fn reasoning(&self, request: &ChatRequest) -> Result<ReasoningControl> {
+        deepseek::resolve_reasoning(
+            ReasoningControl::resolve(request, &self.default_template_kwargs)?,
+            DsDialect::V41,
+        )
+    }
 }
 
 impl ChatRenderer for DeepSeekV41ChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
-        let reasoning = deepseek::resolve_reasoning(
-            ReasoningControl::resolve(request, &self.default_template_kwargs)?,
-            DsDialect::V41,
-        )?;
+        let reasoning = self.reasoning(request)?;
         let (prompt, media_order) =
             deepseek::render_request_with_media_order(request, DsDialect::V41, &reasoning)?;
 
@@ -41,6 +45,10 @@ impl ChatRenderer for DeepSeekV41ChatRenderer {
             media_order: Some(media_order),
             effective_template_kwargs: reasoning.template_kwargs(request),
         })
+    }
+
+    fn template_kwargs(&self, request: &ChatRequest) -> Result<HashMap<String, Value>> {
+        Ok(self.reasoning(request)?.template_kwargs(request))
     }
 }
 

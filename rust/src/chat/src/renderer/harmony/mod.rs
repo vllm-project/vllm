@@ -122,20 +122,30 @@ impl HarmonyChatRenderer {
 
         Ok(token_ids)
     }
+
+    fn reasoning(&self, request: &ChatRequest) -> Result<ReasoningControl> {
+        Ok(
+            ReasoningControl::resolve(request, &self.default_template_kwargs)?
+                .fallback(ReasoningControl::enabled("medium")),
+        )
+    }
 }
 
 impl ChatRenderer for HarmonyChatRenderer {
     /// Render a chat request as [`Prompt::TokenIds`] with template kwargs echoed
     /// for downstream accounting/debugging.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
-        let reasoning = ReasoningControl::resolve(request, &self.default_template_kwargs)?
-            .fallback(ReasoningControl::enabled("medium"));
+        let reasoning = self.reasoning(request)?;
         let effort = to_harmony_reasoning_effort(reasoning.effort())?;
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(self.render_token_ids(request, effort)?),
             media_order: None,
             effective_template_kwargs: reasoning.template_kwargs(request),
         })
+    }
+
+    fn template_kwargs(&self, request: &ChatRequest) -> Result<HashMap<String, Value>> {
+        Ok(self.reasoning(request)?.template_kwargs(request))
     }
 }
 
