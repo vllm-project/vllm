@@ -977,6 +977,14 @@ void fused_experts_cpu(
   int64_t E = w1.size(0);
   int64_t topk = topk_weights_.size(1);
 
+  // topk_ids values index per-expert buffers; validate they are in [0, E)
+  if (topk_ids_.numel() > 0) {
+    auto [topk_ids_min, topk_ids_max] = at::aminmax(topk_ids_);
+    TORCH_CHECK(topk_ids_min.item<int64_t>() >= 0 &&
+                    topk_ids_max.item<int64_t>() < E,
+                "fused_experts_cpu: topk_ids values must be in [0, num_experts)");
+  }
+
   // we use int32_t compensation for int8 w8a8
   int64_t packed_K = get_row_size(static_cast<CPUQuantMethod>(moe_comp_method), K);
   int64_t packed_N = get_row_size(static_cast<CPUQuantMethod>(moe_comp_method), N);
