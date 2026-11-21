@@ -22,6 +22,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.linear_attention.mamba.decode.selector import (
+    select_mamba_ssu_kernel,
+)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
@@ -33,7 +36,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -45,6 +47,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -189,7 +192,8 @@ class MambaMixer(MambaBase, PluggableLayer):
             else None
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -199,6 +203,14 @@ class MambaMixer(MambaBase, PluggableLayer):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+        self.mamba_config = vllm_config.mamba_config
+        spec: MambaSpec | None = None
+        if model_config is not None:
+            layer_config = self.get_kv_cache_config(vllm_config)
+            assert layer_config is not None
+            assert isinstance(layer_config.spec, MambaSpec)
+            spec = layer_config.spec
+        self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, spec)
 
     def _ssm_transform(
         self, x: torch.Tensor, batch_start: int, num_batch_tokens: int
@@ -385,7 +397,9 @@ class MambaMixer(MambaBase, PluggableLayer):
 
             # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_outputs_d = torch.empty_like(hidden_states_BC_d.transpose(0, 1))
-            selective_state_update(
+            self.ssu_kernel.forward(
+                self,
+                attn_metadata,
                 ssm_state,
                 conv_out_d.transpose(0, 1),
                 discrete_time_step_d.transpose(0, 1),
@@ -394,11 +408,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 C_d,
                 self.D,
                 time_proj_bias,
+                scan_outputs_d,
                 z=gate_d.transpose(0, 1),
-                dt_softplus=True,
-                state_batch_indices=state_indices_tensor_d,
-                dst_state_batch_indices=state_indices_tensor_d,
-                out=scan_outputs_d,
             )
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 

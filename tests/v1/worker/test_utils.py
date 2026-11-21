@@ -28,6 +28,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
 )
+from vllm.model_executor.layers.linear_attention.mamba.decode.replayssm_base import (
+    ReplaySSMLayerState,
+)
+from vllm.model_executor.layers.linear_attention.mamba.decode.replayssm_flashinfer import (  # noqa: E501
+    FlashInferReplaySSMKernel,
+)
+from vllm.model_executor.layers.linear_attention.mamba.decode.replayssm_triton import (
+    TritonReplaySSMKernel,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -1477,16 +1486,18 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
 
 
 class _TestReplaySSMMixer(MambaMixer2):
+    ssu_state: ReplaySSMLayerState
+
     def __init__(self, backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER):
         torch.nn.Module.__init__(self)
-        self.use_replayssm = True
-        self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
-        self.use_replayssm_trackers = self.use_flashinfer_replayssm
+        self.ssu_kernel = (
+            FlashInferReplaySSMKernel
+            if backend == MambaBackendEnum.FLASHINFER
+            else TritonReplaySSMKernel
+        )
+        self.ssu_state = ReplaySSMLayerState(buffer_len=16, num_spec=0)
         self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
-        self.cache_config = SimpleNamespace(enable_prefix_caching=True)
-        self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
-        self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return ((2,), (3,), (4,), (5,), (6,))
@@ -1534,11 +1545,11 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     assert pages[names[0]].untyped_storage().nbytes() == expected_storage_size
     for mixer in mixers:
         assert len(mixer.kv_cache) == 5
-    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
+    assert mixers[0].ssu_state.ring_start is mixers[2].ssu_state.ring_start
     assert (
-        mixers[0]._replayssm_prev_num_accepted is mixers[2]._replayssm_prev_num_accepted
+        mixers[0].ssu_state.prev_num_accepted is mixers[2].ssu_state.prev_num_accepted
     )
-    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
+    assert mixers[0].ssu_state.ring_start is not mixers[1].ssu_state.ring_start
     extra = get_replayssm_block_copy_tensors(ctx)
     assert len({tensor.data_ptr() for tensor in extra}) == 4
     assert all(tensor.is_contiguous() and tensor.shape == (4,) for tensor in extra)
@@ -1554,7 +1565,7 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         assert torch.all(state[1] == index)
     assert all(torch.all(state[2] == 99) for state in mixers[1].kv_cache)
     for index, tensor in enumerate(
-        (mixers[0]._replayssm_ring_start, mixers[0]._replayssm_prev_num_accepted),
+        (mixers[0].ssu_state.ring_start, mixers[0].ssu_state.prev_num_accepted),
         start=7,
     ):
         tensor[1] = index
@@ -1563,16 +1574,16 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     for name, page in pages.items():
         assert torch.equal(page[3], before[name][1])
         assert torch.equal(page[:3], before[name][:3])
-    assert mixers[2]._replayssm_ring_start[3] == 7
-    assert mixers[2]._replayssm_prev_num_accepted[3] == 8
-    assert torch.count_nonzero(mixers[1]._replayssm_ring_start) == 0
-    assert torch.count_nonzero(mixers[1]._replayssm_prev_num_accepted) == 0
+    assert mixers[2].ssu_state.ring_start[3] == 7
+    assert mixers[2].ssu_state.prev_num_accepted[3] == 8
+    assert torch.count_nonzero(mixers[1].ssu_state.ring_start) == 0
+    assert torch.count_nonzero(mixers[1].ssu_state.prev_num_accepted) == 0
 
     clear_layer_kv_caches(mixers)
     for mixer in mixers:
         assert not mixer.kv_cache
-        assert mixer._replayssm_ring_start.numel() == 0
-        assert mixer._replayssm_prev_num_accepted.numel() == 0
+        assert mixer.ssu_state.ring_start.numel() == 0
+        assert mixer.ssu_state.prev_num_accepted.numel() == 0
 
 
 def test_rebind_kv_cache_keeps_replayssm_trackers():
@@ -1602,29 +1613,29 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
         initialize_replayssm_ring_trackers(config, ctx)
 
     bind(8)
-    ring_start = mixers[0]._replayssm_ring_start
-    prev_accepted = mixers[0]._replayssm_prev_num_accepted
+    ring_start = mixers[0].ssu_state.ring_start
+    prev_accepted = mixers[0].ssu_state.prev_num_accepted
     ring_start[3] = 7
     prev_accepted[3] = 2
     for num_blocks in (8, 5):
         bind(num_blocks)
         for mixer in mixers:
             for actual, original in (
-                (mixer._replayssm_ring_start, ring_start),
-                (mixer._replayssm_prev_num_accepted, prev_accepted),
+                (mixer.ssu_state.ring_start, ring_start),
+                (mixer.ssu_state.prev_num_accepted, prev_accepted),
             ):
                 assert actual.data_ptr() == original.data_ptr()
                 assert actual.shape == (num_blocks,)
                 assert torch.equal(actual, original[:num_blocks])
-        assert mixers[0]._replayssm_ring_start is mixers[1]._replayssm_ring_start
+        assert mixers[0].ssu_state.ring_start is mixers[1].ssu_state.ring_start
         assert (
-            mixers[0]._replayssm_prev_num_accepted
-            is mixers[1]._replayssm_prev_num_accepted
+            mixers[0].ssu_state.prev_num_accepted
+            is mixers[1].ssu_state.prev_num_accepted
         )
 
     bind(9)
-    assert mixers[0]._replayssm_ring_start.data_ptr() != ring_start.data_ptr()
-    assert mixers[0]._replayssm_prev_num_accepted.data_ptr() != prev_accepted.data_ptr()
+    assert mixers[0].ssu_state.ring_start.data_ptr() != ring_start.data_ptr()
+    assert mixers[0].ssu_state.prev_num_accepted.data_ptr() != prev_accepted.data_ptr()
     assert all(
         tensor.shape == (9,) and torch.count_nonzero(tensor) == 0
         for tensor in get_replayssm_block_copy_tensors(ctx)
@@ -1656,10 +1667,10 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
     )
     initialize_replayssm_ring_trackers(config, ctx)
 
-    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
-    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
-    assert mixers[0]._replayssm_ring_start.shape == (4,)
-    assert [m._plans_replayssm_decode for m in mixers] == [True, True, False]
+    assert mixers[0].ssu_state.ring_start is mixers[2].ssu_state.ring_start
+    assert mixers[0].ssu_state.ring_start is not mixers[1].ssu_state.ring_start
+    assert mixers[0].ssu_state.ring_start.shape == (4,)
+    assert [m.ssu_state.plans_decode for m in mixers] == [True, True, False]
     assert get_replayssm_block_copy_tensors(ctx) == []
 
 

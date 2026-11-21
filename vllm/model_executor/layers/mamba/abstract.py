@@ -26,12 +26,7 @@ class MambaBase(AttentionLayerBase):
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
     supports_dcp: bool = False
-    use_replayssm: bool = False
-    use_flashinfer_replayssm: bool = False
-    use_replayssm_trackers: bool = False
     state_alignment: int = 1
-    _replayssm_ring_start: torch.Tensor
-    _replayssm_prev_num_accepted: torch.Tensor
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.
