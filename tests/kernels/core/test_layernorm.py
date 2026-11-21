@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import pytest
 import torch
 
@@ -258,3 +260,61 @@ def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
 
     assert out.dtype == x.dtype
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    os.environ.get("VLLM_BATCH_INVARIANT") != "1",
+    reason="Strict CUDA RMS requires VLLM_BATCH_INVARIANT=1 before process startup",
+)
+@pytest.mark.parametrize("width", [128, 512, 513, 1536, 5120])
+@pytest.mark.parametrize("strided", [False, True])
+@torch.inference_mode()
+def test_bi_rms_native_row_identity_and_graph_replay(width, strided):
+    """Fixed CUDA reductions preserve rows across decode/teacher forcing."""
+    from vllm.model_executor.kernels.batch_invariant import rms_norm_cuda
+
+    if not current_platform.is_cuda():
+        pytest.skip("Native CUDA row RMS")
+    generator = torch.Generator(device="cuda").manual_seed(529)
+    storage = torch.randn(
+        257,
+        width * (2 if strided else 1),
+        dtype=torch.bfloat16,
+        device="cuda",
+        generator=generator,
+    )
+    values = storage[:, ::2] if strided else storage
+    weight = torch.ones(width, dtype=torch.bfloat16, device="cuda")
+    together = rms_norm_cuda(values, weight, 1e-6)
+    alone = rms_norm_cuda(values[:1], weight, 1e-6)
+    assert isinstance(together, torch.Tensor)
+    assert isinstance(alone, torch.Tensor)
+    assert torch.equal(together[:1], alone)
+    oracle_values = values.cpu().double()
+    expected = (
+        (
+            oracle_values
+            * torch.rsqrt(oracle_values.square().mean(-1, keepdim=True) + 1e-6)
+        )
+        .bfloat16()
+        .to(values.device)
+    )
+    torch.testing.assert_close(together, expected, rtol=0.008, atol=0.008)
+
+    values.fill_(1)
+    exact = rms_norm_cuda(values, weight, 0.0)
+    assert isinstance(exact, torch.Tensor)
+    assert torch.equal(exact, torch.ones_like(exact))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        rms_norm_cuda(values, weight, 1e-6)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = rms_norm_cuda(values, weight, 1e-6)
+    assert isinstance(replayed, torch.Tensor)
+    values.zero_()
+    replayed.fill_(float("nan"))
+    graph.replay()
+    assert torch.equal(replayed, torch.zeros_like(replayed))
