@@ -976,20 +976,56 @@ class LoRAModelManager:
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
     ):
         module_lora = self._get_lora_layer_weights(lora_model, module_name)
+        gate_up_proj_lora = self._get_lora_layer_weights(
+            lora_model, module_name + ".base_layer"
+        )
+        if module_lora is not None and not torch.is_tensor(module_lora.lora_a):
+            return
+        if gate_up_proj_lora is not None and not torch.is_tensor(
+            gate_up_proj_lora.lora_a
+        ):
+            return
 
         # Note (gnovack) - If MOE lora weights are not split into
         # num_experts chunks, we split them here
-        if module_lora and torch.is_tensor(module_lora.lora_a):
+        if module_lora is not None or gate_up_proj_lora is not None:
             # Handle PEFT file format where experts.base_layer is the
             # gate_up_proj and experts is the down_proj
-            gate_up_proj_lora = self._get_lora_layer_weights(
-                lora_model, module_name + ".base_layer"
-            )
+            reference_lora = module_lora or gate_up_proj_lora
+            assert reference_lora is not None
+            rank = reference_lora.rank
+            total_rank = rank * module.global_num_experts
+            dtype = reference_lora.lora_a.dtype
+            device = reference_lora.lora_a.device
+
+            if gate_up_proj_lora is None:
+                gate_up_proj_lora = LoRALayerWeights(
+                    module_name + ".base_layer",
+                    rank,
+                    lora_alpha=1,
+                    lora_a=torch.zeros(
+                        (total_rank, module.w13_input_size), dtype=dtype, device=device
+                    ),
+                    lora_b=torch.zeros(
+                        (module.w13_output_size, total_rank), dtype=dtype, device=device
+                    ),
+                )
             down_proj_lora = module_lora
-            # FIXME Edge case where LoRA is not added to gate_up_proj
-            # or down_proj
-            assert gate_up_proj_lora is not None
-            assert down_proj_lora is not None
+            if down_proj_lora is None:
+                down_proj_lora = LoRALayerWeights(
+                    module_name,
+                    rank,
+                    lora_alpha=1,
+                    lora_a=torch.zeros(
+                        (total_rank, module.w2_input_size), dtype=dtype, device=device
+                    ),
+                    lora_b=torch.zeros(
+                        (module.w2_output_size, total_rank), dtype=dtype, device=device
+                    ),
+                )
+                lora_model.loras[module_name] = down_proj_lora
+            assert gate_up_proj_lora is not None and down_proj_lora is not None
+            module_lora = down_proj_lora
             if self._is_3d_moe_model:
                 local_num_experts = module.w13_lora_a_stacked[0].shape[1]
                 # The checkpoint holds weights for all global experts, but
