@@ -143,6 +143,76 @@ def test_hunyuan_a13b_tool_parser_extract(
             ],
             [make_tool_call("get_weather", {"city": "Boston"})],
         ),
+        (
+            [
+                '<tool_calls>[{"name": "get_time", ',
+                '"arguments": {}}, ',
+                '{"name": "get_weather", ',
+                '"arguments": {"city": ',
+                '"Boston"}}]',
+                "</tool_calls>",
+            ],
+            [
+                make_tool_call("get_time", {}),
+                make_tool_call("get_weather", {"city": "Boston"}),
+            ],
+        ),
+        (
+            [
+                '<tool_calls>[{"name": "get_weather", ',
+                '"arguments": {"city": ',
+                '"Boston"}}, ',
+                '{"name": "get_time", ',
+                '"arguments": {"tz": ',
+                '"UTC"}}]',
+                "</tool_calls>",
+            ],
+            [
+                make_tool_call("get_weather", {"city": "Boston"}),
+                make_tool_call("get_time", {"tz": "UTC"}),
+            ],
+        ),
+        (
+            [
+                '<tool_calls>[{"name": "register_user", ',
+                '"arguments": {"name": ',
+                '"Ada"}}, ',
+                '{"name": "get_time", ',
+                '"arguments": {}}]',
+                "</tool_calls>",
+            ],
+            [
+                make_tool_call("register_user", {"name": "Ada"}),
+                make_tool_call("get_time", {}),
+            ],
+        ),
+        (
+            [
+                '<tool_calls>[{"name": "get_weather", ',
+                '"arguments": {"city": "San Francisco", "metric": "celsius"}}, ',
+                '{"name": "register_user", ',
+                '"arguments": {"name": "John Doe", "age": 37, ',
+                '"address": {"city": "San Francisco", "state": "CA"}, ',
+                '"role": null, "passed_test": true, "aliases": ["John", "Johnny"]}}]',
+                "</tool_calls>",
+            ],
+            [
+                make_tool_call(
+                    "get_weather", {"city": "San Francisco", "metric": "celsius"}
+                ),
+                make_tool_call(
+                    "register_user",
+                    {
+                        "name": "John Doe",
+                        "age": 37,
+                        "address": {"city": "San Francisco", "state": "CA"},
+                        "role": None,
+                        "passed_test": True,
+                        "aliases": ["John", "Johnny"],
+                    },
+                ),
+            ],
+        ),
         pytest.param(
             [
                 '<tool_calls>[{"name": "complex_tool",',

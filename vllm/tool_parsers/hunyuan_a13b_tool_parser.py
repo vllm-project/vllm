@@ -50,6 +50,7 @@ class HunyuanA13BToolParser(ToolParser):
         self.answer_tool_calls_pattern = re.compile(
             r"<tool_calls>([\s\S]*?)</tool_calls>", re.DOTALL
         )
+        self.think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
         self.tool_name_reg = re.compile(r'"name"\s*:\s*"([^"]+)"')
 
@@ -74,16 +75,14 @@ class HunyuanA13BToolParser(ToolParser):
     def preprocess_model_output(
         self, model_output: str
     ) -> tuple[str | None, str | None]:
+        # Compute <think> regions once before scanning tool_calls blocks
+        think_regions = [
+            (m.start(), m.end()) for m in self.think_pattern.finditer(model_output)
+        ]
         # find the location tool call
         for match in self.answer_tool_calls_pattern.finditer(model_output):
             start, end = match.span()
             # check tool_calls whether in side of <think>
-            think_regions = [
-                (m.start(), m.end())
-                for m in re.finditer(
-                    r"<think>(.*?)</think>", model_output, flags=re.DOTALL
-                )
-            ]
             in_think = any(
                 start > t_start and end < t_end for t_start, t_end in think_regions
             )
@@ -192,7 +191,7 @@ class HunyuanA13BToolParser(ToolParser):
         if test_delta:
             return test_delta
 
-        name_matches = list(self.tool_name_reg.finditer(current_text))
+        name_matches, tool_spans = self._get_top_level_tools(current_text)
         tool_count = len(name_matches)
         if tool_count == 0:
             return None
@@ -206,12 +205,87 @@ class HunyuanA13BToolParser(ToolParser):
             return name_delta
 
         args_delta = self._handle_tool_args_streaming(
-            current_text, current_idx, tool_count
+            current_text, current_idx, tool_count, tool_spans
         )
         if args_delta:
             return args_delta
 
         return None
+
+    def _get_top_level_tools(
+        self, current_text: str
+    ) -> tuple[list[re.Match[str]], list[tuple[int, int]]]:
+        start_idx = consume_space(0, current_text)
+        if current_text[start_idx:].startswith(self.bot_string):
+            start_idx = consume_space(start_idx + len(self.bot_string), current_text)
+        scan_start = (
+            start_idx + 1
+            if start_idx < len(current_text) and current_text[start_idx] == "["
+            else 0
+        )
+
+        in_string = False
+        escape = False
+        brace_depth = 0
+        obj_start: int | None = None
+        first_nested_brace: int | None = None
+        raw_objects: list[tuple[int, int, int]] = []
+
+        for i in range(scan_start, len(current_text)):
+            ch = current_text[i]
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                if brace_depth == 0:
+                    obj_start = i
+                    first_nested_brace = None
+                elif brace_depth == 1 and first_nested_brace is None:
+                    first_nested_brace = i
+                brace_depth += 1
+            elif ch == "}":
+                if brace_depth > 0:
+                    brace_depth -= 1
+                    if brace_depth == 0 and obj_start is not None:
+                        end_pos = i + 1
+                        name_end = (
+                            first_nested_brace
+                            if first_nested_brace is not None
+                            else end_pos
+                        )
+                        raw_objects.append((obj_start, name_end, end_pos))
+                        obj_start = None
+                        first_nested_brace = None
+            elif ch == "]" and brace_depth == 0:
+                break
+
+        if brace_depth > 0 and obj_start is not None:
+            end_pos = len(current_text)
+            name_end = first_nested_brace if first_nested_brace is not None else end_pos
+            raw_objects.append((obj_start, name_end, end_pos))
+
+        name_matches: list[re.Match[str]] = []
+        tool_spans: list[tuple[int, int]] = []
+        for idx, (obj_start, name_end, _obj_end) in enumerate(raw_objects):
+            match = self.tool_name_reg.search(current_text, obj_start, name_end)
+            if match is not None:
+                name_matches.append(match)
+                next_start = (
+                    raw_objects[idx + 1][0]
+                    if idx + 1 < len(raw_objects)
+                    else len(current_text)
+                )
+                tool_spans.append((obj_start, next_start))
+
+        return name_matches, tool_spans
 
     def _try_parse_json_tools(self, current_text: str):
         try:
@@ -252,6 +326,7 @@ class HunyuanA13BToolParser(ToolParser):
                                 "sent_name": True,
                                 "sent_arguments_prefix": False,
                                 "sent_arguments": "",
+                                "args_complete": False,
                             }
                         )
                     else:
@@ -266,6 +341,7 @@ class HunyuanA13BToolParser(ToolParser):
                     "sent_name": False,
                     "sent_arguments_prefix": False,
                     "sent_arguments": "",
+                    "args_complete": False,
                 }
             )
         while len(self.streaming_state["tool_ids"]) < tool_count:
@@ -274,126 +350,124 @@ class HunyuanA13BToolParser(ToolParser):
     def _handle_tool_name_streaming(
         self, current_idx: int, tool_count: int, name_matches
     ):
-        if current_idx == -1 or current_idx < tool_count - 1:
-            next_idx = current_idx + 1
-            if (
-                next_idx < tool_count
-                and not self.streaming_state["sent_tools"][next_idx]["sent_name"]
-            ):
-                self.streaming_state["current_tool_index"] = next_idx
-                self.current_tool_id = next_idx
-                current_idx = next_idx
-                tool_name = name_matches[current_idx].group(1)
-                tool_id = f"call_{current_idx}_{random_uuid()}"
-                self.streaming_state["tool_ids"][current_idx] = tool_id
-                delta = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=current_idx,
-                            type="function",
-                            id=tool_id,
-                            function=DeltaFunctionCall(name=tool_name).model_dump(
-                                exclude_none=True
-                            ),
-                        )
-                    ]
-                )
-                self.streaming_state["sent_tools"][current_idx]["sent_name"] = True
-                while len(self.streamed_args) <= current_idx:
-                    self.streamed_args.append("")
-                return delta
+        target_idx = None
+        if (
+            0 <= current_idx < tool_count
+            and not self.streaming_state["sent_tools"][current_idx]["sent_name"]
+        ):
+            target_idx = current_idx
+        elif current_idx == -1:
+            target_idx = 0
+        elif (
+            current_idx < tool_count - 1
+            and self.streaming_state["sent_tools"][current_idx].get(
+                "args_complete", False
+            )
+            and not self.streaming_state["sent_tools"][current_idx + 1]["sent_name"]
+        ):
+            target_idx = current_idx + 1
+
+        if target_idx is not None and target_idx < tool_count:
+            self.streaming_state["current_tool_index"] = target_idx
+            self.current_tool_id = target_idx
+            tool_name = name_matches[target_idx].group(1)
+            tool_id = f"call_{target_idx}_{random_uuid()}"
+            self.streaming_state["tool_ids"][target_idx] = tool_id
+            delta = DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=target_idx,
+                        type="function",
+                        id=tool_id,
+                        function=DeltaFunctionCall(name=tool_name).model_dump(
+                            exclude_none=True
+                        ),
+                    )
+                ]
+            )
+            self.streaming_state["sent_tools"][target_idx]["sent_name"] = True
+            while len(self.streamed_args) <= target_idx:
+                self.streamed_args.append("")
+            return delta
         return None
 
     def _handle_tool_args_streaming(
-        self, current_text: str, current_idx: int, tool_count: int
+        self,
+        current_text: str,
+        current_idx: int,
+        tool_count: int,
+        tool_spans: list[tuple[int, int]] | None = None,
     ):
         if current_idx >= 0 and current_idx < tool_count:
-            empty_args_match = self.tool_empty_arg_reg.search(current_text)
-            if empty_args_match and empty_args_match.start() > 0:
-                for i in range(tool_count):
-                    if i == current_idx:
-                        if not self.streaming_state["sent_tools"][current_idx][
-                            "sent_arguments_prefix"
-                        ]:
-                            self.streaming_state["sent_tools"][current_idx][
-                                "sent_arguments_prefix"
-                            ] = True
-                            self.streaming_state["sent_tools"][current_idx][
-                                "sent_arguments"
-                            ] = "{}"
-                            while len(self.streamed_args) <= current_idx:
-                                self.streamed_args.append("")
-                            self.streamed_args[current_idx] += "{}"
-                            delta = DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=current_idx,
-                                        function=DeltaFunctionCall(
-                                            arguments="{}"
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
-                            )
-                            if current_idx < tool_count - 1:
-                                self.streaming_state["current_tool_index"] += 1
-                                self.current_tool_id = self.streaming_state[
-                                    "current_tool_index"
-                                ]
-                            return delta
+            if tool_spans is None:
+                _, tool_spans = self._get_top_level_tools(current_text)
+            if current_idx >= len(tool_spans):
+                return None
 
-            args_matches = list(self.tool_non_empty_arg_reg.finditer(current_text))
-            if current_idx < len(args_matches):
-                args_text = args_matches[current_idx].group(1)
-                is_last_tool = current_idx == tool_count - 1
-                if not is_last_tool:
-                    next_tool_pos = current_text.find(
-                        "},{", args_matches[current_idx].start()
-                    )
-                    if next_tool_pos != -1:
-                        args_end_pos = next_tool_pos + 1
-                        args_text = (
-                            current_text[
-                                args_matches[current_idx].start() : args_end_pos
-                            ]
-                            .split('"arguments":')[1]
-                            .strip()
-                        )
-                sent_args = self.streaming_state["sent_tools"][current_idx][
-                    "sent_arguments"
-                ]
+            tool_start, tool_end = tool_spans[current_idx]
+            tool_text = current_text[tool_start:tool_end]
+
+            empty_args_match = self.tool_empty_arg_reg.search(tool_text)
+            if empty_args_match:
                 if not self.streaming_state["sent_tools"][current_idx][
                     "sent_arguments_prefix"
-                ] and args_text.startswith("{"):
+                ]:
                     self.streaming_state["sent_tools"][current_idx][
                         "sent_arguments_prefix"
                     ] = True
                     self.streaming_state["sent_tools"][current_idx][
                         "sent_arguments"
-                    ] = "{"
+                    ] = "{}"
+                    self.streaming_state["sent_tools"][current_idx]["args_complete"] = (
+                        True
+                    )
                     while len(self.streamed_args) <= current_idx:
                         self.streamed_args.append("")
-                    self.streamed_args[current_idx] += "{"
+                    self.streamed_args[current_idx] += "{}"
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
                                 index=current_idx,
-                                function=DeltaFunctionCall(arguments="{").model_dump(
+                                function=DeltaFunctionCall(arguments="{}").model_dump(
                                     exclude_none=True
                                 ),
                             )
                         ]
                     )
+                    if current_idx < tool_count - 1:
+                        self.streaming_state["current_tool_index"] += 1
+                        self.current_tool_id = self.streaming_state[
+                            "current_tool_index"
+                        ]
                     return delta
 
+            args_match = self.tool_non_empty_arg_reg.search(tool_text)
+            if args_match is not None:
+                args_text = args_match.group(1)
+                sent_args = self.streaming_state["sent_tools"][current_idx][
+                    "sent_arguments"
+                ]
                 if args_text.startswith(sent_args):
                     args_diff = args_text[len(sent_args) :]
                     if args_diff:
+                        self.streaming_state["sent_tools"][current_idx][
+                            "sent_arguments_prefix"
+                        ] = True
                         self.streaming_state["sent_tools"][current_idx][
                             "sent_arguments"
                         ] = args_text
                         while len(self.streamed_args) <= current_idx:
                             self.streamed_args.append("")
                         self.streamed_args[current_idx] += args_diff
+                        if args_text.endswith("}"):
+                            self.streaming_state["sent_tools"][current_idx][
+                                "args_complete"
+                            ] = True
+                            if current_idx < tool_count - 1:
+                                self.streaming_state["current_tool_index"] += 1
+                                self.current_tool_id = self.streaming_state[
+                                    "current_tool_index"
+                                ]
                         delta = DeltaMessage(
                             tool_calls=[
                                 DeltaToolCall(
@@ -407,6 +481,9 @@ class HunyuanA13BToolParser(ToolParser):
                         return delta
 
                 if args_text.endswith("}") and args_text == sent_args:
+                    self.streaming_state["sent_tools"][current_idx]["args_complete"] = (
+                        True
+                    )
                     if current_idx < tool_count - 1:
                         self.streaming_state["current_tool_index"] += 1
                         self.current_tool_id = self.streaming_state[
