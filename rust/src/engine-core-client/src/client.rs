@@ -16,6 +16,7 @@ use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::client::readiness::{RecheckGuard, run_readiness_loop};
+pub use crate::client::state::EngineLoadSnapshot;
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
@@ -668,6 +669,13 @@ impl EngineCoreClient {
     /// Return whether the connected engines record stats.
     pub fn engine_stats_enabled(&self) -> bool {
         self.config.engine_stats_enabled
+    }
+
+    /// Snapshot the latest scheduler-side load of every connected engine,
+    /// keyed by engine index. Engines that have not reported scheduler stats
+    /// yet map to `None`.
+    pub fn load_snapshots(&self) -> BTreeMap<u32, Option<EngineLoadSnapshot>> {
+        self.inner.load_snapshots()
     }
 
     /// Return whether the client still considers the engine healthy.
