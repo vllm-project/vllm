@@ -2176,6 +2176,192 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
     assert select_common_block_size(1024, backends, specs) == transfer_block_size
 
 
+# Kimi K3 with a FLASH_ATTN DSpark draft, scaled down: the MLA target takes
+# 4-token kernel blocks, the draft keeps one 16-token row per block (2 heads x
+# 5 B, token-major), padded from 160 B to the shared 192 B page.
+_ROW_BLOCK, _ROW_KERNEL_BLOCK, _ROW_PAGE = 16, 4, 192
+_ROW_DRAFT_HEADS, _ROW_DRAFT_WIDTH = 2, 5
+
+
+def _whole_row_draft_worker(
+    engine_id, num_blocks=6, *, layers=("target", "draft"), pp_stage=None
+):
+    """Worker holding `layers`; `pp_stage=(pp_rank, pp_size)` makes it that
+    prefill PP stage, which keeps both groups but only its own layers."""
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    ratio = _ROW_BLOCK // _ROW_KERNEL_BLOCK
+    target = MLAAttentionSpec(
+        block_size=_ROW_BLOCK,
+        num_kv_heads=1,
+        head_size=_ROW_PAGE // _ROW_BLOCK,
+        dtype=torch.uint8,
+    )
+    draft = AttentionSpec(
+        block_size=_ROW_BLOCK,
+        num_kv_heads=_ROW_DRAFT_HEADS,
+        head_size=3,
+        head_size_v=2,
+        dtype=torch.uint8,
+        page_size_padded=_ROW_PAGE,
+    )
+    raw = {
+        name: torch.zeros(num_blocks * _ROW_PAGE, dtype=torch.uint8) for name in layers
+    }
+    views = {
+        "target": lambda t: t.view(num_blocks * ratio, 1, _ROW_KERNEL_BLOCK, -1),
+        "draft": lambda t: t.as_strided(
+            (num_blocks, _ROW_DRAFT_HEADS, _ROW_BLOCK, _ROW_DRAFT_WIDTH),
+            (_ROW_PAGE, _ROW_DRAFT_WIDTH, _ROW_DRAFT_HEADS * _ROW_DRAFT_WIDTH, 1),
+        ),
+    }
+    caches = {name: views[name](t) for name, t in raw.items()}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=t.nbytes,
+                layers=[name],
+                layer_stride=t.nbytes,
+                block_stride=_ROW_PAGE,
+            )
+            for name, t in raw.items()
+        ],
+        kv_cache_groups=[
+            KVCacheGroup(
+                {name: spec} if name in layers else {},
+                FullAttentionManager.config(),
+                _ROW_BLOCK,
+                unprojected_specs=(spec,),
+            )
+            for name, spec in (("target", target), ("draft", draft))
+        ],
+    )
+    vllm_config = create_vllm_config(
+        block_size=_ROW_BLOCK, kv_role="kv_producer" if pp_stage else "kv_both"
+    )
+    vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    if pp_stage:
+        vllm_config.parallel_config.pipeline_parallel_size = pp_stage[1]
+    backend = MagicMock()
+    backend.get_name.return_value = "FLASHMLA"
+    backend.full_cls_name.return_value = "fake.FLASHMLA"
+    platform = MagicMock()
+    platform.device_type = "cuda"
+    platform.get_nixl_memory_type.return_value = "VRAM"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
+        patch.object(bw, "select_common_block_size", return_value=_ROW_KERNEL_BLOCK),
+        patch.object(bw, "current_platform", platform),
+        patch("threading.Thread"),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, engine_id, kv_cache_config)
+        worker.use_mla = True
+        worker.register_kv_caches(caches)
+    return worker, raw
+
+
+@pytest.mark.cpu_test
+def test_whole_row_draft_next_to_split_target_pulls_every_row_byte():
+    """The draft's rows are registered as kernel-page-sized byte ranges, so
+    a pull must still land each row whole, pad included, in both groups."""
+    p, p_raw = _whole_row_draft_worker("P")
+    d, d_raw = _whole_row_draft_worker("D")
+    names = ["target", "draft"]
+    p_ids, d_ids = [[1, 2], [3, 4]], [[5, 4], [1, 0]]
+    for name, ids in zip(names, p_ids):
+        for pos, block in enumerate(ids):
+            row = p_raw[name][block * _ROW_PAGE : (block + 1) * _ROW_PAGE]
+            row.copy_(_tag(row, name, pos))
+
+    meta = msgspec.msgpack.Decoder(NixlAgentMetadata).decode(
+        p.xfer_handshake_metadata.agent_metadata_bytes
+    )
+    _register_remote_agents(d, meta, 1)
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=tuple(d_ids),
+        kv_transfer_params={
+            "remote_block_ids": p_ids,
+            "remote_engine_id": "P",
+            "remote_request_id": "prefill-req",
+            "remote_host": "remote-host",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+    req = metadata.reqs_to_recv["req"]
+    req.local_physical_block_ids = d._logical_to_kernel_block_ids(
+        req.local_block_ids, d._physical_blocks_per_logical_kv_block
+    )
+    d._recving_metadata["req"] = req
+    d._read_blocks_for_req("req", req)
+    _run_recorded_copies(d.nixl_wrapper)
+
+    for name, ids in zip(names, d_ids):
+        for pos, block in enumerate(ids):
+            row = d_raw[name][block * _ROW_PAGE : (block + 1) * _ROW_PAGE]
+            assert torch.equal(row, _tag(row, name, pos)), (name, pos)
+            row.zero_()
+    assert not any(t.any() for t in d_raw.values()), "bytes outside the rows changed"
+
+
+@pytest.mark.cpu_test
+def test_whole_row_draft_pulls_every_row_byte_from_prefill_pp_stages():
+    """PP splits layers and leaves each row's layout alone, so a PP=1 decoder
+    reads the target from stage 0 and the whole draft row, pad included, from
+    stage 1, which is the only stage that tiles."""
+    d, d_raw = _whole_row_draft_worker("decode")
+    stages, p_raw = zip(
+        *(
+            _whole_row_draft_worker("prefill", layers=(name,), pp_stage=(rank, 2))
+            for rank, name in enumerate(("target", "draft"))
+        )
+    )
+    assert [s._tiles_whole_kernel_rows for s in stages] == [False, True]
+    names = ["target", "draft"]
+    p_ids, d_ids = [[1, 2], [3, 4]], [[5, 4], [1, 0]]
+    for raw, name, ids in zip(p_raw, names, p_ids):
+        for pos, block in enumerate(ids):
+            row = raw[name][block * _ROW_PAGE : (block + 1) * _ROW_PAGE]
+            row.copy_(_tag(row, name, pos))
+
+    _pull_page_pairs(d, stages, tuple(d_ids), p_ids)
+    _run_recorded_copies(d.nixl_wrapper)
+
+    for name, ids in zip(names, d_ids):
+        for pos, block in enumerate(ids):
+            row = d_raw[name][block * _ROW_PAGE : (block + 1) * _ROW_PAGE]
+            assert torch.equal(row, _tag(row, name, pos)), (name, pos)
+            row.zero_()
+    assert not any(t.any() for t in d_raw.values()), "bytes outside the rows changed"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "peer", [{"remote_tp_size": 2}, {"remote_tp_size": 1, "remote_dcp_size": 2}]
+)
+def test_whole_row_draft_refuses_a_peer_with_another_row_layout(peer):
+    """Another TP puts other heads at a byte page's offset, another DCP other
+    tokens, so the page copy would move the wrong KV."""
+    p, _ = _whole_row_draft_worker("P")
+    d, _ = _whole_row_draft_worker("D")
+    meta = msgspec.msgpack.Decoder(NixlAgentMetadata).decode(
+        p.xfer_handshake_metadata.agent_metadata_bytes
+    )
+    with pytest.raises(NotImplementedError, match="different kernel block sizes"):
+        d.add_remote_agent(meta, remote_tp_rank=0, **peer)
+
+
 # Real model KV layouts, end to end on CPU: vLLM's planner and allocator build
 # P's and D's caches, D reads one request from P, and the recorded descriptors
 # are run as memory copies so every byte can be checked. Each case is the

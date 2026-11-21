@@ -127,6 +127,12 @@ def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
     )
 
 
+def _view_span_bytes(view: torch.Tensor) -> int:
+    """Bytes from a view's first element to the end of its last one."""
+    span = sum((size - 1) * stride for size, stride in zip(view.shape, view.stride()))
+    return (span + 1) * view.element_size()
+
+
 def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     """Return whether all views share storage and a block stride."""
     block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
@@ -1158,6 +1164,10 @@ class NixlBaseConnectorWorker:
         # explicitly because aliased layers share a region keyed by address, so
         # e.g. a scratch page lands in the region of the page it overlays.
         self._group_region_indices = list[list[int] | None]()
+        # Whether some attention view keeps one row per logical block, which NIXL
+        # registers as `_physical_blocks_per_logical_kv_block` byte pages (see
+        # `register_kv_caches`). Such pages line up only with an identical peer.
+        self._tiles_whole_kernel_rows = False
         self._ple_region_index: int | None = None
         # Page length of the PLE short-conv state; its region may be shared with
         # pages of a different (smaller) size, so it cannot use the region's.
@@ -1718,6 +1728,7 @@ class NixlBaseConnectorWorker:
         seen_region_keys: list[tuple[int, int]] = []
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
+        self._tiles_whole_kernel_rows = False
         self._ple_block_len = None
         self._ple_region_index = None
 
@@ -1835,6 +1846,43 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
+                # Views round to whole rows of this stride (see the segment split).
+                row_stride = block_stride
+                ratio = self._physical_blocks_per_logical_kv_block
+                if (
+                    not is_mla_region
+                    and ratio > 1
+                    and cache.ndim > 1
+                    and cache.shape[0] * ratio == num_blocks
+                    and block_stride == ratio * physical_page_size
+                    and _view_span_bytes(cache[0]) <= block_stride
+                ):
+                    # Tile a whole kernel row into `ratio` byte pages.
+                    #
+                    # `ratio` comes from one kernel block size picked for all
+                    # groups, but the model runner picks one per group. A group
+                    # whose backend accepts the full logical block size keeps
+                    # one row per logical block. Kimi K3 with a FLASH_ATTN draft
+                    # (1792-token logical blocks, ratio 28):
+                    #
+                    #   MLA target | p0 | p1 | ... | p27 |  28 x 64-token pages
+                    #   FA draft   | 1792 tokens x 4 heads | pad |  one row
+                    #              0                917504   1032192 = 28 x 36864
+                    #
+                    # NIXL counts `ratio` blocks per row (num_blocks = rows *
+                    # ratio), but this view's stride is a whole row, so it does
+                    # not split into blocks of `physical_page_size`. Register
+                    # the row as `ratio` byte ranges of that size instead. A
+                    # range need not match the backend's page (range 0 is tokens
+                    # 0-71 of the draft, and the pad starts inside range 24
+                    # here). That is fine because a logical block id always
+                    # expands to all `ratio` page ids of its row
+                    # (`_logical_to_kernel_block_ids`), so every transfer copies
+                    # the whole row, padding included, byte for byte. The copy
+                    # is correct only if the peer's row has the same layout,
+                    # which `_validate_remote_agent_handshake` checks.
+                    block_stride = physical_page_size
+                    self._tiles_whole_kernel_rows = True
                 # A connector that registers the backing as one memory region
                 # may need its length rounded up to a page boundary. Such a tail
                 # is shorter than one block, so it cannot make the storage
@@ -1899,14 +1947,9 @@ class NixlBaseConnectorWorker:
                     # padding past its payload (e.g. DSA latent + indexer rows).
                     view_bytes = cache.nbytes
                     if cache.ndim > 1:
-                        view_span = (
-                            sum(
-                                (size - 1) * stride
-                                for size, stride in zip(cache.shape, cache.stride())
-                            )
-                            + 1
-                        ) * cache.element_size()
-                        view_bytes = cdiv(view_span, block_stride) * block_stride
+                        view_bytes = (
+                            cdiv(_view_span_bytes(cache), row_stride) * row_stride
+                        )
                     if view_bytes % segment_bytes != 0:
                         raise AssertionError(
                             "KV cache view cannot be partitioned into NIXL regions: "
@@ -3010,6 +3053,27 @@ class NixlBaseConnectorWorker:
             != nixl_agent_meta.block_size * remote_physical_per_logical
         ):
             raise NotImplementedError("DCP requires matching P/D logical block sizes")
+        if self._tiles_whole_kernel_rows and (
+            tp_ratio != 1
+            or self.dcp_size != remote_dcp_size
+            or block_size_ratio != 1
+            or remote_physical_per_logical != self._physical_blocks_per_logical_kv_block
+        ):
+            # Byte pages cut a row at fixed offsets. With a different TP the
+            # peer's row holds other heads; with a different DCP, block size or
+            # ratio it holds other tokens. Page k would then name different KV
+            # on each side, so refuse instead of copying the wrong bytes.
+            raise NotImplementedError(
+                "KV cache groups with different kernel block sizes require "
+                "matching TP, DCP and block sizes on both NIXL peers: "
+                f"local TP={self.transfer_topo.tp_size}, remote TP={remote_tp_size}, "
+                f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
+                f"local block size={self.block_size}, "
+                f"remote block size={nixl_agent_meta.block_size}, "
+                "local/remote physical blocks per logical="
+                f"{self._physical_blocks_per_logical_kv_block}/"
+                f"{remote_physical_per_logical}."
+            )
         if (
             self._has_mamba
             and remote_physical_per_logical
