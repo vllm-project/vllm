@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
+    VLLM_MUSE_DSPARK_MARKOV_VOCAB_SHARD: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1351,6 +1352,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
+    # Muse Spark DSpark draft on ROCm with TP > 1: run the sequential Markov
+    # sampling on each rank's vocabulary shard of the draft lm_head (1/tp of
+    # markov_w2 a rank, one small all-gather a draft position) instead of
+    # all-gathering the draft logits. It runs ahead of the --monokernel Markov
+    # rounds, which then take only the steps it declines.
+    "VLLM_MUSE_DSPARK_MARKOV_VOCAB_SHARD": lambda: bool(
+        int(os.getenv("VLLM_MUSE_DSPARK_MARKOV_VOCAB_SHARD", "0"))
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
