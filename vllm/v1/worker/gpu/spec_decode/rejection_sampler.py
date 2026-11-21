@@ -10,6 +10,7 @@ from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.sample.ops.topk_topp_triton import top_k_top_p_kept_tokens_triton
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -273,6 +274,7 @@ class RejectionSampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        max_kept = self._max_kept_tokens(logits, draft_logits, idx_mapping_np)
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -282,7 +284,18 @@ class RejectionSampler:
             draft_sampled,
             expanded_local_pos,
             seq_lens_upper_bound_np,
+            **({"skip_top_k_top_p": True} if max_kept is not None else {}),
         )
+        kept = None
+        if max_kept is not None:
+            # The returned logits stay unmasked, which no caller reads here.
+            top_k, top_p, _ = self.sampler.sampling_states.get_top_k_top_p(
+                expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
+            )
+            assert top_k is not None
+            kept = top_k_top_p_kept_tokens_triton(
+                processed_logits, top_k, top_p, max_kept
+            )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -304,6 +317,7 @@ class RejectionSampler:
             skip_masked_vocab_blocks=bool(
                 np.any(self.sampler.may_mask_logits[idx_mapping_np])
             ),
+            kept=kept,
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),
@@ -313,6 +327,28 @@ class RejectionSampler:
                 sampled, num_sampled, draft_sampled, cu_num_logits, idx_mapping
             )
         return processed_logits, sampled, num_sampled
+
+    def _max_kept_tokens(
+        self,
+        logits: torch.Tensor,
+        draft_logits: DraftLogitsCache | None,
+        idx_mapping_np: np.ndarray,
+    ) -> int | None:
+        """Width of the compact kept-token output, if the chunk can be verified
+        from it: no block or FLy verification, watermarking or processed
+        logprobs, and every request with a top-k <= _MAX_KEPT_TOKENS."""
+        if (
+            self.use_block_verification
+            or self.fly_window_size > 0
+            or self.watermark_key is not None
+            or self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+            or (
+                draft_logits is not None
+                and draft_logits.values.size(-1) < logits.shape[-1]
+            )
+        ):
+            return None
+        return self.sampler._max_kept_tokens(idx_mapping_np, return_logprobs=False)
 
     def _verify_in_chunks(
         self,

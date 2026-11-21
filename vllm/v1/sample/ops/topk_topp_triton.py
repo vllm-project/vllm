@@ -120,6 +120,10 @@ def _topk_topp_kernel(
     TOPK_ENABLED: tl.constexpr,
     TOPP_ENABLED: tl.constexpr,
     SPLIT_COVERS_PONLY: tl.constexpr,
+    KEPT_IDS=None,
+    KEPT_LOGITS=None,
+    NUM_KEPT=None,
+    MAX_KEPT=0,
 ):
     NUM_TILES: tl.constexpr = (VOCAB_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE
     pid = tl.program_id(0)
@@ -854,6 +858,21 @@ def _topk_topp_kernel(
         # Using `not <` instead of `>=` so that NaN is also caught.
         if not (final_pivot < max_logit):
             final_pivot = -float("inf")
+        if KEPT_IDS is not None:
+            row_offset = row_id.to(tl.int64) * MAX_KEPT
+            _store_kept_tokens(
+                LOGITS_ROW,
+                KEPT_IDS + row_offset,
+                KEPT_LOGITS + row_offset,
+                NUM_KEPT + row_id,
+                MAX_KEPT,
+                final_pivot,
+                duplicate_logit,
+                num_duplicate_logit,
+                num_keep,
+                VOCAB_SIZE,
+                BLOCK_SIZE,
+            )
         elif final_pivot != -float("inf"):
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -876,6 +895,52 @@ def _topk_topp_kernel(
 
                 logits_blk = tl.where(keep_mask, logits_blk, MASK_VALUE)
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
+
+
+@triton.jit
+def _store_kept_tokens(
+    LOGITS_ROW,
+    KEPT_IDS_ROW,
+    KEPT_LOGITS_ROW,
+    NUM_KEPT_PTR,
+    MAX_KEPT,
+    final_pivot,
+    duplicate_logit,
+    num_duplicate_logit,
+    num_keep,
+    VOCAB_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Write the row's kept tokens compactly in vocab order, instead of masking.
+
+    Keeps the same tokens as the masking pass: a -inf pivot keeps every finite
+    logit, and tied logits at the cutoff are kept in vocab order. Stores at most
+    MAX_KEPT tokens, and the number kept (which may be larger) in NUM_KEPT_PTR.
+    """
+    NUM_TILES: tl.constexpr = (VOCAB_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE
+    split_ties = (final_pivot != -float("inf")) & (num_keep < num_duplicate_logit)
+    num_ties_kept = tl.zeros((), dtype=tl.uint32)
+    num_kept = tl.zeros((), dtype=tl.int32)
+    for i in range(0, NUM_TILES):
+        offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask_n = offs_n < VOCAB_SIZE
+        logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf"))
+        keep_mask = (logits_blk > final_pivot) & mask_n
+        if split_ties:
+            tie_mask = (tl.abs(logits_blk - duplicate_logit) < 1e-9) & mask_n
+            tie_keep_mask = (tl.cumsum(tie_mask) + num_ties_kept <= num_keep) & tie_mask
+            num_ties_kept += tl.sum(tie_keep_mask)
+            keep_mask = keep_mask & ~(tie_mask & ~tie_keep_mask)
+        keep = keep_mask.to(tl.int32)
+        num_tile_kept = tl.sum(keep)
+        # Most tiles keep nothing, so skip their scan.
+        if num_tile_kept > 0:
+            slot = num_kept + tl.cumsum(keep) - 1
+            store_mask = keep_mask & (slot < MAX_KEPT)
+            tl.store(KEPT_IDS_ROW + slot, offs_n, mask=store_mask)
+            tl.store(KEPT_LOGITS_ROW + slot, logits_blk, mask=store_mask)
+        num_kept += num_tile_kept
+    tl.store(NUM_KEPT_PTR, num_kept)
 
 
 def _max_sampler_batch_size(vllm_config: Any) -> int:
@@ -923,6 +988,9 @@ def _topk_topp(
     p: torch.Tensor | None,
     mask_value: float,
     num_sm: int,
+    kept_ids: torch.Tensor | None = None,
+    kept_logits: torch.Tensor | None = None,
+    num_kept: torch.Tensor | None = None,
 ) -> DispatchSpec:
     batch_size, vocab_size = logits.shape
     topk_enabled = k is not None
@@ -947,6 +1015,7 @@ def _topk_topp(
         current_platform.is_cuda_alike()
         and topp_enabled
         and batch_size <= _SPLIT_MAX_BATCH
+        and kept_ids is None
     )
     return (num_programs,), dict(
         K=k_ptr,
@@ -958,6 +1027,7 @@ def _topk_topp(
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
         SPLIT_COVERS_PONLY=split_covers_ponly,
+        MAX_KEPT=kept_ids.shape[1] if kept_ids is not None else 0,
         num_warps=num_warps,
     )
 
@@ -1615,12 +1685,39 @@ def _apply_topp_split(
     )
 
 
+def top_k_top_p_kept_tokens_triton(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor | None,
+    max_kept: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The tokens `apply_top_k_top_p_triton` keeps, without masking the logits.
+
+    Every row must have an active top-k with `k <= max_kept`.
+
+    Returns:
+        `kept_ids` (`[batch_size, max_kept]` int32) and `kept_logits`
+        (`[batch_size, max_kept]` float32) of each row's kept tokens in vocab
+        order, and `num_kept` (`[batch_size]` int32). Slots past `num_kept`
+        are undefined.
+
+    """
+    batch_size = logits.shape[0]
+    kept_ids = logits.new_empty((batch_size, max_kept), dtype=torch.int32)
+    kept_logits = logits.new_empty((batch_size, max_kept))
+    num_kept = logits.new_empty((batch_size,), dtype=torch.int32)
+    kept_out = (kept_ids, kept_logits, num_kept)
+    apply_top_k_top_p_triton(logits, k, p, has_topp_only_rows=False, kept_out=kept_out)
+    return kept_out
+
+
 def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     mask_value: float = float("-inf"),
     has_topp_only_rows: bool = True,
+    kept_out: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Apply combined top-k and top-p masking using Triton.
 
@@ -1638,6 +1735,9 @@ def apply_top_k_top_p_triton(
         has_topp_only_rows: Whether any row has p < 1 and k >= vocab_size.
             False lets small batches skip the split top-p pipeline; pass it
             only if no such row exists, as such a row would get no top-p.
+        kept_out: If given, `(kept_ids, kept_logits, num_kept)` receive the
+            kept tokens and the logits are left unmasked. See
+            `top_k_top_p_kept_tokens_triton`.
 
     Returns:
         The masked logits tensor. It may or may not be modified in-place.
@@ -1719,6 +1819,7 @@ def apply_top_k_top_p_triton(
         p_ptr if topp_enabled else None,
         mask_value,
         num_sm,
+        *(kept_out or ()),
     )
     if use_split and has_topp_only_rows:
         _apply_topp_split(logits, k_ptr, p_ptr, mask_value, num_sm)
