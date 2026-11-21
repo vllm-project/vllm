@@ -97,9 +97,10 @@ class PreparedProjection:
             self.maps[rows] = weight_map(self.weight, rows)
         return (cutlass.Int64(self.maps[rows].data_ptr()),)
 
-    def run(self, x, out):
+    def run(self, x, out, *, tactic_tokens=None):
         y = matrix_view(out, output=True)
-        b, stream = x.shape[0], current_stream(self.device)
+        b = x.shape[0] if tactic_tokens is None else tactic_tokens
+        stream = current_stream(self.device)
         if b not in self.kernels or x.shape[1] != self.weight.shape[1]:
             raise ValueError(
                 f"projection input {tuple(x.shape)}: prepared batches "
