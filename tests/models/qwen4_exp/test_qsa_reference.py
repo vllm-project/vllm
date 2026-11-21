@@ -37,6 +37,15 @@ requires_qsa_metadata_kernels = pytest.mark.skipif(
     reason="QSA metadata kernels require CUDA or ROCm and Triton",
 )
 
+# Triton has no e4m3 (fp8e4nv) type below sm_89. There the layer passes an fp8
+# main KV cache as its uint8 storage, and fp8 indexer caches are unsupported.
+FP8_E4M3_NATIVE = current_platform.is_cuda() and current_platform.has_device_capability(
+    89
+)
+requires_native_fp8 = pytest.mark.skipif(
+    not FP8_E4M3_NATIVE, reason="fp8 e4m3 Triton kernels need sm_89+"
+)
+
 
 _HISPARSE_KV_TRANSFER_CONFIG = {
     "kv_connector": "HiSparseConnector",
@@ -857,7 +866,10 @@ def test_qsa_sparse_attention_warmup_covers_different_cache_pools() -> None:
         (4, 33),
     ],
 )
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, pytest.param(torch.float8_e4m3fn, marks=requires_native_fp8)],
+)
 def test_qsa_decode_selection_correctness(
     decode_query_len: int, num_requests: int, dtype: torch.dtype
 ) -> None:
@@ -955,7 +967,10 @@ def test_qsa_decode_selection_correctness(
 
 
 @requires_qsa_kernels
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, pytest.param(torch.float8_e4m3fn, marks=requires_native_fp8)],
+)
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
 @pytest.mark.parametrize("force_chunk", [False, True])
 @pytest.mark.parametrize(
@@ -1249,13 +1264,18 @@ def test_qsa_sparse_paged_attention_correctness(
     else:
         k_scale, v_scale = 1.0, 1.0
 
+    # The layer hands the kernel the uint8 storage of an fp8 cache below sm_89.
+    kernel_k_cache, kernel_v_cache = k_cache, v_cache
+    if fp8 and not FP8_E4M3_NATIVE:
+        kernel_k_cache = k_cache.view(torch.uint8)
+        kernel_v_cache = v_cache.view(torch.uint8)
     actual = torch.full_like(q, torch.nan)
     # Poisoned out buffer: the assert below fails if any actual row is left
     # unwritten, which is what lets the caller skip zero-filling it.
     qsa_ops.qsa_sparse_paged_attention(
         q,
-        k_cache,
-        v_cache,
+        kernel_k_cache,
+        kernel_v_cache,
         logical_indices,
         block_table,
         token_to_req,
