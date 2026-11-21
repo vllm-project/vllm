@@ -6,6 +6,7 @@ import types
 from types import SimpleNamespace
 
 import pytest
+import torch
 from transformers import Gemma2Config, MistralConfig
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
 from transformers.models.llama4.configuration_llama4 import (
@@ -16,6 +17,7 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 
 from vllm.config.model import ModelConfig, get_hf_text_config
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
@@ -596,10 +598,32 @@ def test_moe_expert_activation_proportional_scaling():
     assert two_expert_write_diff == 2 * one_expert_write_diff
 
 
+class _MockQuantConfig(QuantizationConfig):
+    """Smallest real config; each test names the method via get_name()."""
+
+    def get_supported_act_dtypes(self):
+        return [torch.bfloat16]
+
+    @classmethod
+    def get_min_capability(cls):
+        return -1
+
+    @staticmethod
+    def get_config_filenames():
+        return []
+
+    @classmethod
+    def from_config(cls, config):
+        return cls()
+
+    def get_quant_method(self, layer, prefix):
+        return None
+
+
 def test_quantization_config_parser_fp8():
     """Test quantization parsers with fp8."""
 
-    class MockQuantConfig:
+    class MockQuantConfig(_MockQuantConfig):
         def get_name(self):
             return "fp8"
 
@@ -618,7 +642,7 @@ def test_quantization_config_parser_fp8():
 def test_quantization_config_parser_mxfp4():
     """Test quantization parsers with mxfp4."""
 
-    class MockQuantConfig:
+    class MockQuantConfig(_MockQuantConfig):
         def get_name(self):
             return "mxfp4"
 
@@ -970,7 +994,7 @@ _INT4_FP4_METHODS = [m for m, s in _QUANT_WEIGHT_BYTE_SIZE.items() if s == 0.5]
 def test_quantization_config_parser_int4_methods(quant_method):
     """Test quantization parsers with INT4/FP4 methods (0.5 bytes)."""
 
-    class MockQuantConfig:
+    class MockQuantConfig(_MockQuantConfig):
         def get_name(self):
             return quant_method
 
@@ -1001,7 +1025,7 @@ _FP8_INT8_METHODS = [m for m, s in _QUANT_WEIGHT_BYTE_SIZE.items() if s == 1]
 def test_quantization_config_parser_fp8_methods(quant_method):
     """Test quantization parsers with FP8/INT8 methods (1 byte)."""
 
-    class MockQuantConfig:
+    class MockQuantConfig(_MockQuantConfig):
         def get_name(self):
             return quant_method
 
@@ -1027,7 +1051,7 @@ def test_quantization_config_parser_fp8_methods(quant_method):
 def test_quantization_config_parser_unknown_method():
     """Test that an unrecognized quant method raises InvalidComponent."""
 
-    class MockQuantConfig:
+    class MockQuantConfig(_MockQuantConfig):
         def get_name(self):
             return "unknown_quant_method"
 
@@ -1046,10 +1070,33 @@ def test_quantization_config_parser_unknown_method():
         FfnMetrics.get_parser().parse(vllm_config)
 
 
+def test_quantization_config_parser_config_reported_size():
+    """A method missing from the table, such as one registered out of tree,
+    can report its own weight byte size."""
+
+    class MockQuantConfig(_MockQuantConfig):
+        def get_name(self):
+            return "out_of_tree_quant"
+
+        def get_weight_byte_size(self):
+            return 0.5625
+
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        intermediate_size=8192,
+        num_hidden_layers=1,
+    )
+    vllm_config = create_mock_vllm_config(hf_config, quant_config=MockQuantConfig())
+
+    assert AttentionMetrics.get_parser().parse(vllm_config).weight_byte_size == 0.5625
+    assert FfnMetrics.get_parser().parse(vllm_config).weight_byte_size == 0.5625
+
+
 def test_quantized_model_metrics_aggregation():
     """Test that ModelMetrics works end-to-end with a quantized model config."""
 
-    class MockQuantConfig:
+    class MockQuantConfig(_MockQuantConfig):
         def get_name(self):
             return "gptq"
 
