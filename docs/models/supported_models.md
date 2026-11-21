@@ -521,8 +521,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     Nemotron Labs Diffusion runs masked block diffusion by default. `--diffusion-config` sets `canvas_length` (default: the checkpoint's `block_size`) and `model_options` such as `selection_policy` and `confidence_threshold`; request temperatures are applied as usual. Pass `--hf-overrides '{"ar_mode": true}'` (or select `NemotronLabsDiffusionForCausalLM`) for ordinary autoregressive generation with the same checkpoint.
-    Prompt logprobs are retained when prefill finishes without emitting tokens;
-    generated tokens arrive once the denoising canvas is ready.
 
 ## List of Multimodal Language Models
 
