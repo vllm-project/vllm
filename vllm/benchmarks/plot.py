@@ -29,8 +29,7 @@ def generate_timeline_plot(
     itl_thresholds: list[float] | None = None,
     labels: list[str] | None = None,
 ) -> None:
-    """
-    Generate an HTML timeline plot from benchmark results.
+    """Generate an HTML timeline plot from benchmark results.
 
     Args:
         results: List of per-request result dictionaries containing:
@@ -44,8 +43,8 @@ def generate_timeline_plot(
         colors: List of colors for ITL categories (default: green, orange, red, black)
         itl_thresholds: ITL thresholds in seconds (default: [1.0, 4.0, 6.0])
         labels: Labels for ITL categories (default based on thresholds)
-    """
 
+    """
     # Set defaults
     if colors is None:
         colors = ["#109618", "#FF7F0E", "#D62728"]
@@ -118,8 +117,7 @@ def construct_timeline_data(
     itl_thresholds: list[float],
     labels: list[str],
 ) -> list[dict[str, Any]]:
-    """
-    Construct timeline data from request results.
+    """Construct timeline data from request results.
 
     Args:
         requests_data: List of per-request result dictionaries
@@ -128,6 +126,7 @@ def construct_timeline_data(
 
     Returns:
         List of timeline segments for plotting
+
     """
 
     def tostr(sec_time: float) -> str:
@@ -229,8 +228,7 @@ def generate_dataset_stats_plot(
     results: list[dict[str, Any]],
     output_path: Path,
 ) -> None:
-    """
-    Generate a matplotlib figure with dataset statistics.
+    """Generate a matplotlib figure with dataset statistics.
 
     Creates a figure with 4 subplots:
     - Top-left: Prompt tokens distribution (histogram)
@@ -243,6 +241,7 @@ def generate_dataset_stats_plot(
             - prompt_len: Number of prompt tokens
             - output_tokens: Number of output tokens
         output_path: Path where the figure will be saved
+
     """
     # Extract data
     prompt_tokens = []

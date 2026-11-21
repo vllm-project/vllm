@@ -4,7 +4,7 @@
 
 FusedMoEModularKernel is implemented [here](../../vllm/model_executor/layers/fused_moe/modular_kernel.py)
 
-Based on the format of the input activations, FusedMoE implementations are broadly classified into 2 types.
+Based on the format of the input activations, fused MoE implementations are broadly classified into 2 types.
 
 * Contiguous / Standard / Non-Batched, and
 * Batched
@@ -17,24 +17,24 @@ The input activation format completely depends on the All2All Dispatch being use
 * In the Contiguous variant, the All2All Dispatch returns the activations as a contiguous tensor of shape (M, K) along with TopK Ids and TopK weights of shape (M, num_topk). Look at `DeepEPHTPrepareAndFinalize` for an example.
 * In the Batched variant, the All2All Dispatch returns the activations as a tensor of shape (num_experts, max_tokens, K). Here, the activations/tokens that subscribe to the same expert are batched together. Note that not all entries of the tensor are valid. The activations tensor is typically accompanied by an `expert_num_tokens` tensor of size `num_experts`, where `expert_num_tokens[i]` indicates the number of valid tokens that subscribe to the ith expert. Look at `DeepEPLLPrepareAndFinalize` for an example.
 
-The FusedMoE operation is generally made of multiple operations, in both the Contiguous and Batched variants, as described in the diagrams below
+The fused MoE operation is generally made of multiple operations, in both the Contiguous and Batched variants, as described in the diagrams below
 
-![FusedMoE Non-Batched](../assets/design/fused_moe_modular_kernel/fused_moe_non_batched.png)
+![Fused MoE Non-Batched](../assets/design/fused_moe_modular_kernel/fused_moe_non_batched.png)
 
-![FusedMoE Batched](../assets/design/fused_moe_modular_kernel/fused_moe_batched.png)
+![Fused MoE Batched](../assets/design/fused_moe_modular_kernel/fused_moe_batched.png)
 
 !!! note
     The main difference, in terms of operations, between the Batched and Non-Batched cases is the Permute / Unpermute operations. All other operations remain.
 
 ## Motivation
 
-As can be seen from the diagrams, there are a lot of operations and there can be a variety of implementations for each operation. The set of ways the operations can be put together to make a valid FusedMoE implementation quickly becomes intractable. The Modular Kernel framework addresses this issue,  by grouping the operations into logical components. This broad categorization makes the combinations manageable and prevents code-duplication. This also decouples the All2All Dispatch & Combine implementations from the FusedMoE implementations and allows for their independent development and testing. Furthermore, the Modular Kernel framework introduces Abstract classes for the different components thus providing a well-defined skeleton for future implementations.
+As can be seen from the diagrams, there are a lot of operations and there can be a variety of implementations for each operation. The set of ways the operations can be put together to make a valid fused MoE implementation quickly becomes intractable. The Modular Kernel framework addresses this issue,  by grouping the operations into logical components. This broad categorization makes the combinations manageable and prevents code-duplication. This also decouples the All2All Dispatch & Combine implementations from the fused MoE implementations and allows for their independent development and testing. Furthermore, the Modular Kernel framework introduces Abstract classes for the different components thus providing a well-defined skeleton for future implementations.
 
 The rest of the document will focus on the Contiguous / Non-Batched case. Extrapolating to the Batched case should be straight-forward.
 
 ## ModularKernel Components
 
-FusedMoEModularKernel splits the FusedMoE operation into 3 parts,
+FusedMoEModularKernel splits the fused MoE operation into 3 parts,
 
 1. TopKWeightAndReduce
 2. FusedMoEPrepareAndFinalizeModular
@@ -81,7 +81,7 @@ The `apply` method is where the implementations perform
 
 #### workspace_shapes()
 
-The core FusedMoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes, the workspace datatype and the FusedMoE output shape as outputs of the workspace_shapes() method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEModularKernel::forward()` and passed on to the `FusedMoEExpertsModular::apply()` method. The workspaces could then be used as intermediate buffers in the FusedMoE implementation.
+The core fused MoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes, the workspace datatype and the fused MoE output shape as outputs of the workspace_shapes() method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEModularKernel::forward()` and passed on to the `FusedMoEExpertsModular::apply()` method. The workspaces could then be used as intermediate buffers in the fused MoE implementation.
 
 #### finalize_weight_and_reduce_impl()
 
@@ -163,7 +163,7 @@ We suggest picking an already existing `FusedMoEPrepareAndFinalizeModular` imple
 
 ### How To Add a FusedMoEExpertsModular Type
 
-FusedMoEExpertsModular performs the core of the FusedMoE operations. The various functions exposed by the abstract class and their significance is as follows,
+FusedMoEExpertsModular performs the core of the fused MoE operations. The various functions exposed by the abstract class and their significance is as follows,
 
 `FusedMoEExpertsModular::activation_formats()`: Return the supported Input and Output activation formats. i.e. Contiguous / Batched format.
 
@@ -205,7 +205,7 @@ derived classes.
 Based on the input and env settings, the `init_prepare_finalize` method creates the appropriate `FusedMoEPrepareAndFinalizeModular` object. The method then queries `select_gemm_impl` for the appropriate `FusedMoEExpertsModular` object and builds the `FusedMoEModularKernel` object
 
 Please take a look at [init_prepare_finalize](https://github.com/vllm-project/vllm/blob/1cbf951ba272c230823b947631065b826409fa62/vllm/model_executor/layers/fused_moe/layer.py#L188).
-**Important**: The `FusedMoEMethodBase` derived classes use the `FusedMoEMethodBase::fused_experts` object in their `apply` methods. When settings permit the construction of a valid `FusedMoEModularKernel` object, we override `FusedMoEMethodBase::fused_experts` with it. This essentially makes the derived classes agnostic to what FusedMoE implementation is used.
+**Important**: The `FusedMoEMethodBase` derived classes use the `FusedMoEMethodBase::fused_experts` object in their `apply` methods. When settings permit the construction of a valid `FusedMoEModularKernel` object, we override `FusedMoEMethodBase::fused_experts` with it. This essentially makes the derived classes agnostic to what fused MoE implementation is used.
 
 ### How To Unit Test
 

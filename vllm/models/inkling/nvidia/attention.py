@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 from torch import nn
+from transformers import InklingTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -26,20 +27,18 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
-from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
+    _INKLING_FA4_REL_ATTENTION_KERNEL,
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
-    inkling_fa4_rel_attention,
 )
-from .ops.fa4_warmup import InklingFA4WarmupConfig, register_fa4_warmup
 from .ops.qkvr_prep import fused_qkvr_prep
 from .sconv_swa_attn import _K, _V, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
@@ -53,7 +52,7 @@ def compute_log_scaling_tau(
 
 
 class RelLogitsProj(nn.Module):
-    """Project the per-head relative branch ``r`` to per-distance logits."""
+    """Project the per-head relative branch `r` to per-distance logits."""
 
     def __init__(self, d_rel: int, rel_extent: int) -> None:
         super().__init__()
@@ -69,7 +68,7 @@ class RelLogitsProj(nn.Module):
 class InklingAttention(nn.Module, AttentionLayerBase):
     def __init__(
         self,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         *,
         num_heads: int,
         num_kv_heads: int,
@@ -175,45 +174,26 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
-        register_fa4_warmup(
-            InklingFA4WarmupConfig(
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                rel_extent=self.rel_extent,
-                window_size=self.window_size,
-                is_local=self.is_local,
-                max_kv_len=self._max_kv_len,
-                dtype=vllm_config.model_config.dtype,
-                kv_dtype=self.kv_cache_torch_dtype,
-                block_size=vllm_config.cache_config.block_size,
-                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-                max_num_batched_tokens=(
-                    vllm_config.scheduler_config.max_num_batched_tokens
-                ),
-            )
-        )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         block_size = vllm_config.cache_config.block_size
-        if self.is_local:
-            assert self.local_extent is not None
-            return SlidingWindowSpec(
-                block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_dim,
-                dtype=self.kv_cache_torch_dtype,
-                sliding_window=self.local_extent,
-            )
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
         )
+        if self.is_local:
+            assert self.local_extent is not None
+            return SlidingWindowManager.layer_config(
+                spec, sliding_window=self.local_extent
+            )
+        return FullAttentionManager.layer_config(spec)
 
     def _split_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
         key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
@@ -277,7 +257,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 fa_md.slot_mapping,
                 off_k,
                 off_v,
-                self.conv_owner.block_size,
+                self.conv_owner.cache_block_size,
                 log_scaling if not self.is_local else None,
             )
             q = q.view(num_tokens, self.num_heads, self.head_dim)
@@ -309,7 +289,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=self.num_kv_heads,
             max_kv_len=self._max_kv_len,
         )
-        inkling_fa4_rel_attention(
+        _INKLING_FA4_REL_ATTENTION_KERNEL(
             q[:nt],
             key_cache,
             value_cache,

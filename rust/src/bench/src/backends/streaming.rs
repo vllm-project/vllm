@@ -4,9 +4,11 @@
 /// SSE streaming response handler.
 ///
 /// Accumulates incoming byte chunks and extracts complete SSE messages.
-/// Mirrors Python's `StreamedResponseHandler` from endpoint_request_func.py:22-60.
+/// Derived from Python's `StreamedResponseHandler` in endpoint_request_func.py,
+/// but not identical: CR and CRLF line endings are normalized to LF here.
 pub struct StreamedResponseHandler {
-    buffer: String,
+    buffer: Vec<u8>,
+    previous_was_cr: bool,
     /// Reusable message buffer — avoids allocating a new Vec per `add_chunk` call.
     messages: Vec<String>,
 }
@@ -14,7 +16,8 @@ pub struct StreamedResponseHandler {
 impl StreamedResponseHandler {
     pub fn new() -> Self {
         Self {
-            buffer: String::with_capacity(4096),
+            buffer: Vec::with_capacity(4096),
+            previous_was_cr: false,
             messages: Vec::with_capacity(4),
         }
     }
@@ -26,12 +29,19 @@ impl StreamedResponseHandler {
     pub fn add_chunk(&mut self, chunk_bytes: &[u8]) -> &[String] {
         self.messages.clear();
 
-        let chunk_str = String::from_utf8_lossy(chunk_bytes);
-        self.buffer.push_str(&chunk_str);
+        // Normalize SSE line endings, including CRLF split across chunks.
+        for &byte in chunk_bytes {
+            if byte == b'\n' && self.previous_was_cr {
+                self.previous_was_cr = false;
+                continue;
+            }
+            self.previous_was_cr = byte == b'\r';
+            self.buffer.push(if self.previous_was_cr { b'\n' } else { byte });
+        }
 
         // Split by double newlines (SSE message separator)
-        while let Some(pos) = self.buffer.find("\n\n") {
-            let message = self.buffer[..pos].trim().to_string();
+        while let Some(pos) = self.buffer.windows(2).position(|window| window == b"\n\n") {
+            let message = String::from_utf8_lossy(&self.buffer[..pos]).trim().to_string();
             // Efficiently remove consumed bytes by shifting remaining data
             self.buffer.drain(..pos + 2);
             if !message.is_empty() {
@@ -47,36 +57,26 @@ impl StreamedResponseHandler {
         //
         // Also handles multi-field SSE events where the buffer may start with
         // "event: ...\ndata: ..." (Dynamo frontend).
-        let data_start = if self.buffer.starts_with("data: ") {
+        let buffer = String::from_utf8_lossy(&self.buffer);
+        let data_start = if buffer.starts_with("data: ") {
             Some(0)
         } else {
             // Look for a "data: " line in multi-field events
-            self.buffer.find("\ndata: ").map(|p| p + 1)
+            buffer.find("\ndata: ").map(|p| p + 1)
         };
         if let Some(offset) = data_start {
-            let content = self.buffer[offset + 6..].trim();
+            let content = buffer[offset + 6..].trim();
             if content == "[DONE]"
                 || (!content.is_empty()
                     && serde_json::from_str::<&serde_json::value::RawValue>(content).is_ok())
             {
-                self.messages.push(self.buffer.trim().to_string());
+                self.messages.push(buffer.trim().to_string());
                 self.buffer.clear();
             }
         }
 
         &self.messages
     }
-}
-
-/// Trim leading/trailing ASCII whitespace from a byte slice.
-pub fn trim_bytes(bytes: &[u8]) -> &[u8] {
-    let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|b| !b.is_ascii_whitespace())
-        .map(|p| p + 1)
-        .unwrap_or(start);
-    &bytes[start..end]
 }
 
 #[cfg(test)]
@@ -100,6 +100,26 @@ mod tests {
         assert!(msgs1.is_empty());
         let msgs2 = handler.add_chunk(b"ices\":[{\"text\":\"a\"}]}\n\n");
         assert_eq!(msgs2.len(), 1);
+    }
+
+    #[test]
+    fn test_split_multibyte_utf8() {
+        let mut handler = StreamedResponseHandler::new();
+        let message = "data: {\"test\":\"中😀\"}\n\n";
+        let mut messages = Vec::new();
+
+        for chunk in message.as_bytes().chunks(1) {
+            messages.extend_from_slice(handler.add_chunk(chunk));
+        }
+
+        assert_eq!(messages, &[message.trim().to_string()]);
+    }
+
+    #[test]
+    fn test_invalid_utf8_remains_lossy() {
+        let mut handler = StreamedResponseHandler::new();
+        let msgs = handler.add_chunk(b"data: {\"test\":\"\xFF\"}\n\n");
+        assert_eq!(msgs, &["data: {\"test\":\"�\"}".to_string()]);
     }
 
     #[test]
@@ -147,5 +167,52 @@ mod tests {
         let msgs = handler.add_chunk(b"event: message\ndata: {\"choices\":[{\"text\":\"hi\"}]}");
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].contains("choices"));
+    }
+
+    #[test]
+    fn test_sse_line_endings_across_transport_chunks() {
+        let expected = [
+            "data: {\"text\":\" leading 中 trailing \"}",
+            "event: message\ndata: {\"usage\":{\"completion_tokens\":3}}",
+            "data: [DONE]",
+        ];
+        for line_ending in ["\n", "\r\n", "\r"] {
+            let stream = expected
+                .iter()
+                .map(|message| {
+                    format!(
+                        "{}{line_ending}{line_ending}",
+                        message.replace('\n', line_ending)
+                    )
+                })
+                .collect::<String>();
+            for chunk_size in 1..=stream.len() {
+                let mut handler = StreamedResponseHandler::new();
+                let mut messages = Vec::new();
+                for chunk in stream.as_bytes().chunks(chunk_size) {
+                    messages.extend_from_slice(handler.add_chunk(chunk));
+                }
+                assert_eq!(
+                    messages, expected,
+                    "line ending {line_ending:?}, chunk size {chunk_size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mixed_sse_line_endings() {
+        let mut handler = StreamedResponseHandler::new();
+        let messages = handler.add_chunk(
+            b": ping\r\ndata: {\"text\":\"a\"}\r\r\nevent: message\ndata: {\"text\":\"b\"}\r\n\ndata: [DONE]\n\n",
+        );
+        assert_eq!(
+            messages,
+            &[
+                ": ping\ndata: {\"text\":\"a\"}",
+                "event: message\ndata: {\"text\":\"b\"}",
+                "data: [DONE]",
+            ]
+        );
     }
 }

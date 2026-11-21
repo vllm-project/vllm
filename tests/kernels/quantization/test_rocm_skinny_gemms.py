@@ -7,12 +7,67 @@ import torch
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
+from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+    ROCmFP8ScaledMMLinearKernel,
+)
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_rdna4
 from vllm.utils.platform_utils import num_compute_units
+
+# Global per-test cleanup costs more than the tests themselves.
+# These tests can just cleanup once at the end
+pytestmark = pytest.mark.skip_global_cleanup
+
+SEEDS = [0]
+
+# These options are independent in the kernels, so the sets below cover every
+# pair of them instead of the full product. bias_mode: 0 = none, 1 = (m,),
+# 2 = (n, m).
+OPTIONS_WVSPLITKRC = [
+    # dtype, padded_a, bias_mode, xnorm
+    (torch.float16, False, 0, False),
+    (torch.float16, True, 1, True),
+    (torch.float16, True, 2, False),
+    (torch.bfloat16, True, 0, True),
+    (torch.bfloat16, False, 1, False),
+    (torch.bfloat16, False, 2, True),
+]
+
+OPTIONS_WVSPLITK = [
+    # dtype, padded_a, padded_b, bias_mode, xnorm
+    (torch.float16, False, False, 0, False),
+    (torch.float16, False, True, 1, True),
+    (torch.float16, True, False, 2, True),
+    (torch.bfloat16, True, True, 0, True),
+    (torch.bfloat16, True, False, 1, False),
+    (torch.bfloat16, False, True, 2, False),
+]
+
+OPTIONS_WVSPLITK_FP8 = [
+    # dtype, padded_a, padded_b, biased, xnorm
+    (torch.float16, False, False, True, True),
+    (torch.bfloat16, True, False, False, True),
+    (torch.bfloat16, False, True, True, True),
+    (torch.float16, True, False, True, False),
+    (torch.float16, False, True, False, False),
+    (torch.bfloat16, True, True, False, False),
+]
 
 DTYPES = [torch.bfloat16, torch.float16]
 BIAS_MODES = [0, 1, 2]
+
+# kWvSlots in csrc/rocm/skinny_gemms_wvsplitkrc.cu; beyond it streams take overflow
+# workspaces.
+WVSPLITKRC_SLOTS = 8
+
+# The CU count is the grid size. Production passes num_compute_units(); a small
+# value manufactures better concurrency for these tests.
+WVSPLITKRC_TEST_CU = 16
+
+# Gate spin, ~125 ms on gfx950 -- must outlast the host enqueue loop it gates.
+_GATE_CYCLES = 300_000_000
+
 # Specific (N, K, M) combinations for targeted testing
 NKM_FACTORS_LLMM1 = [
     # Small, medium, large cases
@@ -50,8 +105,17 @@ NKM_FACTORS_WVSPLITK = [
     (1, 64, 8),
     (2, 128, 8),
     (4, 256, 8),
+    # K % 16 != 0: the gfx1150/gfx1151 rows fall back to A_CHUNK = 8
+    (1, 4096 + 8, 4096 + 1),
+    (5, 1000, 2048),
+    # Speculative-decode batch
+    (5, 2048, 2560),
+    # N = 5 past the YTILE 2 range: the YTILE 3 and 4 rows on MI3xx
+    (5, 4096, 10240),
+    (5, 4096, 16384),
 ]
 
+# N is bucketed up to its next ^2 (16/32/64/128) and the remainder is masked
 N_FACTORS_WVSPLITKRC = [
     13,
     16,
@@ -70,8 +134,64 @@ N_FACTORS_WVSPLITKRC = [
     117,
     128,
 ]
+# K shards are 512 wide, evenly divided or not, +8 for a partial 8-element load
 K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
+# M tiles are 64 rows, +16 for a partial tile
 M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
+
+# (N, K, M) with more K-shards than the readback can stage in one LDS pass.
+# Spans both CHUNKK values and both N-tile counts.
+NKM_FACTORS_WVSPLITKRC_LARGE_K = [
+    (128, 6144, 128),
+    (96, 8192, 128),
+    # Keep 24 K-shards (batched readback) within the DPX budget of 128 CUs.
+    (128, 12288, 64),
+    (32, 12288, 128),
+]
+
+NKM_FACTORS_SWMMAC = [
+    #  Small aligned cases
+    (5, 64, 32),
+    (6, 96, 48),
+    (7, 128, 64),
+    (8, 160, 80),
+    (5, 256, 112),
+    (6, 288, 128),
+    (7, 320, 144),
+    (8, 352, 160),
+    # Large K aligned cases
+    (5, 4032, 80),
+    (6, 4064, 112),
+    (7, 4096, 144),
+    (8, 4128, 176),
+    (5, 4000, 256),
+    (6, 4032, 256),
+    (7, 4064, 256),
+    (8, 4096, 256),
+    # Large M aligned cases
+    (5, 64, 1040),
+    (6, 64, 1552),
+    (7, 128, 2064),
+    (8, 128, 2576),
+    (5, 256, 1296),
+    (6, 256, 1808),
+    (7, 256, 2320),
+    (8, 256, 3088),
+    # Large M unaligned cases
+    (5, 64, 1043),
+    (6, 64, 1551),
+    (7, 128, 2065),
+    (8, 128, 2577),
+    (5, 256, 1295),
+    (6, 256, 1807),
+    (7, 256, 2321),
+    (8, 256, 3089),
+    # Large aligned cases
+    (5, 8192, 16384),
+    (6, 12288, 24576),
+    (7, 16384, 32768),
+    (8, 24576, 49152),
+]
 
 NKM_FACTORS_WVSPLITK_FP8 = [
     # FP8-specific cases with K % 16 == 0
@@ -106,7 +226,11 @@ NKM_FACTORS_WVSPLITK_FP8 = [
     (4, 32768 * 2 + 16, 28672 + 16),
 ]
 
-SEEDS = [0]
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_after_all_tests():
+    yield
+    cleanup_dist_env_and_memory()
 
 
 def pad_fp8(weight):
@@ -116,17 +240,21 @@ def pad_fp8(weight):
     return F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
 
 
-@pytest.mark.parametrize("xnorm", [False, True])
+def make_bias(bias_mode, n, m, dtype):
+    if bias_mode == 0:
+        return None
+    shape = (m,) if bias_mode == 1 else (n, m)
+    return torch.rand(shape, dtype=dtype, device="cuda") * 2 - 1
+
+
 @pytest.mark.parametrize("n", N_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("k", K_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype,padded_a,bias_mode,xnorm", OPTIONS_WVSPLITKRC)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded_a", [False, True])
-@pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode):
+def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, padded_a, bias_mode, xnorm, seed):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
@@ -140,7 +268,7 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     GrpsShrB = min(N_p2 // 16, 4)
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
-    # candidate for atomic reduce count splitk?
+    # Deterministic reduction stores one float workspace value per K shard.
     fits_wvsplitkrc = (N_p2 * m * ((k + 512 - 1) // 512)) <= 128 * 1024 * 12
     fits_wvsplitkrc &= CuNeeded <= cu_count
 
@@ -155,13 +283,7 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     if padded_a:
         A = pad_fp8(A)
 
-    BIAS = None
-    if bias_mode == 1:
-        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
-    elif bias_mode == 2:
-        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
-    elif bias_mode == 3:
-        BIAS = torch.rand(1, m, dtype=dtype, device="cuda") * 2 - 1
+    BIAS = make_bias(bias_mode, n, m, dtype)
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitKrc(A, B, cu_count, BIAS)
@@ -175,6 +297,83 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
         torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-8)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITKRC_LARGE_K)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_large_k(n, k, m, dtype, seed):
+    """K large enough that the split-K readback must stage LDS in batches."""
+    torch.manual_seed(seed)
+
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+
+    ref_out = torch.nn.functional.linear(A, B, None)
+    out = ops.wvSplitKrc(A, B, num_compute_units(), None)
+
+    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("n_streams", [WVSPLITKRC_SLOTS, WVSPLITKRC_SLOTS + 4])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_multistream(n_streams, dtype, seed):
+    """Concurrent streams must not share a split-K workspace.
+
+    The workspace is cleared by protocol rather than per invocation, so sharing
+    one corrupts the reduction and returns wrong numbers rather than failing.
+    n_streams > WVSPLITKRC_SLOTS additionally exercises the overflow path.
+    """
+    torch.manual_seed(seed)
+
+    n, k, m = 16, 2048, 256
+    iters = 4
+    xavier = math.sqrt(2 / k)
+
+    B = torch.randn(m, k, dtype=dtype, device="cuda") * xavier
+    As = [
+        torch.randn(n, k, dtype=dtype, device="cuda") * xavier for _ in range(n_streams)
+    ]
+    refs = [torch.nn.functional.linear(A, B, None) for A in As]
+    torch.accelerator.synchronize()
+
+    streams = [torch.Stream() for _ in range(n_streams)]
+    outs: list[list[torch.Tensor]] = [[] for _ in range(n_streams)]
+    _release_together(streams)
+    # Round-robin the enqueues so kernels from different streams are in flight
+    # at the same time.
+    for _ in range(iters):
+        for i, s in enumerate(streams):
+            with torch.cuda.stream(s):
+                outs[i].append(ops.wvSplitKrc(As[i], B, WVSPLITKRC_TEST_CU, None))
+    for s in streams:
+        torch.accelerator.current_stream().wait_stream(s)
+    torch.accelerator.synchronize()
+
+    for i in range(n_streams):
+        for out in outs[i]:
+            torch.testing.assert_close(out, refs[i], atol=1e-3, rtol=1e-2)
+
+
+def _release_together(streams):
+    """Release every stream at once, once everything below is enqueued.
+
+    An event recorded on an idle stream is already complete, so waiting on it
+    gates nothing -- the spin, not the event, is what holds the streams.
+    """
+    blocker = torch.Stream()
+    with torch.cuda.stream(blocker):
+        torch.cuda._sleep(_GATE_CYCLES)
+        gate = torch.Event()
+        gate.record()
+    for s in streams:
+        s.wait_event(gate)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
@@ -197,16 +396,15 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
 
 
-@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "dtype,padded_a,padded_b,bias_mode,xnorm",
+    OPTIONS_WVSPLITK,
+)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-@pytest.mark.parametrize("bias_mode", BIAS_MODES)
-@pytest.mark.parametrize("padded_a", [False, True])
-@pytest.mark.parametrize("padded_b", [False, True])
 def test_rocm_wvsplitk_kernel(
-    xnorm, n, k, m, dtype, seed, bias_mode, padded_a, padded_b
+    n, k, m, dtype, padded_a, padded_b, bias_mode, xnorm, seed
 ):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
@@ -217,11 +415,7 @@ def test_rocm_wvsplitk_kernel(
     A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
     B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
 
-    BIAS = None
-    if bias_mode == 1:
-        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
-    elif bias_mode == 2:
-        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
+    BIAS = make_bias(bias_mode, n, m, dtype)
 
     if padded_a:
         A = pad_fp8(A)
@@ -236,19 +430,53 @@ def test_rocm_wvsplitk_kernel(
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
-@pytest.mark.parametrize("xnorm", [False, True])
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_SWMMAC)
+@pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded_a", [False, True])
-@pytest.mark.parametrize("padded_b", [False, True])
-@pytest.mark.parametrize("biased", [False, True])
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and on_rdna4()),
+    reason="only supported on gfx120x",
+)
+@torch.inference_mode()
+def test_rocm_swmmac_gemm_kernel(n, k, m, bias_mode, dtype, seed):
+    torch.manual_seed(seed)
+    cu_count = num_compute_units()
+
+    # Normalize both inputs so the BF16 tolerance remains meaningful even for
+    # the large-K Split-K cases.
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+
+    BIAS = None
+    if bias_mode == 1:
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
+    elif bias_mode == 2:
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
+
+    ref_out = torch.nn.functional.linear(A, B, BIAS)
+    out = ops.swmmac_gemm(A.view(-1, A.size(-1)), B, B.shape[0], cu_count, BIAS)
+
+    torch.testing.assert_close(out, ref_out, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
+@pytest.mark.parametrize(
+    "dtype,padded_a,padded_b,biased,xnorm",
+    OPTIONS_WVSPLITK_FP8,
+)
+@pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_fp8()),
     reason="only test for rocm fp8",
 )
+@pytest.mark.skipif(
+    not ROCmFP8ScaledMMLinearKernel.is_supported()[0],
+    reason=f"wvSplitKQ: {ROCmFP8ScaledMMLinearKernel.is_supported()[1]}",
+)
 def test_rocm_wvsplitk_fp8_kernel(
-    xnorm, n, k, m, dtype, seed, padded_a, padded_b, biased
+    n, k, m, dtype, padded_a, padded_b, biased, xnorm, seed
 ):
     torch.manual_seed(seed)
 

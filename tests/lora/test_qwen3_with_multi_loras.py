@@ -1,24 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script contains:
+"""This script contains:
 1. test multi loras service with tp >= 2
 2. test multi loras request
 """
-
-import os
 
 import pytest
 
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
-    "Alice": "charent/self_cognition_Alice",
-    "Bob": "charent/self_cognition_Bob",
-    "Cat": "charent/self_cognition_Bob",  # same as Bob
+    "Alice": "vllm-project/self_cognition_Alice",
+    "Bob": "vllm-project/self_cognition_Bob",
+    "Cat": "vllm-project/self_cognition_Bob",  # same as Bob
 }
 
 LORA_NAME_ID_MAP = {}
@@ -39,18 +37,6 @@ def format_chatml_messages(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
-
-
-@pytest.fixture(autouse=True)
-def set_mrv2_env():
-    original = os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0")
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
-    yield
-
-    if original is None:
-        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
-    else:
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = original
 
 
 def make_add_lora_request(name: str, path: str):
@@ -124,8 +110,7 @@ def test_multi_loras_with_tp_sync():
         return output_text
 
     def reload_lora(name: str):
-        """
-        reload a lora to simulate the case:
+        """Reload a lora to simulate the case:
         setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
         for dynamic lora loading and unloading
         """
@@ -192,7 +177,7 @@ def test_multiple_lora_requests():
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(PROMPTS, lora_request=lora_request[:1])
 
     # Single LoRARequest should be applied to every prompt
@@ -204,8 +189,7 @@ def test_multiple_lora_requests():
 def test_load_inplace_offline_reload(
     qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
 ) -> None:
-    """
-    Test that load_inplace=True allows reloading LoRA adapters with the same ID
+    """Test that load_inplace=True allows reloading LoRA adapters with the same ID
     in offline mode (using LLM class directly).
     """
     llm = LLM(
@@ -254,9 +238,8 @@ def test_load_inplace_offline_reload(
 def test_load_inplace_false_no_reload(
     qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
 ) -> None:
-    """
-    Test that load_inplace=False prevents reloading when an adapter
-    with the same ID already exists.
+    """Without load_inplace, an id already used by another adapter is
+    rejected instead of serving the loaded adapter's weights.
     """
     llm = LLM(
         model=MODEL_PATH,
@@ -288,19 +271,10 @@ def test_load_inplace_false_no_reload(
         f"Expected meowing output, got: {first_output}"
     )
 
-    # Try to load woofing LoRA with same ID but load_inplace=False
-    # This should NOT reload (adapter 2 already exists)
     woofing_request_no_reload = LoRARequest(
         lora_name="test-adapter-2-woof",
-        lora_int_id=adapter_id,  # Same ID
+        lora_int_id=adapter_id,
         lora_path=qwen3_woofing_lora_files,
     )
-
-    outputs = llm.chat(
-        [messages], sampling_params, lora_request=woofing_request_no_reload
-    )
-    second_output = outputs[0].outputs[0].text.strip()
-    # Should still get meowing output because it didn't reload
-    assert "Meow Meow Meow" in second_output, (
-        f"Expected meowing output (no reload), got: {second_output}"
-    )
+    with pytest.raises(VLLMValidationError, match="already used"):
+        llm.chat([messages], sampling_params, lora_request=woofing_request_no_reload)
