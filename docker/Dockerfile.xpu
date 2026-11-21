@@ -39,6 +39,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
     SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 
+FROM scratch AS xpu-requirements
+COPY requirements/xpu.txt /xpu.txt
+
 FROM ubuntu:24.04 AS vllm-base
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -120,7 +123,7 @@ ARG GIT_REPO_CHECK=0
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
+    --mount=type=bind,from=xpu-requirements,src=/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
     uv pip install -r /vllm-workspace/requirements/xpu.txt
 
@@ -214,7 +217,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
+    --mount=type=bind,from=xpu-requirements,src=/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
     --mount=type=bind,src=requirements/test/xpu.txt,target=/vllm-workspace/requirements/test/xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
     uv pip install -r /vllm-workspace/requirements/xpu.txt && \
