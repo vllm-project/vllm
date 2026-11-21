@@ -131,6 +131,32 @@ def test_rms_norm_weightless(
         )
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("has_weight", [False, True])
+@pytest.mark.parametrize("add_residual", [False, True])
+@torch.inference_mode()
+def test_rms_norm_empty_input(
+    dtype: torch.dtype, has_weight: bool, add_residual: bool
+) -> None:
+    """Empty calls preserve backing storage and leave subsequent CUDA work usable."""
+    x = torch.ones((1, 1024), dtype=dtype, device=CUDA_DEVICES[0])
+    out_or_residual = torch.full_like(x, 2)
+    weight = torch.ones_like(x[0]) if has_weight else None
+
+    if add_residual:
+        torch.ops._C.fused_add_rms_norm(x[:0], out_or_residual[:0], weight, 1e-6)
+    else:
+        torch.ops._C.rms_norm(out_or_residual[:0], x[:0], weight, 1e-6)
+
+    torch.accelerator.synchronize()
+    probe = torch.ones(1, device=x.device)
+    torch.testing.assert_close(probe.cpu(), torch.ones(1, device="cpu"), rtol=0, atol=0)
+    torch.testing.assert_close(x, torch.ones_like(x), rtol=0, atol=0)
+    torch.testing.assert_close(
+        out_or_residual, torch.full_like(out_or_residual, 2), rtol=0, atol=0
+    )
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
