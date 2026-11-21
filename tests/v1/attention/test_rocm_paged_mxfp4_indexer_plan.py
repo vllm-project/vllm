@@ -246,6 +246,43 @@ def test_decode_row_shard_skips_steps_with_prefill(
     monkeypatch, max_query_len, is_prefilling, sharded
 ):
     rows = 128
+    metadata = _build_decode_step(monkeypatch, rows, max_query_len, is_prefilling)
+    assert (metadata.decode_shard is not None) == sharded
+    assert metadata.decode_row_lens is not None
+    assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)
+    assert metadata.decode_step_row_lens is not None
+    assert torch.equal(
+        metadata.decode_step_row_lens, torch.full((rows,), 64, dtype=torch.int32)
+    )
+    ends = metadata.decode_block_ends
+    expected = range(rows // 4, rows // 2) if sharded else range(rows)
+    assert ends is not None and ends.tolist() == list(expected)
+
+
+def test_decode_row_shard_keeps_per_row_launch_on_varlen_steps(monkeypatch):
+    # Adaptive verification at TP4: a step the row shard cuts keeps the per-row
+    # launch on its rank's rows, since the shard would cut varlen sequences
+    # apart; a step it leaves whole launches its requests as varlen sequences.
+    rows = 128
+    metadata = _build_decode_step(monkeypatch, rows, 7, [False] * rows, varlen_next_n=7)
+    assert metadata.decode_shard is not None
+    assert (metadata.decode_shard.start, metadata.decode_shard.stop) == (32, 64)
+    assert metadata.decode_row_lens is not None
+    assert metadata.decode_row_lens.shape[0] == 32
+    assert metadata.decode_varlen is None
+
+    rows = 32
+    metadata = _build_decode_step(monkeypatch, rows, 7, [False] * rows, varlen_next_n=7)
+    assert metadata.decode_shard is None
+    assert metadata.decode_row_lens is not None
+    assert metadata.decode_row_lens.shape[0] == rows
+    assert metadata.decode_varlen is not None
+    assert metadata.decode_varlen.query_start_loc.shape[0] == rows + 1
+
+
+def _build_decode_step(
+    monkeypatch, rows, max_query_len, is_prefilling, varlen_next_n=1
+):
     decode = DeepSeekV32IndexerDecodeMetadata(
         block_table=torch.zeros(rows, 4, dtype=torch.int32),
         seq_lens=torch.full((rows, 1), 64, dtype=torch.int32),
@@ -274,6 +311,7 @@ def test_decode_row_shard_skips_steps_with_prefill(
         context_lens_buffer=torch.zeros(rows, dtype=torch.int32),
         decode_threshold=7,
         native_next_n=1,
+        varlen_next_n=varlen_next_n,
         decode_shard_world=4,
         decode_shard_rank=1,
         candidate_block_size=4,
@@ -291,19 +329,13 @@ def test_decode_row_shard_skips_steps_with_prefill(
         num_reqs=rows,
         seq_lens=torch.full((rows,), 256, dtype=torch.int32),
         query_start_loc_cpu=torch.arange(rows + 1, dtype=torch.int32),
+        query_start_loc=torch.arange(rows + 1, dtype=torch.int32),
+        block_table_tensor=torch.zeros(rows, 4, dtype=torch.int32),
         max_query_len=max_query_len,
         is_prefilling=None if is_prefilling is None else torch.tensor(is_prefilling),
         dcp_local_seq_lens=None,
     )
-    metadata = builder.build(0, cm)
-    assert (metadata.decode_shard is not None) == sharded
-    assert metadata.decode_row_lens is not None
-    assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)
-    assert metadata.decode_step_row_lens is not None
-    assert torch.equal(metadata.decode_step_row_lens, decode.seq_lens.view(-1))
-    ends = metadata.decode_block_ends
-    expected = range(rows // 4, rows // 2) if sharded else range(rows)
-    assert ends is not None and ends.tolist() == list(expected)
+    return builder.build(0, cm)
 
 
 def _step(device_lens, prefill_lens=(), host_lens=None, seq=None, rows=None):
