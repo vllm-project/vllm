@@ -151,7 +151,9 @@ mod tests {
     use vllm_engine_core_client::protocol::tensor::{WireArrayData, WireTensor};
 
     use super::*;
-    use crate::multimodal::tests::qwen3_vl_info;
+    use crate::multimodal::tests::{
+        QWEN3_IMAGE_PAD_ID, qwen3_vl_info, qwen3_vl_tokenizer, test_info,
+    };
 
     fn feature(offset: usize, field: MmField) -> MmFeatureSpec {
         MmFeatureSpec {
@@ -190,6 +192,24 @@ mod tests {
         let expected = vec![b.clone(), a.clone(), c.clone()];
         let features = info.prepare_preprocessed(vec![a, b, c], 4).unwrap();
         assert_eq!(features, expected);
+    }
+
+    #[test]
+    fn qwen2_vl_preprocessed_features_require_disjoint_ranges() {
+        for model_type in ["qwen2_vl", "qwen2_5_vl"] {
+            let info = test_info(
+                model_type,
+                serde_json::json!({"model_type": model_type, "image_token_id": QWEN3_IMAGE_PAD_ID}),
+                qwen3_vl_tokenizer(),
+            );
+            let adjacent = vec![feature(0, batched()), feature(2, batched())];
+            let reversed = adjacent.iter().rev().cloned().collect();
+            assert_eq!(info.prepare_preprocessed(reversed, 4).unwrap(), adjacent);
+
+            let overlapping = vec![feature(2, batched()), feature(1, batched())];
+            let error = info.prepare_preprocessed(overlapping, 4).unwrap_err();
+            assert!(matches!(error, Error::InvalidPreprocessedMultimodal { .. }));
+        }
     }
 
     #[test]
