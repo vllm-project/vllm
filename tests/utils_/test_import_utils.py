@@ -4,8 +4,15 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
+from vllm.utils.import_utils import (
+    PlaceholderModule,
+    VllmExtensionImportError,
+    _has_module,
+    import_plugin,
+    import_vllm_extension,
+)
 
 
 def _raises_module_not_found():
@@ -135,3 +142,75 @@ class TestImportPlugin:
         ):
             result = import_plugin("nonexistent_plugin_xyz")
             assert result is None
+
+
+class TestImportVllmExtension:
+    """Tests for import_vllm_extension's diagnostic translation.
+
+    Mirrors the failure in https://github.com/vllm-project/vllm/issues/52300:
+    a vLLM wheel built for CUDA 13 loaded on a CUDA 12.6 stack dies with a
+    bare ``libcudart.so.13: cannot open shared object file``.
+    """
+
+    _LOADER_ERROR = (
+        "libcudart.so.13: cannot open shared object file: No such file or directory"
+    )
+
+    def test_success_returns_the_module(self):
+        sentinel = MagicMock()
+        with patch(
+            "vllm.utils.import_utils.importlib.import_module",
+            return_value=sentinel,
+        ) as mock_import:
+            assert import_vllm_extension("vllm._C_stable_libtorch") is sentinel
+        mock_import.assert_called_once_with("vllm._C_stable_libtorch")
+
+    def test_missing_shared_library_raises_actionable_error(self, monkeypatch):
+        monkeypatch.setattr(torch.version, "cuda", "12.6", raising=False)
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=ImportError(self._LOADER_ERROR),
+            ),
+            pytest.raises(VllmExtensionImportError) as excinfo,
+        ):
+            import_vllm_extension("vllm._C_stable_libtorch")
+
+        message = str(excinfo.value)
+        # Names the missing library, the required CUDA major version, the
+        # local torch CUDA, and the fix.
+        assert "libcudart.so.13" in message
+        assert "CUDA 13" in message
+        assert "12.6" in message
+        assert "wheels.vllm.ai" in message
+        assert self._LOADER_ERROR in message
+        # Stays an ImportError subclass for existing handlers.
+        assert isinstance(excinfo.value, ImportError)
+        # Preserves the original loader error for debugging.
+        assert isinstance(excinfo.value.__cause__, ImportError)
+
+    def test_missing_library_without_cuda_tag_still_actionable(self):
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=ImportError(
+                    "libnccl.so.2: cannot open shared object file: "
+                    "No such file or directory"
+                ),
+            ),
+            pytest.raises(VllmExtensionImportError, match="libnccl.so.2"),
+        ):
+            import_vllm_extension("vllm._moe_C_stable_libtorch")
+
+    def test_other_import_errors_propagate_unchanged(self):
+        original = ModuleNotFoundError("No module named 'vllm._C_stable_libtorch'")
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=original,
+            ),
+            pytest.raises(ModuleNotFoundError) as excinfo,
+        ):
+            import_vllm_extension("vllm._C_stable_libtorch")
+        assert excinfo.value is original
+        assert not isinstance(excinfo.value, VllmExtensionImportError)
