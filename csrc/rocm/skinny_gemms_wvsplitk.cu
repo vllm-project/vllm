@@ -71,24 +71,30 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 #define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N) \
   WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, 8)
 
-// bf16 at N=5 on wave64 spills at YTILE 3 and 4 (its dot product widens to
-// f32), so it stays at YTILE 2. fp16 and wave32 do not spill there.
-#define WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N) \
-  {                                                       \
-    bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
-    if (_sYT <= 1)                                        \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
-    else if (__N == 5 && _THRDS == 64 &&                  \
-             std::is_same_v<fptype, __hip_bfloat16>)      \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
-    else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
-    else if (_sYT <= 4 * 3)                               \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)           \
-    else if (__N == 4)                                    \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)           \
-    else                                                  \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
+// bf16 at N=5 on wave64 spills at YTILE 3/4 on gfx90a/gfx942 (no packed bf16
+// dot there), so it stays at YTILE 2. gfx950 has the packed dot and takes
+// the generic rows. fp16 and wave32 do not spill.
+//
+// A YTILE 3/4 row routes to hf_ when M % YTILE != 0; sml_ at YTILE 2 beats
+// the fragmented hf_ tile there (wave64, both dtypes, measured).
+#define WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N)            \
+  {                                                                  \
+    bool fit_lds = (Kbp_in * N_in <= max_lds_len);                   \
+    if (_sYT <= 1)                                                   \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                      \
+    else if (__N == 5 && _THRDS == 64 &&                             \
+             std::is_same_v<fptype, __hip_bfloat16> && !on_gfx950()) \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)                      \
+    else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2) ||          \
+             (_THRDS == 64 && (M_in % 2) == 0 &&                     \
+              (M_in % ((_sYT <= 4 * 3) ? 3 : 4)) != 0))              \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)                      \
+    else if (_sYT <= 4 * 3)                                          \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)                      \
+    else if (__N == 4)                                               \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                      \
+    else                                                             \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)                      \
   }
 
 // gfx1151 and the gfx1150 class take the tile that a sweep of every
