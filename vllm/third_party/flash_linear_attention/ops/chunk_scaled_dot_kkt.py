@@ -14,7 +14,25 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE
+from .utils import FLA_CHUNK_SIZE, is_nvidia_hopper
+
+
+# On Hopper, some Triton versions miscompile the loop-carried WGMMA
+# accumulator below (`b_A +=`) for configs with BK < 128 and num_warps >= 4:
+# the kernel produces wrong, run-to-run non-deterministic output for those
+# configs specifically (relative error ~0.2-0.7 vs a float32 reference,
+# against ~1.7e-3 for the unaffected ones). Since every BK choice has a
+# correct config at num_warps <= 2, and BK=128 is correct at every
+# num_warps, dropping the other 12 (of 27) configs removes the bug without
+# losing coverage for the K=128 head dim used by all current GDN models.
+# https://github.com/vllm-project/vllm/issues/65385
+_KKT_CONFIGS = [
+    triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
+    for BK in [32, 64, 128]
+    for num_warps in [2, 4, 8]
+    for num_stages in [2, 3, 4]
+    if not (is_nvidia_hopper and BK < 128 and num_warps >= 4)
+]
 
 
 @triton.heuristics(
@@ -24,12 +42,7 @@ from .utils import FLA_CHUNK_SIZE
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
+    configs=_KKT_CONFIGS,
     key=["H", "K", "BT", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
