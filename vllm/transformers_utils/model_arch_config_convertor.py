@@ -27,6 +27,10 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
 
+_LATENT_ATTENTION_WITHOUT_MLA = {"minicpm3"}
+"""Model types whose configs set `kv_lora_rank` but whose vLLM implementations use
+regular attention over the decompressed heads."""
+
 
 class ModelArchConfigConvertorBase:
     def __init__(
@@ -298,57 +302,13 @@ class ModelArchConfigConvertorBase:
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
-        if not hasattr(self.hf_text_config, "model_type"):
+        config = self.hf_text_config
+        # DeepSeek-V4 compresses its KV cache without `kv_lora_rank`
+        if get_compress_ratios(config):
+            return getattr(config, "head_dim", None) is not None
+        if getattr(config, "model_type", None) in _LATENT_ATTENTION_WITHOUT_MLA:
             return False
-        elif self.hf_text_config.model_type in (
-            "axk1",
-            "deepseek_v2",
-            "deepseek_v3",
-            "deepseek_v32",
-            "deepseek_v4",
-            "deepseek_v41",
-            "dots3_note",
-            "deepseek_mtp",
-            "k3_dspark",
-            "glm5_next",
-            "glm5_next_text",
-            "glm_moe_dsa",
-            "glm4_moe_lite",
-            "glm4_moe_lite_mtp",
-            "kimi_k2",
-            "kimi_linear",
-            "longcat_flash",
-            "mistral_large_4",
-            "pangu_ultra_moe",
-            "pangu_ultra_moe_mtp",
-            "bailing_hybrid",
-            "bailing_hybrid_mtp",
-            "bailing_hybrid_v3_mtp",
-            "hy_v4",
-            "hy_v4_flash",
-            "hy_v4_mtp",
-            "hy_v4_dfly",
-        ):
-            # check is deepseek_v4 model
-            if get_compress_ratios(self.hf_text_config):
-                return getattr(self.hf_text_config, "head_dim", None) is not None
-            else:
-                return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
-        elif self.hf_text_config.model_type == "eagle":
-            # if the model is an EAGLE module, check for the
-            # underlying architecture
-            return (
-                self.hf_text_config.model.model_type
-                in (
-                    "axk1",
-                    "deepseek_v2",
-                    "deepseek_v3",
-                    "deepseek_v32",
-                    "deepseek_mtp",
-                )
-                and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
-            )
-        return False
+        return getattr(config, "kv_lora_rank", None) is not None
 
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         """Whether to use bidirectional attention for mm positions.
