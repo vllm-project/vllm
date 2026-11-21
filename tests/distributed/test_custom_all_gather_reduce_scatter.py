@@ -352,8 +352,10 @@ def _run_multimem_reduce_scatter_test(
         fa = get_tp_group().device_communicator.ca_comm
         assert fa is not None and not fa.disabled
         assert fa.mnnvl_multimem_rs_supported
-        assert not fa.mnnvl_multimem_rs_initialized
-        assert not fa.mnnvl_multimem_rs_multicast_ptr
+        # The multimem buffer must be mapped when the communicator is built,
+        # never lazily during serving.
+        assert fa.mnnvl_multimem_rs_initialized
+        assert fa.mnnvl_multimem_rs_multicast_ptr
 
         message_bytes = {
             "mnnvl_lamport": 1 * 1024 * 1024,
