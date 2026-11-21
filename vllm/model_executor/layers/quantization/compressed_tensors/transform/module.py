@@ -44,10 +44,25 @@ class HadamardTransform(torch.nn.Module):
         super().__init__()
         self.transforms = transforms
 
-        if get_tensor_model_parallel_world_size() > 1:
-            raise NotImplementedError(
-                "Online transforms with tensor parallelism is not supported"
-            )
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size > 1:
+            # Transform matrices are replicated, so block-diagonal transforms need
+            # head_dim to divide the per-rank size. Full-width transforms on a
+            # sharded dimension fail to load (matrix shape mismatch).
+            layer_name = getattr(layer, "prefix", type(layer).__name__)
+            for part_index, (scheme_name, scheme, args) in self.transforms.items():
+                if scheme.head_dim is None:
+                    continue
+                if args.location == TransformLocation.INPUT:
+                    dim, size = "input", input_size_per_partition
+                else:
+                    dim, size = "output", output_partition_sizes[part_index]
+                if size % scheme.head_dim != 0:
+                    raise NotImplementedError(
+                        f"Layer {layer_name}, scheme {scheme_name}: {dim} size per "
+                        f"partition {size} at tensor parallel size {tp_size} is not "
+                        f"divisible by head_dim {scheme.head_dim}"
+                    )
 
         # Similar to row/col parallel params, but tensors are separate
         # to allow for loading with shared memory
