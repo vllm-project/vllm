@@ -99,7 +99,8 @@ def _qwen3_parse_params(
 
     for match in _PARAM_RE.finditer(raw_args, pos):
         outside.append(raw_args[pos : match.start()])
-        params[match.group(1)] = _trim_wrapping_newlines(match.group(2))
+        # A repeated key keeps its first value, the one already streamed.
+        params.setdefault(match.group(1), _trim_wrapping_newlines(match.group(2)))
         pos = match.end()
 
     if closed is not None and pos > start:
@@ -121,7 +122,9 @@ def _qwen3_arg_converter(
 ) -> str:
     params, open_param = _qwen3_parse_params(raw_args, partial, closed)
     if open_param is not None and open_param.group(1):
-        params[open_param.group(1)] = _trim_wrapping_newlines(open_param.group(2))
+        params.setdefault(
+            open_param.group(1), _trim_wrapping_newlines(open_param.group(2))
+        )
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -152,7 +155,7 @@ def _param_value_extender(
     if match is None:
         return None
     name, value = match.group(1), match.group(2)
-    # A repeated key keeps its first position, so its value is not last.
+    # A repeated key keeps its first value, so this one is never streamed.
     if name in closed_params:
         return None
 
