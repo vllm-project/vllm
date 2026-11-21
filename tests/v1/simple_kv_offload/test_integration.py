@@ -32,9 +32,13 @@ PERF_MODELS = [
 ]
 
 
-def test_chunked_local_partial_gpu_hit(vllm_runner, tmp_path, monkeypatch):
+@pytest.mark.parametrize("descriptor_cap", [0, 2])
+def test_chunked_local_partial_gpu_hit(
+    vllm_runner, tmp_path, monkeypatch, descriptor_cap: int
+):
     """A CPU suffix after a short GPU hit must preserve the cold prediction."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", str(descriptor_cap))
     envs.disable_envs_cache()
     config = Llama4TextConfig(
         vocab_size=512,

@@ -9,6 +9,7 @@ import threading
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
@@ -17,6 +18,7 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     BatchMemcpyParams,
     build_params,
     copy_blocks,
+    copy_blocks_cuda,
 )
 
 logger = init_logger(__name__)
@@ -108,6 +110,12 @@ class DmaCopyBackend:
         store_stream: torch.cuda.Stream,
     ) -> None:
         current_platform.set_device(device)
+        copy_fn = copy_blocks
+        if (
+            current_platform.is_cuda()
+            and envs.VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS > 0
+        ):
+            copy_fn = copy_blocks_cuda
         while True:
             item = q.get()
             if item is None:
@@ -124,7 +132,7 @@ class DmaCopyBackend:
             stream = store_stream if is_store else load_stream
             if wait_event is not None:
                 stream.wait_event(wait_event)
-            copy_blocks(src_blocks, dst_blocks, params)
+            copy_fn(src_blocks, dst_blocks, params)
             event = torch.Event()
             event.record(stream)
             events_list.append((event_idx, event))

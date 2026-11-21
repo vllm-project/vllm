@@ -555,6 +555,24 @@ selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
 
+## DMA batch size for `SimpleCPUOffloadConnector`
+
+`VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS` limits the number of copy descriptors
+submitted in one driver call. CUDA defaults to an unlimited batch; ROCm defaults
+to 8192 descriptors. Set the environment variable before starting the server:
+
+```bash
+VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS=64 vllm serve ...
+```
+
+For the CUDA CPU backend, configured batches are submitted inside the existing
+native copy op so that each driver call does not reacquire Python's GIL. This
+does not limit the number of descriptors submitted per engine step. Smaller
+batches can help small-block transfers but increase the number of driver calls;
+benchmark the workload before choosing a cap. Omitting the variable preserves
+the existing default. The disk backend and ROCm retain their existing submission
+paths.
+
 ## Chunked-local attention with `SimpleCPUOffloadConnector`
 
 For chunked-local attention, CPU cache reuse requires the GPU-local prefix to

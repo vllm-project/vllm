@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -236,6 +237,57 @@ def build_params(
     )
 
 
+def _block_copy_arrays(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    params: BatchMemcpyParams,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build layer-major source pointers, destination pointers and byte sizes."""
+    n = len(src_block_ids)
+    src_ids = np.array(src_block_ids, dtype=np.uint64)
+    dst_ids = np.array(dst_block_ids, dtype=np.uint64)
+
+    src_all = (
+        params.src_bases[:, None] + src_ids[None, :] * params.bpb[:, None]
+    ).ravel()
+    dst_all = (
+        params.dst_bases[:, None] + dst_ids[None, :] * params.bpb[:, None]
+    ).ravel()
+    sz_all = np.repeat(params.bpb, n)
+    return src_all, dst_all, sz_all
+
+
+def copy_blocks_cuda(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    params: BatchMemcpyParams,
+) -> None:
+    """Copy CUDA blocks with native descriptor batching on the supplied stream.
+
+    The existing native op honors VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS without
+    reacquiring the GIL between driver calls. Host descriptor arrays remain
+    alive until submission returns.
+
+    Args:
+        src_block_ids: Source block indices shared by all layers.
+        dst_block_ids: Corresponding destination block indices.
+        params: Layer bases, block sizes, ANY/STREAM source ordering and stream.
+
+    """
+    if not src_block_ids:
+        return
+    src_all, dst_all, sz_all = _block_copy_arrays(src_block_ids, dst_block_ids, params)
+    with torch.cuda.stream(torch.cuda.ExternalStream(params.stream_handle)):
+        ops.swap_blocks_batch(
+            torch.from_numpy(src_all.view(np.int64)),
+            torch.from_numpy(dst_all.view(np.int64)),
+            torch.from_numpy(sz_all.view(np.int64)),
+            is_src_access_order_any=(
+                params.attrs.srcAccessOrder == CU_MEMCPY_SRC_ACCESS_ORDER_ANY
+            ),
+        )
+
+
 def copy_blocks(
     src_block_ids: list[int],
     dst_block_ids: list[int],
@@ -248,17 +300,7 @@ def copy_blocks(
 
     assert _batch_memcpy is not None, "build_params() must run before copy_blocks()"
     fn, _ = _batch_memcpy
-
-    src_ids = np.array(src_block_ids, dtype=np.uint64)
-    dst_ids = np.array(dst_block_ids, dtype=np.uint64)
-
-    src_all = (
-        params.src_bases[:, None] + src_ids[None, :] * params.bpb[:, None]
-    ).ravel()
-    dst_all = (
-        params.dst_bases[:, None] + dst_ids[None, :] * params.bpb[:, None]
-    ).ravel()
-    sz_all = np.repeat(params.bpb, n)
+    src_all, dst_all, sz_all = _block_copy_arrays(src_block_ids, dst_block_ids, params)
     total = n * params.num_layers
 
     # Chunk on ROCm: hipMemcpyBatchAsync faults above 8192 descriptors/call.
