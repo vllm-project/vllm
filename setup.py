@@ -1646,6 +1646,9 @@ package_data = {
         "models/inkling2/nvidia/ops/*.cu",
         # Built-in multimodal chat template fallbacks (registry.py)
         "transformers_utils/chat_templates/*.jinja",
+        # numa_utils.py execs NUMA-bound workers through this wrapper (default
+        # best-effort binding and --numa-bind); .git-less builds need it listed.
+        "utils/numa_wrapper.sh",
         "third_party/flash_linear_attention/LICENSE",
         # DeepGEMM JIT include headers (vendored via cmake)
         "third_party/deep_gemm/include/**/*.cuh",
