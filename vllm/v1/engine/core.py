@@ -2015,30 +2015,27 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
-    def _reject_add_in_shutdown(self, request: Request) -> bool:
-        if self.shutdown_state == EngineShutdownState.RUNNING:
-            return False
+    def _updates_open_streaming_session(self, request: Request) -> bool:
+        """Return whether this add updates an open resumable session.
 
-        logger.debug(
-            "[shutdown] EngineCore: rejecting new request request_id=%s",
-            request.request_id,
-        )
-        self._send_abort_outputs_to_client([request.request_id], request.client_index)
-        return True
-
-    def _reject_add_while_paused(self, request: Request) -> bool:
-        # KV cleanup markers and inputs to open streaming sessions are not new work.
-        if (
-            not self.reject_new_requests
-            or request.abort_immediately
-            or self.scheduler.has_request(request.request_id)
-        ):
+        `Scheduler.add_request` asserts on any other reuse of a live id.
+        A resumable session accepts another input chunk and the non-resumable
+        finish sentinel; a normal in-flight request does not.
+        """
+        requests = getattr(self.scheduler, "requests", None)
+        if requests is None:
             return False
-        error = RequestError(
-            code="engine_paused",
-            message="Generation is paused. Please retry after it resumes.",
-            retryable=True,
-        )
+        existing = requests.get(request.request_id)
+        return existing is not None and existing.resumable is True
+
+    def _reject_new_request(self, request: Request, error: RequestError) -> bool:
+        """Reject a new request with a client-facing error and free KV state."""
+        # KV cleanup markers and inputs to an open resumable session are not
+        # new work. `scheduler.has_request` is true for every live id, so it
+        # must not be the carve-out: a duplicate of a normal in-flight request
+        # would reach `Scheduler.add_request` and kill the busy loop.
+        if request.abort_immediately or self._updates_open_streaming_session(request):
+            return False
         self._send_finish_outputs_to_client(
             [request.request_id], request.client_index, FinishReason.ERROR, error
         )
@@ -2047,6 +2044,40 @@ class EngineCoreProc(EngineCore):
             request.abort_immediately = True
             self.add_request(request)
         return True
+
+    def _reject_add_in_shutdown(self, request: Request) -> bool:
+        if self.shutdown_state == EngineShutdownState.RUNNING:
+            return False
+        # Non-streaming routes map this retryable error to HTTP 503. A
+        # streaming response has already committed HTTP 200, so the same
+        # error is an SSE error frame (same as `engine_paused`). Callers
+        # cannot tell a rejected stream is retryable from the status line.
+        rejected = self._reject_new_request(
+            request,
+            RequestError(
+                code="engine_shutting_down",
+                message="Server is shutting down.",
+                retryable=True,
+            ),
+        )
+        if rejected:
+            logger.debug(
+                "[shutdown] EngineCore: rejecting new request request_id=%s",
+                request.request_id,
+            )
+        return rejected
+
+    def _reject_add_while_paused(self, request: Request) -> bool:
+        if not self.reject_new_requests:
+            return False
+        return self._reject_new_request(
+            request,
+            RequestError(
+                code="engine_paused",
+                message="Generation is paused. Please retry after it resumes.",
+                retryable=True,
+            ),
+        )
 
     def _reject_utility_in_shutdown(
         self, client_idx: int, call_id: int, method_name: str
@@ -2680,6 +2711,11 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
+        # Do not publish start_wave while shutting down. An idle peer may
+        # already have left the collective, and a rejected prefill/decode
+        # cleanup add would otherwise set engines_running and block there.
+        if self.shutdown_state != EngineShutdownState.RUNNING:
+            return
         if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
