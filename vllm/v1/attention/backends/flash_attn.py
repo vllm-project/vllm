@@ -1183,6 +1183,13 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        # With weight updates on, a 1.0 scale may change, so FA4 keeps its descale.
+        vllm_config = get_current_vllm_config_or_none()
+        self._kv_scales_can_change = (
+            is_quantized_kv_cache(kv_cache_dtype)
+            and vllm_config is not None
+            and vllm_config.weight_transfer_config is not None
+        )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -1263,18 +1270,30 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
     def _descale(
-        self, scale: torch.Tensor, scale_float: float, shape: tuple[int, int]
+        self,
+        scale: torch.Tensor,
+        scale_float: float,
+        shape: tuple[int, int],
+        name: str = "qkv",
     ) -> torch.Tensor | None:
         # FA4 reads a missing descale as 1.0, and it copies every expanded view
-        # into a contiguous tensor: three copy kernels per layer and step. The
-        # scales are fixed once weights are loaded, so a per-tensor scale of 1.0
-        # (FP8 KV cache without calibrated scales) needs none. Per-head scales
-        # keep their tensor: their float mirror holds only the maximum.
+        # into a contiguous tensor: three copy kernels per layer and step.
+        # Without weight updates a per-tensor scale of 1.0 (no calibrated
+        # scales) needs none. Per-head scales keep their tensor: their float
+        # mirror holds only the maximum.
         if (
             self.vllm_flash_attn_version == 4
             and scale.numel() == 1
             and scale_float == 1.0
+            and not self._kv_scales_can_change
         ):
+            if torch.cuda.is_current_stream_capturing():
+                # The captured graph keeps the implicit 1.0, so a reload that
+                # changes it is refused.
+                self.frozen_kv_scales = "full_graph"
+                self.frozen_kv_scale_names = (
+                    self.frozen_kv_scale_names or frozenset()
+                ) | set(name)
             return None
         # A (1, 1) expanded view (one sequence, one KV head per rank) counts
         # as contiguous, so FA4 skips its copy and its CuTe layout check then
@@ -1389,12 +1408,16 @@ class FlashAttentionImpl(AttentionImpl):
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
         q_descale = (
-            self._descale(layer._q_scale, layer._q_scale_float, descale_shape)
+            self._descale(layer._q_scale, layer._q_scale_float, descale_shape, "q")
             if self.supports_quant_query_input
             else None
         )
-        k_descale = self._descale(layer._k_scale, layer._k_scale_float, descale_shape)
-        v_descale = self._descale(layer._v_scale, layer._v_scale_float, descale_shape)
+        k_descale = self._descale(
+            layer._k_scale, layer._k_scale_float, descale_shape, "k"
+        )
+        v_descale = self._descale(
+            layer._v_scale, layer._v_scale_float, descale_shape, "v"
+        )
 
         if self.dcp_world_size > 1:
             self._forward_with_dcp(
