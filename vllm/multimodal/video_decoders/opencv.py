@@ -14,6 +14,7 @@ from .base import (
     VideoTargetMetadata,
     charge_sampled_frames,
     check_frame_pixel_limit,
+    check_video_decode_frame_limit,
 )
 
 try:
@@ -315,6 +316,8 @@ class OpenCVVideoBackendMixin:
         *,
         frame_recovery: bool = False,
     ) -> tuple[npt.NDArray, list[int]]:
+        if frame_idx:
+            check_video_decode_frame_limit(max(frame_idx) + 1)
         if frame_recovery:
             num_frames_to_sample = len(frame_idx)
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
