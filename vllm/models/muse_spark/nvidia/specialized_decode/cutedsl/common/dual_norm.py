@@ -45,6 +45,8 @@ import torch
 from cutlass import BFloat16, Float32, Int32, Int64, const_expr
 from cutlass.cute.runtime import make_fake_compact_tensor
 
+from vllm.cute_utils import mbarrier as mbar_ops
+
 from .host import assert_not_capturing
 from .primitives import (
     VEC_BF16,
@@ -160,7 +162,9 @@ def _row_sum4(v0, v1, v2, v3, buf, mbar, tidx, lane, warp, rank):
         if lane < CLUSTER_N:
             p = buf[(None, slot)].iterator
             _store4_remote(p, mbar, lane, w0, w1, w2, w3)
-        cute.arch.mbarrier_wait(mbar, 0)
+        # The peers' st.async complete-tx release at cluster scope, so the
+        # wait acquires at cluster scope before buf is read.
+        mbar_ops.wait_parity_acquire_cluster(mbar, Int32(0))
         f = cute.make_fragment_like(buf[(None, lane)])
         cute.autovec_copy(buf[(None, lane)], f)
         x = f.load()

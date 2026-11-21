@@ -47,6 +47,8 @@ import torch
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32, const_expr
 from cutlass.cute.runtime import make_fake_compact_tensor
 
+from vllm.cute_utils import mbarrier as mbar_ops
+
 from ..common.draft_boundary import (
     FRAGMENTS,
     BoundaryOperands,
@@ -158,7 +160,9 @@ def _row_sum(
         total = warp_sum(thread_sum(blocks))
         if lane < Int32(CLUSTER_N):
             _send_sum(sums + cy, mbar, lane, total)
-    cute.arch.mbarrier_wait(mbar, 0)
+    # The peers' st.async complete-tx release at cluster scope, so the wait
+    # acquires at cluster scope before sums is read.
+    mbar_ops.wait_parity_acquire_cluster(mbar, Int32(0))
     return warps_sum(
         [cute.arch.load((sums + i).llvm_ptr, Float32) for i in range(CLUSTER_N)]
     )
