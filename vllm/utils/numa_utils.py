@@ -141,6 +141,34 @@ def get_auto_numa_nodes() -> list[int] | None:
     return numa_nodes
 
 
+def _is_local_executor_backend(backend) -> bool:
+    if backend in ("mp", "uni"):
+        return True
+    if not isinstance(backend, (str, type)) or backend in (
+        "ray",
+        "external_launcher",
+    ):
+        return False
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+    from vllm.v1.executor.uniproc_executor import (
+        ExecutorWithExternalLauncher,
+        UniProcExecutor,
+    )
+
+    try:
+        executor_class = (
+            resolve_obj_by_qualname(backend) if isinstance(backend, str) else backend
+        )
+    except (ImportError, AttributeError, ValueError):
+        return False
+    return (
+        isinstance(executor_class, type)
+        and issubclass(executor_class, (MultiprocExecutor, UniProcExecutor))
+        and not issubclass(executor_class, ExecutorWithExternalLauncher)
+    )
+
+
 def _can_auto_bind(
     parallel_config, local_rank: int, dp_local_rank: int | None = None
 ) -> bool:
@@ -155,7 +183,7 @@ def _can_auto_bind(
         logger.debug("Automatic NUMA binding requires the spawn start method.")
         return False
     if (
-        parallel_config.distributed_executor_backend not in ("mp", "uni")
+        not _is_local_executor_backend(parallel_config.distributed_executor_backend)
         or parallel_config.data_parallel_backend != "mp"
     ):
         logger.debug("Automatic NUMA binding requires local mp/uni launchers.")
