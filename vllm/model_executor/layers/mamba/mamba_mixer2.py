@@ -249,13 +249,13 @@ def mamba_v2_sharded_weight_loader(
             #   seem to handle slices well.
             # https://github.com/python/mypy/issues/2410
             target_slice = param.data[boundary : (boundary + take), ...]
-            param.data[
-                boundary : (boundary + take), ...  # type: ignore[misc]
-            ] = loaded_weight[
-                loaded_start_idx : (
-                    loaded_start_idx + take
-                )  # type: ignore[misc]
-            ].view_as(target_slice)
+            target_slice.copy_(
+                loaded_weight[
+                    loaded_start_idx : (
+                        loaded_start_idx + take
+                    )  # type: ignore[misc]
+                ].view(target_slice.shape)
+            )
 
             # move indexing boundaries
             boundary += shard_size
@@ -497,7 +497,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
         a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float())
+            sharded_weight_loader(0), lambda x: -torch.exp(x.float()), elementwise=True
         )
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})

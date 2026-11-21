@@ -5,8 +5,9 @@
 The model's `load_weights` method still handles checkpoint-name mapping,
 TP slicing, and packed parameters. Sparse patches use NaN to mark unchanged
 checkpoint elements. The supported sparse-loader contract permits only final
-same-shaped floating-point `Tensor.copy_` writes. Composed, multi-stage, and
-custom-write loaders are unsupported.
+same-shaped floating-point `Tensor.copy_` writes, plus `composed_weight_loader`
+with `elementwise=True`. Other composed, multi-stage, and custom-write loaders
+are unsupported.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from collections.abc import Iterable
 from typing import NamedTuple
 
 import torch
+
+from vllm.model_executor.utils import sparse_patch_load_scope
 
 _DEFAULT_PATCH_CHUNK_BYTES = 512 << 20
 
@@ -80,7 +83,8 @@ def _load_nan_masked_weights(
 
     torch.Tensor.copy_ = copy_non_nan_
     try:
-        return model.load_weights(weights)
+        with sparse_patch_load_scope():
+            return model.load_weights(weights)
     finally:
         torch.Tensor.copy_ = original_copy
 
@@ -222,8 +226,9 @@ def load_checkpoint_weight_patches(
     sparse patch creates a full checkpoint-shaped tensor whose NaNs mark unchanged
     elements. Each locally applied sparse patch must use one final same-shaped
     floating-point `Tensor.copy_`. Intermediate or unrelated `copy_` calls,
-    composed loaders, and custom write paths are unsupported. `max_chunk_bytes`
-    is a batching target; one tensor may exceed it.
+    composed loaders not marked `elementwise=True`, and custom write paths are
+    unsupported. `max_chunk_bytes` is a batching target; one tensor may exceed
+    it.
 
     Online checkpoint-format dense updates require the caller to manage vLLM's
     layerwise reload lifecycle. Sparse online updates modify initialized model

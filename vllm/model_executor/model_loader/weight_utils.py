@@ -51,7 +51,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
-from vllm.model_executor.utils import copy_weight_
+from vllm.model_executor.utils import copy_weight_, is_sparse_patch_load
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
@@ -1600,12 +1600,47 @@ def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
     return loader
 
 
+def _load_sparse_patch_composed(
+    loader: LoaderFunction,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+) -> None:
+    """Apply fn only to the elements a sparse patch changes.
+
+    param already holds fn(old) where loaded_weight is NaN, so loading into
+    param and applying fn to it would transform those elements twice. The
+    changed elements are taken from the staged load, before fn runs, so fn
+    cannot erase the mask.
+    """
+    staging = torch.full_like(param.data, float("nan"))
+    loader(staging, loaded_weight)
+    changed = ~torch.isnan(staging)
+    param.data.copy_(torch.where(changed, fn(staging), param.data))
+
+
 def composed_weight_loader(
-    loader: LoaderFunction, fn: Callable[[torch.Tensor], torch.Tensor]
+    loader: LoaderFunction,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+    *,
+    elementwise: bool = False,
 ) -> LoaderFunction:
-    """Create a weight loader that post-processes the weights after loading"""
+    """Create a weight loader that post-processes the weights after loading.
+
+    Sparse checkpoint patches are supported only with `elementwise=True`, which
+    declares that `fn` transforms each element independently and maps finite
+    values to finite values. Otherwise a sparse patch raises.
+    """
 
     def composed_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        if is_sparse_patch_load():
+            if not elementwise:
+                raise NotImplementedError(
+                    "Sparse checkpoint patches require composed_weight_loader "
+                    "with elementwise=True"
+                )
+            _load_sparse_patch_composed(loader, fn, param, loaded_weight)
+            return
         loader(param, loaded_weight)
         param.data.copy_(fn(param))
         return

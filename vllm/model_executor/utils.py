@@ -36,6 +36,25 @@ def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
 
 
+_sparse_patch_load: ContextVar[bool] = ContextVar("sparse_patch_load", default=False)
+
+
+@contextmanager
+def sparse_patch_load_scope():
+    """Mark weight loaders called in this scope as loading NaN-masked sparse
+    checkpoint patches, where NaN means "keep the current value".
+    """
+    token = _sparse_patch_load.set(True)
+    try:
+        yield
+    finally:
+        _sparse_patch_load.reset(token)
+
+
+def is_sparse_patch_load() -> bool:
+    return _sparse_patch_load.get()
+
+
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: dict[str, Any] | None,
