@@ -1,0 +1,23 @@
+[package]
+name = "vllm-turn-detection-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# A Python extension only: there is nothing to test or document from Rust,
+# and linking it outside a Python build needs Python's symbols.
+[lib]
+name = "_rust_turn_detection"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+# Don't link libpython: the interpreter that imports the module provides it.
+pyo3 = { workspace = true, features = ["extension-module"] }
+thiserror-ext.workspace = true
+vllm-turn-detection.workspace = true
+
+[lints]
+workspace = true

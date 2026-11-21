@@ -7,30 +7,56 @@ import ast
 import logging
 import os
 import subprocess
+import sysconfig
 import tempfile
 import unittest
+from contextlib import chdir
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+from zipfile import ZipFile
 
-# setup.py executes setup() on import; load only the wheel utility class.
+# setup.py executes setup() on import; load only the wheel utility code.
 setup_path = Path(__file__).resolve().parents[2] / "setup.py"
-node = next(
+nodes = [
     node
     for node in ast.parse(setup_path.read_text()).body
-    if isinstance(node, ast.ClassDef) and node.name == "precompiled_wheel_utils"
-)
+    if (
+        isinstance(node, ast.Import)
+        and all(
+            alias.name in {"os", "re", "shutil", "subprocess", "sysconfig"}
+            for alias in node.names
+        )
+    )
+    or (
+        isinstance(node, (ast.ClassDef, ast.FunctionDef))
+        and node.name
+        in {
+            "get_precompiled_rust_extension_paths",
+            "has_compatible_rust_extension_suffix",
+            "is_freethreaded",
+            "precompiled_wheel_utils",
+        }
+    )
+    or (
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX"
+            for target in node.targets
+        )
+    )
+]
 namespace: dict[str, Any] = {
-    "subprocess": subprocess,
-    "os": os,
+    "Path": Path,
     "logger": logging.getLogger("setup"),
     "envs": SimpleNamespace(VLLM_DOCKER_BUILD_CONTEXT=False, VLLM_USE_PRECOMPILED=True),
 }
 exec(
-    compile(ast.Module(body=[node], type_ignores=[]), str(setup_path), "exec"),
+    compile(ast.Module(body=nodes, type_ignores=[]), str(setup_path), "exec"),
     namespace,
 )
 wheel_utils = namespace["precompiled_wheel_utils"]
@@ -189,6 +215,56 @@ class TestDetermineWheelUrl(unittest.TestCase):
                 self.assertEqual(url, (location, None))
                 fetch.assert_not_called()
                 search.assert_not_called()
+
+
+class TestRustExtensionAbi(unittest.TestCase):
+    def test_local_and_extracted_extensions_match_the_interpreter_abi(self):
+        abi3 = "_rust_turn_detection.abi3.so"
+        python_314t = "_rust_turn_detection.cpython-314t-x86_64-linux-gnu.so"
+        python_313t = "_rust_turn_detection.cpython-313t-x86_64-linux-gnu.so"
+
+        for gil_disabled, ext_suffix, compatible in [
+            (False, ".cpython-314-x86_64-linux-gnu.so", abi3),
+            (True, ".cpython-314t-x86_64-linux-gnu.so", python_314t),
+        ]:
+            config = {"Py_GIL_DISABLED": gil_disabled, "EXT_SUFFIX": ext_suffix}
+            with (
+                self.subTest(gil_disabled=gil_disabled),
+                tempfile.TemporaryDirectory() as tmp,
+                patch.object(sysconfig, "get_config_var", side_effect=config.get),
+            ):
+                root = Path(tmp)
+                package = root / "vllm"
+                package.mkdir()
+                for name in (abi3, python_314t, python_313t):
+                    (package / name).touch()
+
+                with self.subTest(source="local"), patch.dict(namespace, ROOT_DIR=root):
+                    self.assertEqual(
+                        namespace["get_precompiled_rust_extension_paths"](),
+                        [package / compatible],
+                    )
+
+                wheel = root / "vllm.whl"
+                with ZipFile(wheel, "w") as archive:
+                    for name in ("vllm-rs", abi3, python_314t, python_313t):
+                        archive.writestr(f"vllm/{name}", name)
+
+                extracted = root / "extracted"
+                extracted.mkdir()
+                with chdir(extracted):
+                    package_data = wheel_utils.extract_precompiled_and_patch_package(
+                        str(wheel),
+                        None,
+                        extract_extensions=False,
+                        extract_rust_frontend=True,
+                    )
+                with self.subTest(source="wheel"):
+                    self.assertEqual(package_data, {"vllm": ["vllm-rs", compatible]})
+                    self.assertEqual(
+                        {path.name for path in (extracted / "vllm").iterdir()},
+                        {"vllm-rs", compatible},
+                    )
 
 
 if __name__ == "__main__":

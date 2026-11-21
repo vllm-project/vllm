@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import sysconfig
 from pathlib import Path
 
 from setuptools import setup
@@ -46,6 +47,7 @@ def prepare_build_environment() -> str | None:
 
 
 def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
+    freethreaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
     return [
         RustExtension(
             target="vllm.vllm-rs",
@@ -55,15 +57,16 @@ def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
             binding=Binding.Exec,
             optional=optional,
         ),
-        # Example PyO3 module (the removed tool-parser bridge):
-        # RustExtension(
-        #     target="vllm._rust_tool_parser",
-        #     path="rust/src/parser/python/Cargo.toml",
-        #     features=["pyo3/abi3-py38"],
-        #     binding=Binding.PyO3,
-        #     optional=optional,
-        #     py_limited_api=True,
-        # ),
+        # Silero VAD and Smart Turn for /v1/realtime turn detection.
+        RustExtension(
+            target="vllm._rust_turn_detection",
+            path="rust/src/turn-detection/python/Cargo.toml",
+            # Free-threaded CPython has no stable ABI.
+            features=[] if freethreaded else ["pyo3/abi3-py311"],
+            binding=Binding.PyO3,
+            optional=optional,
+            py_limited_api=not freethreaded,
+        ),
     ]
 
 
