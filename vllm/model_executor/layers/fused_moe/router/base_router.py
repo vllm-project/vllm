@@ -8,63 +8,17 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.model_executor.layers.fused_moe.eplb_triton import eplb_map_and_record
+from vllm.model_executor.layers.fused_moe.eplb_triton import (
+    _eplb_map_and_record_i32_kernel,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
-
-    @triton.jit
-    def _eplb_map_and_record_i32_kernel(
-        topk_ids_ptr,
-        logical_replica_count_ptr,
-        logical_to_physical_ptr,
-        out_ids_ptr,
-        out_ptr,
-        record_enabled_ptr,
-        num_unpadded_tokens_ptr,
-        num_logical_experts,
-        map_slots,
-        out_size,
-        numel,
-        num_active_experts,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < numel
-
-        expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
-
-        # TODO(bowen): When using `FusedMoEModularKernel`, this
-        # can be done in a more unified way, since
-        # `FusedMoEPrepareAndFinalize` will return the expert
-        # token count, in some cases directly from the kernel.
-        # However, now there are many code paths not using
-        # the modular kernel, e.g. calling `fused_experts`,
-        # so we decide to keep the logic here.
-        #
-        # If later refactor moved all the MoE kernel calls
-        # to the modular kernel, we can move this logic there
-        # to achieve better efficiency.
-        physical_id = eplb_map_and_record(
-            expert_id,
-            offs // num_active_experts,
-            mask,
-            logical_to_physical_ptr,
-            logical_replica_count_ptr,
-            num_logical_experts,
-            map_slots,
-            out_ptr,
-            out_size,
-            record_enabled_ptr,
-            num_unpadded_tokens_ptr,
-        )
-        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
 
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
@@ -73,6 +27,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None,
+        replica_routing_table: torch.Tensor | None,
     ) -> torch.Tensor:
         topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
@@ -82,6 +37,11 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
         grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         assert expert_load_view.is_contiguous()
+        if replica_routing_table is not None:
+            assert replica_routing_table.ndim == 2
+            assert replica_routing_table.shape[0] > 0
+            assert replica_routing_table.shape[1] == logical_replica_count.shape[0]
+            assert replica_routing_table.is_contiguous()
         _eplb_map_and_record_i32_kernel[grid](
             topk_ids_in,
             logical_replica_count.contiguous(),
@@ -96,6 +56,12 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             numel,
             num_active_experts,
             BLOCK_SIZE=256,
+            replica_routing_table=replica_routing_table,
+            ROUTING_TABLE_ROWS=(
+                replica_routing_table.shape[0]
+                if replica_routing_table is not None
+                else 0
+            ),
         )
         return out_flat.reshape(topk_ids.shape)
 
@@ -106,6 +72,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        replica_routing_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fused triton implementation: mapping + optional recording in one kernel.
         return _eplb_map_and_record_triton(
@@ -115,6 +82,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             expert_load_view=expert_load_view,
             record_enabled=record_enabled,
             num_unpadded_tokens=num_unpadded_tokens,
+            replica_routing_table=replica_routing_table,
         )
 else:
 
@@ -125,6 +93,7 @@ else:
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        replica_routing_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
 
