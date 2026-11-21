@@ -9,6 +9,7 @@ from typing import Any
 
 from vllm import EngineArgs, envs
 from vllm.logger import current_formatter_type, init_logger
+from vllm.plugins.model_metadata import skip_model_metadata_source
 
 logger = init_logger(__name__)
 
@@ -75,8 +76,12 @@ def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
 
     # Handle EngineArgs instance
     elif isinstance(args, EngineArgs):
-        default_args = EngineArgs(model=args.model)  # Create default instance
+        # This instance is only compared against, so it must not fetch anything.
+        with skip_model_metadata_source():
+            default_args = EngineArgs(model=args.model)  # Create default instance
         for field in dataclasses.fields(args):
+            if not field.init:
+                continue
             current_val = getattr(args, field.name)
             default_val = getattr(default_args, field.name)
             if current_val != default_val:
