@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnector,
     MoRIIOConnectorWorker,
 )
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
@@ -120,7 +121,6 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
         pop_failed_write_req_ids=pop_failed_write_req_ids, shutdown=lambda: None
     )
     worker._unmatched_write_failures = OrderedDict()
-    worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
     worker.write_done = set()
 
@@ -130,6 +130,15 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
 
     worker.get_finished = get_finished  # type: ignore[method-assign]
     return worker
+
+
+def _transfer_results(worker: MoRIIOConnectorWorker, metadata):
+    """A step's results, as the model runner gets them: from the connector,
+    with the step's metadata bound."""
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.connector_worker = worker
+    connector.bind_connector_metadata(metadata)
+    return connector.get_transfer_results(set())
 
 
 class _Engine:
@@ -176,7 +185,7 @@ class _Engine:
             if ranks is None or rank in ranks:
                 worker.write_done |= write_done
                 worker.write_failed |= write_failed
-            results = worker.get_transfer_results()
+            results = _transfer_results(worker, out.kv_connector_metadata)
             outputs.append(
                 create_model_runner_output(
                     scheduled,
@@ -236,7 +245,7 @@ def test_dead_prefill_does_not_leave_its_request_waiting(consumer_role, monkeypa
     def step():
         out = scheduler.schedule()
         worker.start_load_kv(out.kv_connector_metadata)
-        results = worker.get_transfer_results()
+        results = _transfer_results(worker, out.kv_connector_metadata)
         scheduler.update_from_output(
             out,
             create_model_runner_output(

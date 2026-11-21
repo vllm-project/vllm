@@ -661,7 +661,6 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     worker.moriio_wrapper = wrapper
     worker.transfer_id_to_request_id = {"tA": "req-1"}
     worker._unmatched_write_failures = OrderedDict()
-    worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
     worker.get_finished = lambda: (set(), set())  # type: ignore[method-assign]
 

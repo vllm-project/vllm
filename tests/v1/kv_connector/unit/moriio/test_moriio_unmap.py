@@ -218,7 +218,7 @@ def test_write_allocation_without_remote_prefill_preserves_receive_tracking(
     request = create_request(num_tokens=16, do_remote_prefill=True)
     _setup_kv_transfer_request(request, fake_transfer_id="xfer-local")
     request.kv_transfer_params["do_remote_prefill"] = False
-    pending = {request.request_id: False} if already_in_flight else {}
+    pending = {request.request_id: mc._WriteRecv()} if already_in_flight else {}
     connector._write_recvs_in_flight.update(pending)
     connector.send_notify_block = MagicMock()
 
