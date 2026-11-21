@@ -132,6 +132,75 @@ def _make_int8_moe_weights(use_bias: bool, dtype: torch.dtype = torch.bfloat16):
     return w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
 
 
+@pytest.fixture
+def mock_zentorch_preprocess_weights():
+    """Reference zentorch_preprocess_weights, registered when zentorch is absent."""
+    if hasattr(torch.ops.zentorch, "zentorch_preprocess_weights"):
+        yield None
+        return
+
+    def _preprocess_weights(weight, zentorch_op_name=""):
+        if weight.dim() != 3 or weight.dtype is not torch.int8:
+            return weight
+        e, n, k = weight.shape
+        pad = ((n * 4 + 63) // 64) * 64 + 64
+        storage = weight.new_empty((e, 1, n * k + pad))
+        out = storage.as_strided((e, n, k), (n * k + pad, k, 1))
+        out.copy_(weight)
+        return out
+
+    lib_def = torch.library.Library("zentorch", "DEF")
+    lib_def.define(
+        "zentorch_preprocess_weights(Tensor weight, str "
+        "zentorch_op_name='zentorch::zentorch_preprocess_weights') -> Tensor"
+    )
+    lib_impl = torch.library.Library("zentorch", "IMPL", "CPU")
+    lib_impl.impl("zentorch_preprocess_weights", _preprocess_weights)
+
+    yield True
+
+    lib_impl._destroy()
+    lib_def._destroy()
+
+
+def test_zen_int8_moe_weights_get_per_expert_slack(
+    default_vllm_config, mock_zentorch_preprocess_weights, monkeypatch
+):
+    """The experts' load hook pads both projections through the op."""
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
+    w13, w2, w13_scale, w2_scale, _, _ = _make_int8_moe_weights(use_bias=False)
+    moe_config = _make_moe_config(
+        EXPERT_NUM,
+        HIDDEN_SIZE,
+        INTERMEDIATE_SIZE,
+        EXPERT_NUM // 2,
+        torch.bfloat16,
+        MoEActivation.SILU,
+        False,
+    )
+    quant_config = int8_w8a8_moe_quant_config(
+        w1_scale=w13_scale.unsqueeze(-1),
+        w2_scale=w2_scale.unsqueeze(-1),
+        a1_scale=None,
+        a2_scale=None,
+        per_act_token_quant=True,
+    )
+
+    layer = torch.nn.Module()
+    for name, w in (("w13_weight", w13), ("w2_weight", w2)):
+        layer.register_parameter(
+            name, torch.nn.Parameter(w.clone(), requires_grad=False)
+        )
+
+    ZenCPUExpertsInt8(moe_config, quant_config).process_weights_after_loading(layer)
+
+    for name, original in (("w13_weight", w13), ("w2_weight", w2)):
+        padded = getattr(layer, name).data
+        n, k = original.shape[1:]
+        assert padded.stride(0) > n * k
+        assert torch.equal(padded, original)
+
+
 def test_zen_int8_first_in_cpu_backend_priority():
     """The Zen experts are preferred over the generic CPU int8 experts."""
     assert backend_to_kernel_cls(Int8MoeBackend.CPU)[0] is ZenCPUExpertsInt8
