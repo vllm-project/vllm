@@ -14,7 +14,7 @@ from .linear import _k_group_tile, _prefetch_k_group_tile, k_group_partials
 from .mxfp8 import _mxfp8_block, _store_mxfp8_block
 from .nvfp4 import FP32_MAX, _quantize_block, _quantize_columns, _store_block
 from .seq_parallel import HALO_ROWS, SeqParallel
-from .trtllm_bmm import ExpertPlan
+from .trtllm_bmm import ExpertPlan, operand
 
 
 @triton.jit
@@ -914,14 +914,14 @@ def route(
     weights = torch.empty(n, dtype=torch.float32, device=device)
     if nvfp4:
         quantized = (
-            torch.empty((rows, hidden // 2), dtype=torch.uint8, device=device),
-            torch.empty((rows, hidden // 16), dtype=torch.float8_e4m3fn, device=device),
-            torch.empty(rows, dtype=torch.float32, device=device),
+            operand(rows, hidden // 2, dtype=torch.uint8, device=device),
+            operand(rows, hidden // 16, dtype=torch.float8_e4m3fn, device=device),
+            operand(rows, dtype=torch.float32, device=device),
         )
     else:
         quantized = (
-            torch.empty((rows, hidden), dtype=torch.float8_e4m3fn, device=device),
-            torch.empty((rows, hidden // 32), dtype=torch.uint8, device=device),
+            operand(rows, hidden, dtype=torch.float8_e4m3fn, device=device),
+            operand(rows, hidden // 32, dtype=torch.uint8, device=device),
             None,
         )
     outputs = (src2dst, gammas, routed, tiles)

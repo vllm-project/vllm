@@ -636,6 +636,29 @@ def test_humming_nvfp4_preserves_quantized_experts(dist_init, tokens: int):
 
 
 @requires_packed_experts
+@pytest.mark.skipif(not use_sm100_kernels(), reason="TRT-LLM-gen expert GEMMs")
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_gemm_operands_span_128kib(dist_init, monkeypatch, fmt: str):
+    """The expert GEMMs' TMA accesses can reach 128 KiB past each operand's
+    base however few rows are used: even a one-token layer backs every
+    operand and output of both GEMMs with that much memory."""
+    moe = _build_moe(fmt, _random_moe_weights(fmt))
+    gemm, calls = moe_module.bmm, []
+
+    def record(act, act_scale, row_scale, *args):
+        out = gemm(act, act_scale, row_scale, *args)
+        calls.append((act, act_scale, row_scale, out))
+        return out
+
+    monkeypatch.setattr(moe_module, "bmm", record)
+    moe(torch.randn(1, 512, device="cuda").bfloat16())
+    assert len(calls) == 2
+    for tensor in (t for call in calls for t in call if t is not None):
+        offset = tensor.storage_offset() * tensor.element_size()
+        backed = tensor.untyped_storage().nbytes() - offset
+        assert backed >= trtllm_bmm.MIN_OPERAND_BYTES, (tensor.shape, backed)
+
+
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 @pytest.mark.parametrize("tokens", [5, 64])
 def test_token_tiles_match(dist_init, monkeypatch, fmt: str, tokens: int):

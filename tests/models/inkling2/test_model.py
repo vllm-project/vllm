@@ -275,11 +275,8 @@ def test_tiny_model_generates(
         kv_cache_dtype=kv_cache_dtype,
         kernel_config={"moe_backend": moe_backend},
         gpu_memory_utilization=0.10 if looped else 0.035,
-        # Bound SM12x warmup memory and exercise chunking of the 298-token
-        # prompt. On B200 this budget faulted in the TRT-LLM NVFP4 expert GEMM.
-        max_num_batched_tokens=(
-            256 if current_platform.is_device_capability_family(120) else None
-        ),
+        # Bound warmup memory and exercise chunking of the 298-token prompt.
+        max_num_batched_tokens=256,
         max_model_len=2048,
         max_num_seqs=4,
         limit_mm_per_prompt={"image": 0},
