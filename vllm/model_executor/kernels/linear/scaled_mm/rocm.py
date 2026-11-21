@@ -106,6 +106,9 @@ class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.pad_weight_k(layer)
+
     def apply_scaled_mm(
         self,
         *,

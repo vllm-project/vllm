@@ -64,6 +64,11 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return False, "requires a platform with torch FP8 scaled-MM support."
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # The K padding is a ROCm fix, so other platforms keep their behavior.
+        if current_platform.is_rocm():
+            self.pad_weight_k(layer)
+
     def get_output_padding(self) -> int | None:
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
