@@ -47,6 +47,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion.gated_linear_silu import create_gated_linear_silu
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -98,6 +99,8 @@ class Qwen3MoeMLP(nn.Module):
         is_sequence_parallel: bool = False,
         disable_tp: bool = False,
         prefix: str = "",
+        *,
+        enable_gated_linear_silu: bool = False,
     ) -> None:
         super().__init__()
         disable_tp = disable_tp or is_sequence_parallel
@@ -124,10 +127,18 @@ class Qwen3MoeMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
+        self.gate_up_silu = (
+            create_gated_linear_silu(self.gate_up_proj, self.down_proj, self.act_fn)
+            if enable_gated_linear_silu and quant_config is None and expert_gate is None
+            else None
+        )
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        out = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
+        if self.gate_up_silu is not None:
+            out = self.gate_up_silu(x, self.gate_up_proj.weight)
+        else:
+            gate_up, _ = self.gate_up_proj(x)
+            out = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
