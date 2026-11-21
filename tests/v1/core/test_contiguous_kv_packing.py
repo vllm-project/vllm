@@ -447,10 +447,10 @@ class TestCSALinearGrouping:
         )
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (16, 16)
 
-        # 2 tokens is not a multiple of the compression ratio 4: a prefix hit
-        # could land inside a partially filled compressed state.
+        # 2 tokens is not a multiple of the compression ratio 4, so it would
+        # disable fine-grained hits.
         config.cache_config.prefix_match_unit = 2
-        with pytest.raises(ValueError, match="per-state compression"):
+        with pytest.raises(ValueError, match="would disable fine-grained"):
             resolve_kv_cache_block_sizes(kv_cache_config, config)
 
     def test_scratch_ring_does_not_drag_hash_granularity(self):

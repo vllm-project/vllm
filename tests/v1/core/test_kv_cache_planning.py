@@ -1597,7 +1597,7 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     )
     assert kv_cache_utils.resolve_kv_cache_block_sizes(
         kv_cache_config, vllm_config
-    ) == (544, 136)
+    ) == (544, 68)
 
 
 def test_multi_run_layer_compact_strides_place_hoisted_heads():

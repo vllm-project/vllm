@@ -211,6 +211,10 @@ class CacheConfig:
     inside a physical block. It controls matching granularity only, not how
     often states are stored.
 
+    If unset with hybrid prefix caching, vLLM chooses the smallest supported
+    value of at least 64 tokens. An explicit value fails at startup if it
+    would disable fine-grained hits.
+
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
     gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)

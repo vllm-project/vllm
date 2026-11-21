@@ -85,6 +85,9 @@ def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
 
 logger = init_logger(__name__)
 
+# Smallest automatically selected unit; finer hashing grows lookup work.
+MIN_AUTO_PREFIX_MATCH_UNIT = 64
+
 # The hash seed for the first block of any prefix block sequence.
 #
 # For cryptographic hash algorithms it is derived deterministically from a fixed
@@ -754,6 +757,7 @@ def partial_hash_hits_enabled(
     hash_block_size: int,
     dcp_world_size: int = 1,
     manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
+    log_disabled: bool = True,
 ) -> bool:
     """Whether aligned Mamba states support sub-block prefix-cache hits.
 
@@ -778,14 +782,13 @@ def partial_hash_hits_enabled(
         and not manager_cls.supports_fine_grained_hash_lookup
         and resolve_dcp_kv_block_size(group, dcp_world_size) != hash_block_size
     }
-    if unsupported_managers:
+    if unsupported_managers and log_disabled:
         logger.warning_once(
             "Disabling fine-grained prefix-cache hits because these KV "
             "cache managers require block-aligned lookups: %s.",
             ", ".join(sorted(unsupported_managers)),
         )
-        return False
-    return True
+    return not unsupported_managers
 
 
 def resolve_kv_cache_block_sizes(
@@ -803,8 +806,10 @@ def resolve_kv_cache_block_sizes(
       is computed. Single group: equals scheduler block size, and any other
       `cache_config.prefix_match_unit` is rejected while block hashing is
       active. Multiple groups:
-      `cache_config.prefix_match_unit` override if set, else the GCD of
-      group block sizes; every group's block size must be divisible by it.
+      `cache_config.prefix_match_unit` override if set, else the smallest
+      unit of at least `MIN_AUTO_PREFIX_MATCH_UNIT` that enables partial hits,
+      falling back to the GCD of group block sizes. Every prefix-cacheable
+      group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
       hashing is inactive, or prefix caching is off for a mamba group.
     """
@@ -859,15 +864,6 @@ def resolve_kv_cache_block_sizes(
         for group, block_size in zip(groups, group_block_sizes)
         if group.prefix_cacheable
     ] or group_block_sizes
-    requested = cache_config.prefix_match_unit
-    hash_block_size = requested if requested is not None else math.gcd(*hashing_sizes)
-    if any(bs % hash_block_size != 0 for bs in hashing_sizes):
-        raise ValueError(
-            f"Invalid prefix_match_unit={hash_block_size}; prefix-cacheable "
-            "KV cache group block sizes must be divisible by prefix_match_unit. "
-            f"Got group block sizes={group_block_sizes}, "
-            f"prefix-cacheable={hashing_sizes}."
-        )
     prefix_alignments = {
         spec.tokens_per_state
         for group in groups
@@ -875,11 +871,47 @@ def resolve_kv_cache_block_sizes(
         for spec in group.kv_cache_specs.values()
         if isinstance(spec.tokens_per_state, int) and spec.tokens_per_state > 1
     }
-    cache_hit_alignment = (
-        hash_block_size
-        if partial_hash_hits_enabled(groups, hash_block_size, dcp)
-        else scheduler_block_size
-    )
+    manager_classes = [group.manager_cls for group in groups]
+
+    def supports_partial_hits(unit: int) -> bool:
+        return partial_hash_hits_enabled(
+            groups, unit, dcp, manager_classes, log_disabled=False
+        ) and all(unit % alignment == 0 for alignment in prefix_alignments)
+
+    requested = cache_config.prefix_match_unit
+    gcd_block_size = math.gcd(*hashing_sizes)
+    if requested is None and cache_config.enable_prefix_caching:
+        hash_block_size = next(
+            (
+                unit
+                for unit in range(MIN_AUTO_PREFIX_MATCH_UNIT, gcd_block_size + 1)
+                if gcd_block_size % unit == 0 and supports_partial_hits(unit)
+            ),
+            gcd_block_size,
+        )
+        logger.info_once("Resolved prefix_match_unit to %d", hash_block_size)
+    else:
+        hash_block_size = requested if requested is not None else gcd_block_size
+    if any(bs % hash_block_size != 0 for bs in hashing_sizes):
+        raise ValueError(
+            f"Invalid prefix_match_unit={hash_block_size}; prefix-cacheable "
+            "KV cache group block sizes must be divisible by prefix_match_unit. "
+            f"Got group block sizes={group_block_sizes}, "
+            f"prefix-cacheable={hashing_sizes}."
+        )
+    partial_hits = supports_partial_hits(hash_block_size)
+    if (
+        cache_config.enable_prefix_caching
+        and requested is not None
+        and partial_hash_hits_enabled(groups, requested, dcp)
+        and not partial_hits
+    ):
+        raise ValueError(
+            f"Invalid prefix_match_unit={requested}; it would disable "
+            "fine-grained prefix-cache hits. Unset it to choose a supported "
+            f"value automatically. Got group block sizes={group_block_sizes}."
+        )
+    cache_hit_alignment = hash_block_size if partial_hits else scheduler_block_size
     if any(cache_hit_alignment % alignment for alignment in prefix_alignments):
         raise ValueError(
             f"Invalid prefix_match_unit={hash_block_size}; prefix-cache boundaries "

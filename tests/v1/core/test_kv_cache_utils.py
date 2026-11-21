@@ -73,7 +73,9 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
+    MambaManager,
     SinkFullAttentionManager,
+    SlidingWindowManager,
     get_kv_cache_kind,
 )
 from vllm.v1.hisparse.layout import (
@@ -1923,6 +1925,185 @@ def test_resolve_dcp_kv_block_size_scales_only_sharded_groups():
 
     assert kv_cache_utils.resolve_dcp_kv_block_size(attention_group, 4) == 64
     assert kv_cache_utils.resolve_dcp_kv_block_size(mamba_group, 4) == 16
+
+
+def _prefix_match_kv_cache_config(
+    full_block_size: int,
+    mamba_block_size: int,
+    sliding_window_block_size: int | None = None,
+    full_tokens_per_state: int = 1,
+) -> KVCacheConfig:
+    groups = [
+        new_kv_cache_group(
+            ["full"],
+            AttentionSpec(
+                block_size=full_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                tokens_per_state=full_tokens_per_state,
+            ),
+        ),
+        new_kv_cache_group(
+            ["mamba"],
+            MambaSpec(
+                block_size=mamba_block_size,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+            ),
+            MambaManager.config(mamba_cache_mode="align"),
+        ),
+    ]
+    if sliding_window_block_size is not None:
+        groups.append(
+            new_kv_cache_group(
+                ["draft_swa"],
+                AttentionSpec(
+                    block_size=sliding_window_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                SlidingWindowManager.config(sliding_window=sliding_window_block_size),
+            )
+        )
+    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=groups)
+
+
+def _prefix_match_vllm_config(
+    prefix_match_unit: int | None,
+    *,
+    enable_prefix_caching: bool = True,
+    kv_transfer_config: KVTransferConfig | None = None,
+) -> VllmConfig:
+    return VllmConfig(
+        cache_config=CacheConfig(
+            enable_prefix_caching=enable_prefix_caching,
+            prefix_match_unit=prefix_match_unit,
+        ),
+        kv_transfer_config=kv_transfer_config,
+    )
+
+
+def _resolve_prefix_match_unit(
+    kv_cache_config: KVCacheConfig,
+    prefix_match_unit: int | None,
+    **kwargs,
+) -> tuple[int, int, int]:
+    vllm_config = _prefix_match_vllm_config(prefix_match_unit, **kwargs)
+    scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
+    cache_hit_alignment = kv_cache_utils.resolve_cache_hit_alignment_tokens(
+        kv_cache_config,
+        vllm_config,
+        scheduler_block_size,
+        hash_block_size,
+    )
+    return scheduler_block_size, hash_block_size, cache_hit_alignment
+
+
+@pytest.mark.parametrize(
+    ("full_block_size", "mamba_block_size", "sliding_window_block_size", "expected"),
+    [
+        # Full attention and Mamba support finer lookups, so the floor wins.
+        (1024, 8192, None, (8192, 64, 64)),
+        # A sliding-window group can only match its own block boundary.
+        (768, 6144, 768, (6144, 768, 768)),
+    ],
+)
+def test_unset_prefix_match_unit_chooses_smallest_supported_unit(
+    full_block_size: int,
+    mamba_block_size: int,
+    sliding_window_block_size: int | None,
+    expected: tuple[int, int, int],
+):
+    kv_cache_config = _prefix_match_kv_cache_config(
+        full_block_size, mamba_block_size, sliding_window_block_size
+    )
+
+    assert _resolve_prefix_match_unit(kv_cache_config, None) == expected
+
+
+def test_unset_prefix_match_unit_respects_compressed_state_alignment():
+    kv_cache_config = _prefix_match_kv_cache_config(
+        1024, 8192, full_tokens_per_state=128
+    )
+
+    assert _resolve_prefix_match_unit(kv_cache_config, None) == (8192, 128, 128)
+
+
+def test_unset_prefix_match_unit_keeps_gcd_below_automatic_floor():
+    kv_cache_config = _prefix_match_kv_cache_config(32, 64)
+
+    assert _resolve_prefix_match_unit(kv_cache_config, None) == (64, 32, 32)
+
+
+def test_unset_prefix_match_unit_keeps_gcd_without_prefix_caching():
+    kv_cache_config = _prefix_match_kv_cache_config(1024, 8192)
+
+    assert _resolve_prefix_match_unit(
+        kv_cache_config,
+        None,
+        enable_prefix_caching=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleConnector", kv_role="kv_both"
+        ),
+    ) == (8192, 1024, 8192)
+
+
+@pytest.mark.parametrize(
+    ("sliding_window_block_size", "prefix_match_unit", "expected"),
+    [
+        (None, 16, (8192, 16, 16)),
+        (None, 128, (8192, 128, 128)),
+        (768, 768, (6144, 768, 768)),
+    ],
+)
+def test_explicit_prefix_match_unit_is_honored_when_supported(
+    sliding_window_block_size: int | None,
+    prefix_match_unit: int,
+    expected: tuple[int, int, int],
+):
+    full_block_size = 768 if sliding_window_block_size else 1024
+    mamba_block_size = 6144 if sliding_window_block_size else 8192
+    kv_cache_config = _prefix_match_kv_cache_config(
+        full_block_size, mamba_block_size, sliding_window_block_size
+    )
+
+    assert _resolve_prefix_match_unit(kv_cache_config, prefix_match_unit) == expected
+
+
+@pytest.mark.parametrize("prefix_match_unit", [64, 128, 256, 384])
+def test_explicit_prefix_match_unit_errors_when_partial_hits_are_disabled(
+    prefix_match_unit: int,
+):
+    kv_cache_config = _prefix_match_kv_cache_config(768, 6144, 768)
+
+    with pytest.raises(ValueError, match="would disable fine-grained"):
+        _resolve_prefix_match_unit(kv_cache_config, prefix_match_unit)
+
+
+def test_explicit_prefix_match_unit_errors_for_unaligned_compressed_state():
+    kv_cache_config = _prefix_match_kv_cache_config(
+        1024, 8192, full_tokens_per_state=128
+    )
+
+    with pytest.raises(ValueError, match="would disable fine-grained"):
+        _resolve_prefix_match_unit(kv_cache_config, 64)
+
+
+def test_explicit_prefix_match_unit_errors_when_not_a_block_divisor():
+    kv_cache_config = _prefix_match_kv_cache_config(768, 6144, 768)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        _resolve_prefix_match_unit(kv_cache_config, 1536)
+
+
+def test_explicit_scheduler_block_prefix_match_unit_is_allowed():
+    kv_cache_config = _prefix_match_kv_cache_config(6144, 6144)
+
+    assert _resolve_prefix_match_unit(kv_cache_config, 6144) == (6144, 6144, 6144)
 
 
 def _swa_mla_spec(head_size=576):
