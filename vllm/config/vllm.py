@@ -2430,6 +2430,14 @@ class VllmConfig:
                     " to accommodate the additional draft token slots, or decrease"
                     " num_speculative_tokens."
                 )
+            if max_num_batched_tokens < self.uniform_decode_query_len:
+                raise ValueError(
+                    f"max_num_batched_tokens={max_num_batched_tokens} cannot fit"
+                    " one speculative decode step of"
+                    f" {self.uniform_decode_query_len} tokens"
+                    " (1 + num_speculative_tokens). Increase"
+                    " max_num_batched_tokens or decrease num_speculative_tokens."
+                )
             if self.scheduler_config.max_num_scheduled_tokens < 8192:
                 logger.warning_once(
                     "max_num_scheduled_tokens is set to"

@@ -2665,6 +2665,44 @@ def test_draft_model_enables_async_scheduling_by_default():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "should_raise"), [(15, True), (16, False)]
+)
+def test_spec_decode_rejects_budget_smaller_than_decode_step(
+    max_num_batched_tokens: int, should_raise: bool
+):
+    """One decode step needs 1 + num_speculative_tokens tokens."""
+    parallel_config = ParallelConfig(distributed_executor_backend="uni")
+    model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=64)
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=15,
+        prompt_lookup_min=2,
+        prompt_lookup_max=2,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+
+    def make():
+        return VllmConfig(
+            model_config=model_config,
+            scheduler_config=SchedulerConfig(
+                max_model_len=model_config.max_model_len,
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_num_seqs=2,
+                is_encoder_decoder=False,
+            ),
+            parallel_config=parallel_config,
+            speculative_config=speculative_config,
+        )
+
+    if should_raise:
+        with pytest.raises(ValueError, match="one speculative decode step"):
+            make()
+    else:
+        assert make().uniform_decode_query_len == 16
+
+
 def test_dflash_allows_async_scheduling(tmp_path: Path):
     """DFlash must stay async-schedulable: it was the only parallel-drafting
     method excluded from the allowlist."""
