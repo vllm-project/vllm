@@ -4202,3 +4202,21 @@ def test_registered_online_config_is_instantiated(
 
     assert type(result) is _OotOnlineConfig
     assert result.args is not None
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        (QuantizationConfigArgs(linear="fp8_per_block", moe="fp8_per_block"), True),
+        (QuantizationConfigArgs(linear="fp8_per_block"), True),
+        (QuantizationConfigArgs(moe="fp8_per_block"), True),
+        (QuantizationConfigArgs(targets={"re:.*o_proj": "fp8_per_block"}), True),
+        (QuantizationConfigArgs(linear="fp8_per_tensor", moe="fp8_per_tensor"), False),
+        (QuantizationConfigArgs(targets={"re:.*o_proj": "fp8_per_tensor"}), False),
+    ],
+    ids=["both", "linear", "moe", "targets", "per-tensor", "targets-per-tensor"],
+)
+def test_online_has_blocked_weights(args, expected) -> None:
+    # Drives "+quant_fp8" in VllmConfig, so block FP8 activation quant uses
+    # the CUDA kernel (UE8M0-packed scales for DeepGEMM).
+    assert OnlineQuantizationConfig(args).has_blocked_weights() is expected
