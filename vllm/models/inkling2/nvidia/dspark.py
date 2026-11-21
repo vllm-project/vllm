@@ -31,7 +31,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
-    FlashAttentionImpl,
     FlashAttentionMetadata,
 )
 from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
@@ -188,8 +187,28 @@ class Inkling2DraftSelfAttention(nn.Module):
     def _write_kv(
         self, k: torch.Tensor, v: torch.Tensor, slot_mapping: torch.Tensor
     ) -> None:
-        impl = cast(FlashAttentionImpl, self.attn.impl)
-        impl.do_kv_cache_update(self.attn, k, v, self.attn.kv_cache, slot_mapping)
+        key_cache, value_cache = self.attn.kv_cache.transpose(1, 2).split(
+            self.head_dim, dim=-1
+        )
+        page = key_cache.shape[1]
+        slots = slot_mapping[: k.shape[0]].long()
+        slots = torch.where(slots < 0, torch.zeros_like(slots), slots)
+        blk, off = slots // page, slots % page
+        if key_cache.dtype in (torch.uint8, torch.float8_e4m3fn):
+            k = (
+                (k.float() / self.attn._k_scale.float())
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+            )
+            v = (
+                (v.float() / self.attn._v_scale.float())
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+            )
+            if key_cache.dtype == torch.uint8:
+                k, v = k.view(torch.uint8), v.view(torch.uint8)
+        key_cache[blk, off] = k.to(key_cache.dtype)
+        value_cache[blk, off] = v.to(value_cache.dtype)
 
     def forward(
         self, positions: torch.Tensor, x: torch.Tensor, cos_sin_cache: torch.Tensor
