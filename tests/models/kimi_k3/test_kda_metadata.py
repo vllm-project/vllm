@@ -828,6 +828,66 @@ def test_mixed_one_token_prefill_and_spec_decode_uses_prefill_metadata(
 
 
 @requires_gpu
+def test_mixed_prefill_and_spec_decode_gathers_rows_with_device_indices(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Indexing a device tensor with a host bool mask makes ATen copy the
+    mask's indices to the device on the current stream. Under GPU confidential
+    computing that copy blocks the host until the stream drains, so the mixed
+    spec/non-spec path must gather rows with device indices instead, and still
+    match the shared GDN builder."""
+    device = GPU_DEVICE
+    batch = BatchSpec(seq_lens=[100, 65, 20, 40], query_lens=[50, 1, 3, 3])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device
+    ).replace(is_prefilling=torch.tensor([True, False, False, False]))
+    kwargs = {
+        "num_decode_draft_tokens_cpu": torch.tensor([-1, -1, 2, 2], dtype=torch.int32),
+        "num_accepted_tokens": torch.ones(
+            batch.batch_size, dtype=torch.int32, device=device
+        ),
+    }
+    reference = _make_builder(
+        GDNAttentionMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        device=device,
+    ).build(0, common_attn_metadata, **kwargs)
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        device=device,
+    )
+
+    host_mask_gathers: list[torch.Size] = []
+    original_getitem = torch.Tensor.__getitem__
+
+    def checking_getitem(self: torch.Tensor, index):
+        parts = index if isinstance(index, tuple) else (index,)
+        if self.device.type != "cpu" and any(
+            isinstance(p, torch.Tensor)
+            and p.dtype == torch.bool
+            and p.device.type == "cpu"
+            for p in parts
+        ):
+            host_mask_gathers.append(self.shape)
+        return original_getitem(self, index)
+
+    monkeypatch.setattr(torch.Tensor, "__getitem__", checking_getitem)
+    actual = builder.build(0, common_attn_metadata, **kwargs)
+    monkeypatch.undo()
+
+    assert not host_mask_gathers, host_mask_gathers
+    # With a prefill in the batch, the one-token row also goes through the
+    # prefill path.
+    assert actual.num_spec_decodes == 2
+    assert actual.num_prefills == 2
+    assert actual.num_decodes == 0
+    _assert_matches_shared_gdn(reference, actual)
+
+
+@requires_gpu
 def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
     device = GPU_DEVICE
     batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])

@@ -328,6 +328,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks_cpu = None
 
         spec_request_indices = None
+        # Device row indices of the spec and active non-spec requests, set only
+        # when spec decodes share the batch with other requests.
+        spec_rows: torch.Tensor | None = None
+        non_spec_rows: torch.Tensor | None = None
         spec_token_start = None
         non_spec_token_start = None
         if num_spec_decodes == 0:
@@ -456,16 +460,30 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     spec_token_start = 0 if spec_first else num_non_spec_tokens
                     non_spec_token_start = num_spec_decode_tokens if spec_first else 0
 
+                # Gather with device row indices sent in one async copy. A host
+                # bool mask as the index makes ATen copy its indices on the
+                # current stream, which under GPU confidential computing blocks
+                # the host until the stream drains.
+                rows = async_tensor_h2d(
+                    torch.cat(
+                        (
+                            spec_sequence_masks_cpu.nonzero().flatten(),
+                            active_non_spec_mask_cpu.nonzero().flatten(),
+                        )
+                    ),
+                    device=query_start_loc.device,
+                )
+                spec_rows = rows[:num_spec_decodes]
+                non_spec_rows = rows[num_spec_decodes:]
+
                 # Native spec uses one state slot per step. RecoverSSM keeps
                 # only the current checkpoint slot.
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.spec_state_slots
+                    spec_rows, : self.spec_state_slots
                 ]
-                non_spec_state_indices_tensor = block_table_tensor[
-                    active_non_spec_mask_cpu, 0
-                ]
+                non_spec_state_indices_tensor = block_table_tensor[non_spec_rows, 0]
 
-                spec_query_lens = query_lens[spec_sequence_masks_cpu]
+                spec_query_lens = query_lens[spec_rows]
                 spec_query_start_loc = torch.zeros(
                     num_spec_decodes + 1,
                     dtype=torch.int32,
@@ -477,7 +495,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     out=spec_query_start_loc[1:],
                 )
                 if num_prefills > 0:
-                    non_spec_query_lens = query_lens[active_non_spec_mask_cpu]
+                    non_spec_query_lens = query_lens[non_spec_rows]
                     non_spec_query_start_loc = torch.zeros(
                         non_spec_query_lens.size(0) + 1,
                         dtype=torch.int32,
@@ -503,7 +521,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     non_spec_query_start_loc = None
                     non_spec_query_start_loc_cpu = None
 
-                num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+                num_accepted_tokens = num_accepted_tokens[spec_rows]
 
             if self.use_recoverssm:
                 assert self.recoverssm_num_accepted_tokens is not None
@@ -517,7 +535,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if num_prefills > 0:
             has_initial_state = m.compute_num_computed_tokens() > 0
             if num_spec_decodes > 0:
-                has_initial_state = has_initial_state[active_non_spec_mask_cpu]
+                assert non_spec_rows is not None
+                has_initial_state = has_initial_state[non_spec_rows]
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
