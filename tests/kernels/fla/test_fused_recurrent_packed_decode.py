@@ -8,6 +8,7 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
+    fused_sigmoid_gating_delta_rule_update,
 )
 
 DEVICE = current_platform.device_type
@@ -133,6 +134,49 @@ def test_fused_recurrent_packed_decode_matches_reference(
     valid = ssm_state_indices > 0
     torch.testing.assert_close(out_packed[valid], out_ref[valid], rtol=rtol, atol=atol)
     torch.testing.assert_close(state_packed, state_ref, rtol=rtol, atol=atol)
+
+
+def test_packed_and_spec_decode_use_same_qk_normalization() -> None:
+    """K=1 isolates normalization from the kernels' different reductions."""
+    batch = 32
+    generator = torch.Generator(device=DEVICE).manual_seed(907)
+    mixed_qkv = torch.randn(batch, 3, device=DEVICE, generator=generator)
+    q, k, v = (tensor.reshape(1, batch, 1, 1) for tensor in mixed_qkv.unbind(1))
+    gate = torch.zeros(batch, 1, device=DEVICE)
+    params = torch.zeros(1, device=DEVICE)
+    slots = torch.arange(1, batch + 1, device=DEVICE, dtype=torch.int32)
+    state = torch.zeros(batch + 1, 1, 1, 1, device=DEVICE)
+    packed_state = state.clone()
+    packed_out = torch.empty(batch, 1, 1, 1, device=DEVICE)
+    common = dict(
+        a=gate,
+        b=gate,
+        A_log=params,
+        dt_bias=params,
+        use_qk_l2norm_in_kernel=True,
+    )
+    fused_recurrent_gated_delta_rule_packed_decode(
+        mixed_qkv=mixed_qkv,
+        initial_state=packed_state,
+        out=packed_out,
+        ssm_state_indices=slots,
+        scale=1.0,
+        **common,
+    )
+    spec_out, spec_state = fused_sigmoid_gating_delta_rule_update(
+        q=q,
+        k=k,
+        v=v,
+        initial_state=state,
+        cu_seqlens=torch.arange(batch + 1, device=DEVICE, dtype=torch.int32),
+        ssm_state_indices=slots[:, None],
+        num_accepted_tokens=torch.ones_like(slots),
+        **common,
+    )
+    torch.testing.assert_close(
+        spec_out.reshape_as(packed_out), packed_out, rtol=0, atol=0
+    )
+    torch.testing.assert_close(spec_state, packed_state, rtol=0, atol=0)
 
 
 def test_packed_decode_keeps_beta_in_fp32():
