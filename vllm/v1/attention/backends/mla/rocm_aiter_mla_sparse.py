@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    SparseMLAPrefillRoute,
     align_blocks_to_rows,
     flat_kv_row_view,
     triton_filter_and_convert_dcp_index,
@@ -809,7 +810,8 @@ class ROCMAiterMLASparseMetadataBuilder(
             common_prefix_len, common_attn_metadata, fast_build=fast_build
         )
         use_dense_prefill = (
-            metadata.prefill is not None and metadata.prefill.use_dense_mha
+            metadata.prefill is not None
+            and metadata.prefill.route is SparseMLAPrefillRoute.DENSE_MHA
         )
         num_reqs = metadata.num_decodes if use_dense_prefill else metadata.num_reqs
         num_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs].item())

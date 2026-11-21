@@ -27,6 +27,10 @@ engine drives on your behalf:
 3. **Weight Update** (`update_weights`): transfers updated weights. May be called one or more times (e.g. for chunked transfers).
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
+Checkpoint-format backends reload in the mode set by the `VLLM_RELOAD_MODE`
+environment variable: by default [direct reload](../direct_reload.md) where it
+applies, else [layerwise reload](../layerwise.md).
+
 ## Available Backends
 
 | Backend | Transport | Use Case |
