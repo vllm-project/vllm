@@ -14,6 +14,9 @@ import numpy.typing as npt
 import pytest
 import torch
 from transformers import AutoVideoProcessor, Qwen3VLVideoProcessor
+from transformers.models.auto.video_processing_auto import (
+    VIDEO_PROCESSOR_MAPPING_NAMES,
+)
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
@@ -120,6 +123,70 @@ def test_video_loader_registry():
 def test_video_loader_type_doesnt_exist():
     with pytest.raises(AssertionError):
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
+
+
+def test_muse_spark_video_backend_resolves_by_model_type(tmp_path):
+    """The muse_spark model type must resolve to its registered video backend.
+
+    Regression test: transformers maps ``muse_spark`` to the borrowed
+    ``MuseGlimmerVideoProcessor`` entry, so a ``setdefault`` on the mapping is
+    a no-op. The connector then resolved a name with no registered backend and
+    every Muse-Spark-Open video fell back to the generic opencv loader
+    (``num_frames=32``) instead of the model's own frame sampling.
+
+    Runs in a subprocess: importing the model module mutates the (process
+    global) transformers mapping, which must not leak into other tests.
+    """
+    code = f"""
+import json
+from pathlib import Path
+
+from transformers.models.auto.video_processing_auto import (
+    VIDEO_PROCESSOR_MAPPING_NAMES,
+)
+
+before_type = type(VIDEO_PROCESSOR_MAPPING_NAMES["muse_spark"]).__name__
+
+import vllm.models.muse_spark.common.processor  # noqa: F401  applies the fix
+
+checkpoint = Path({str(tmp_path)!r})
+checkpoint.mkdir(parents=True, exist_ok=True)
+(checkpoint / "config.json").write_text(
+    json.dumps({{"model_type": "muse_spark"}})
+)
+
+from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
+from vllm.transformers_utils.processor import (
+    get_video_processor_cls_name_from_config,
+)
+
+resolved = get_video_processor_cls_name_from_config(str(checkpoint))
+entry = VIDEO_PROCESSOR_MAPPING_NAMES["muse_spark"]
+if isinstance(entry, dict):
+    entry = entry.get("torchvision")
+
+print(before_type)
+print(type(VIDEO_PROCESSOR_MAPPING_NAMES["muse_spark"]).__name__)
+print(resolved)
+print(entry)
+print(VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(resolved))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    (
+        before_type,
+        after_type,
+        resolved,
+        entry,
+        backend,
+    ) = result.stdout.strip().splitlines()[-5:]
+
+    # The mapping entry's value type is preserved (dict stays a dict).
+    assert after_type == before_type
+    assert resolved == "MuseSparkVideoProcessor"
+    assert entry == "MuseSparkVideoProcessor"
+    assert backend == "muse_spark"
 
 
 def test_video_decoder_backends_are_lazy_imported():
