@@ -659,15 +659,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_config = spec.draft_model_config if spec is not None else None
         # A draft stored in the target's checkpoint (e.g. MTP) reloads with it,
         # first, so the target's load wins on shared tensors as at cold start.
-        reload_draft = (
-            weights_iterator is None
-            and draft_model is not None
+        if (
+            spec is not None
             and draft_config is not None
+            and weights_iterator is None
+            and draft_model is not None
             and draft_config is not vllm_config.model_config
             and draft_config.model == vllm_config.model_config.model
             and not spec.prefill_context_kv_only
-        )
-        if reload_draft:
+        ):
             draft_vllm_config = copy(vllm_config)
             draft_vllm_config.model_config = draft_config
             draft_vllm_config.load_config = get_draft_load_config(vllm_config)
