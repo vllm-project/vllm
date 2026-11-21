@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 
 if TYPE_CHECKING:
@@ -380,6 +381,7 @@ def rocm_aiter_fused_experts(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a2: torch.dtype | None = None,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -439,7 +441,8 @@ def rocm_aiter_fused_experts(
     if activation == MoEActivation.SITU:
         gate_mode = (
             GateMode.INTERLEAVE.value
-            if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            if quant_config.quant_dtype == "mxfp8"
+            or rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
             else GateMode.SEPARATED.value
         )
     elif gate_mode_override is not None:
@@ -484,6 +487,7 @@ def rocm_aiter_fused_experts(
         shared_w2_scale=shared_w2_scale,
         shared_expert_id=shared_expert_id,
         q_dtype_a=q_dtype_a,
+        q_dtype_a2=q_dtype_a2,
     )
 
 
@@ -780,3 +784,67 @@ class AiterMxfp4Experts(AiterExperts):
 
     def _extra_fused_moe_kwargs(self) -> dict:
         return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+
+
+class AiterMxfp4Mxfp8Experts(AiterMxfp4Experts):
+    """SiTU MXFP4 weights with explicitly selected MXFP8 activations on gfx950."""
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        from vllm.platforms.rocm import on_gfx950
+
+        return (
+            on_gfx950()
+            and rocm_aiter_ops.is_fused_moe_enabled()
+            and rocm_aiter_ops.fused_moe_supports_gate_mode()
+            and rocm_aiter_ops.fused_moe_supports_quant_dtype_a2()
+            and rocm_aiter_ops.get_aiter_activation_type("situ") is not None
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, kMxfp8Dynamic)
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SITU
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return (
+            AiterExperts._supports_parallel_config(moe_parallel_config)
+            and not moe_parallel_config.use_mori_epv1_kernels
+            and not moe_parallel_config.use_mori_epv2_kernels
+        )
+
+    @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        if moe_config.has_bias:
+            return False, "SiTU MXFP8 does not support expert bias"
+        if moe_config.in_dtype != torch.bfloat16:
+            return False, "SiTU MXFP8 requires BF16 inputs"
+        supported, reason = AiterExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if supported and moe_config.activation_situ_linear_beta is None:
+            return False, "SiTU MXFP8 requires activation_situ_linear_beta"
+        return supported, reason
+
+    def _extra_fused_moe_kwargs(self) -> dict:
+        from aiter import dtypes
+
+        return {
+            "q_dtype_a": dtypes.fp8,
+            "q_dtype_a2": dtypes.fp8,
+            "bias1": self.quant_config.w1_bias,
+            "bias2": self.quant_config.w2_bias,
+        }
