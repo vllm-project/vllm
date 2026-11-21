@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -187,6 +187,7 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self.try_preallocate: Callable[[str, int, int, bool], bool] | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -539,8 +540,9 @@ class KVCacheManager:
         # extends it to resumed requests replaying their output tokens.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
+        full_sequence_shortfall = 0
         if full_sequence_must_fit:
-            # First check and fail if the full request sequence won't fit.
+            # First check whether the full request sequence fits.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
@@ -555,7 +557,10 @@ class KVCacheManager:
                 prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            full_sequence_shortfall = (
+                required_blocks - self.block_pool.get_num_free_blocks()
+            )
+            if full_sequence_shortfall > 0 and self.try_preallocate is None:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -594,8 +599,24 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > available_blocks:
-            # Cannot allocate new blocks
+        if (full_sequence_shortfall > 0 or required_blocks > available_blocks) and (
+            self.try_preallocate is None
+            or not self.try_preallocate(
+                request.request_id,
+                max(
+                    required_blocks - available_blocks,
+                    full_sequence_shortfall + reserved_blocks
+                    if full_sequence_shortfall > 0
+                    else 0,
+                ),
+                available_blocks - watermark_blocks,
+                bool(
+                    num_new_computed_tokens
+                    or num_external_computed_tokens
+                    or any(new_computed_block_list)
+                ),
+            )
+        ):
             return None
 
         if (
