@@ -10,11 +10,17 @@ from typing import List
 from unittest.mock import Mock
 
 import pytest
+import torch
+import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.model_executor.kernels.linear import HummingHadamardNvFp4LinearKernel
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE
+from vllm.model_executor.models.afmoe import AfmoeMoE
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsW4A4Fp4,
@@ -33,6 +39,60 @@ from vllm.platforms import current_platform
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA loading regression")
+@pytest.mark.parametrize("backend", ["flashinfer_cutlass", "humming"])
+def test_afmoe_nvfp4_loaded_precision(vllm_runner, monkeypatch, backend):
+    if not is_quant_method_supported("modelopt_fp4"):
+        pytest.skip("ModelOpt NVFP4 is unsupported on this GPU")
+    if backend == "flashinfer_cutlass" and not current_platform.has_device_capability(
+        100
+    ):
+        pytest.skip("Native NVFP4 W4A4 requires Blackwell")
+
+    model_id = "arcee-ai/Trinity-Nano-Preview-NVFP4"
+    revision = "6ffbc24c4d58965cc505401f2189272fd976503c"
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def check_loaded_model(model):
+        assert model.quant_config.quant_method == "NVFP4"
+        assert isinstance(model.lm_head.quant_method, UnquantizedLinearMethod)
+        assert model.lm_head.weight.dtype == torch.bfloat16
+        routers = 0
+        for module in model.modules():
+            if isinstance(module, RMSNorm):
+                assert module.weight.dtype == torch.bfloat16
+            if isinstance(module, AfmoeMoE):
+                method = module.experts.routed_experts.quant_method
+                assert isinstance(method, ModelOptNvFp4FusedMoE)
+                assert method.nvfp4_backend.value == backend.upper()
+                assert module.gate.weight.dtype == torch.bfloat16
+                assert module.expert_bias.dtype == torch.float32
+                inputs = torch.ones_like(module.gate.weight[:1])
+                logits, _ = module.gate(inputs)
+                assert logits.dtype == torch.bfloat16
+                torch.testing.assert_close(
+                    logits, F.linear(inputs, module.gate.weight), rtol=0, atol=0
+                )
+                routers += 1
+        assert routers == 54
+
+    with vllm_runner(
+        model_id,
+        revision=revision,
+        dtype="bfloat16",
+        moe_backend=backend,
+        linear_backend=backend,
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=64 * 1024**2,
+    ) as runner:
+        runner.apply_model(check_loaded_model)
+        outputs = runner.generate_greedy(["The capital of France is"], max_tokens=8)
+        assert len(outputs) == 1 and outputs[0][0]
+
 
 MODELS = ["nvidia/Llama-3.3-70B-Instruct-FP4"]
 
