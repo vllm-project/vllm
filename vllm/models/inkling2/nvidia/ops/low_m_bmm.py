@@ -66,8 +66,8 @@ def _low_m_bmm_kernel(
         num_b = tl.num_programs(1)
         tile = b * tl.num_programs(0) + pid_n
         offs = rows[:, None] * N + cols[None, :]
-        col_mask = (cols < N)[None, :]
-        tl.store(P + ((s * num_b + b) * MP * N + offs), acc, col_mask)
+        mask = (rows[:, None] < M) & (cols < N)[None, :]
+        tl.store(P + ((s * num_b + b) * MP * N + offs), acc, mask)
         tl.debug_barrier()
         is_last = tl.atomic_add(C + tile, 1, sem="acq_rel", scope="gpu") == SPLIT - 1
         if is_last:
@@ -75,7 +75,7 @@ def _low_m_bmm_kernel(
             for i in tl.static_range(SPLIT):
                 acc += tl.load(
                     P + ((i * num_b + b) * MP * N + offs),
-                    col_mask,
+                    mask,
                     cache_modifier=".cg",
                 )
             tl.atomic_xchg(C + tile, 0, sem="relaxed", scope="gpu")
