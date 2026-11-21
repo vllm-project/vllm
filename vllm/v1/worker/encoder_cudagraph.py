@@ -664,29 +664,29 @@ class EncoderCudaGraphManager:
         # One replay per path: the smallest budget that holds the whole batch.
         # A batch beyond the captured range runs eagerly in one forward.
         fits = num_items <= self.max_batch_size
-        # Largest items first: varlen attention schedules long sequences first,
-        # which balances its tiles better on mixed batches.
-        batch_indices = sorted(
-            range(num_items), key=lambda i: per_item_out_tokens[i], reverse=True
-        )
-        batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
+        path_budgets = {
+            path: self._path_fitting_budget(path, sum(tokens)) if fits else None
+            for path, tokens in per_item_path_tokens.items()
+            if sum(tokens) > 0
+        }
+        all_eager = all(budget is None for budget in path_budgets.values())
+        batch_indices = list(range(num_items))
+        axis_keys: CaptureAxisKeys
+        if all_eager:
+            batch_mm_kwargs, axis_keys = mm_kwargs, ()
+        else:
+            # Largest first balances varlen attention tiles on mixed batches.
+            batch_indices.sort(key=lambda i: per_item_out_tokens[i], reverse=True)
+            batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
         graph_outputs: dict[str, torch.Tensor] = {}
-        all_eager = True
 
-        for path, tokens in per_item_path_tokens.items():
-            if sum(tokens) == 0:
-                continue
-
-            token_budget = (
-                self._path_fitting_budget(path, sum(tokens)) if fits else None
-            )
+        for path, token_budget in path_budgets.items():
             if token_budget is None:
                 with torch.inference_mode():
                     output = self.model.encoder_eager_forward(
                         batch_mm_kwargs, path=path
                     )
             else:
-                all_eager = False
                 graph_output = self._run_budget_graph(
                     batch_mm_kwargs,
                     token_budget,
@@ -711,10 +711,22 @@ class EncoderCudaGraphManager:
             batch_indices,
             per_item_out_tokens,
             outputs_by_orig_idx,
-            clone=True,
+            clone=not all_eager,
             batch_mm_kwargs=batch_mm_kwargs,
         )
-        return [outputs_by_orig_idx[i] for i in range(num_items)]
+        outputs = [outputs_by_orig_idx[i] for i in range(num_items)]
+        if all_eager:
+            # Do not retain a whole batch for one cached item.
+            sources, destinations = [], []
+            for i, output in enumerate(outputs):
+                if output.untyped_storage().nbytes() > output.nbytes:
+                    copied = torch.empty_like(output)
+                    sources.append(output)
+                    destinations.append(copied)
+                    outputs[i] = copied
+            if sources:
+                torch._foreach_copy_(destinations, sources)
+        return outputs
 
     def _dp_shard(
         self,

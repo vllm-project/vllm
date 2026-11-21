@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.model_executor.models.encoder_cudagraph_utils import (
     Qwen2VLEncoderCudaGraphMixin,
@@ -39,6 +40,7 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
 HAS_DEVICE_GRAPH = current_platform.is_cuda_alike() or current_platform.is_xpu()
 
@@ -2411,11 +2413,43 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         assert result is not None
         torch.testing.assert_close(result[0], self._eager(small)[0])
 
-    def test_oversized_batch_falls_back_to_eager(self):
-        # 10000 frames -> 1300 tokens, above the largest budget (1024).
-        mm_kwargs = _make_audio_mm_kwargs([10000], self.device, self.dtype)
+    @pytest.mark.parametrize(
+        "feature_lens", [[10000], [100, 10000, 250], [100, 250] * 5]
+    )
+    def test_oversized_batch_falls_back_to_eager(self, feature_lens):
+        """Fallback preserves input order and lets cache items be freed separately."""
+        mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
+        expected = self._eager(mm_kwargs)
         misses = self.mgr.graph_misses
-        result = self.mgr.execute(mm_kwargs)
-        assert self.mgr.graph_misses == misses + 1
-        assert result is not None
-        torch.testing.assert_close(result[0], self._eager(mm_kwargs)[0], rtol=0, atol=0)
+        input_storage = mm_kwargs["input_audio_features"].untyped_storage().data_ptr()
+
+        class CheckFallbackCopies(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                if func == torch.ops.aten.cat.default:
+                    assert all(
+                        tensor.untyped_storage().data_ptr() != input_storage
+                        for tensor in args[0]
+                    ), "Eager fallback must not concatenate the packed audio input"
+                elif func == torch.ops.aten._foreach_copy_.default:
+                    assert all(
+                        tensor.untyped_storage().nbytes() > tensor.nbytes
+                        for tensor in args[1]
+                    ), "Eager fallback must not copy outputs with bounded storage"
+                return func(*args, **(kwargs or {}))
+
+        with CheckFallbackCopies():
+            result = self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_misses == misses + len(feature_lens)
+        assert len(result) == len(expected)
+        self.mgr.execute(_make_audio_mm_kwargs([100], self.device, self.dtype))
+        for out, ref in zip(result, expected):
+            torch.testing.assert_close(out, ref, rtol=0, atol=0)
+        cache = EncoderCache()
+        cache.encoder_outputs.update({str(i): out for i, out in enumerate(result)})
+        for i in range(1, len(result)):
+            cache.free_encoder_cache(str(i))
+        del result, out
+        retained = cache.encoder_outputs["0"]
+        assert retained.untyped_storage().nbytes() == (
+            retained.numel() * retained.element_size()
+        )

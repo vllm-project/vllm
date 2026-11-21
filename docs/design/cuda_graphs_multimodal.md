@@ -87,6 +87,8 @@ The dense default table is affordable for every model because capture buffers ar
 
 Because later captures overwrite a shared buffer, its capture-time contents may belong to another budget. Replay must therefore provide every shared buffer (the manager raises if one is missing), and a custom `padding_logics` entry must write its whole destination buffer.
 
+When a batch exceeds the item limit or no active encoder path has a fitting token budget, it runs eagerly in its original item order. This avoids graph-specific input selection and concatenation. Local outputs reuse their storage when it is bounded by the item's size; views retaining a larger allocation are copied in a batch to compact allocations. In non-DP mode, each retained encoder cache item therefore keeps backing storage no larger than its logical size. Graph replay outputs are also copied because subsequent replays overwrite the shared graph buffers. In data-parallel encoder mode, the eager decision is made after sharding, separately for each rank's local batch; the final gather retains its existing shared-output layout.
+
 Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured encoder path. A path can provide its own minimum token budget and opt into zero-token batches; the manager generates and stores a separate budget graph set for every configured path.
 
 ### Multi-Path Graph Capture
