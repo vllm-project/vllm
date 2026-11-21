@@ -9,7 +9,7 @@ import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
@@ -24,7 +24,11 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -69,12 +73,11 @@ def _get_num_image_tokens(image_size: int) -> int:
 
 
 class OpenVLAImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (6)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (6)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -296,18 +299,16 @@ class OpenVLADummyInputsBuilder(BaseDummyInputsBuilder[OpenVLAProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        image_overrides = mm_options.get("image")
         image_size = self.info.get_image_size_with_most_features()
 
         return {
             "image": self._get_dummy_images(
                 width=image_size.width,
                 height=image_size.height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -327,15 +328,6 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -348,13 +340,14 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
         tokenizer = self.info.get_tokenizer()
         bos_token_id = tokenizer.bos_token_id
 
-        def get_insertion(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_insertion(item_idx: int) -> PromptUpdateDetails:
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems)
             )
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -496,11 +489,15 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
             tower_model="vision_backbone",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        return num_image_tokens
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def maybe_rename_vision_weights(

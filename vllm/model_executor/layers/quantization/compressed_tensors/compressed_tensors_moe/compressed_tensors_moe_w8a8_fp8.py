@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 
 import torch
 from compressed_tensors.quantization import (
@@ -8,7 +9,6 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
 )
 
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
@@ -29,8 +30,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    dequantize_fp8_moe_weights,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
+    validate_fp8_block_shape_moe,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -97,6 +100,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             ),
         }
         weight_key = ct2vllm_weight[self.weight_quant.strategy]
+        self.weight_quant_key = weight_key
         if weight_key == kFp8Static128BlockSym:
             activation_key = kFp8Dynamic128Sym
         else:
@@ -129,28 +133,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         if self.block_quant:
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
-            tp_size = get_tensor_model_parallel_world_size()
             block_n, block_k = (
                 self.weight_block_size[0],
                 self.weight_block_size[1],
             )
-            # NOTE: To ensure proper alignment of the block-wise quantization
-            # scales, the output_size of the weights for both the gate and up
-            # layers must be divisible by block_n.
-            # Required by column parallel or enabling merged weights
-            if intermediate_size_per_partition % block_n != 0:
-                raise ValueError(
-                    f"The output_size of gate's and up's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_n = {block_n}."
-                )
-            if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
-                # Required by row parallel
-                raise ValueError(
-                    f"The input_size of down's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_k = {block_k}."
-                )
+            validate_fp8_block_shape_moe(
+                intermediate_size_per_partition,
+                self.weight_block_size,
+            )
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -267,6 +257,23 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized FP8 experts, for online
+        requantization."""
+        return dequantize_fp8_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            weight_key=self.weight_quant_key,
+            num_w13_shards=self.moe.w13_num_shards,
+            weight_block_size=self.weight_block_size,
+            static_input_scales=self.static_input_scales,
+            out_dtype=layer.orig_dtype,
+        )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
@@ -290,7 +297,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
             assert w13_input_scale is not None and w2_input_scale is not None
             w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
-                w13_input_scale, w2_input_scale
+                w13_input_scale,
+                w2_input_scale,
+                layer.moe_config.moe_parallel_config.enable_eplb,
             )
             replace_parameter(layer, "w13_input_scale", w13_input_scale)
             replace_parameter(layer, "w2_input_scale", w2_input_scale)
@@ -337,8 +346,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+            self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
@@ -351,6 +361,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             per_act_token_quant=is_per_token,
             per_out_ch_quant=is_per_token,
             block_shape=self.weight_block_size,
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             layer=layer,
         )
@@ -376,6 +388,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
@@ -386,7 +399,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(

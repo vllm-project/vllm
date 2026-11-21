@@ -2,8 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import OrderedDict
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
+import pytest
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram
+
+from tests.v1.kv_connector.unit.test_mooncake_connector import (
+    FakeMooncakeWrapper,
+    _make_test_kv_cache_config,
+    mooncake_register_worker,
+)
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     MooncakeConnector,
     MooncakeConnectorWorker,
@@ -11,7 +25,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
+    MooncakePromMetrics,
 )
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 
 
 def test_is_empty_on_fresh_stats():
@@ -40,6 +56,9 @@ def test_record_transfer_and_reduce():
     assert reduced["Num failed transfers"] == 0
     assert reduced["Num failed recvs"] == 0
     assert reduced["Num KV expired reqs"] == 0
+    # Reduced values must be plain Python scalars so CLI logging renders
+    # them without numpy reprs (eg np.float64(...)).
+    assert all(not isinstance(v, np.generic) for v in reduced.values())
 
 
 def test_record_failures_keeps_stats_non_empty():
@@ -202,25 +221,38 @@ def _bare_worker() -> MooncakeConnectorWorker:
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.xfer_stats = MooncakeKVConnectorStats()
-    worker.engine = MagicMock()
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
+    worker._kv_lease_duration = None
+    worker._expired_transfer_ids = OrderedDict()
     return worker
 
 
-def test_send_blocks_records_success():
-    worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
+@pytest.fixture
+def transfer_worker(request, monkeypatch):
+    status = getattr(request, "param", 0)
+    monkeypatch.setattr(
+        FakeMooncakeWrapper, "batch_transfer_sync_write", lambda *args: status
+    )
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        try:
+            yield worker
+        finally:
+            worker.shutdown()
+
+
+def test_send_blocks_records_success(transfer_worker):
+    worker = transfer_worker
 
     ret = worker._send_blocks(
         "host:1234",
-        src_ptrs=[0x1000, 0x2000],
-        dst_ptrs=[0x3000, 0x4000],
-        lengths=[1024, 2048],
+        src_ptrs=np.array([0x1000, 0x2000], dtype=np.uint64),
+        dst_ptrs=np.array([0x3000, 0x4000], dtype=np.uint64),
+        lengths=np.array([1024, 2048], dtype=np.uint64),
     )
 
-    assert ret == 0
+    assert ret is None
     assert worker.xfer_stats.num_successful_transfers == 1
     data = worker.xfer_stats.data
     assert data["bytes_transferred"] == [1024 + 2048]
@@ -228,15 +260,37 @@ def test_send_blocks_records_success():
     assert data["num_failed_transfers"] == []
 
 
-def test_send_blocks_records_failure():
-    worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 1  # non-zero = fail
+@pytest.mark.parametrize("transfer_worker", [1], indirect=True)
+def test_send_blocks_records_failure(transfer_worker):
+    worker = transfer_worker
 
-    ret = worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+    ret = worker._send_blocks(
+        "host:1234", *(np.array([v], dtype=np.uint64) for v in (0x1000, 0x2000, 4096))
+    )
 
-    assert ret == 1
+    assert ret == "Mooncake transfer engine returned 1"
     assert worker.xfer_stats.num_successful_transfers == 0
     assert worker.xfer_stats.data["num_failed_transfers"] == [1]
+
+
+def test_send_blocks_submits_one_range_per_descriptor(transfer_worker, monkeypatch):
+    calls = []
+
+    def transfer(*args):
+        calls.append(args)
+        return 0
+
+    monkeypatch.setattr(
+        transfer_worker.transfer_backend.engine,
+        "batch_transfer_sync_write",
+        transfer,
+    )
+    columns = [
+        np.array(values, dtype=np.uint64)
+        for values in ([0x1000, 0x2000], [0x3000, 0x4000], [8, 16])
+    ]
+    assert transfer_worker._send_blocks("host:1234", *columns) is None
+    assert calls == [("host:1234", [0x1000, 0x2000], [0x3000, 0x4000], [8, 16])]
 
 
 def test_get_kv_connector_stats_returns_none_when_empty():
@@ -245,10 +299,11 @@ def test_get_kv_connector_stats_returns_none_when_empty():
     assert worker.get_kv_connector_stats() is None
 
 
-def test_get_kv_connector_stats_returns_and_resets():
-    worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
-    worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+def test_get_kv_connector_stats_returns_and_resets(transfer_worker):
+    worker = transfer_worker
+    worker._send_blocks(
+        "host:1234", *(np.array([v], dtype=np.uint64) for v in (0x1000, 0x2000, 4096))
+    )
 
     snapshot = worker.get_kv_connector_stats()
     assert isinstance(snapshot, MooncakeKVConnectorStats)
@@ -266,7 +321,7 @@ def test_expired_request_bumps_counter():
         "tid1": SendBlockMeta(
             p_req_id="req1",
             transfer_id="tid1",
-            local_block_ids=[0, 1],
+            local_block_ids=[[0, 1]],
             ready=asyncio.Event(),
             expire_time=-1.0,  # Already expired.
             sending=0,
@@ -279,3 +334,119 @@ def test_expired_request_bumps_counter():
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
     # Expired transfer also cleaned out of reqs_need_send.
     assert "tid1" not in worker.reqs_need_send
+
+
+TEST_MODEL = "test-model"
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    """VLLM metrics share the process-wide registry, so drop them per test."""
+    unregister_vllm_metrics()
+    yield
+    unregister_vllm_metrics()
+
+
+def _labels(engine_idx: int = 0) -> dict[str, str]:
+    return {"model_name": TEST_MODEL, "engine": str(engine_idx)}
+
+
+def _sample(series: str, engine_idx: int = 0) -> float | None:
+    return REGISTRY.get_sample_value(series, _labels(engine_idx))
+
+
+def _fake_vllm_config() -> Any:
+    return SimpleNamespace(kv_transfer_config=SimpleNamespace())
+
+
+def _build_prom_metrics(
+    per_engine_labelvalues: dict[int, list[object]],
+) -> MooncakePromMetrics:
+    prom_metrics = MooncakeConnector.build_prom_metrics(
+        vllm_config=_fake_vllm_config(),  # type: ignore[arg-type]
+        metric_types={Gauge: Gauge, Counter: Counter, Histogram: Histogram},
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues=per_engine_labelvalues,
+    )
+    assert isinstance(prom_metrics, MooncakePromMetrics)
+    return prom_metrics
+
+
+def _recorded_stats() -> dict[str, list[float | int]]:
+    """Drive the real stats container, so the keys observed below are the ones
+    the connector actually produces rather than keys restated in this test."""
+    stats = MooncakeKVConnectorStats()
+    stats.record_transfer(duration_s=0.001, total_bytes=1024, num_descs=4)
+    stats.record_transfer(duration_s=2.0, total_bytes=2048, num_descs=6)
+    stats.record_failed_transfer()
+    stats.record_failed_recv()
+    stats.record_failed_recv()
+    stats.record_kv_expired_req()
+    stats.record_kv_expired_req()
+    stats.record_kv_expired_req()
+    return stats.clone_and_reset().to_dict()
+
+
+@pytest.fixture
+def exported_series():
+    """Record one interval from the real stats container into the real registry."""
+    _build_prom_metrics({0: [TEST_MODEL, "0"]}).observe(_recorded_stats(), engine_idx=0)
+    yield
+
+
+def test_kv_connector_prom_wires_the_mooncake_metrics():
+    """The production entry point resolves the connector and builds its metrics."""
+    prom = KVConnectorProm(
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="MooncakeConnector", kv_role="kv_producer"
+            )
+        ),
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: [TEST_MODEL, "0"]},
+    )
+
+    assert isinstance(prom.prom_metrics, MooncakePromMetrics)
+
+
+@pytest.mark.usefixtures("exported_series")
+def test_transfer_histograms_are_exported():
+    # One distinct sum per histogram, so a series fed by the wrong stats key
+    # cannot pass.
+    assert _sample("vllm:mooncake_xfer_time_seconds_count") == 2
+    assert _sample("vllm:mooncake_xfer_time_seconds_sum") == 2.0 + 0.001
+    # 0.001s falls into the lowest bucket (0.005s), 2.0s past the last edge.
+    assert (
+        REGISTRY.get_sample_value(
+            "vllm:mooncake_xfer_time_seconds_bucket", {**_labels(), "le": "0.005"}
+        )
+        == 1
+    )
+    assert _sample("vllm:mooncake_bytes_transferred_sum") == 1024 + 2048
+    assert _sample("vllm:mooncake_num_descriptors_sum") == 4 + 6
+
+
+@pytest.mark.usefixtures("exported_series")
+def test_failure_counters_are_exported():
+    assert _sample("vllm:mooncake_num_failed_transfers_total") == 1
+    assert _sample("vllm:mooncake_num_failed_recvs_total") == 2
+    assert _sample("vllm:mooncake_num_kv_expired_reqs_total") == 3
+
+
+def test_samples_are_routed_to_the_reported_engine():
+    metrics = _build_prom_metrics({0: [TEST_MODEL, "0"], 1: [TEST_MODEL, "1"]})
+
+    metrics.observe(_recorded_stats(), engine_idx=1)
+
+    assert _sample("vllm:mooncake_xfer_time_seconds_count", engine_idx=0) == 0
+    assert _sample("vllm:mooncake_xfer_time_seconds_count", engine_idx=1) == 2
+    assert _sample("vllm:mooncake_num_failed_recvs_total", engine_idx=0) == 0
+    assert _sample("vllm:mooncake_num_failed_recvs_total", engine_idx=1) == 2
+
+
+def test_observe_rejects_a_snapshot_missing_a_declared_key():
+    """A renamed stats key must surface, not silently report zeros."""
+    metrics = _build_prom_metrics({0: [TEST_MODEL, "0"]})
+
+    with pytest.raises(KeyError):
+        metrics.observe({"transfer_duration": []}, engine_idx=0)
