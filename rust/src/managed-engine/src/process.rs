@@ -251,8 +251,24 @@ mod process_group {
     /// Place the Python child into its own process group so `serve` can tear
     /// down the whole subtree rather than just the immediate shell process.
     pub fn configure(command: &mut Command) {
+        #[cfg(target_os = "linux")]
+        let parent_pid = unsafe { libc::getpid() };
+
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
+                #[cfg(target_os = "linux")]
+                {
+                    // Linux binds PDEATHSIG to the spawning thread. Both production
+                    // callers spawn here from their Runtime::block_on driver thread,
+                    // which remains alive for the managed engine's lifetime.
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    // PDEATHSIG is not delivered if the parent died before prctl.
+                    if libc::getppid() != parent_pid {
+                        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                    }
+                }
                 if libc::setpgid(0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -271,14 +287,21 @@ mod process_group {
 mod tests {
     use std::fs;
     use std::path::Path;
+    #[cfg(target_os = "linux")]
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use expect_test::expect;
 
+    #[cfg(target_os = "linux")]
+    use super::process_group;
     use super::{
         MIN_SHUTDOWN_TIMEOUT, ManagedEngineConfig, ManagedEngineHandle, allocate_handshake_port,
         redacted_for_log,
     };
+
+    #[cfg(target_os = "linux")]
+    const PARENT_DEATH_HELPER_DIR: &str = "VLLM_PARENT_DEATH_HELPER_DIR";
 
     #[test]
     fn command_snapshot() {
@@ -418,6 +441,72 @@ mod tests {
             return false;
         };
         !matches!(stat.rsplit(") ").next(), Some(rest) if rest.starts_with('Z'))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn launcher_receives_sigterm_when_parent_dies() {
+        if let Some(dir) = std::env::var_os(PARENT_DEATH_HELPER_DIR).map(PathBuf::from) {
+            let mut command = std::process::Command::new("sh");
+            command.arg(dir.join("launcher.sh")).arg(&dir);
+            let _handle = ManagedEngineHandle::spawn_command(command).await.unwrap();
+            wait_for_file(&dir.join("launcher-ready")).await;
+            fs::write(dir.join("helper-ready"), []).unwrap();
+            std::future::pending::<()>().await;
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("launcher.sh"),
+            "#!/bin/sh\ntrap 'touch \"$1/launcher-term\"; exit 0' TERM\necho $$ > \"$1/launcher.pid\"\ntouch \"$1/launcher-ready\"\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
+        let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("process::tests::launcher_receives_sigterm_when_parent_dies")
+            .arg("--nocapture")
+            .env(PARENT_DEATH_HELPER_DIR, dir.path())
+            .spawn()
+            .unwrap();
+
+        let helper_ready = tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_file(&dir.path().join("helper-ready")),
+        )
+        .await
+        .is_ok();
+        let launcher_pid = fs::read_to_string(dir.path().join("launcher.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse::<i32>().ok());
+
+        helper.kill().unwrap();
+        helper.wait().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let terminated = if let Some(pid) = launcher_pid {
+            loop {
+                if dir.path().join("launcher-term").exists() && !process_alive(pid) {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } else {
+            false
+        };
+
+        if let Some(pid) = launcher_pid.filter(|pid| process_alive(*pid)) {
+            process_group::kill(pid as u32).unwrap();
+        }
+
+        assert!(helper_ready, "parent-death helper did not become ready");
+        assert!(
+            terminated,
+            "managed launcher did not receive SIGTERM and exit after its parent died"
+        );
     }
 
     #[tokio::test]
