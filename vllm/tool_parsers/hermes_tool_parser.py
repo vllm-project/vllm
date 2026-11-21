@@ -99,7 +99,8 @@ class Hermes2ProToolParser(ToolParser):
                             name=function_call["name"],
                             # function call args are JSON but as a string
                             arguments=json.dumps(
-                                function_call["arguments"], ensure_ascii=False
+                                function_call.get("arguments", {}),
+                                ensure_ascii=False,
                             ),
                         ),
                     )
@@ -178,10 +179,12 @@ class Hermes2ProToolParser(ToolParser):
         Given {"name": "f", "arguments": {"x": 1}}, returns '{"x": 1}'.
         When is_complete, strips the trailing '}' that closes the outer
         object (not the arguments). For partial JSON, returns as-is.
+        A complete call without an "arguments" key (a tool that takes no
+        parameters) returns '{}'.
         """
         match = re.search(r'"arguments"\s*:\s*', tc_json)
         if not match:
-            return None
+            return "{}" if is_complete else None
         raw = tc_json[match.end() :]
         if is_complete:
             raw = raw.rstrip()

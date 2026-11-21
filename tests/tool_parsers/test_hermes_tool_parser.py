@@ -420,3 +420,91 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+# A tool that takes no parameters is often called without an "arguments" key.
+NO_ARGS_THEN_ARGS = (
+    '<tool_call>\n{"name": "get_time"}\n</tool_call>\n'
+    '<tool_call>\n{"name": "search", "arguments": {"q": "cats"}}\n</tool_call>'
+)
+
+
+def test_hermes_parser_non_streaming_tool_call_without_arguments(
+    hermes_parser: ToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    tool_call = hermes_parser.extract_tool_calls(
+        model_output=NO_ARGS_THEN_ARGS,
+        request=any_chat_request,
+    )
+
+    assert tool_call.tools_called
+    assert [
+        (tc.function.name, json.loads(tc.function.arguments))
+        for tc in tool_call.tool_calls
+    ] == [("get_time", {}), ("search", {"q": "cats"})]
+    assert not (tool_call.content or "").strip()
+
+
+@pytest.mark.parametrize("stream_interval", [1, 9999])
+def test_hermes_streaming_tool_call_without_arguments(
+    qwen_tokenizer: TokenizerLike,
+    hermes_parser: ToolParser,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    deltas = _simulate_streaming(
+        qwen_tokenizer,
+        hermes_parser,
+        any_chat_request,
+        NO_ARGS_THEN_ARGS,
+        stream_interval,
+    )
+
+    tool_deltas = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    calls: dict[int, tuple[str, str]] = {}
+    for tc in tool_deltas:
+        name, args = calls.get(tc.index, ("", ""))
+        calls[tc.index] = (
+            name + (tc.function.name or ""),
+            args + (tc.function.arguments or ""),
+        )
+
+    assert [(name, json.loads(args)) for name, args in calls.values()] == [
+        ("get_time", {}),
+        ("search", {"q": "cats"}),
+    ]
+    assert not "".join(d.content or "" for d in deltas).strip()
+
+
+def test_granite4_streaming_recovers_after_malformed_call_in_chunk(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    parser = Granite4ToolParser(qwen_tokenizer)
+
+    def stream(text: str):
+        return parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+
+    # The second call has no "name", so the whole chunk is rejected.
+    assert (
+        stream(
+            '<tool_call>{"name": "get_time"}</tool_call>'
+            '<tool_call>{"arguments": {}}</tool_call>'
+        )
+        is None
+    )
+
+    delta = stream(
+        '<tool_call>{"name": "search", "arguments": {"q": "cats"}}</tool_call>'
+    )
+    assert delta is not None
+    assert [(tc.index, tc.function.name) for tc in delta.tool_calls] == [(0, "search")]
