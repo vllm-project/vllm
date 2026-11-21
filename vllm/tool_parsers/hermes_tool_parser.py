@@ -80,18 +80,32 @@ class Hermes2ProToolParser(ToolParser):
 
         else:
             try:
-                # there are two possible captures - between tags, or between a
-                # tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and
-                # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+                # Closing tags inside JSON strings are argument data.
+                decoder = json.JSONDecoder()
+                raw_function_calls = []
+                search_idx = 0
+                while (
+                    start := model_output.find(self.tool_call_start_token, search_idx)
+                ) != -1:
+                    json_start = start + len(self.tool_call_start_token)
+                    while (
+                        json_start < len(model_output)
+                        and model_output[json_start] in " \t\r\n"
+                    ):
+                        json_start += 1
+                    obj, end = decoder.raw_decode(model_output, json_start)
+                    # Reject trailing data that json.loads would reject.
+                    tail = end
+                    while tail < len(model_output) and model_output[tail] in " \t\r\n":
+                        tail += 1
+                    if not (
+                        tail == len(model_output)
+                        or model_output.startswith(self.tool_call_end_token, tail)
+                    ):
+                        raise ValueError("unexpected trailing data in tool call")
+                    raw_function_calls.append(obj)
+                    search_idx = end
 
-                # load the JSON, and then use it to build the Function and
-                # Tool Call
-                raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
-                    for match in function_call_tuples
-                ]
                 tool_calls = [
                     ToolCall(
                         type="function",
