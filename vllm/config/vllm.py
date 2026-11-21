@@ -159,6 +159,8 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
                     "HYV4ForCausalLM",
                     "HYV4VLForConditionalGeneration",
                     "HYV4MTPModel",
+                    "GlmMoeDsaForCausalLM",
+                    "DeepseekV32MTPModel",
                 }
             )
             | _QWEN3_5_ARCHITECTURES
