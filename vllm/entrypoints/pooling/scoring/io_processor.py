@@ -495,15 +495,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             self.model_config, self.renderer.default_chat_tok_params
         )
 
-        resolved_template = self._default_chat_template()
-        saved_chat_template_kwargs = (
-            self.saved_chat_template_kwargs
-            if self.saved_chat_template is not None
-            and resolved_template == self.saved_chat_template
-            else None
+        default_template = self._default_chat_template()
+        effective_template = request.chat_template or default_template
+        saved_chat_template_kwargs = self._resolve_saved_chat_template_kwargs(
+            effective_template
         )
         chat_params = request.build_chat_params(
-            default_template=resolved_template,
+            default_template=default_template,
             chat_template_kwargs=saved_chat_template_kwargs,
             default_template_content_format=self.chat_template_content_format,
         )
@@ -555,16 +553,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
 
-        resolved_template = self._default_chat_template()
-        saved_chat_template_kwargs = (
-            self.saved_chat_template_kwargs
-            if self.saved_chat_template is not None
-            and resolved_template == self.saved_chat_template
-            else None
+        default_template = self._default_chat_template()
+        effective_template = ctx.chat_template or default_template
+        saved_chat_template_kwargs = self._resolve_saved_chat_template_kwargs(
+            effective_template
         )
         chat_params = ctx.build_chat_params(
             ctx.pooling_params,
-            default_template=resolved_template,
+            default_template=default_template,
             chat_template_kwargs=saved_chat_template_kwargs,
             default_template_content_format=self.chat_template_content_format,
         )
@@ -689,6 +685,18 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         The per-request template still overrides this at the context level.
         """
         return self.chat_template or self.saved_chat_template
+
+    def _resolve_saved_chat_template_kwargs(
+        self, effective_template: str | None
+    ) -> dict[str, Any] | None:
+        """Return saved ST kwargs only when the effective template matches the
+        saved checkpoint template rather than a replacement template."""
+        if (
+            self.saved_chat_template is not None
+            and effective_template == self.saved_chat_template
+        ):
+            return self.saved_chat_template_kwargs
+        return None
 
     def _prepare_chat_params(self, chat_params: ChatParams) -> ChatParams:
         if (

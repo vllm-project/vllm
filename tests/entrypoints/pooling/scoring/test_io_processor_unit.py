@@ -6,11 +6,13 @@ import asyncio
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 import torch
 from PIL import Image
+from pydantic import BaseModel, ConfigDict
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import (
     Mistral3Config,
@@ -23,6 +25,7 @@ from vllm import PoolingParams, TokensPrompt
 from vllm.config import ModelConfig, VllmConfig
 from vllm.connections import MediaRequestDownloadSizeExceededError
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.base.protocol import ChatRequestOptionsMixin
 from vllm.entrypoints.pooling.scoring.io_processor import (
     BiEncoderIOProcessor,
     CrossEncoderIOProcessor,
@@ -35,8 +38,10 @@ from vllm.entrypoints.pooling.types import (
     EncodeCMPLRenderParams,
     OfflineScoringInputsContext,
     PoolingEngineInput,
+    PoolingServeContext,
     ScoringRenderParams,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
@@ -592,3 +597,254 @@ def test_scoring_detects_structured_content_with_saved_template(
         "a", "bc", _multimodal_tok_params(), chat_params
     )
     assert prompt == "query:adocument:bc"
+
+
+# =============================================================================
+# Saved Sentence Transformers chat template kwargs tests
+# =============================================================================
+
+
+class _DummyOnlineScoreRequest(ChatRequestOptionsMixin, BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("model", "dummy-model")
+        kwargs.setdefault(
+            "messages",
+            [
+                {"role": "user", "content": "a"},
+                {"role": "user", "content": "bc"},
+            ],
+        )
+        kwargs.setdefault("skip_mm_cache", False)
+        super().__init__(**kwargs)
+
+    def build_tok_params(
+        self, model_config: Any, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
+        return default_tok_params
+
+
+def _make_processor(
+    base_processor: CrossEncoderIOProcessor,
+    *,
+    saved_template: str | None = "{{ messages[0].content }} {{ messages[1].content }}",
+    saved_kwargs: dict[str, Any] | None = None,
+    processor_template: str | None = None,
+) -> CrossEncoderIOProcessor:
+    base_processor.chat_template = processor_template
+    base_processor.saved_chat_template = saved_template
+    base_processor.saved_chat_template_kwargs = (
+        dict(saved_kwargs) if saved_kwargs is not None else {}
+    )
+    base_processor.trust_request_chat_template = True
+    base_processor.renderer = SimpleNamespace(
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32),
+        default_chat_tok_params=TokenizeParams(max_total_tokens=32),
+    )
+    return base_processor
+
+
+def _call_online_chat_params(
+    processor: CrossEncoderIOProcessor,
+    request: _DummyOnlineScoreRequest,
+) -> ChatParams:
+    serve_ctx = SimpleNamespace(
+        request=request,
+        pooling_params=PoolingParams(),
+        lora_request=None,
+        priorities=0,
+        prompt_extras=None,
+    )
+    with patch.object(
+        processor,
+        "valid_inputs_online",
+        return_value=ScoringData(data_1=["a"], data_2=["bc"]),
+    ):
+        render_params = processor.get_request_factory_online(
+            cast(PoolingServeContext, serve_ctx)
+        )
+    assert len(render_params) == 1
+    return cast(ScoringRenderParams, render_params[0])["chat_params"]
+
+
+def _call_offline_chat_params(
+    processor: CrossEncoderIOProcessor,
+    ctx: OfflineScoringInputsContext,
+) -> ChatParams:
+    factory, count = processor.get_request_factory_offline(ctx)
+    assert count == 1
+    (render_params,) = factory()
+    return cast(ScoringRenderParams, render_params)["chat_params"]
+
+
+class TestSavedChatTemplateKwargsDefaults:
+    """Saved ST kwargs override default False flags when no higher-precedence
+    override is supplied, while unset flags stay False."""
+
+    def test_offline_saved_true_overrides_default_false(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+        )
+
+        chat_params = _call_offline_chat_params(processor, ctx)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+        }
+
+    def test_online_saved_true_overrides_default_false(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        request = _DummyOnlineScoreRequest()
+
+        chat_params = _call_online_chat_params(processor, request)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+        }
+
+
+class TestSavedChatTemplateKwargsPrecedence:
+    """Precedence order: explicit flags > chat_template_kwargs > saved ST kwargs
+    > default False flags."""
+
+    @pytest.mark.parametrize(
+        ("req_kwargs", "explicit_flag", "expected_flag"),
+        [
+            ({"add_generation_prompt": False}, None, False),
+            ({"add_generation_prompt": True}, False, False),
+            (None, None, True),
+        ],
+    )
+    def test_offline_overrides_saved_kwargs(
+        self,
+        llm_reranker_processor: CrossEncoderIOProcessor,
+        req_kwargs: dict[str, Any] | None,
+        explicit_flag: bool | None,
+        expected_flag: bool,
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True, "saved_only": "kept"},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+            chat_template_kwargs=req_kwargs,
+            add_generation_prompt=explicit_flag,
+        )
+
+        chat_params = _call_offline_chat_params(processor, ctx)
+
+        assert (
+            chat_params.chat_template_kwargs["add_generation_prompt"] is expected_flag
+        )
+        assert chat_params.chat_template_kwargs["saved_only"] == "kept"
+
+    @pytest.mark.parametrize(
+        ("req_kwargs", "explicit_flag", "expected_flag"),
+        [
+            ({"add_generation_prompt": False}, None, False),
+            ({"add_generation_prompt": True}, False, False),
+            (None, None, True),
+        ],
+    )
+    def test_online_overrides_saved_kwargs(
+        self,
+        llm_reranker_processor: CrossEncoderIOProcessor,
+        req_kwargs: dict[str, Any] | None,
+        explicit_flag: bool | None,
+        expected_flag: bool,
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True, "saved_only": "kept"},
+        )
+        request = _DummyOnlineScoreRequest(
+            chat_template_kwargs=req_kwargs,
+            add_generation_prompt=explicit_flag,
+        )
+
+        chat_params = _call_online_chat_params(processor, request)
+
+        assert (
+            chat_params.chat_template_kwargs["add_generation_prompt"] is expected_flag
+        )
+        assert chat_params.chat_template_kwargs["saved_only"] == "kept"
+
+
+class TestSavedChatTemplateReplacementAndValidation:
+    """Replacement templates bypass saved ST kwargs; conflicting True flags
+    raise an error."""
+
+    def test_offline_replacement_template_skips_saved_kwargs(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+            chat_template="{{ messages[1].content }} {{ messages[0].content }}",
+        )
+
+        chat_params = _call_offline_chat_params(processor, ctx)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+
+    def test_online_replacement_template_skips_saved_kwargs(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        request = _DummyOnlineScoreRequest(
+            chat_template="{{ messages[1].content }} {{ messages[0].content }}"
+        )
+
+        chat_params = _call_online_chat_params(processor, request)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+
+    def test_conflicting_true_flags_raise_error(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+            continue_final_message=True,
+        )
+
+        with pytest.raises(VLLMValidationError):
+            _call_offline_chat_params(processor, ctx)
