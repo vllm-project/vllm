@@ -14,6 +14,9 @@ from tests.v1.attention.utils import (
 )
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
+from vllm.compilation.passes.fusion.attn_output_gate_fusion import (
+    AttnOutputGateFusionPass,
+)
 from vllm.compilation.passes.fusion.attn_quant_fusion import (
     ATTN_OP,
     AttnQuantFusionPass,
@@ -51,6 +54,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheLayout,
     get_kv_quant_mode,
 )
 
@@ -580,3 +584,206 @@ def test_rocm_aiter_static_quant_attention(
             )
     finally:
         rocm_aiter_ops.refresh_env_variables()
+
+
+class TestAttentionOutputGatePatternModel(torch.nn.Module):
+    """Gated attention (Qwen3-Next): q and the gate packed per head as [q | gate]
+    (gate_by_head, the model's chunk), or as [q heads | gate heads] (flat), then
+    attn * sigmoid(gate). Qwen3.8 full-attention geometry."""
+
+    num_heads, num_kv_heads, head_size = 24, 4, 256
+
+    def __init__(self, vllm_config, device, gate_by_head: bool):
+        super().__init__()
+        self.block_size = vllm_config.cache_config.block_size
+        self.device = device
+        self.gate_by_head = gate_by_head
+        self.attn = Attention(
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            scale=self.head_size**-0.5,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=vllm_config.cache_config,
+            prefix="model.layers.0.self_attn.attn",
+        )
+        self.attn._k_scale = self.attn._k_scale.to(device)
+        self.attn._v_scale = self.attn._v_scale.to(device)
+        self.kv_cache_spec = self.attn.attn_backend.customize_spec(
+            AttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=torch.bfloat16,
+            )
+        )
+        self.builder = self.attn.attn_backend.get_builder_cls()(
+            kv_cache_spec=self.kv_cache_spec,
+            layer_names=[self.attn.layer_name],
+            vllm_config=vllm_config,
+            device=device,
+        )
+
+    def build_attn_metadata(
+        self, num_tokens: int, seq_len: int
+    ) -> tuple[AttentionMetadata, torch.Tensor]:
+        """Decode batch of num_tokens sequences of seq_len, on a random KV cache;
+        returns the metadata and the slot mapping."""
+        batch_spec = BatchSpec(
+            seq_lens=[seq_len] * num_tokens, query_lens=[1] * num_tokens
+        )
+        common = create_common_attn_metadata(
+            batch_spec, self.block_size, self.device, arange_block_indices=True
+        )
+        num_blocks = num_tokens * -(-seq_len // self.block_size)
+        raw = torch.zeros(
+            num_blocks * self.kv_cache_spec.page_size_bytes,
+            dtype=torch.int8,
+            device=self.device,
+        )
+        kv_cache = dense_kv_cache_views(
+            raw,
+            self.kv_cache_spec,
+            num_blocks,
+            num_layers=1,
+            layout=KVCacheLayout.LBHNC,
+        )[0]
+        generator = torch.Generator(device=self.device).manual_seed(1)
+        kv_cache.copy_(
+            torch.randn(
+                kv_cache.shape,
+                generator=generator,
+                dtype=kv_cache.dtype,
+                device=self.device,
+            )
+        )
+        self.attn.kv_cache = kv_cache
+        metadata = self.builder.build(common_prefix_len=0, common_attn_metadata=common)
+        return metadata, common.slot_mapping
+
+    def forward(self, q_gate: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        hidden = self.num_heads * self.head_size
+        if self.gate_by_head:
+            q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_size)
+            q, gate = torch.chunk(q_gate, 2, dim=-1)
+            q, gate = q.reshape(-1, hidden), gate.reshape(-1, hidden)
+        else:
+            q, gate = q_gate.split([hidden, hidden], dim=-1)
+        return self.attn(q, k, v) * torch.sigmoid(gate)
+
+
+def _run_attention_output_gate_fusion(
+    backend: AttentionBackendEnum, num_tokens: int, seq_len: int, gate_by_head: bool
+):
+    """The eager reference and the compiled run with AttnOutputGateFusionPass, of
+    one decode batch."""
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    torch.set_default_device(device)
+    torch.set_default_dtype(torch.bfloat16)
+    torch.manual_seed(0)
+    model_cls = TestAttentionOutputGatePatternModel
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            dtype=torch.bfloat16,
+            hf_overrides={
+                "num_attention_heads": model_cls.num_heads,
+                "num_key_value_heads": model_cls.num_kv_heads,
+                "head_dim": model_cls.head_size,
+            },
+        ),
+        cache_config=CacheConfig(block_size=16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(fuse_attn_output_gate=True, eliminate_noops=True),
+        ),
+        attention_config=AttentionConfig(backend=backend),
+    )
+    with set_current_vllm_config(vllm_config):
+        model = model_cls(vllm_config, device, gate_by_head)
+        gate_pass = LazyInitPass(AttnOutputGateFusionPass, vllm_config)
+        test_backend = TestBackend(
+            NoOpEliminationPass(vllm_config), gate_pass, PostCleanupPass(vllm_config)
+        )
+        hidden = model_cls.num_heads * model_cls.head_size
+        kv_hidden = model_cls.num_kv_heads * model_cls.head_size
+        q_gate = torch.randn(num_tokens, 2 * hidden)
+        k = torch.randn(num_tokens, kv_hidden)
+        v = torch.randn(num_tokens, kv_hidden)
+
+        def run(fn):
+            with set_forward_context(None, vllm_config):
+                attn_metadata, slot_mapping = model.build_attn_metadata(
+                    num_tokens, seq_len
+                )
+                forward_ctx = get_forward_context()
+                forward_ctx.attn_metadata = attn_metadata
+                forward_ctx.slot_mapping = {model.attn.layer_name: slot_mapping}
+                return fn(q_gate.clone(), k.clone(), v.clone())
+
+        reference = run(model)
+        for x in (q_gate, k, v):
+            torch._dynamo.mark_dynamic(x, 0)
+        fused = run(torch.compile(model, backend=test_backend, fullgraph=True))
+    return gate_pass.pass_, test_backend, reference, fused
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
+)
+@pytest.mark.parametrize("gate_by_head", [True, False], ids=["by_head", "flat"])
+def test_attention_output_gate_pattern_unsupported_backend(
+    gate_by_head: bool, dist_init, disable_vllm_compile_cache
+):
+    """A backend without fused_output_gate_supported() keeps attn * sigmoid(gate)."""
+    gate_pass, backend, reference, fused = _run_attention_output_gate_fusion(
+        AttentionBackendEnum.TRITON_ATTN, 7, 37, gate_by_head
+    )
+    assert gate_pass.matched_count == 0
+    assert backend.op_count(torch.ops.aten.sigmoid.default) == 1
+    (attn,) = find_op_nodes(ATTN_OP, backend.graph_post_pass)
+    assert attn.kwargs.get("output_gate") is None
+    torch.testing.assert_close(fused, reference, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_rocm()
+        and is_aiter_found_and_supported()
+        and rocm_aiter_ops.pa_decode_gluon_supports_output_gate()
+    ),
+    reason="Requires ROCm AITER whose pa_decode_gluon takes output_gate",
+)
+@pytest.mark.parametrize("num_tokens", [1, 7, 64, 128])
+@pytest.mark.parametrize("seq_len", [37, 3000])
+@pytest.mark.parametrize("gate_by_head", [True, False], ids=["by_head", "flat"])
+def test_attention_output_gate_pattern(
+    num_tokens: int,
+    seq_len: int,
+    gate_by_head: bool,
+    dist_init,
+    disable_vllm_compile_cache,
+    monkeypatch,
+):
+    """ROCM_AITER_FA_GLUON takes the gate in the attention op: no sigmoid left and,
+    for the per-head gate, no copy flattening it. 128 tokens runs the one-split
+    path, where the impl applies the gate itself."""
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ROCM_USE_AITER", "1")
+            patch.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "1")
+            rocm_aiter_ops.refresh_env_variables()
+            gate_pass, backend, reference, fused = _run_attention_output_gate_fusion(
+                AttentionBackendEnum.ROCM_AITER_FA_GLUON,
+                num_tokens,
+                seq_len,
+                gate_by_head,
+            )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+    assert gate_pass.matched_count == 1
+    assert backend.op_count(torch.ops.aten.sigmoid.default) == 0
+    if gate_by_head:
+        clone = torch.ops.aten.clone.default
+        assert backend.op_count(clone) < backend.op_count(clone, before=True)
+    (attn,) = find_op_nodes(ATTN_OP, backend.graph_post_pass)
+    assert attn.kwargs.get("output_gate") is not None
+    torch.testing.assert_close(fused, reference, atol=2e-2, rtol=2e-2)

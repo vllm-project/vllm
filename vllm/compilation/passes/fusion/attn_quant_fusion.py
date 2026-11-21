@@ -89,6 +89,7 @@ class AttnFp8StaticQuantPattern(
                     output_scale=None,
                     output_block_scale=None,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
+                    output_gate=None,
                 )
                 attn_out_view = RESHAPE_OP(
                     at1[1], [q.shape[0], self._num_heads * self._head_size]
@@ -108,6 +109,7 @@ class AttnFp8StaticQuantPattern(
                 output_scale=None,
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                output_gate=None,
             )
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self._num_heads * self._head_size]
@@ -142,6 +144,7 @@ class AttnFp8StaticQuantPattern(
                     output_scale=scale,
                     output_block_scale=None,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
+                    output_gate=None,
                 )
                 return self._output(
                     RESHAPE_OP(at1[1], [-1, self._num_heads * self._head_size]), scale
@@ -165,6 +168,7 @@ class AttnFp8StaticQuantPattern(
                 output_scale=scale,
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                output_gate=None,
             )
             return self._output(
                 RESHAPE_OP(at1[1], [-1, self._num_heads * self._head_size]), scale
@@ -258,6 +262,7 @@ class AttnNvfp4QuantPattern(
                     output_scale=None,
                     output_block_scale=None,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
+                    output_gate=None,
                 )
                 attn_out_view = RESHAPE_OP(
                     at1[1], [q.shape[0], self._num_heads * self._head_size]
@@ -294,6 +299,7 @@ class AttnNvfp4QuantPattern(
                 output_scale=None,
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                output_gate=None,
             )
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self._num_heads * self._head_size]
@@ -343,6 +349,7 @@ class AttnNvfp4QuantPattern(
                     output_scale=input_scale,
                     output_block_scale=osv,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
+                    output_gate=None,
                 )
                 return RESHAPE_OP(
                     at2[1], [-1, self._num_heads * self._head_size // 2]
@@ -376,6 +383,7 @@ class AttnNvfp4QuantPattern(
                 output_scale=input_scale,
                 output_block_scale=osv,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                output_gate=None,
             )
             return RESHAPE_OP(
                 at2[1], [-1, self._num_heads * self._head_size // 2]
