@@ -41,11 +41,12 @@ int moe_align_block_size(
     int32_t* __restrict__ offsets,
     int num_experts,
     int numel,
-    int num_threads) {
+    int num_threads,
+    int64_t alignment_grain) {
 #define T_INDEX(tt) total_cnts + (tt) * num_experts
 
   // accumulate count of expert ids locally
-  at::parallel_for(0, numel, 0, [&](int begin, int end) {
+  at::parallel_for(0, numel, alignment_grain, [&](int begin, int end) {
     int tid = at::get_thread_num();
     int32_t* __restrict__ local_cnts = T_INDEX(tid + 1);
 
@@ -74,7 +75,7 @@ int moe_align_block_size(
   }
   int num_tokens_post_pad = cumsums[num_experts];
 
-  at::parallel_for(0, numel, 0, [&](int begin, int end) {
+  at::parallel_for(0, numel, alignment_grain, [&](int begin, int end) {
     int tid = at::get_thread_num();
     // thread tid offsets in `total_cnts`
     int32_t* __restrict__ offsets = T_INDEX(tid);
@@ -1019,20 +1020,29 @@ void fused_experts_cpu(
   // init sorted_ids with `numel` as the padding number
   // init expert_ids with `num_experts`
   int64_t numel = M * topk;
-  at::parallel_for(0, max_num_blocks, GRAIN_SIZE / BLOCK_M, [&](int64_t begin, int64_t end) {
+  const bool is_int8 = moe_comp_method == CPUQuantMethod::INT8_W8A8;
+  const int64_t init_grain = is_int8 ? (max_num_blocks < GRAIN_SIZE ? GRAIN_SIZE : 0) : GRAIN_SIZE / BLOCK_M;
+  at::parallel_for(0, max_num_blocks, init_grain, [&](int64_t begin, int64_t end) {
     int64_t m_start = begin * BLOCK_M;
     int64_t m_size = std::min((end - begin) * BLOCK_M, max_num_tokens_padded - m_start);
     fill_stub(sorted_ids + m_start, (int32_t)numel, m_size);
     fill_stub(expert_ids + begin, (int32_t)E, end - begin);
   });
   // zero total_cnts and cumsums
-  at::parallel_for(0, (num_threads + 1) * E + (E + 1), GRAIN_SIZE, [&](int64_t begin, int64_t end) {
-    fill_stub(total_cnts + begin, 0, end - begin);
-  });
+  if (is_int8) {
+    fill_stub(total_cnts, 0, (num_threads + 1) * E + (E + 1));
+  } else {
+    at::parallel_for(0, (num_threads + 1) * E + (E + 1), GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+      fill_stub(total_cnts + begin, 0, end - begin);
+    });
+  }
 
   // align experts index
+  // Both passes must split alike. Small INT8 inputs avoid team fork/resize.
+  const int64_t alignment_grain = is_int8 && numel < GRAIN_SIZE ? GRAIN_SIZE : 0;
   int64_t num_tokens_post_pad = moe_align_block_size<BLOCK_M>(
-      sorted_ids, expert_ids, topk_ids_.data_ptr<int32_t>(), total_cnts, cumsums, offsets, E, numel, num_threads);
+      sorted_ids, expert_ids, topk_ids_.data_ptr<int32_t>(), total_cnts, cumsums, offsets, E, numel, num_threads,
+      alignment_grain);
 
   // unlike triton kernel, we fuse silu with gemm1 so only need 2 intermediate_caches:
   //   1. intermediate_cache1 : [M * topk, N]
@@ -1041,8 +1051,8 @@ void fused_experts_cpu(
   //   4. C_tmp : [T, 2 * BLOCK_M * BLOCK_N]
   //
   // for int8 w8a8:
-  //   5. Aq_tmp : [M, K] or [M * topk, N]
-  //   6. As_tmp : [M * topk]
+  //   5. Aq_tmp : [M, K]
+  //   6. As_tmp : [M + M * topk]
   //
   // for fp8 w8a16, mxfp4, and fp8 w8a8:
   //   7. intermediate_cache0 : [M * topk, 2N]
@@ -1059,7 +1069,7 @@ void fused_experts_cpu(
       num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
 
   if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
-    buffer_size_nbytes += std::max(M * K, M * topk * N) + M * topk * sizeof(float);
+    buffer_size_nbytes += M * K + (M + M * topk) * sizeof(float);
   }
   if (moe_comp_method == CPUQuantMethod::FP8_W8A16 || moe_comp_method == CPUQuantMethod::MXFP4
       || moe_comp_method == CPUQuantMethod::FP8_W8A8) {
@@ -1087,7 +1097,7 @@ void fused_experts_cpu(
       uint8_t* __restrict__ A_tmp = (uint8_t*)((void*)(intermediate_cache2 + M * topk * K));
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
       uint8_t* __restrict__ Aq_tmp = (uint8_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
-      float* __restrict__ As_tmp = (float*)((void*)(Aq_tmp + std::max(M * K, M * topk * N)));
+      float* __restrict__ As_tmp = (float*)((void*)(Aq_tmp + M * K));
 
       auto w1s = w1_scale.value();
       auto w2s = w2_scale.value();
