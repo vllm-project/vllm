@@ -17,9 +17,9 @@ for a reported vulnerability.
    it or spends resources on it. Distinguish inference callers, model output,
    artifact authors, operators, and trusted peers. Include conversions,
    defaults, expansion, and the error path.
-2. Scan the quick screen below. Use the change-type table to open only the
-   relevant sections of the detailed checklist. Include any additional family
-   flagged by the quick screen for this change.
+2. Use the quick screen below to identify applicable failure families.
+   Open only the review-area files relevant to your change. The change-type
+   table gives starting points, and the quick screen may identify other areas.
 3. Search for sibling consumers by field or operation. When applicable, compare
    Python and Rust, HTTP and gRPC, streaming and buffered flows, model or backend
    overrides, and opt-in and fallback paths. Identify where each path enforces
@@ -45,7 +45,7 @@ for a reported vulnerability.
 
 Start with the families for each affected change type.
 
-| Change type | Checklist sections |
+| Change type | Checklist files |
 | --- | --- |
 | Endpoint, request field, or frontend | [Authorization][access], [resource budgets][budgets], [input invariants][input], [sensitive output][output] |
 | Multimodal model, processor, or media backend | [Fetch and decoder policy][fetch], [resource budgets][budgets], [input invariants][input], [artifact trust][artifacts] |
@@ -66,11 +66,11 @@ or interleave two requests and verify their results and cleanup independently.
 See [Published advisory examples](references/advisory-evidence.md) for
 cases behind these checks.
 
-[budgets]: references/failure-modes.md#resource-budgets
-[input]: references/failure-modes.md#input-invariants-and-fault-containment
-[ownership]: references/failure-modes.md#cache-request-and-peer-ownership
-[parsing]: references/failure-modes.md#parser-and-rendering-complexity
-[artifacts]: references/failure-modes.md#artifact-trust-and-unsafe-interpretation
-[fetch]: references/failure-modes.md#fetch-filesystem-and-decoder-policy
-[access]: references/failure-modes.md#authorization-and-capability-gates
-[output]: references/failure-modes.md#sensitive-output-and-error-responses
+[budgets]: references/failure-modes/resource-budgets.md
+[input]: references/failure-modes/input-invariants.md
+[ownership]: references/failure-modes/cache-and-request-ownership.md
+[parsing]: references/failure-modes/parser-and-rendering.md
+[artifacts]: references/failure-modes/artifact-trust.md
+[fetch]: references/failure-modes/fetch-and-decoder-policy.md
+[access]: references/failure-modes/authorization.md
+[output]: references/failure-modes/sensitive-output.md
