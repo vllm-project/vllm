@@ -1640,12 +1640,16 @@ def _patch_nvfp4_moe_conversion(moe):
 
 
 # Backends that quantize activations with the checkpoint's input scales, and
-# those that do not (backend, checkpoint quant_method, VLLM_B12X_MOE_FP4_FORCE_A16).
+# those that do not (backend, checkpoint quant_method, VLLM_B12X_MOE_FP4_FORCE_A16),
+# off SM107.
 NVFP4_MOE_READS_INPUT_SCALES = [
+    ("FLASHINFER_TRTLLM", "NVFP4", False),
     ("FLASHINFER_CUTLASS", "NVFP4", False),
     ("FLASHINFER_CUTEDSL", "NVFP4", False),
+    ("FLASHINFER_CUTEDSL_BATCHED", "NVFP4", False),
     ("VLLM_CUTLASS", "NVFP4", False),
     ("B12X", "NVFP4", False),
+    ("EMULATION", "NVFP4", False),
 ]
 NVFP4_MOE_IGNORES_INPUT_SCALES = [
     ("HUMMING", "NVFP4", False),
@@ -1657,13 +1661,26 @@ NVFP4_MOE_IGNORES_INPUT_SCALES = [
 ]
 
 
-def _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16):
+def test_modelopt_nvfp4_moe_input_scale_tables_cover_every_backend():
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    listed = NVFP4_MOE_READS_INPUT_SCALES + NVFP4_MOE_IGNORES_INPUT_SCALES
+    assert {name for name, _, _ in listed} == {
+        backend.name for backend in NvFp4MoeBackend
+    } - {"NONE"}
+
+
+def _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16, sm107=False):
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.modelopt.envs."
         "VLLM_B12X_MOE_FP4_FORCE_A16",
         force_a16,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.is_sm107_device",
+        lambda: sm107,
     )
     moe = _make_nvfp4_moe(
         quant_method=quant_method, backend=NvFp4MoeBackend[backend_name]
@@ -1678,11 +1695,12 @@ def _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16):
     NVFP4_MOE_READS_INPUT_SCALES + NVFP4_MOE_IGNORES_INPUT_SCALES,
 )
 @pytest.mark.parametrize("missing", NVFP4_MOE_WEIGHT_SCALE_NAMES)
+@pytest.mark.parametrize("value", [float("nan"), 0.0])  # 0.0: layerwise reload
 def test_modelopt_nvfp4_moe_missing_weight_scale_fails(
-    backend_name, quant_method, force_a16, missing, monkeypatch
+    backend_name, quant_method, force_a16, missing, value, monkeypatch
 ):
     moe, layer = _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16)
-    getattr(layer, missing).data[2] = float("nan")
+    getattr(layer, missing).data[2] = value
 
     convert, build = _patch_nvfp4_moe_conversion(moe)
     with (
@@ -1763,6 +1781,26 @@ def test_modelopt_nvfp4_moe_backends_without_input_scales_load(
         moe.process_weights_after_loading(layer)
     converter.assert_called_once()
     assert not any("calibrated" in r.msg for r in caplog_vllm.records)
+
+
+def test_modelopt_nvfp4_moe_ep_cutedsl_fills_input_scales_on_sm107(
+    monkeypatch, caplog_vllm
+):
+    # The SM107 megakernel takes the layer's largest input scale for its
+    # epilogue and rejects a non-finite one, so missing experts are filled.
+    moe, layer = _make_backend_moe(
+        monkeypatch, "FLASHINFER_MOE_EP_CUTEDSL", "NVFP4", False, sm107=True
+    )
+    layer.w2_input_scale.data[5] = float("nan")
+
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with convert as converter, build:
+        moe.process_weights_after_loading(layer)
+    assert torch.all(converter.call_args.kwargs["a2_scale"] == 0.01)
+    assert any(
+        "'w2_input_scale' of expert ids [5]" in r.getMessage()
+        for r in caplog_vllm.records
+    )
 
 
 @pytest.mark.parametrize("missing_weight", [None, *NVFP4_MOE_WEIGHT_SCALE_NAMES])

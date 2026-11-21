@@ -38,6 +38,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import is_sm107_device
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -1070,6 +1071,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
         )
 
+        # NaN marks a scale the checkpoint does not provide; see
+        # _check_and_fill_expert_scales.
         w13_weight_scale_2 = PerTensorScaleParameter(
             data=torch.full(
                 (num_experts, w13_num_shards), float("nan"), dtype=torch.float32
@@ -1121,39 +1124,42 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             set_weight_attrs(param, {"dummy_weight_value": value})
 
     def _reads_input_scales(self) -> bool:
-        """Whether the backend quantizes activations with the checkpoint's
-        input scales. Weight-only kernels do not, FLASHINFER_B12X quantizes the
-        FC1 input itself and sets a2_gscale to 1.0, FLASHINFER_MOE_EP_CUTEDSL
-        drops them, and per-token activation replaces them with 1.0."""
-        return not (
-            self.per_token_activation
-            or _use_a16(self.nvfp4_backend, self.use_a16)
-            or self.nvfp4_backend
-            in (
-                NvFp4MoeBackend.HUMMING,
-                NvFp4MoeBackend.MARLIN,
-                NvFp4MoeBackend.FLASHINFER_B12X,
-                NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
-            )
+        """Whether the backend's kernels quantize activations with the
+        checkpoint's input scales (`uses_input_scales`, set after conversion,
+        only says whether the layer keeps them). Weight-only kernels do not,
+        FLASHINFER_B12X never reads a1_gscale and sets a2_gscale to 1.0,
+        FLASHINFER_MOE_EP_CUTEDSL quantizes activations dynamically except on
+        SM107, where the layer's largest input scale sets its epilogue, and
+        per-token activation replaces them with 1.0."""
+        if self.per_token_activation or _use_a16(self.nvfp4_backend, self.use_a16):
+            return False
+        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
+            return is_sm107_device()
+        return self.nvfp4_backend not in (
+            NvFp4MoeBackend.HUMMING,
+            NvFp4MoeBackend.MARLIN,
+            NvFp4MoeBackend.FLASHINFER_B12X,
         )
 
     def _check_and_fill_expert_scales(self, layer: RoutedExperts) -> None:
         """Reject missing weight scales; fill missing activation scales.
 
-        The scales start as NaN, so one the checkpoint does not provide stays
-        NaN. Calibration can leave an expert without an input scale (no tokens
-        were routed to it), so a missing or non-positive one takes the largest
-        calibrated value of the same tensor before any backend reduces the
-        scales or hands them to a kernel. Expert ids are the tensor's rows:
-        local ids, or global ids for input scales shared across EP ranks.
+        The scales start as NaN (zero after a layerwise reload), so one the
+        checkpoint does not provide stays NaN (or zero). Calibration can leave
+        an expert without an input scale (no tokens were routed to it), so a
+        missing or non-positive one takes the largest calibrated value of the
+        same tensor before any backend reduces the scales or hands them to a
+        kernel. Expert ids are the tensor's rows: local ids, or global ids for
+        input scales shared across EP ranks.
         """
         for name in ("w13_weight_scale_2", "w2_weight_scale_2"):
             scale = getattr(layer, name).data
-            bad = ~scale.isfinite().reshape(scale.shape[0], -1).all(dim=-1)
+            ok = (scale.isfinite() & (scale > 0)).reshape(scale.shape[0], -1)
+            bad = ~ok.all(dim=-1)
             if bad.any():
                 raise ValueError(
-                    f"ModelOpt NVFP4 MoE checkpoint is missing '{name}' in layer "
-                    f"'{layer.layer_name}' for expert ids "
+                    f"ModelOpt NVFP4 MoE checkpoint has no positive '{name}' in "
+                    f"layer '{layer.layer_name}' for expert ids "
                     f"{bad.nonzero(as_tuple=True)[0].tolist()}."
                 )
         if not self._reads_input_scales():
