@@ -197,6 +197,13 @@ class EncoderCudaGraphManager:
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
 
+        # Sequence-parallel encoder graphs (per-rank row bucket -> (graph,
+        # buffers, output)) for models that implement them; data-parallel only.
+        self.sp_rows: list[int] = []
+        if self.use_dp and hasattr(self.model, "get_encoder_sp_rows"):
+            self.sp_rows = self.model.get_encoder_sp_rows()
+        self.sp_graphs: dict[int, Any] = {}
+
         self.budget_graphs: dict[str, dict[BudgetGraphMapKey, BudgetGraphMetadata]] = {}
         self.graph_pool: Any | None = None
         # One set of max-size input buffers and one max-size output buffer
@@ -321,6 +328,7 @@ class EncoderCudaGraphManager:
         """Release captured encoder CUDA graphs and the manager-local pool."""
         for graph_set in self.budget_graphs.values():
             graph_set.clear()
+        self.sp_graphs.clear()
         self.graph_pool = None
         self._shared_input_buffers.clear()
         self._shared_output_buffers.clear()
@@ -355,11 +363,30 @@ class EncoderCudaGraphManager:
                         axis_keys=axis_keys,
                     )
 
+        for rows in sorted(self.sp_rows, reverse=True):
+            self._capture_sp_graph(rows)
+
         logger.info(
-            "Encoder CUDA graph capture complete. Captured %d graphs across %d paths.",
-            num_graphs,
+            "Encoder CUDA graph capture complete. Captured %d graphs across %d paths"
+            " and %d sequence-parallel graphs (rows per rank %s).",
+            num_graphs - len(self.sp_rows),
             len(self.path_token_budgets),
+            len(self.sp_rows),
+            self.sp_rows,
         )
+
+    def _capture_sp_graph(self, rows: int) -> None:
+        """Capture the model's sequence-parallel encoder for one row bucket."""
+        buffers = self.model.prepare_encoder_sp_buffers(rows, self.device)
+        with torch.inference_mode():
+            self.model.encoder_sp_forward(buffers)
+        graph = torch.cuda.CUDAGraph()
+        with (
+            torch.inference_mode(),
+            torch.cuda.graph(graph, pool=self.graph_pool, stream=current_stream()),
+        ):
+            output = self.model.encoder_sp_forward(buffers)
+        self.sp_graphs[rows] = (graph, buffers, output)
 
     def _num_graphs_for_budgets(self, budgets: list[int]) -> int:
         num_budgets = sum(1 for budget in budgets if budget != 0)
@@ -368,7 +395,7 @@ class EncoderCudaGraphManager:
     def get_num_graphs_to_capture(self) -> int:
         if not self.config.modalities:
             return 0
-        return sum(
+        return len(self.sp_rows) + sum(
             self._num_graphs_for_budgets(budgets)
             for budgets in self.path_token_budgets.values()
         )
@@ -860,6 +887,14 @@ class EncoderCudaGraphManager:
             List of encoder outputs (one per item).
 
         """
+        if self.sp_graphs:
+            # The model reads the batch's grids on the host to plan the split.
+            with gpu_sync_allowed():
+                sp_result = self.model.encoder_sp_execute(mm_kwargs, self.sp_graphs)
+            if sp_result is not None:
+                self.graph_hits += len(sp_result)
+                return sp_result
+
         if self.use_dp:
             per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)
 
