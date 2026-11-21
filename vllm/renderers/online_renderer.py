@@ -239,6 +239,53 @@ class OnlineRenderer:
             .chat_template_kwargs
         )
 
+    def validate_tool_choice(
+        self,
+        tool_choice: Any,
+    ) -> ErrorResponse | None:
+        """Validate that requested tool_choice is supported by the loaded parser."""
+        tokenizer = (
+            self.renderer.tokenizer
+            if hasattr(self, "renderer") and self.renderer is not None
+            else None
+        )
+        tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
+
+        tool_parsing_unavailable = (
+            tool_parser is None
+            and not is_mistral_tokenizer(tokenizer)
+            and not self.use_harmony
+        )
+
+        if tool_parsing_unavailable and tool_choice not in (
+            None,
+            "none",
+        ):
+            if tool_choice == "auto" and not self.enable_auto_tools:
+                return self.create_error_response(
+                    '"auto" tool choice requires '
+                    "--enable-auto-tool-choice and --tool-call-parser to be set"
+                )
+            elif tool_choice != "auto":
+                if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+                    tool_choice_desc = f'function "{tool_choice.function.name}"'
+                elif (
+                    isinstance(tool_choice, dict)
+                    and tool_choice.get("type") == "function"
+                ):
+                    name = tool_choice.get("function", {}).get(
+                        "name"
+                    ) or tool_choice.get("name")
+                    tool_choice_desc = f'function "{name}"'
+                else:
+                    tool_choice_desc = f'"{tool_choice}"'
+                return self.create_error_response(
+                    f"tool_choice={tool_choice_desc} requires "
+                    "--tool-call-parser to be set"
+                )
+
+        return None
+
     async def render_chat(
         self,
         request: ChatCompletionRequest,
@@ -260,8 +307,6 @@ class OnlineRenderer:
         render_start = time.perf_counter()
         tokenizer = self.renderer.tokenizer
 
-        tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
-
         if is_mistral_tokenizer(tokenizer):
             # because of issues with pydantic we need to potentially
             # re-serialize the tool_calls field of the request
@@ -269,35 +314,9 @@ class OnlineRenderer:
             _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
             _mt.validate_request_params(request)
 
-        # Check if tool parsing is unavailable (common condition)
-        tool_parsing_unavailable = (
-            tool_parser is None
-            and not is_mistral_tokenizer(tokenizer)
-            and not self.use_harmony
-        )
-
-        # Validate tool_choice when tool parsing is required but unavailable
-        if tool_parsing_unavailable and request.tool_choice not in (
-            None,
-            "none",
-        ):
-            if request.tool_choice == "auto" and not self.enable_auto_tools:
-                # for hf tokenizers, "auto" tools requires
-                # --enable-auto-tool-choice and --tool-call-parser
-                return self.create_error_response(
-                    '"auto" tool choice requires '
-                    "--enable-auto-tool-choice and --tool-call-parser to be set"
-                )
-            elif request.tool_choice != "auto":
-                # "required" or named tool requires tool parser
-                if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
-                    tool_choice_desc = f'function "{request.tool_choice.function.name}"'
-                else:
-                    tool_choice_desc = f'"{request.tool_choice}"'
-                return self.create_error_response(
-                    f"tool_choice={tool_choice_desc} requires "
-                    "--tool-call-parser to be set"
-                )
+        tool_choice_error = self.validate_tool_choice(request.tool_choice)
+        if tool_choice_error is not None:
+            return tool_choice_error
 
         if request.tools is None or (
             request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
@@ -378,6 +397,10 @@ class OnlineRenderer:
                 err_type="invalid_request_error",
                 param="previous_response_id",
             )
+
+        tool_choice_error = self.validate_tool_choice(request.tool_choice)
+        if tool_choice_error is not None:
+            return tool_choice_error
 
         tool_dicts = construct_tool_dicts(
             request.tools,

@@ -582,6 +582,49 @@ async def test_online_renderer_rejects_chat_history_for_harmony_model():
 
 
 @pytest.mark.asyncio
+async def test_online_renderer_rejects_unsupported_tool_choice_without_parser():
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.enable_auto_tools = False
+    renderer.parser = None
+
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ]
+
+    # tool_choice="required" without parser
+    req_required = ResponsesRequest(
+        input="What's the weather?",
+        tools=tools,
+        tool_choice="required",
+    )
+    result_required = await renderer.render_responses(req_required)
+    assert isinstance(result_required, ErrorResponse)
+    assert result_required.error.code == 400
+    assert (
+        'tool_choice="required" requires --tool-call-parser'
+        in result_required.error.message
+    )
+
+    # tool_choice="auto" without enable_auto_tools
+    req_auto = ResponsesRequest(
+        input="What's the weather?",
+        tools=tools,
+        tool_choice="auto",
+    )
+    result_auto = await renderer.render_responses(req_auto)
+    assert isinstance(result_auto, ErrorResponse)
+    assert result_auto.error.code == 400
+    assert (
+        "--enable-auto-tool-choice and --tool-call-parser" in result_auto.error.message
+    )
+
+
+@pytest.mark.asyncio
 async def test_online_renderer_adjusts_harmony_tool_choice(
     monkeypatch: pytest.MonkeyPatch,
 ):
