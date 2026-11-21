@@ -165,6 +165,68 @@ def test_cutlass_fp8_gemm(
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
 
 
+# Prefill-sized cases for the SM 12.x per-tensor / per-channel FP8 path, where
+# the op switches the tile scheduler to a swizzled CTA order once M >= 2048 and
+# both operands are at least 3/4 of the L2 (on a 24 MiB L2 part: 6144x4096 at
+# M = 8192, 4096x14336 at M = 4097). Elsewhere they run the default order.
+FP8_PREFILL_FACTORS = [
+    (8192, 6144, 4096),
+    (4097, 4096, 14336),
+]
+
+
+@pytest.mark.parametrize("m,n,k", FP8_PREFILL_FACTORS)
+@pytest.mark.parametrize(
+    "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
+)
+@pytest.mark.parametrize(
+    "b_scale_group_shape", [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
+)
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(89),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_cutlass_fp8_gemm_prefill(
+    m: int, n: int, k: int, a_scale_group_shape, b_scale_group_shape, use_bias: bool
+):
+    cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
+
+
+@pytest.mark.parametrize("m,n,k", FP8_PREFILL_FACTORS)
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM 12.x CTA swizzle check.",
+)
+def test_cutlass_fp8_gemm_prefill_swizzle_bit_identical(
+    m: int, n: int, k: int, use_bias: bool
+):
+    """The swizzled CTA order only changes which CTA computes which output tile,
+    never a tile's K-reduction, so the result must be bit-identical to the same
+    GEMM issued as row slices that stay below the swizzle threshold (balanced so
+    every slice uses the same M > 256 tile configuration)."""
+    out_dtype = torch.bfloat16
+    a = to_fp8(torch.randn((m, k), device="cuda"))
+    b = to_fp8(torch.randn((n, k), device="cuda").t())
+    scale_a = torch.rand((m, 1), device="cuda", dtype=torch.float32) + 0.5
+    scale_b = torch.rand((1, n), device="cuda", dtype=torch.float32) + 0.5
+    bias = torch.rand((n,), device="cuda", dtype=out_dtype) * 10 if use_bias else None
+
+    out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+
+    num_slices = cdiv(m, 1024)
+    bounds = [m * i // num_slices for i in range(num_slices + 1)]
+    sliced = torch.cat(
+        [
+            ops.cutlass_scaled_mm(a[lo:hi], b, scale_a[lo:hi], scale_b, out_dtype, bias)
+            for lo, hi in zip(bounds[:-1], bounds[1:])
+        ]
+    )
+    assert all(256 < hi - lo < 2048 for lo, hi in zip(bounds[:-1], bounds[1:]))
+    torch.testing.assert_close(out, sliced, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("m,n,k", UNALIGNED_MNK_FACTORS)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
