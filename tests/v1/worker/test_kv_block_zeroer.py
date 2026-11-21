@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -18,9 +19,45 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     KVBlockZeroer,
     _zero_kv_blocks_kernel,
+    bind_kv_cache_to_layers,
 )
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("reverse_layers", [False, True])
+def test_aliased_cache_views_keep_distinct_block_strides(
+    default_vllm_config, reverse_layers
+):
+    """Shared scratch views retain their stride and merge equal-stride pages."""
+    num_blocks = 4
+    backing = torch.ones(num_blocks * 8, dtype=torch.int32)
+    wide = backing.view(num_blocks, 1, 1, 8)
+    views = {
+        "narrow": backing[: num_blocks * 4].view(num_blocks, 1, 1, 4),
+        "wide": wide,
+        "overlay": wide[..., :4],
+    }
+    if reverse_layers:
+        views = dict(reversed(views.items()))
+    context = {name: Attention(1, 128, 1.0, prefix=name) for name in views}
+    bind_kv_cache_to_layers(views, context)
+    spec = AttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype=torch.int32)
+
+    zeroer = KVBlockZeroer(
+        torch.device("cpu"),
+        attn_groups_iter=[AttentionGroup(None, list(views), spec, 0)],
+        kernel_block_sizes=[1],
+        static_forward_context=context,
+        num_blocks=num_blocks,
+    )
+
+    assert zeroer._meta is not None
+    addresses, strides, page_sizes, _, _, num_segments = zeroer._meta
+    assert num_segments == 2
+    assert addresses.tolist() == [backing.data_ptr()] * 2
+    assert dict(zip(strides.tolist(), page_sizes.tolist())) == {4: 4, 8: 8}
 
 
 @pytest.mark.skipif(
