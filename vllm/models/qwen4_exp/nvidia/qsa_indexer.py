@@ -234,6 +234,7 @@ class QSAIndexer(nn.Module):
         qkv: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         main_kv_cache: torch.Tensor | None = None,
+        skip_selection: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Update indexer caches and select token indices from pre-projected Q/K.
 
@@ -395,7 +396,7 @@ class QSAIndexer(nn.Module):
                     position_rows,
                 )
 
-        if self.skip_topk:
+        if self.skip_topk or skip_selection:
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
             return out, main_outputs
