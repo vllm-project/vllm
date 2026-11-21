@@ -23,9 +23,7 @@ if get_triton_kernels_version() == "3.8":
     from triton_kernels.matmul import FlexCtx, PrecisionConfig
 else:
     from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
-from triton_kernels.numerics import InFlexData
 from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp
-from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
 from triton_kernels.testing import assert_close
 
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -38,12 +36,15 @@ from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe imp
     UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4,
+    mx_scale_kwargs,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
 
-from .utils import make_dummy_moe_config, mxfp4_w_layouts, shuffle_weight
+from .utils import make_dummy_moe_config, shuffle_weight
 
 MNK = [
     (1, 512, 384),
@@ -133,33 +134,19 @@ def make_weights(dtype, k, n, e):
     w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, dtype, axis=1)
     w2 = w2[..., :n, :k]
 
-    num_warps = 8
-    (
-        w_layout,
-        w_layout_opts,
-        w_scale_layout,
-        w_scale_layout_opts,
-    ) = mxfp4_w_layouts(mx_axis=1, num_warps=num_warps)
-
-    w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout, **w_layout_opts)
-    w1_scale_tri = convert_layout(
-        wrap_torch_tensor(w1_scale_tri),
-        w_scale_layout,
-        **w_scale_layout_opts,
+    # Use the production layout preparation, including its kernel constraints.
+    w1_tri, w1_flex, w1_scale_tri = _swizzle_mxfp4(
+        w1_tri.transpose(-2, -1), w1_scale_tri.transpose(-2, -1)
     )
-
-    w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout, **w_layout_opts)
-    w2_scale_tri = convert_layout(
-        wrap_torch_tensor(w2_scale_tri),
-        w_scale_layout,
-        **w_scale_layout_opts,
+    w2_tri, w2_flex, w2_scale_tri = _swizzle_mxfp4(
+        w2_tri.transpose(-2, -1), w2_scale_tri.transpose(-2, -1)
     )
 
     w1_precision_config = PrecisionConfig(
-        **mx_scale_kwargs(w1_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
+        **mx_scale_kwargs(w1_scale_tri), flex_ctx=FlexCtx(rhs_data=w1_flex)
     )
     w2_precision_config = PrecisionConfig(
-        **mx_scale_kwargs(w2_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
+        **mx_scale_kwargs(w2_scale_tri), flex_ctx=FlexCtx(rhs_data=w2_flex)
     )
 
     return (
@@ -277,6 +264,7 @@ def test_oai_triton_moe(
     num_experts: int,
     topk: int,
     unfused: bool,
+    dist_init,
     workspace_init,
 ):
     wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
@@ -327,7 +315,9 @@ def test_oai_triton_moe(
     not UnfusedOAITritonExperts._supports_current_device(),
     reason="Unfused OAI Triton MoE is not supported on this device.",
 )
-def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_init):
+def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(
+    dist_init, workspace_init
+):
     """Exercise `UnfusedOAITritonExperts.apply` with explicit workspaces.
 
     Same MoE topology as `launch_dsv4.sh` / DeepSeek-V4-Flash `config.json`,

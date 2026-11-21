@@ -144,8 +144,8 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
             # Native MXFP (cap >= 10.0) requires the persistent kernel, and
             # epilogue_subtile=1 keeps the heuristic away from a triton_kernels
             # 3.5.1 codegen bug (SWAP_XW with a subtiled epilogue) that SM110
-            # and SM12x otherwise hit. On SM12x, block_m is also pinned per
-            # call in gpt_oss_triton_kernels_moe to fit the 99KB shared memory.
+            # and SM12x otherwise hit. SM12x also needs per-call constraints
+            # in gpt_oss_triton_kernels_moe for shared memory and TMA scatter.
             constraints = {
                 "is_persistent": True,
                 "epilogue_subtile": 1,

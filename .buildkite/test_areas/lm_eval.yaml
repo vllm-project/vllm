@@ -1431,8 +1431,11 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/layers/fused_moe/
   - tests/evals/gpt_oss/
+  - tests/models/quantization/test_mxfp4.py
   commands:
+    - pytest -v -s models/quantization/test_mxfp4.py::test_gpt_oss_triton_unfused_sm12x
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
   mirror:
     amd:

@@ -49,7 +49,7 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # Hopper SM90, datacenter Blackwell SM100/103, Jetson Thor SM110 and
         # consumer Blackwell SM120/121. SM110 and SM12x need the opt-flag
         # constraints applied by `_swizzle_mxfp4` (SM12x also
-        # `_constrain_sm12x_block_m` to fit its 99KB of shared memory); both
+        # `_constrain_sm12x_opt_flags` for shared memory and TMA scatter); both
         # are still ordered after MARLIN by the selector.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
@@ -82,14 +82,17 @@ def _sm12x_block_m(num_rows: int, num_experts: int) -> int:
     return max(16, min(triton.next_power_of_2(tokens_per_expt), _SM12X_MAX_BLOCK_M))
 
 
-def _constrain_sm12x_block_m(num_rows: int, num_experts: int) -> None:
-    """Pin block_m for the following matmul_ogs calls on SM12x."""
+def _constrain_sm12x_opt_flags(num_rows: int, num_experts: int) -> None:
+    """Fit shared memory and avoid unsupported TMA scatter on SM12x."""
     if not _is_sm12x():
         return
     import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
 
     opt_flags.update_opt_flags_constraints(
-        {"block_m": _sm12x_block_m(num_rows, num_experts)}
+        {
+            "block_m": _sm12x_block_m(num_rows, num_experts),
+            "fused_scatter": False,
+        }
     )
 
 
@@ -838,7 +841,7 @@ def triton_kernel_fused_experts(
         )
     )
     gammas = routing_data.gate_scal if routing_data else None
-    _constrain_sm12x_block_m(M * topk, E)
+    _constrain_sm12x_opt_flags(M * topk, E)
 
     matmul_ogs(
         hidden_states,
@@ -1440,7 +1443,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         intermediate_cache2 = _resize_cache(workspace13, (M * topk, activation_out_dim))
 
         gammas = routing_data.gate_scal if routing_data else None
-        _constrain_sm12x_block_m(M * topk, E)
+        _constrain_sm12x_opt_flags(M * topk, E)
 
         matmul_ogs(
             hidden_states,
