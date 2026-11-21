@@ -180,6 +180,40 @@ async def test_metrics_counts(
         assert found_metric, f"Did not find {metric_family} in prom endpoint"
 
 
+def _tpot_count(server: RemoteOpenAIServer) -> float:
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+    return sum(
+        sample.value
+        for family in text_string_to_metric_families(response.text)
+        for sample in family.samples
+        if sample.name == "vllm:request_time_per_output_token_seconds_count"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tpot_skips_single_token_requests(
+    server: RemoteOpenAIServer,
+    client: openai.AsyncClient,
+    model_key: str,
+):
+    """Requests with one output token (e.g. P/D prefill with max_tokens=1)
+    have no decode interval and must not add TPOT samples."""
+    if model_key == "multimodal":
+        pytest.skip("Unnecessary test")
+
+    model_name = MODELS[model_key]
+    before = _tpot_count(server)
+    for max_tokens in (1, 1, 1, 5, 5):
+        await client.completions.create(
+            model=model_name,
+            prompt=_PROMPT,
+            max_tokens=max_tokens,
+            extra_body={"ignore_eos": True},
+        )
+    assert _tpot_count(server) - before == 2
+
+
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
