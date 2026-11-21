@@ -39,11 +39,13 @@ def _build_renderer(
     model: str = QWEN25_VL_MODEL_ID,
     mm_cache_gb: float = 4.0,
     enable_prefix_caching: bool = True,
+    mm_processor_kwargs: dict | None = None,
 ) -> HfRenderer:
     model_config = ModelConfig(
         model=model,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
+        mm_processor_kwargs=mm_processor_kwargs,
     )
 
     vllm_config = VllmConfig(
@@ -222,6 +224,22 @@ def test_ineligible_request_fetches_media_upfront(monkeypatch, use_async, case):
 
     assert process.call_count == 1
     assert fetch_image.call_count == 1
+
+
+def test_server_audio_in_video_default_does_not_defer_media_fetching():
+    """A server-wide use_audio_in_video default must also disable deferral.
+
+    Audio is extracted from the video bytes that deferral leaves unfetched,
+    so a request that does not set the flag itself still must not defer.
+    """
+    renderer = _build_renderer(
+        model=QWEN25_OMNI_MODEL_ID,
+        mm_processor_kwargs={"use_audio_in_video": True},
+    )
+
+    assert not renderer._should_defer_uuid_media_fetching(
+        ChatParams(), skip_mm_cache=False
+    )
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
