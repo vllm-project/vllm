@@ -138,6 +138,7 @@ steps:
   - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
   - vllm/models/deepseek_v41/nvidia/ops/candidate_indexer.py
   - vllm/models/deepseek_v41/nvidia/ops/candidate_paged_logits.py
+  - vllm/models/deepseek_v41/nvidia/ops/candidate_pcp.py
   - vllm/models/deepseek_v41/attention.py
   - vllm/model_executor/models/config.py
   - vllm/config/attention.py
