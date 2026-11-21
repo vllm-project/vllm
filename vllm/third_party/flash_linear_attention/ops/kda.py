@@ -52,7 +52,8 @@ def fused_recurrent_kda_fwd(
     num_stages = 3
     num_warps = 1
 
-    o = torch.empty_like(k)
+    # The kernel writes value-shaped outputs (HV heads of width V).
+    o = k.new_empty(v.shape)
     if inplace_final_state:
         final_state = initial_state
     else:
