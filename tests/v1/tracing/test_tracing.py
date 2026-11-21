@@ -19,7 +19,6 @@ from tests.tracing.conftest import (  # noqa: F401
 )
 
 
-# Tracing must not depend on stat logging; offline LLM disables it by default.
 @pytest.mark.parametrize("disable_log_stats", [False, True])
 def test_traces(
     monkeypatch: pytest.MonkeyPatch,
