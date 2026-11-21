@@ -26,6 +26,37 @@ except ImportError:
 logger = init_logger(__name__)
 
 
+def uses_nccl_symm_mem_backend(device: torch.device) -> bool:
+    """Whether this process selected PyTorch's NCCL symmetric-memory backend.
+
+    That backend rendezvouses through a group's NCCL communicator, so callers
+    must name an NCCL process group rather than a Gloo one.
+    """
+    if not symm_mem_available or device.type != "cuda":
+        return False
+    get_backend = getattr(torch_symm_mem, "get_backend", None)
+    return get_backend is not None and get_backend(device) == "NCCL"
+
+
+def select_nccl_symm_mem_backend() -> None:
+    """Select PyTorch's NCCL symmetric-memory backend for this process.
+
+    The backend is process-wide, so this must run before any symmetric memory
+    is allocated. vLLM's symmetric-memory users then rendezvous on the NCCL
+    device group (see `uses_nccl_symm_mem_backend`).
+    """
+    if not symm_mem_available:
+        raise RuntimeError("PyTorch symmetric memory is not available.")
+    try:
+        torch_symm_mem.set_backend("NCCL")
+    except RuntimeError as error:
+        raise RuntimeError(
+            "Cannot select PyTorch's NCCL symmetric-memory backend: another "
+            "backend is already in use in this process."
+        ) from error
+    logger.info_once("Using PyTorch's NCCL symmetric-memory backend.")
+
+
 class SymmMemCommunicator:
     _WORLD_SIZES_MULTIMEM = {
         "9.0": [4, 6, 8],
@@ -41,7 +72,10 @@ class SymmMemCommunicator:
         # add options for testing
         force_multimem: bool | None = None,
         max_size_override: int | None = None,
+        symm_mem_group: ProcessGroup | None = None,
     ):
+        """`group` is the CPU group; `symm_mem_group`, when given, is the
+        group to rendezvous on (the NCCL group under the NCCL backend)."""
         self.disabled = True
 
         if not symm_mem_available:
@@ -58,6 +92,7 @@ class SymmMemCommunicator:
         self.dtype = torch.bfloat16
         self.device = device
         self.group = group
+        self.symm_mem_group = symm_mem_group or group
         self.world_size = dist.get_world_size(self.group)
         capability = current_platform.get_device_capability()
         if capability is None:
@@ -107,7 +142,9 @@ class SymmMemCommunicator:
                 device=self.device,
                 dtype=self.dtype,
             )
-            handle = torch_symm_mem.rendezvous(self.buffer, self.group.group_name)
+            handle = torch_symm_mem.rendezvous(
+                self.buffer, self.symm_mem_group.group_name
+            )
         except RuntimeError as e:
             logger.warning_once(
                 "SymmMemCommunicator: symmetric memory initialization failed: %s "
@@ -159,11 +196,11 @@ class SymmMemCommunicator:
 
         if use_multimem:
             torch.ops.symm_mem.multimem_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
+                self.buffer[: inp.numel()], "sum", self.symm_mem_group.group_name
             )
         else:
             torch.ops.symm_mem.two_shot_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
+                self.buffer[: inp.numel()], "sum", self.symm_mem_group.group_name
             )
         out.copy_(self.buffer[: inp.numel()].view(out.shape))
         return out
