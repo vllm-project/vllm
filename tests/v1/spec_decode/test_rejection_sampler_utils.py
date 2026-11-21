@@ -1190,6 +1190,7 @@ def test_verify_rejects_unproposed_drafts():
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
     rejection_sampler.watermark_key = None
+    rejection_sampler.flydsl_rejection_sampler = None
     draft_logits = DraftLogitsCache(
         *inputs["draft_logits"].shape,
         dtype=inputs["draft_logits"].dtype,

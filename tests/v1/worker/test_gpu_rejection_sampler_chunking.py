@@ -62,6 +62,7 @@ def _make_rejection_sampler(
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
     rejection_sampler.watermark_key = None
+    rejection_sampler.flydsl_rejection_sampler = None
     return rejection_sampler
 
 

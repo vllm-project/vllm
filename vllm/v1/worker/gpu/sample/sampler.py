@@ -86,6 +86,11 @@ class Sampler:
         # Whether processing may leave -inf in a request's logits (filters,
         # forcing, logits processors) rather than only scale them.
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
+        # Whether processing changes a request's logits in any way other than
+        # the temperature scaling (filters, penalties, bias, forcing, logits
+        # processors). A kernel that applies the temperature itself may skip
+        # apply_sampling_params only for requests where this is False.
+        self.needs_non_temperature_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -98,12 +103,17 @@ class Sampler:
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
-        may_mask = self.sampling_states.masks_logits(req_idx)
-        may_mask |= self.thinking_budget_state.add_request(req_idx, sampling_params)
+        # The filters (min-p, top-k, top-p) and every processor that reports
+        # it changes this request's logits: all processing but temperature.
+        non_temperature = self.sampling_states.masks_logits(req_idx)
+        non_temperature |= self.thinking_budget_state.add_request(
+            req_idx, sampling_params
+        )
         for processor in self.logits_processors:
-            may_mask |= processor.add_request(req_idx, sampling_params)
-        self.needs_logits_processing[req_idx] = needs_processing or may_mask
-        self.may_mask_logits[req_idx] = may_mask
+            non_temperature |= processor.add_request(req_idx, sampling_params)
+        self.needs_logits_processing[req_idx] = needs_processing or non_temperature
+        self.may_mask_logits[req_idx] = non_temperature
+        self.needs_non_temperature_processing[req_idx] = non_temperature
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
