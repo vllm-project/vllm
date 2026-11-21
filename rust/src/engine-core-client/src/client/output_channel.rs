@@ -5,12 +5,12 @@
 //! [`EngineCoreOutputStream`](crate::EngineCoreOutputStream).
 //!
 //! With a stream interval above one, the sender holds back the outputs after
-//! the first one until they carry at least that many new tokens, then delivers
-//! them in one channel message, which the stream yields as one
+//! the first one until they reach the token interval or fill half the unread
+//! output budget, then delivers them in one channel message as one
 //! [`EngineCoreStreamDelivery`](crate::EngineCoreStreamDelivery). The request
 //! task is then woken once per delivery instead of once per engine step.
 //!
-//! Outputs are never merged, reordered, or dropped here; the consumer merges a
+//! Accepted outputs are never merged or reordered here; the consumer merges a
 //! delivery into one output (see `vllm-llm`). Merging here would hide the raw
 //! outputs that request metrics observe one by one (per-step timestamps for
 //! inter-token latency, prefill stats, lifecycle events), and would have to
@@ -19,6 +19,8 @@
 
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::sync::mpsc;
@@ -30,35 +32,49 @@ use crate::error::{Error, Result};
 /// Keep Tokio's 32-slot channel blocks pointer-sized.
 type QueuedOutput = Box<Result<Delivery>>;
 
+pub(crate) const MAX_QUEUED_OUTPUTS_PER_REQUEST: usize = 256;
+// Leave room for the next batch while the consumer drains the first.
+const MAX_BUFFERED_OUTPUTS_PER_DELIVERY: usize = MAX_QUEUED_OUTPUTS_PER_REQUEST / 2;
+
 /// Create the output channel for one request.
 pub(crate) fn output_channel(stream_interval: NonZeroU32) -> (OutputSender, OutputReceiver) {
     let (tx, rx) = mpsc::unbounded_channel();
+    let queued_outputs = Arc::new(AtomicUsize::new(0));
     let sender = OutputSender {
         tx,
+        queued_outputs: queued_outputs.clone(),
         stream_interval: stream_interval.get() as usize,
         delivered_first: false,
         buffered: Vec::new(),
         buffered_tokens: 0,
     };
-    (sender, OutputReceiver { rx })
+    (sender, OutputReceiver { rx, queued_outputs })
 }
 
 /// Receiving half of a request's output channel.
 #[derive(Debug)]
 pub(crate) struct OutputReceiver {
     rx: mpsc::UnboundedReceiver<QueuedOutput>,
+    queued_outputs: Arc<AtomicUsize>,
 }
 
 impl OutputReceiver {
     pub fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Delivery>>> {
-        Pin::new(&mut self.get_mut().rx)
-            .poll_recv(cx)
-            .map(|item| item.map(|item| *item))
+        let this = self.get_mut();
+        let item = Pin::new(&mut this.rx).poll_recv(cx).map(|item| item.map(|item| *item));
+        if let Poll::Ready(Some(Ok(delivery))) = &item {
+            this.queued_outputs.fetch_sub(delivery.iter().count(), Ordering::AcqRel);
+        }
+        item
     }
 
     #[cfg(test)]
     pub fn try_recv(&mut self) -> std::result::Result<Result<Delivery>, mpsc::error::TryRecvError> {
-        self.rx.try_recv().map(|item| *item)
+        let item = *self.rx.try_recv()?;
+        if let Ok(delivery) = &item {
+            self.queued_outputs.fetch_sub(delivery.iter().count(), Ordering::AcqRel);
+        }
+        Ok(item)
     }
 }
 
@@ -66,7 +82,8 @@ impl OutputReceiver {
 #[derive(Debug)]
 pub(crate) struct OutputSender {
     tx: mpsc::UnboundedSender<QueuedOutput>,
-    /// Minimum number of new tokens per delivery after the first one.
+    queued_outputs: Arc<AtomicUsize>,
+    /// Target number of new tokens per delivery after the first one.
     stream_interval: usize,
     /// Whether the first output has been delivered.
     delivered_first: bool,
@@ -77,24 +94,39 @@ pub(crate) struct OutputSender {
 }
 
 impl OutputSender {
-    /// Send one output, or hold it back until the held-back outputs reach the
-    /// stream interval. The first output and the terminal output are always
-    /// delivered immediately, the latter together with any held-back outputs.
-    pub fn send(&mut self, output: EngineCoreStreamOutput) {
+    /// Send one output, or buffer it until the token interval or batch limit.
+    /// Within the unread output limit, the first and terminal
+    /// outputs are delivered immediately, the latter with any held-back outputs.
+    /// Returns false when the receiver is gone or its unread output limit is reached.
+    pub fn send(&mut self, output: EngineCoreStreamOutput) -> bool {
+        if self.tx.is_closed()
+            || self
+                .queued_outputs
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                    (queued < MAX_QUEUED_OUTPUTS_PER_REQUEST).then_some(queued + 1)
+                })
+                .is_err()
+        {
+            return false;
+        }
         let finished = output.finished();
         if self.buffered.is_empty()
             && (finished || !self.delivered_first || self.stream_interval == 1)
         {
             self.delivered_first = true;
             self.deliver(Delivery::One(output));
-            return;
+            return true;
         }
 
         self.buffered_tokens += output.new_token_ids.len();
         self.buffered.push(output);
-        if finished || self.buffered_tokens >= self.stream_interval {
+        if finished
+            || self.buffered_tokens >= self.stream_interval
+            || self.buffered.len() >= MAX_BUFFERED_OUTPUTS_PER_DELIVERY
+        {
             self.flush();
         }
+        true
     }
 
     /// Deliver the held-back outputs, if any.
@@ -127,8 +159,8 @@ impl OutputSender {
 
 impl Drop for OutputSender {
     fn drop(&mut self) {
-        // Every path that ends a live request delivers held-back outputs first
-        // (terminal output, `flush`, or `send_error`). Outputs left here are lost.
+        // Overflow can end a request with held-back outputs. All other paths
+        // deliver them first (terminal output, `flush`, or `send_error`).
         if !self.buffered.is_empty() && !self.tx.is_closed() {
             warn!(
                 request_id = self.buffered[0].request_id,
@@ -341,5 +373,38 @@ mod tests {
         // One delivery for the first output, one for the held-back output,
         // then the error.
         assert_eq!(items, [Some(1), Some(1), None]);
+    }
+
+    #[test]
+    fn long_stream_interval_delivers_in_order_to_a_periodic_reader() {
+        let (mut sender, mut receiver) = channel(512);
+        let mut received = Vec::new();
+        for token in 1u32..=513 {
+            assert!(sender.send(output(&[token])));
+            if (token - 1).is_multiple_of(MAX_BUFFERED_OUTPUTS_PER_DELIVERY as u32) {
+                received.extend(deliveries(&mut receiver).into_iter().flatten().flatten());
+            }
+        }
+        assert!(sender.send(finished(&[514])));
+        received.extend(deliveries(&mut receiver).into_iter().flatten().flatten());
+        assert_eq!(received, (1..=514).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn unread_outputs_are_bounded_across_deliveries_and_batching() {
+        let (mut sender, mut receiver) = channel(512);
+        for _ in 0..MAX_QUEUED_OUTPUTS_PER_REQUEST {
+            assert!(sender.send(output(&[1])));
+        }
+        assert!(!sender.send(output(&[1])));
+
+        // Consuming the first delivery frees exactly one raw output slot.
+        assert_eq!(receiver.try_recv().unwrap().unwrap().iter().count(), 1);
+        assert!(sender.send(output(&[1])));
+        assert!(!sender.send(output(&[1])));
+
+        sender.flush();
+        let remaining: usize = deliveries(&mut receiver).iter().map(Vec::len).sum();
+        assert_eq!(remaining, MAX_QUEUED_OUTPUTS_PER_REQUEST);
     }
 }
