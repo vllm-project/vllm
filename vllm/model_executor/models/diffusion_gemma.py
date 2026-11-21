@@ -73,7 +73,11 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+from vllm.v1.worker.gpu.sample.logprob import (
+    compute_topk_scores,
+    concat_logprob_stashes,
+    masked_stash_write,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
@@ -381,55 +385,6 @@ def _compute_num_rejected(
     num_rejected = num_logits - num_sampled
     is_denoise = (num_logits > 0) & (num_sampled == 0)
     return torch.where(is_denoise, query_lens, num_rejected)
-
-
-def _concat_logprob_stashes(
-    parts: list[LogprobsTensors], cu_num_generated_tokens: list[int]
-) -> LogprobsTensors:
-    """Join the logprobs stashed for the requests committing this step.
-
-    Each stash is as wide as the widest logprobs request in the batch at the
-    step that request converged, so stashes from different steps can differ
-    in width. Pad the narrow ones the way compute_topk_scores pads a mixed
-    batch: token id 0 at -inf, which the output processor never reports.
-    """
-    width = max(p.logprob_token_ids.shape[1] for p in parts)
-
-    def pad(t: torch.Tensor, value: float) -> torch.Tensor:
-        return F.pad(t, (0, width - t.shape[1]), value=value)
-
-    return LogprobsTensors(
-        logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
-        logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
-        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
-        cu_num_generated_tokens=cu_num_generated_tokens,
-    )
-
-
-def _masked_stash_write(
-    stash: LogprobsTensors,
-    slots: torch.Tensor,
-    keep: torch.Tensor,
-    new: LogprobsTensors,
-) -> None:
-    """Write `new` ([n * W] rows) into the per-slot stash where `keep`.
-
-    The PyTorch counterpart of `stash_converged_logprobs`,
-    for constrained reads and non-CUDA runs.
-    """
-    n = slots.shape[0]
-    pad = stash.logprobs.shape[-1] - new.logprobs.shape[1]
-    ids = F.pad(new.logprob_token_ids.to(torch.int64), (0, pad))
-    lps = F.pad(new.logprobs, (0, pad), value=float("-inf"))
-    ranks = new.selected_token_ranks.to(torch.int64).view(n, -1)
-    W = ranks.shape[1]
-    for buf, rows in (
-        (stash.logprob_token_ids, ids.view(n, W, -1)),
-        (stash.logprobs, lps.view(n, W, -1)),
-        (stash.selected_token_ranks, ranks),
-    ):
-        mask = keep.view(n, *[1] * (rows.dim() - 1))
-        buf[slots, :W] = torch.where(mask, rows, buf[slots, :W])
 
 
 _MASKED_LOGIT = -1e20
@@ -1384,7 +1339,7 @@ class DiffusionSampler:
                 num_logprobs,
                 max_token_ids,
             )
-            _masked_stash_write(stash, slots, keep, new)
+            masked_stash_write(stash, slots, keep, new)
             return
         ids_state = self.logprob_token_ids_state
         stash_converged_logprobs(
@@ -1489,7 +1444,7 @@ class DiffusionSampler:
             flat_offset += part.logprobs.shape[0]
         if not parts:
             return None
-        return _concat_logprob_stashes(parts, cu_gen)
+        return concat_logprob_stashes(parts, cu_gen)
 
     # ------------------------------------------------------------------
     # Main entry point
