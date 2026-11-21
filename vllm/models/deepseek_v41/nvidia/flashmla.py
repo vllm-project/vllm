@@ -325,25 +325,45 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
-            workspace = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
-            kv, combined_indices_out, combined_lens_out = workspace
-            if not swa_only:
-                # Gather compressed KV
-                assert attn_metadata is not None
-                block_table = attn_metadata.block_table[num_decodes:]
-                dequantize_and_gather_k_cache(
-                    kv[:chunk_size],
-                    compressed_k_cache,
-                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                    gather_lens=None,
-                    block_table=block_table[chunk_start:chunk_end],
-                    block_size=attn_metadata.block_size // self.compress_ratio,
-                    offset=0,
+            kv_spec = ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16)
+            if swa_only:
+                kv, combined_indices_out, combined_lens_out = (
+                    workspace_manager.get_simultaneous(
+                        kv_spec,
+                        ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                        ((self.max_num_batched_tokens,), torch.int32),
+                    )
                 )
+            else:
+                combined_indices_out, combined_lens_out = (
+                    workspace_manager.get_simultaneous(
+                        ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                        ((self.max_num_batched_tokens,), torch.int32),
+                    )
+                )
+                # The chunk's compressed columns stay in the workspace's tail
+                # span, which the scratch of the layers in between leaves
+                # alone. A kv source has just inserted this step's rows, so it
+                # always gathers; the consumers after it in the same forward
+                # reuse its columns while the span still holds this source and
+                # chunk, and rewrite only their SWA columns.
+                kv, intact = workspace_manager.get_retained(
+                    (self.compressed_cache_prefix, chunk_start, chunk_end),
+                    *kv_spec,
+                )
+                if self.is_kv_source or not intact:
+                    assert attn_metadata is not None
+                    block_table = attn_metadata.block_table[num_decodes:]
+                    dequantize_and_gather_k_cache(
+                        kv[:chunk_size],
+                        compressed_k_cache,
+                        seq_lens=seq_lens[chunk_start:chunk_end]
+                        // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=block_table[chunk_start:chunk_end],
+                        block_size=attn_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                    )
 
             # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
