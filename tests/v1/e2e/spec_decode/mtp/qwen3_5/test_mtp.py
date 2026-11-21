@@ -130,6 +130,49 @@ def test_mtp_draft_steps_use_their_own_module(
     assert step_2 < 0.05, f"module 1 acceptance {step_2:.3f}: module 0 was reused"
 
 
+def _drop_mtp_weights(model_name: str, path: Path) -> Path:
+    """Copy of `model_name` without its `mtp.*` tensors."""
+    src = Path(download_weights_from_hf(model_name, None, allow_patterns=["*"]))
+    index = json.loads((src / "model.safetensors.index.json").read_text())
+    shards = set(index["weight_map"].values())
+    for file in src.iterdir():
+        if file.name not in shards | {"model.safetensors.index.json"}:
+            (path / file.name).symlink_to(file)
+    index["weight_map"] = {
+        n: s for n, s in index["weight_map"].items() if not n.startswith("mtp.")
+    }
+    for shard in shards:
+        with safe_open(src / shard, framework="pt") as f:
+            kept = {
+                n: f.get_tensor(n) for n, s in index["weight_map"].items() if s == shard
+            }
+        save_file(kept, path / shard, metadata={"format": "pt"})
+    (path / "model.safetensors.index.json").write_text(json.dumps(index))
+    return path
+
+
+@single_gpu_only
+def test_mtp_without_mtp_weights_fails_to_load(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, vllm_runner
+):
+    """Quantized models skip the strict unloaded-weights check, so a checkpoint
+    whose `mtp.*` tensors were dropped must still fail instead of drafting with
+    uninitialized MTP weights."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    model = _drop_mtp_weights("Qwen/Qwen3.5-0.8B-Base", tmp_path)
+    with (
+        pytest.raises(ValueError, match=r"needs the checkpoint's `mtp\.\*` weights"),
+        vllm_runner(
+            str(model),
+            quantization="fp8",
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+        ),
+    ):
+        pass
+
+
 @single_gpu_only
 def test_multi_module_mtp_reused_slot_has_only_current_request_inputs(
     tmp_path: Path,

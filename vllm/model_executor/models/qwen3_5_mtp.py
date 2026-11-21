@@ -18,6 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.models.interfaces import LocalArgmaxMixin
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5DecoderLayer,
@@ -295,18 +296,29 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        num_mtp_weights = 0
+
         def remap_weight_names(weights):
+            nonlocal num_mtp_weights
             for name, weight in weights:
                 if self.is_unused_checkpoint_weight(name):
                     continue
                 if name.startswith("mtp."):
+                    num_mtp_weights += 1
                     name = name.replace("mtp.", "model.")
                 elif "embed_tokens" in name:
                     name = name.replace("language_model.", "")
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(remap_weight_names(weights))
+        loaded_params = loader.load_weights(remap_weight_names(weights))
+        # A weight update may send the MTP weights in another call.
+        if num_mtp_weights == 0 and not weight_update_active():
+            raise ValueError(
+                "MTP speculative decoding needs the checkpoint's `mtp.*` weights, "
+                "but it has none (quantization tools may drop them)"
+            )
+        return loaded_params
 
 
 class Qwen3_5MoeMTP(Qwen3_5MTP, QwenNextMixtureOfExperts):
