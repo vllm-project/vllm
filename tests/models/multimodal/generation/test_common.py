@@ -1435,3 +1435,31 @@ def test_custom_inputs_models_heavy(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
     )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="FlashInfer requires CUDA")
+def test_flashinfer_fixed_length_vision(vllm_runner):
+    """A fixed-length SigLIP encoder must serve images with FlashInfer."""
+    from PIL import Image
+
+    prompt = (
+        "<|im_start|>User:<image>What color is this image? Answer briefly."
+        "<end_of_utterance>\nAssistant:"
+    )
+    with vllm_runner(
+        "HuggingFaceTB/SmolVLM-256M-Instruct",
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=2048,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.2,
+        kv_cache_memory_bytes=512 * 1024**2,
+        attention_config={"backend": "TRITON_ATTN"},
+        mm_encoder_attn_backend="FLASHINFER",
+        limit_mm_per_prompt={"image": 1},
+    ) as model:
+        outputs = model.generate_greedy(
+            [prompt], max_tokens=8, images=[Image.new("RGB", (224, 224), "red")]
+        )
+    assert "red" in outputs[0][1].lower()

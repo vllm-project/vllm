@@ -512,3 +512,52 @@ def test_qwen2_vl_embeddings_input_with_encoder_cudagraph(
         tensor_parallel_size=1,
         encoder_cudagraph=True,
     )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="FlashInfer requires CUDA")
+def test_qwen2_vl_flashinfer_packed_images(vllm_runner):
+    """FlashInfer must serve variable-size packed images like SDPA."""
+    images = [
+        Image.new("RGB", (112, 112), "red"),
+        Image.new("RGB", (168, 112), "blue"),
+    ]
+    prompts = [
+        qwen2_vl_chat_template(IMAGE_PLACEHOLDER, "Describe the image color briefly.")
+    ] * 2
+    prompts.append(
+        qwen2_vl_chat_template(
+            IMAGE_PLACEHOLDER * 2, "Describe both image colors in order."
+        )
+    )
+    results = []
+    for backend in ("TORCH_SDPA", "FLASHINFER"):
+        with vllm_runner(
+            "Qwen/Qwen2-VL-2B-Instruct",
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=2048,
+            max_num_seqs=2,
+            gpu_memory_utilization=0.1,
+            kv_cache_memory_bytes=256 * 1024**2,
+            attention_config={"backend": "TRITON_ATTN"},
+            mm_encoder_attn_backend=backend,
+            limit_mm_per_prompt={"image": 2, "video": 0},
+            mm_processor_kwargs={"min_pixels": 56 * 56, "max_pixels": 224 * 224},
+            enable_prefix_caching=False,
+        ) as model:
+            outputs = model.generate_greedy_logprobs(
+                prompts,
+                max_tokens=16,
+                num_logprobs=5,
+                images=[images[0], images[1], images],
+            )
+        assert len(outputs) == 3
+        assert all(tokens and text and logprobs for tokens, text, logprobs in outputs)
+        results.append(outputs)
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="TORCH_SDPA",
+        name_1="FLASHINFER",
+    )
