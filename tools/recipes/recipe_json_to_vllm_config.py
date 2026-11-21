@@ -52,6 +52,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from recipe_validation_status import RecipeSkipError, write_validation_result
+
 try:
     import yaml
 except ImportError as exc:
@@ -138,9 +140,19 @@ def parse_args() -> argparse.Namespace:
         help="Output vLLM YAML config (default: config.yml)",
     )
     p.add_argument(
+        "--validation-result-out",
+        help="Write machine-readable READY/SKIP/ERROR JSON for validation automation.",
+    )
+    p.add_argument(
         "--env-out",
         default="env.sh",
         help="Output shell environment file (default: env.sh)",
+    )
+
+    p.add_argument(
+        "--max-model-len",
+        type=int,
+        help="Explicit context-length override for generated serving config.",
     )
 
     tuning = p.add_argument_group(
@@ -155,7 +167,7 @@ def parse_args() -> argparse.Namespace:
         "--detect-hardware",
         action="store_true",
         help=(
-            "Detect effective CPU/NUMA/memory resources and allow the selected "
+            "Detect CPU/NUMA or Intel XPU resources and allow the selected "
             "recipe-hardware policy to override recipe runtime arguments."
         ),
     )
@@ -754,9 +766,11 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
     # Current Recipes API's single-node rendering exposes `argv`.
     if isinstance(recipe.get("argv"), list):
         if deploy_type not in (None, "single_node"):
-            raise ValueError(
+            raise RecipeSkipError(
+                "UNSUPPORTED_DEPLOYMENT",
                 f"Recipe deploy_type={deploy_type!r} is not a single-node deployment. "
-                "A single config.yml would not fully represent this deployment."
+                "A single config.yml would not fully represent this deployment.",
+                deploy_type=deploy_type,
             )
         return recipe["argv"]
 
@@ -774,9 +788,11 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
         if k in recipe
     ]
     if multi_process_fields:
-        raise ValueError(
+        raise RecipeSkipError(
+            "UNSUPPORTED_DEPLOYMENT",
             "This recipe is a multi-process deployment and cannot be represented "
-            "by one config.yml. Found fields: " + ", ".join(multi_process_fields)
+            "by one config.yml. Found fields: " + ", ".join(multi_process_fields),
+            fields=multi_process_fields,
         )
 
     raise ValueError("Recipe JSON does not contain an `argv` field")
@@ -892,6 +908,10 @@ def main() -> int:
 
         argv = recipe_argv(recipe)
         config = argv_to_config(argv)
+        if args.max_model_len is not None:
+            if args.max_model_len <= 0:
+                raise ValueError("--max-model-len must be positive")
+            config["max-model-len"] = args.max_model_len
 
         tuning_requested = (
             args.detect_hardware
@@ -956,9 +976,16 @@ def main() -> int:
             )
 
             if args.detect_hardware:
-                from hardware_detection import detect_hardware
+                if recipe_hardware == "xeon6":
+                    from hardware_detection import detect_hardware
 
-                hardware = detect_hardware()
+                    hardware = detect_hardware()
+                elif recipe_hardware == "arc_pro_b70":
+                    from xpu_hardware_detection import detect_xpu_hardware
+
+                    hardware = detect_xpu_hardware()
+                else:
+                    raise ValueError(f"No detector registered for {recipe_hardware!r}")
 
             tuning = finetune_runtime_config(
                 config,
@@ -993,7 +1020,11 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                numa_node_count=hardware.numa_node_count,
+                **(
+                    {"gpu_count": hardware.gpu_count}
+                    if recipe_hardware == "arc_pro_b70"
+                    else {"numa_node_count": hardware.numa_node_count}
+                ),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_parallel_layout_sweep:
@@ -1010,7 +1041,11 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                numa_node_count=hardware.numa_node_count,
+                **(
+                    {"gpu_count": hardware.gpu_count}
+                    if recipe_hardware == "arc_pro_b70"
+                    else {"numa_node_count": hardware.numa_node_count}
+                ),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_concurrency_sweep:
@@ -1051,10 +1086,27 @@ def main() -> int:
                     print(f"  {key}: {value}")
             for note in tuning.notes:
                 print(f"  tuning: {note}")
+    except RecipeSkipError as exc:
+        write_validation_result(
+            args.validation_result_out,
+            "SKIP",
+            reason_code=exc.reason_code,
+            reason=str(exc),
+            **exc.details,
+        )
+        print(f"SKIP [{exc.reason_code}]: {exc}", file=sys.stderr)
+        return 3
     except Exception as exc:
+        write_validation_result(
+            args.validation_result_out,
+            "ERROR",
+            reason_code="CONVERSION_ERROR",
+            reason=str(exc),
+        )
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    write_validation_result(args.validation_result_out, "READY")
     print(f"Wrote {args.config_out}")
     print(f"Wrote {args.env_out}")
     if sweep_files:

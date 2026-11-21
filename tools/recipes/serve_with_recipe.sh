@@ -26,12 +26,32 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     esac
 done
 
-if [[ "${hardware,,}" == "xeon6" ]]; then
+has_detect_hardware=false
+for arg in "${args[@]}"; do
+    if [[ "$arg" == "--detect-hardware" ]]; then
+        has_detect_hardware=true
+        break
+    fi
+done
+
+if [[ "$has_detect_hardware" == false && \
+      ( "${hardware,,}" == "xeon6" || "${hardware,,}" == "arc_pro_b70" ) ]]; then
     args+=(--detect-hardware)
+fi
+
+# Opt-in protocol for validation harnesses; normal CLI use is unchanged.
+if [[ -n "${RECIPE_VALIDATION_RESULT_OUT:-}" ]]; then
+    args+=(--validation-result-out "$RECIPE_VALIDATION_RESULT_OUT")
 fi
 
 echo "==> Generating vLLM configuration"
 python3 "${CONVERTER}" "${args[@]}"
+
+echo
+echo "==> Preparing recipe assets"
+python3 "${SCRIPT_DIR}/recipe_assets.py" \
+    --config "${CONFIG_PATH}" \
+    --cache-dir "${RECIPE_ASSET_CACHE_DIR:-${OUTPUT_DIR}/.recipe-assets}"
 
 echo
 echo "==> Loading recipe environment"

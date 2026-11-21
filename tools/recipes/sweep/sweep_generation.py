@@ -568,6 +568,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")" && pwd)"
 CONFIG_PATH="${{SCRIPT_DIR}}/{config_rel}"
 ENV_PATH="${{SCRIPT_DIR}}/{env_rel}"
+SWEEP_PORT="${{VLLM_RECIPE_SWEEP_PORT:-8000}}"
 
 source "${{ENV_PATH}}"
 
@@ -593,8 +594,8 @@ SWEEP_RETRY_COUNT="${{VLLM_RECIPE_SWEEP_RETRY_COUNT:-0}}"
 MAX_SWEEP_RETRIES="${{VLLM_RECIPE_SWEEP_RETRIES:-2}}"
 
 {prepare_config}vllm bench sweep serve \
-  --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
-  --bench-cmd "{bench_cmd}" \
+  --serve-cmd "vllm serve --config '${{CONFIG_PATH}}' --port ${{SWEEP_PORT}}" \
+  --bench-cmd "{bench_cmd} --port ${{SWEEP_PORT}}" \
   --serve-params "${{SCRIPT_DIR}}/{serve_params_name}" \
   --bench-params "${{SCRIPT_DIR}}/bench_params.json" \
   --output-dir "${{SCRIPT_DIR}}/results" \
@@ -896,10 +897,13 @@ def write_parallel_layout_sweep_files(
     env_path: str,
     config: dict[str, Any],
     workload: WorkloadHints,
-    numa_node_count: int,
+    numa_node_count: int | None = None,
+    gpu_count: int | None = None,
     tune_scheduler: bool = False,
 ) -> list[Path]:
-    """Write a standalone NUMA-aware TP/DP sweep package."""
+    """Write a standalone CPU NUMA or XPU TP/DP sweep package."""
+    if (gpu_count is None) == (numa_node_count is None):
+        raise ValueError("Specify exactly one of gpu_count or numa_node_count")
     validate_sweep_workload(workload)
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -921,26 +925,36 @@ def write_parallel_layout_sweep_files(
     _write_sweep_config(parallel_config, config)
     benchmark_config_rel = initial_config_rel if tune_scheduler else parallel_config_rel
 
-    try:
-        model_metadata = inspect_model_parallel_metadata(config)
-    except Exception as exc:
-        print(
-            "Warning: could not inspect model parallel metadata; retaining the "
-            f"generic layouts and relying on sweep error isolation: {exc}",
-            file=sys.stderr,
+    if gpu_count is not None:
+        from .xpu_layouts import build_xpu_parallel_layout_plan
+
+        parallel_candidates, skipped_candidates = build_xpu_parallel_layout_plan(
+            config,
+            workload,
+            gpu_count,
+            tune_scheduler=tune_scheduler,
         )
-        model_metadata = UNKNOWN_MODEL_PARALLEL_METADATA
-    cpu_moe_dp_supported = (
-        cpu_supports_moe_dp_collectives() if model_metadata.is_moe else True
-    )
-    parallel_candidates, skipped_candidates = build_parallel_layout_plan(
-        config,
-        workload,
-        numa_node_count,
-        model_metadata=model_metadata,
-        cpu_moe_dp_supported=cpu_moe_dp_supported,
-        tune_scheduler=tune_scheduler,
-    )
+    else:
+        try:
+            model_metadata = inspect_model_parallel_metadata(config)
+        except Exception as exc:
+            print(
+                "Warning: could not inspect model parallel metadata; retaining the "
+                f"generic layouts and relying on sweep error isolation: {exc}",
+                file=sys.stderr,
+            )
+            model_metadata = UNKNOWN_MODEL_PARALLEL_METADATA
+        cpu_moe_dp_supported = (
+            cpu_supports_moe_dp_collectives() if model_metadata.is_moe else True
+        )
+        parallel_candidates, skipped_candidates = build_parallel_layout_plan(
+            config,
+            workload,
+            numa_node_count,
+            model_metadata=model_metadata,
+            cpu_moe_dp_supported=cpu_moe_dp_supported,
+            tune_scheduler=tune_scheduler,
+        )
     _write_json(parallel_params, parallel_candidates)
     _write_json(parallel_skips, skipped_candidates)
     _write_json(bench_params, build_bench_params(workload))
@@ -965,7 +979,21 @@ def write_parallel_layout_sweep_files(
     )
 
     guide.write_text(
-        f"""# Parallel-Layout Sweep
+        (
+            f"""# Parallel-Layout Sweep (Intel XPU)
+
+This package evaluates bounded GPU TP/DP layouts with {gpu_count} visible GPUs.
+Model attention/KV head compatibility is checked before candidate generation;
+weight/KV memory fit is validated only when a candidate server starts.
+Review skipped candidates in `parallel_layout_skips.json`.
+Pass `--max-model-len` to the converter when needed, as large model context
+defaults may exceed available B70 KV-cache memory.
+
+Run `./run_parallel_layout_sweep.sh --dry-run`, then run the sweep and
+`./recommend_parallel_layout.py`. XPU layouts do not assume host CPU NUMA.
+"""
+            if gpu_count is not None
+            else f"""# Parallel-Layout Sweep
 
 This package tunes only the NUMA-aware TP/DP layout.
 
@@ -1007,7 +1035,8 @@ parallel-layout-recommendation.json
 
 This mode stops after TP/DP selection. Use `--generate-full-sweep` when
 concurrency and scheduler tuning should follow automatically.
-""",
+"""
+        ),
         encoding="utf-8",
     )
     analysis_files = _write_post_benchmark_analysis_files(directory, workload=workload)
@@ -1095,6 +1124,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")" && pwd)"
 CONFIG_PATH="${{SCRIPT_DIR}}/{config_rel}"
 ENV_PATH="${{SCRIPT_DIR}}/{env_rel}"
+SWEEP_PORT="${{VLLM_RECIPE_SWEEP_PORT:-8000}}"
 
 source "${{ENV_PATH}}"
 
@@ -1124,8 +1154,8 @@ SERVER_READY_TIMEOUT="${{VLLM_RECIPE_SERVER_READY_TIMEOUT:-1800}}"
 run_concurrency_sweep() {{
   if [[ "{int(use_adaptive_sla_search)}" == "1" ]]; then
     python3 "${{SCRIPT_DIR}}/adaptive_concurrency.py" \
-      --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
-      --bench-cmd "{bench_cmd}" \
+      --serve-cmd "vllm serve --config '${{CONFIG_PATH}}' --port ${{SWEEP_PORT}}" \
+      --bench-cmd "{bench_cmd} --port ${{SWEEP_PORT}}" \
       --results-dir "${{SCRIPT_DIR}}/results/concurrency-tuning" \
       {adaptive_args_text} \
       --server-ready-timeout "${{SERVER_READY_TIMEOUT}}" \
@@ -1133,8 +1163,8 @@ run_concurrency_sweep() {{
       "$@"
   else
     vllm bench sweep serve_workload \
-      --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
-      --bench-cmd "{bench_cmd}" \
+      --serve-cmd "vllm serve --config '${{CONFIG_PATH}}' --port ${{SWEEP_PORT}}" \
+      --bench-cmd "{bench_cmd} --port ${{SWEEP_PORT}}" \
       --bench-params "${{SCRIPT_DIR}}/concurrency_bench_params.json" \
       --output-dir "${{SCRIPT_DIR}}/results" \
       --experiment-name concurrency-tuning \
@@ -1464,7 +1494,8 @@ def write_full_sweep_files(
     env_path: str,
     config: dict[str, Any],
     workload: WorkloadHints,
-    numa_node_count: int,
+    numa_node_count: int | None = None,
+    gpu_count: int | None = None,
     tune_scheduler: bool = False,
 ) -> list[Path]:
     """Write TP/DP -> concurrency -> scheduler end-to-end tuning artifacts."""
@@ -1475,6 +1506,7 @@ def write_full_sweep_files(
         config=config,
         workload=workload,
         numa_node_count=numa_node_count,
+        gpu_count=gpu_count,
         tune_scheduler=tune_scheduler,
     )
 

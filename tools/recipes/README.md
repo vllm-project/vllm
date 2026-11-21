@@ -50,7 +50,7 @@ hardware, and strategy discovery:
 python3 tools/recipes/recipe_json_to_vllm_config.py
 ```
 
-For `xeon6`, the script enables hardware detection automatically. Generated
+For `xeon6` and `arc_pro_b70`, the script enables hardware detection automatically. Generated
 `config.yml` and `env.sh` files remain in the directory where the script was
 invoked.
 
@@ -113,8 +113,8 @@ custom output files, and deployment scope.
 
 ### 2. Hardware Information (Optional)
 
-Add `--detect-hardware` when using the converter directly and the target host's
-effective CPU/NUMA/memory resources should refine deployment-sensitive values:
+Add `--detect-hardware` when using the converter directly so CPU/NUMA/memory
+or process-visible Intel XPU resources can refine deployment-sensitive values:
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -123,8 +123,22 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --detect-hardware
 ```
 
-`serve_with_recipe.sh` enables this automatically for `xeon6`. See
-[RUNTIME_TUNING.md](RUNTIME_TUNING.md#hardware-information) for details.
+For Intel Arc Pro B70, use `--hardware arc_pro_b70 --detect-hardware`.
+Detection queries XPU-enabled PyTorch for device count, names and free/total VRAM.
+The B70 policy validates that enough devices are visible for the recipe's
+TP/PP/DP layout and conservatively reduces `gpu-memory-utilization` if needed.
+It does not prove that the model and KV cache fit.
+
+```bash
+python3 tools/recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware arc_pro_b70 \
+  --detect-hardware
+```
+
+`serve_with_recipe.sh` enables detection automatically for both `xeon6` and
+`arc_pro_b70`. See [RUNTIME_TUNING.md](RUNTIME_TUNING.md#hardware-information)
+for details.
 
 ### 3. Workload Information (Optional)
 
@@ -135,6 +149,7 @@ seed optional benchmark tuning:
 python3 tools/recipes/recipe_json_to_vllm_config.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --hardware xeon6 \
+  --detect-hardware \
   --input-tokens 128 \
   --output-tokens 128 \
   --concurrency 32 \
