@@ -49,7 +49,8 @@ class ECConnectorStats:
 class ECConnectorLogging:
     def __init__(self, ec_transfer_config: ECTransferConfig | None):
         # Instantiate the connector's stats class.
-        if ec_transfer_config and ec_transfer_config.ec_connector:
+        self.connector_cls = None
+        if ec_transfer_config and ec_transfer_config.is_ec_transfer_instance:
             self.connector_cls = ECConnectorFactory.get_connector_class(
                 ec_transfer_config
             )
@@ -148,7 +149,7 @@ class ECConnectorProm:
     ):
         self.prom_metrics: ECConnectorPromMetrics | None = None
         ec_transfer_config = vllm_config.ec_transfer_config
-        if ec_transfer_config and ec_transfer_config.ec_connector:
+        if ec_transfer_config and ec_transfer_config.is_ec_transfer_instance:
             connector_cls = ECConnectorFactory.get_connector_class(ec_transfer_config)
             metric_types = {
                 Gauge: self._gauge_cls,

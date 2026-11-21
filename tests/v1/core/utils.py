@@ -87,6 +87,7 @@ def create_scheduler(
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    ec_transfer_config: ECTransferConfig | None = None,
     kv_cache_layer_config: KVCacheLayerConfig | None = None,
     mamba_layer_config: KVCacheLayerConfig | None = None,
     runner: RunnerOption = "auto",
@@ -198,15 +199,12 @@ def create_scheduler(
             spec_kwargs["prompt_lookup_min"] = 1
         speculative_config = SpeculativeConfig(**spec_kwargs)
 
-    ec_transfer_config = (
-        ECTransferConfig(
+    if ec_transfer_config is None and use_ec_connector:
+        ec_transfer_config = ECTransferConfig(
             ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
-        if use_ec_connector
-        else None
-    )
 
     diffusion_config: DiffusionConfig | None = None
     if diffusion_canvas_length is not None:
