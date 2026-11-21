@@ -23,8 +23,8 @@ from vllm.models.inkling.nvidia.sconv_swa_attn import (
 
 from .ops.allreduce import Inkling2AllReduceWorkspace, all_reduce_conv_mix
 from .ops.conv_mix import conv_mix as fused_conv_mix
+from .ops.gemv import low_m_bmm, use_low_m_bmm
 from .ops.linear import linear_k_groups
-from .ops.low_m_bmm import low_m_bmm, use_low_m_bmm
 from .ops.sconv import short_conv
 from .ops.seq_parallel import SeqParallel
 

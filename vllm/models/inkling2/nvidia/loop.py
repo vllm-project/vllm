@@ -27,9 +27,9 @@ from .model import (
     Inkling2Model,
 )
 from .ops.attn_res import attn_res
+from .ops.gemv import low_m_bmm, use_low_m_bmm
 from .ops.linear import linear_k_groups
 from .ops.loop import blend_rms_norm, pair_rms_norm
-from .ops.low_m_bmm import low_m_bmm, use_low_m_bmm
 from .sconv import conv_metadata
 
 LOOP_STREAMS = ("attn", "k", "v", "mlp")
