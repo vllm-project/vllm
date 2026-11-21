@@ -59,6 +59,20 @@ REASONING_ONLY_END_THINK = {
     "content": "No thoughts!",
 }
 
+# Literal <think>/</think> in content (only the first pair is markup) must not
+# restart the streaming state machine.
+LITERAL_START_THINK_IN_CONTENT = {
+    "output": f"{START_REASONING}realreason{END_REASONING}see {START_REASONING} tag",
+    "reasoning": "realreason",
+    "content": f"see {START_REASONING} tag",
+}
+
+LITERAL_END_THINK_IN_CONTENT = {
+    "output": f"{START_REASONING}realreason{END_REASONING}answer {END_REASONING} tail",
+    "reasoning": "realreason",
+    "content": f"answer {END_REASONING} tail",
+}
+
 TEST_CASES = [
     pytest.param(
         False,  # not streaming
@@ -134,6 +148,26 @@ TEST_CASES = [
         True,  # enable streaming
         REASONING_ONLY_END_THINK,
         id="yes_reasoning_only_end_think_streaming",
+    ),
+    pytest.param(
+        False,  # not streaming
+        LITERAL_START_THINK_IN_CONTENT,
+        id="literal_start_think_in_content",
+    ),
+    pytest.param(
+        True,  # enable streaming
+        LITERAL_START_THINK_IN_CONTENT,
+        id="literal_start_think_in_content_streaming",
+    ),
+    pytest.param(
+        False,  # not streaming
+        LITERAL_END_THINK_IN_CONTENT,
+        id="literal_end_think_in_content",
+    ),
+    pytest.param(
+        True,  # enable streaming
+        LITERAL_END_THINK_IN_CONTENT,
+        id="literal_end_think_in_content_streaming",
     ),
 ]
 
