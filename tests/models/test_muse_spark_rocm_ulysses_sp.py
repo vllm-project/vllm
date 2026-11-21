@@ -256,9 +256,10 @@ def test_ulysses_prefill_matches_the_token_sharded_stream(
     tmp_path, monkeypatch
 ) -> None:
     """Prompt logprobs of one Ulysses step stay within the FP8 projection error of
-    the token-sharded stream without Ulysses. A wrong head or rank order moves them
-    by far more."""
-    llm = _tiny_llm(tmp_path, monkeypatch, {})
+    the stream without Ulysses. A wrong head or rank order moves them by far more.
+    The reference sets the option with steps too small for the token-sharded
+    stream, where it is ignored and builds no Ulysses copies."""
+    llm = _tiny_llm(tmp_path, monkeypatch, ON, max_num_batched_tokens=512)
     assert llm.built == [0, 0]
     reference = _prompt_logprobs(llm)
     del llm
@@ -273,32 +274,19 @@ def test_ulysses_prefill_matches_the_token_sharded_stream(
 
 
 def _count_ulysses_exchanges(model: torch.nn.Module) -> None:
-    """Count this worker's token-to-head all-to-all calls from here on."""
-    exchange = usp.a2a_tokens_to_heads
+    """Count this worker's head-to-token all-to-all calls from here on."""
+    exchange = usp.a2a_heads_to_tokens
     model.ulysses_exchanges = 0
 
     def counted(*args, **kwargs):
         model.ulysses_exchanges += 1
         return exchange(*args, **kwargs)
 
-    usp.a2a_tokens_to_heads = counted
+    usp.a2a_heads_to_tokens = counted
 
 
 def _ulysses_exchanges(model: torch.nn.Module) -> int:
     return model.ulysses_exchanges
-
-
-@pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="Muse Spark Ulysses needs ROCm"
-)
-@multi_gpu_test(num_gpus=2)
-def test_ulysses_prefill_builds_nothing_where_no_step_can_take_it(
-    tmp_path, monkeypatch
-) -> None:
-    """With steps too small for the token-sharded stream, the option is ignored:
-    no layer holds Ulysses copies, so their memory is not spent."""
-    llm = _tiny_llm(tmp_path, monkeypatch, ON, max_num_batched_tokens=512)
-    assert llm.built == [0, 0]
 
 
 def _bits(t: torch.Tensor) -> torch.Tensor:

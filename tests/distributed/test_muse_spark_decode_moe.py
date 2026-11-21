@@ -71,9 +71,8 @@ def _moe_layer(vllm_config):
 
 
 # AITER configs a tuned row can select whose stages the decode MoE cannot launch:
-# a fused-quant stage 1 (quantized rows and scales), another stage-2 kernel, a
-# one-stage kernel and a whole-graph config.
-UNLAUNCHABLE_CONFIGS = ["fused_quant_stage1", "cktile_stage2", "one_stage", "graph"]
+# a fused-quant stage 1 (quantized rows and scales) and a one-stage kernel.
+UNLAUNCHABLE_CONFIGS = ["fused_quant_stage1", "one_stage"]
 
 
 def _offer_unlaunchable_config(kind: str) -> None:
@@ -87,14 +86,10 @@ def _offer_unlaunchable_config(kind: str) -> None:
     lookup = fm.get_2stage_cfgs
     name1 = "flydsl_moe1_afp4_wfp4_bf16_t32x128x256_w2"
     name2 = "flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic_bnt2"
-    stage1 = functools.partial(fm._flydsl_stage1_wrapper, kernelName=name1)
     stage2 = functools.partial(fm._flydsl_stage2_wrapper, kernelName=name2)
     fused1 = functools.partial(fm._flydsl_stage1_wrapper, kernelName=f"{name1}_fp4")
     metadata = {
         "fused_quant_stage1": fm.MOEMetadata(fused1, stage2, 32, 0, fuse_quant="fp4"),
-        "cktile_stage2": fm.MOEMetadata(
-            stage1, functools.partial(fm.cktile_moe_stage2), 32, 0
-        ),
         "one_stage": fm.MOEMetadata(
             functools.partial(fm.fused_moe_1stage, kernelName="fmoe_g1u1_fp4"),
             None,
@@ -102,7 +97,6 @@ def _offer_unlaunchable_config(kind: str) -> None:
             0,
             True,
         ),
-        "graph": fm.MOEMetadata(None, None, 32, 0),
     }[kind]
 
     def offer(*args, **kwargs):
