@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
+    VLLM_MEDIA_ALLOW_PRIVATE_IPS: bool = False
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
@@ -1028,6 +1029,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default to True
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(
         int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))
+    ),
+    # Opt-out of the SSRF mitigation that blocks fetching URLs whose
+    # DNS-resolved hostnames point to loopback, private (RFC 1918),
+    # link-local (e.g. 169.254.169.254), or reserved IP ranges.
+    # Default is False (mitigation enabled). Set to 1 only if your
+    # deployment genuinely serves media from internal hosts.
+    "VLLM_MEDIA_ALLOW_PRIVATE_IPS": lambda: bool(
+        int(os.getenv("VLLM_MEDIA_ALLOW_PRIVATE_IPS", "0"))
     ),
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.
