@@ -171,6 +171,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
+    VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL: bool = False
+    VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -1510,6 +1512,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # keeps it allocated after every process exits (ROCm/rocm-systems#13573).
     "VLLM_ROCM_ENGRAM_HIP_VMM": lambda: (
         os.getenv("VLLM_ROCM_ENGRAM_HIP_VMM", "False").lower() in ("true", "1")
+    ),
+    # DSA indexer prefill with DCP > 1 on ROCm. 1 gathers every rank's index
+    # keys once per chunk and takes the top-k over the global key set, so no
+    # candidate merge is needed. 0 scores this rank's keys only and merges the
+    # per-rank candidates, which is the behaviour of the decode path.
+    "VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL": lambda: (
+        os.getenv("VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL", "0").lower() in ("true", "1")
+    ),
+    # Global-key DSA prefill only: 1 scores 1/dcp of a chunk's query rows per
+    # rank and all-gathers the selections once per layer. 0 scores every row
+    # on every rank.
+    "VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL": lambda: (
+        os.getenv("VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL", "0").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
