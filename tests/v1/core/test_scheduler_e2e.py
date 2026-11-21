@@ -4,13 +4,14 @@
 import pytest
 
 from vllm import LLM
+from vllm.sampling_params import SamplingParams
 
 MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 
-@pytest.fixture(scope="module")
-def llm() -> LLM:
+@pytest.fixture(scope="module", params=[False, True])
+def llm(request) -> LLM:
     return LLM(
         MODEL,
         enforce_eager=True,
@@ -19,6 +20,7 @@ def llm() -> LLM:
         max_num_batched_tokens=6,
         max_num_seqs=3,
         block_size=16,
+        adaptive_prefill=request.param,
     )
 
 
@@ -35,3 +37,12 @@ def test_prefix_cache_stats_is_recorded(llm):
     _ = llm.generate([input_tokens])
     outputs = llm.generate([input_tokens])
     assert outputs[0].num_cached_tokens == 16
+
+
+def test_mixed_prefill_requests_complete(llm):
+    prompts = [{"prompt_token_ids": [101] * length} for length in (384, 384, 16)]
+    outputs = llm.generate(
+        prompts, SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+    )
+    assert len(outputs) == len(prompts)
+    assert all(len(output.outputs[0].token_ids) == 8 for output in outputs)

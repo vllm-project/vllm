@@ -2168,6 +2168,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.step_timing.forward_start()
 
+        adaptive_prefill_start = None
+        if self.vllm_config.scheduler_config.adaptive_prefill and not dummy_run:
+            adaptive_prefill_start = torch.cuda.Event(enable_timing=True)
+            adaptive_prefill_start.record()
+
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
@@ -2247,6 +2252,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else scheduler_output.skip_drafts
         )
         self.execute_model_state = ExecuteModelState(
+            adaptive_prefill_start=adaptive_prefill_start,
             input_batch=input_batch,
             attn_metadata=attn_metadata,
             slot_mappings_by_layer=slot_mappings_by_layer,
@@ -2293,6 +2299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        adaptive_prefill_start = self.execute_model_state.adaptive_prefill_start
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2374,7 +2381,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._get_num_drafted_and_verified(input_batch)
         )
         # Start async output copy here so that it can overlap with speculator proposal.
+        adaptive_prefill_events = None
+        if adaptive_prefill_start is not None:
+            adaptive_prefill_end = torch.cuda.Event(enable_timing=True)
+            adaptive_prefill_end.record()
+            adaptive_prefill_events = (adaptive_prefill_start, adaptive_prefill_end)
         async_output = AsyncOutput(
+            adaptive_prefill_events=adaptive_prefill_events,
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled,
@@ -2635,6 +2648,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
 
 class ExecuteModelState(NamedTuple):
+    adaptive_prefill_start: torch.cuda.Event | None
     input_batch: InputBatch
     attn_metadata: dict[str, Any] | None
     slot_mappings_by_layer: dict[str, torch.Tensor] | None

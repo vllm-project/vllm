@@ -99,6 +99,135 @@ from .utils import (
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_adaptive_prefill_preserves_decode_and_caps_new_prompt(
+    async_scheduling, enabled
+):
+    scheduler = create_scheduler(
+        max_num_batched_tokens=128,
+        max_model_len=128,
+        async_scheduling=async_scheduling,
+        adaptive_prefill=enabled,
+        adaptive_prefill_token_ms=10,
+    )
+    (decode,) = create_requests(
+        num_requests=1, num_tokens=1, max_tokens=32, req_ids=["decode"]
+    )
+    scheduler.add_request(decode)
+    first = scheduler.schedule()
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["decode"],
+            sampled_token_ids=[[1]],
+            adaptive_prefill_device_ms=2,
+        ),
+    )
+    (prefill,) = create_requests(
+        num_requests=1, num_tokens=64, max_tokens=8, req_ids=["prefill"]
+    )
+    scheduler.add_request(prefill)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["decode"] == 1
+    scheduled = output.num_scheduled_tokens["prefill"]
+    assert 0 < scheduled <= (4 if enabled else 64)
+    assert (scheduler.adaptive_prefill is not None) == enabled
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("num_long,late_short", [(3, True), (4, False)])
+def test_adaptive_prefill_progress_with_fixed_step_overhead(
+    async_scheduling, num_long, late_short
+):
+    """Delayed timing must not trap prefills at one token per step."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=512,
+        max_model_len=2048,
+        async_scheduling=async_scheduling,
+        adaptive_prefill=True,
+    )
+    requests = {}
+    pending = []
+
+    def schedule():
+        positions = {rid: r.num_computed_tokens for rid, r in requests.items()}
+        output = scheduler.schedule()
+        if not output.num_scheduled_tokens:
+            return output
+        units = 0.0
+        decode_reqs = 0
+        for rid, count in output.num_scheduled_tokens.items():
+            if positions[rid] < requests[rid].num_prompt_tokens - 1:
+                units += count * (1 + positions[rid] / 8192)
+            else:
+                decode_reqs += 1
+        ids = list(output.num_scheduled_tokens)
+        result = ModelRunnerOutput(
+            req_ids=ids,
+            sampled_token_ids=[
+                [1]
+                if positions[rid] + output.num_scheduled_tokens[rid]
+                >= requests[rid].num_prompt_tokens
+                else []
+                for rid in ids
+            ],
+            adaptive_prefill_device_ms=14.76 + 0.53 * decode_reqs + 0.07 * units,
+        )
+        pending.append((output, result))
+        return output
+
+    (warmup,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=32, req_ids=["warmup"]
+    )
+    requests[warmup.request_id] = warmup
+    scheduler.add_request(warmup)
+    for _ in range(64):
+        schedule()
+        if pending:
+            scheduler.update_from_output(*pending.pop(0))
+        if not scheduler.get_num_unfinished_requests():
+            break
+    assert not scheduler.get_num_unfinished_requests()
+
+    longs = create_requests(
+        num_requests=num_long,
+        num_tokens=1900,
+        max_tokens=8,
+        req_ids=[f"long-{i}" for i in range(num_long)],
+    )
+    for request in longs:
+        requests[request.request_id] = request
+        scheduler.add_request(request)
+
+    first_short_step = None
+    for step in range(256):
+        if late_short and step == 32:
+            (short,) = create_requests(
+                num_requests=1, num_tokens=16, max_tokens=8, req_ids=["short"]
+            )
+            requests[short.request_id] = short
+            scheduler.add_request(short)
+        output = schedule()
+        if "short" in output.num_scheduled_tokens and first_short_step is None:
+            first_short_step = step
+        if pending and (
+            not async_scheduling or len(pending) > 1 or not output.num_scheduled_tokens
+        ):
+            scheduler.update_from_output(*pending.pop(0))
+        if (
+            (not late_short or step >= 32)
+            and not scheduler.get_num_unfinished_requests()
+            and not pending
+        ):
+            break
+
+    if late_short:
+        assert first_short_step is not None and first_short_step <= 32 + 70
+    assert not scheduler.get_num_unfinished_requests()
+    assert all(request.num_output_tokens == 8 for request in longs)
+
+
 @pytest.mark.parametrize(
     ("async_scheduling", "outcome", "num_speculative_tokens"),
     [
@@ -5345,6 +5474,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request.num_computed_tokens = request.num_tokens
 
     scheduler.perf_metrics = None
+    scheduler.adaptive_prefill = None
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()

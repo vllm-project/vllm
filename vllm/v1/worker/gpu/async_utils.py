@@ -126,12 +126,15 @@ class AsyncOutput(AsyncModelRunnerOutput):
         pending_aux_output: "PendingAuxOutput | None",
         num_drafted_tokens_per_req: torch.Tensor | None = None,
         num_verified_tokens_per_req: torch.Tensor | None = None,
+        adaptive_prefill_events: tuple[torch.cuda.Event, torch.cuda.Event]
+        | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
         # the one where the tensors were created.
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
+        self.adaptive_prefill_events = adaptive_prefill_events
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
         self.num_drafted_tokens_per_req = num_drafted_tokens_per_req
@@ -191,6 +194,12 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self.adaptive_prefill_events is not None:
+            start, end = self.adaptive_prefill_events
+            if end.query():
+                self.model_runner_output.adaptive_prefill_device_ms = (
+                    start.elapsed_time(end)
+                )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

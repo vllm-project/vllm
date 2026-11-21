@@ -281,6 +281,9 @@ class ModelRunnerOutput:
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[int]] = field(default_factory=list)
 
+    # Opt-in completed GPU forward + sampling timing, excluding output D2H.
+    adaptive_prefill_device_ms: float | None = None
+
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]

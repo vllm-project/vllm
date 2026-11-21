@@ -244,6 +244,23 @@ class SchedulerConfig:
     already-admitted prompt, so a long prompt can take up to N times as many
     steps to finish prefilling."""
 
+    adaptive_prefill: bool = False
+    """Experimental GPU-time-based prompt admission; disabled by default."""
+
+    adaptive_prefill_target_ms: float = Field(default=40.0, gt=0, allow_inf_nan=False)
+    """Soft step-time target, not a guaranteed per-request inter-token p99."""
+
+    adaptive_prefill_token_ms: float = Field(default=0.02, gt=0, allow_inf_nan=False)
+    """Bootstrap milliseconds per uncached token at zero context."""
+
+    adaptive_prefill_min_share: float = Field(default=0.1, gt=0, lt=1)
+    """Share of target time accrued as bounded prefill progress credit."""
+
+    adaptive_prefill_max_wait_ms: float = Field(
+        default=250.0, gt=0, allow_inf_nan=False
+    )
+    """Age after which a prefill may spend progress credit under contention."""
+
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
     requests, those whose prefix is already in the KV cache are admitted ahead
@@ -358,6 +375,11 @@ class SchedulerConfig:
             "scheduler_reserve_full_isl",
             "watermark",
             "prefill_schedule_interval",
+            "adaptive_prefill",
+            "adaptive_prefill_target_ms",
+            "adaptive_prefill_token_ms",
+            "adaptive_prefill_min_share",
+            "adaptive_prefill_max_wait_ms",
             "async_scheduling",
             "stream_interval",
         }

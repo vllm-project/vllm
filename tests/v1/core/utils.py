@@ -71,6 +71,8 @@ def create_scheduler(
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     long_prefill_token_threshold_adaptive: bool = False,
+    adaptive_prefill: bool = False,
+    adaptive_prefill_token_ms: float = 0.02,
     disable_chunked_mm_input: bool = False,
     mm_encoder_only: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,
@@ -134,6 +136,8 @@ def create_scheduler(
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
+        adaptive_prefill=adaptive_prefill,
+        adaptive_prefill_token_ms=adaptive_prefill_token_ms,
         max_num_seqs=max_num_seqs,
         max_num_active_seqs=max_num_active_seqs,
         max_num_batched_tokens=max_num_batched_tokens,

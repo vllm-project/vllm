@@ -45,6 +45,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.adaptive_prefill import AdaptivePrefillController
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -499,6 +500,38 @@ class Scheduler(SchedulerInterface):
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
         self._aborted_kv_loads: set[str] = set()
+        self.adaptive_prefill: AdaptivePrefillController | None = None
+        if self.scheduler_config.adaptive_prefill:
+            if (
+                not self.scheduler_config.enable_chunked_prefill
+                or self.scheduler_config.runner_type != "generate"
+                or self.is_encoder_decoder
+                or vllm_config.model_config.is_multimodal_model
+                or vllm_config.speculative_config is not None
+                or self.has_mamba_layers
+                or len(kv_cache_config.kv_cache_groups) != 1
+                or self.parallel_config.pipeline_parallel_size != 1
+                or self.parallel_config.data_parallel_size != 1
+                or self.parallel_config.decode_context_parallel_size != 1
+                or self.parallel_config.prefill_context_parallel_size != 1
+                or self.parallel_config.use_ubatching
+                or self.policy != SchedulingPolicy.FCFS
+                or self.connector is not None
+                or self.ec_connector is not None
+                or self.scheduler_config.prefill_schedule_interval != 1
+            ):
+                raise ValueError(
+                    "adaptive_prefill requires text-only chunked generation, "
+                    "FCFS, one KV group, PP=DP=CP=1, no microbatching, "
+                    "no speculation/KV connector, "
+                    "and prefill_schedule_interval=1"
+                )
+            self.adaptive_prefill = AdaptivePrefillController(
+                target_ms=self.scheduler_config.adaptive_prefill_target_ms,
+                token_ms=self.scheduler_config.adaptive_prefill_token_ms,
+                min_share=self.scheduler_config.adaptive_prefill_min_share,
+                max_wait_ms=self.scheduler_config.adaptive_prefill_max_wait_ms,
+            )
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -750,6 +783,28 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        adaptive_budget = None
+        adaptive_contexts: dict[str, int] = {}
+        if self.adaptive_prefill is not None:
+            prefill_ids = {
+                r.request_id
+                for r in self.requests.values()
+                if r.num_computed_tokens < r.num_tokens - 1
+            }
+            adaptive_budget = self.adaptive_prefill.begin(
+                scheduled_timestamp,
+                sum(r.request_id not in prefill_ids for r in self.running),
+                token_budget,
+                prefill_ids,
+            )
+            # Keep decode first; rotate partial prompts by last progress.
+            self.running.sort(
+                key=lambda r: (
+                    r.request_id in prefill_ids,
+                    self.adaptive_prefill.last_progress.get(r.request_id, 0),
+                )
+            )
+
         self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
@@ -842,6 +897,13 @@ class Scheduler(SchedulerInterface):
             )
 
             # Apply Mamba alignment before encoder caps.
+            if (
+                adaptive_budget is not None
+                and request.num_computed_tokens < request.num_tokens - 1
+            ):
+                num_new_tokens = adaptive_budget.limit(
+                    request.request_id, num_new_tokens, request.num_computed_tokens
+                )
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
                     request, num_new_tokens
@@ -936,6 +998,9 @@ class Scheduler(SchedulerInterface):
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
                             restored = num_scheduled_tokens.pop(preempted_req_id)
+                            if adaptive_budget is not None:
+                                adaptive_budget.refund(preempted_req_id)
+                                adaptive_contexts.pop(preempted_req_id, None)
                             token_budget += restored
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
@@ -988,6 +1053,14 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            if (
+                adaptive_budget is not None
+                and request.num_computed_tokens < request.num_tokens - 1
+            ):
+                adaptive_contexts[request_id] = request.num_computed_tokens
+                adaptive_budget.admit(
+                    request_id, num_new_tokens, request.num_computed_tokens
+                )
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
@@ -1386,6 +1459,16 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
+                    if (
+                        adaptive_budget is not None
+                        and num_computed_tokens < request.num_tokens - 1
+                    ):
+                        num_new_tokens = adaptive_budget.limit(
+                            request_id, num_new_tokens, num_computed_tokens
+                        )
+                        if num_new_tokens == 0:
+                            skip_request(request_queue)
+                            continue
                     assert num_new_tokens > 0
 
                     # Apply Mamba alignment before encoder caps.
@@ -1618,6 +1701,14 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                if (
+                    adaptive_budget is not None
+                    and num_computed_tokens < request.num_tokens - 1
+                ):
+                    adaptive_contexts[request_id] = num_computed_tokens
+                    adaptive_budget.admit(
+                        request_id, num_new_tokens, num_computed_tokens
+                    )
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
@@ -1812,6 +1903,16 @@ class Scheduler(SchedulerInterface):
             self.sched_step_seq += 1
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
+            if adaptive_budget is not None and total_num_scheduled_tokens > 0:
+                assert self.adaptive_prefill is not None
+                self.adaptive_prefill.commit(
+                    id(scheduler_output),
+                    adaptive_budget,
+                    num_scheduled_tokens,
+                    adaptive_contexts,
+                    sum(rid not in adaptive_contexts for rid in num_scheduled_tokens),
+                    scheduled_timestamp,
+                )
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
@@ -2336,6 +2437,11 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        if self.adaptive_prefill is not None:
+            self.adaptive_prefill.complete(
+                id(scheduler_output),
+                model_runner_output.adaptive_prefill_device_ms,
+            )
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
