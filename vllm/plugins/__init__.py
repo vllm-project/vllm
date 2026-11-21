@@ -32,6 +32,11 @@ ENDPOINT_PLUGINS_GROUP = "vllm.endpoint_plugins"
 # make sure one process only loads plugins once
 plugins_loaded = False
 
+# Loaded general plugins as "name=value@dist==version", in load order. A
+# plugin can patch code the compiled model traces, and the AOT compile cache
+# key does not hash traced files, so these feed `VllmConfig.compile_factors`.
+loaded_general_plugins: list[str] = []
+
 
 def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     """Load plugins registered under the given entry point group."""
@@ -70,6 +75,12 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
                 plugins[plugin.name] = func
             except Exception:
                 logger.exception("Failed to load plugin %s", plugin.name)
+                continue
+            if is_default_group:
+                identity = f"{plugin.name}={plugin.value}"
+                if (dist := plugin.dist) is not None:
+                    identity += f"@{dist.name}=={dist.version}"
+                loaded_general_plugins.append(identity)
 
     return plugins
 

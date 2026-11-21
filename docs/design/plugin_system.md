@@ -57,6 +57,8 @@ Every plugin has three parts:
 
 ## Guidelines for Writing Plugins
 
+- **Changing the compiled model**: vLLM keys its compilation cache on each loaded general plugin's name, entry point and package version. If what a plugin changes in the traced code also depends on something else, such as an environment variable or a file it reads, add that to the key, for example through `additional_config`, so a cache compiled without the change is not reused.
+
 - **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
 
 ### Platform plugins guidelines
