@@ -1202,6 +1202,27 @@ class VllmConfig:
         ):
             draft.all2all_backend = self.parallel_config.all2all_backend
 
+    def _validate_disable_extract_hidden_states_decode_drafts(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.disable_extract_hidden_states_decode_drafts
+        ):
+            return
+
+        # Mirrors _maybe_disable_dynamic_sd_for_data_parallel, which would
+        # otherwise drop the K=0 schedule with only a warning.
+        if (
+            self.parallel_config.data_parallel_size > 1
+            and self.model_config is not None
+            and self.model_config.is_moe
+        ):
+            raise ValueError(
+                "disable_extract_hidden_states_decode_drafts=True is not supported "
+                "with data parallelism for MoE models, because it relies on dynamic "
+                "speculative decoding."
+            )
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1930,6 +1951,7 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
+        self._validate_disable_extract_hidden_states_decode_drafts()
         self._maybe_disable_dynamic_sd_for_data_parallel()
 
         if (
