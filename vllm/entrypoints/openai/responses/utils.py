@@ -3,7 +3,8 @@
 
 import json
 from collections.abc import Iterable
-from typing import Any, Literal
+from copy import deepcopy
+from typing import Any, Final, Literal
 
 import partial_json_parser
 from openai.types.chat import (
@@ -35,6 +36,7 @@ from partial_json_parser.core.options import Allow
 
 from vllm import envs
 from vllm.entrypoints.generate.base.protocol import FunctionCall, FunctionDefinition
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionToolsParam,
@@ -597,3 +599,176 @@ def construct_tool_dicts(
         convert_tool_responses_to_completions_format(tool).model_dump()
         for tool in iter_response_function_tool_dicts(tools)
     ]
+
+
+# Fallback description/parameters for builtin tools whose ToolServer does not
+# expose a function schema (e.g. DemoToolServer's python tool, which has no
+# ToolDescription). When the server does expose one, its real schema wins so
+# the prompt cannot drift from what ``ParsableContext``'s tool executors send.
+# Keys are the flat request names that ``need_builtin_tool_call`` dispatches on.
+_BUILTIN_TOOL_FALLBACK_SPECS: Final[dict[str, dict[str, Any]]] = {
+    "code_interpreter": {
+        "description": (
+            "Executes Python code in a stateful Jupyter notebook and returns"
+            " the result. Use this tool to run computations instead of"
+            " simulating them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The Python code to execute.",
+                }
+            },
+            "required": ["code"],
+        },
+    },
+    "web_search_preview": {
+        "description": "Searches the web and returns relevant results.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query.",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    "container": {
+        "description": ("Executes a command inside a stateful container environment."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cmd": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "The command to execute.",
+                },
+                "workdir": {"type": "string"},
+                "env": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
+                "session_name": {"type": "string"},
+                "timeout": {"type": "integer"},
+                "user": {"type": "string"},
+            },
+            "required": ["cmd"],
+        },
+    },
+}
+
+# Request tool type -> ToolServer registration name, and -> the MCP tool name
+# that ``ParsableContext``'s executors actually call (python/search/exec).
+_REQUEST_TYPE_TO_SERVER_TOOL: Final[dict[str, str]] = {
+    "code_interpreter": "python",
+    "web_search_preview": "browser",
+    "container": "container",
+}
+_REQUEST_TYPE_TO_EXEC_TOOL: Final[dict[str, str]] = {
+    "code_interpreter": "python",
+    "web_search_preview": "search",
+    "container": "exec",
+}
+
+
+def _server_tool_schema(
+    request_type: str,
+    tool_server: ToolServer | None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Look up a builtin tool's description/parameters on the ToolServer.
+
+    Returns None when the server exposes no matching function schema, so the
+    caller can fall back to ``_BUILTIN_TOOL_FALLBACK_SPECS``. The namespace
+    description is deliberately not used: Harmony namespaces carry
+    citation syntax that does not belong in a plain chat-template prompt.
+    """
+    if tool_server is None:
+        return None
+    server_tool = _REQUEST_TYPE_TO_SERVER_TOOL[request_type]
+    if not tool_server.has_tool(server_tool):
+        return None
+    config = tool_server.get_tool_description(server_tool)
+    if config is None:
+        return None
+    exec_name = _REQUEST_TYPE_TO_EXEC_TOOL[request_type]
+    for tool in config.tools:
+        if tool.name == exec_name and tool.parameters:
+            return tool.description or "", dict(tool.parameters)
+    return None
+
+
+def _builtin_tool_dict(
+    request_type: str,
+    tool_server: ToolServer | None,
+) -> dict[str, Any]:
+    spec = _BUILTIN_TOOL_FALLBACK_SPECS[request_type]
+    description = spec["description"]
+    parameters = deepcopy(spec["parameters"])
+    server_schema = _server_tool_schema(request_type, tool_server)
+    if server_schema is not None:
+        description, parameters = server_schema
+    return {
+        "type": "function",
+        "function": {
+            "name": request_type,
+            "description": description,
+            "parameters": parameters,
+        },
+    }
+
+
+def construct_builtin_tool_dicts(
+    tools: list[Tool],
+    tool_server: ToolServer | None,
+    *,
+    tool_choice: ToolChoice,
+    exclude_tools_when_tool_choice_none: bool = False,
+) -> list[dict[str, Any]] | None:
+    """Build chat-completions function dicts for builtin tools.
+
+    Only ``code_interpreter``, ``web_search_preview`` and ``container`` are
+    rendered, and only when a ToolServer provides the backing implementation.
+    These are the exact names ``ParsableContext.need_builtin_tool_call`` and
+    ``call_tool`` dispatch, so the model can never see a tool the server
+    would not execute. MCP tools are intentionally not rendered here: they
+    are client-side calls and have no dispatch on this path.
+
+    Descriptions and parameter schemas come from ``ToolServer``'s
+    ``get_tool_description()`` (populated from the MCP server's real
+    ``list_tools()`` schema) so the prompt cannot drift from what the tool
+    executors send. Servers that expose no matching function schema fall
+    back to ``_BUILTIN_TOOL_FALLBACK_SPECS``.
+
+    ``tool_choice`` is required so callers cannot forget to honor it. The
+    ``tool_choice="none"`` handling mirrors ``construct_tool_dicts``: tools
+    are omitted only when ``exclude_tools_when_tool_choice_none`` is set, so
+    builtin and function tools never disagree about whether definitions
+    belong in the prompt. Other ``tool_choice`` values (including named-tool
+    objects) do not filter the list, matching ``construct_tool_dicts``.
+
+    Returns None when there is nothing to render so callers can merge the
+    result with ``construct_tool_dicts`` output directly.
+    """
+    if tool_choice == "none" and exclude_tools_when_tool_choice_none:
+        return None
+
+    prompt_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        request_type = _tool_type(tool)
+        if request_type not in _BUILTIN_TOOL_FALLBACK_SPECS:
+            continue
+        server_tool = _REQUEST_TYPE_TO_SERVER_TOOL[request_type]
+        if tool_server is None or not tool_server.has_tool(server_tool):
+            continue
+        prompt_tools.append(_builtin_tool_dict(request_type, tool_server))
+    return prompt_tools or None
+
+
+def _tool_type(tool: Tool | dict[str, Any]) -> str:
+    if isinstance(tool, dict):
+        return tool.get("type", "")
+    return tool.type
