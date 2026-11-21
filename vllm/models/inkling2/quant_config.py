@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.models.inkling2.configs import INKLING2_ARCHITECTURES
 
 _COMPUTE_DTYPES = ("float32", "bfloat16", "mxfp8", "nvfp4")
 
@@ -67,7 +68,7 @@ class Inkling2QuantConfig(QuantizationConfig):
         if hf_quant_cfg.get("quant_method") == "compressed-tensors":
             return None
         architectures = getattr(hf_config, "architectures", None) or []
-        if "Inkling2ForConditionalGeneration" in architectures:
+        if INKLING2_ARCHITECTURES & set(architectures):
             return "inkling2"
         return None
 
