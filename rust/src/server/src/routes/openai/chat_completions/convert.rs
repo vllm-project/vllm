@@ -16,7 +16,7 @@ use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submi
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
-    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
+    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceObject, ToolChoiceValue,
 };
 use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
 use crate::utils::{
@@ -121,7 +121,10 @@ pub(super) fn prepare_chat_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let requested_logprobs = request.logprobs;
-    let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
+    let is_named_tool_choice = matches!(
+        &request.tool_choice,
+        Some(ToolChoice::Object(ToolChoiceObject::Function { .. }))
+    );
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
     // behavior.
@@ -447,17 +450,30 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
         ToolChoice::Value(ToolChoiceValue::Auto) => Ok(ChatToolChoice::Auto),
         ToolChoice::Value(ToolChoiceValue::None) => Ok(ChatToolChoice::None),
         ToolChoice::Value(ToolChoiceValue::Required) => Ok(ChatToolChoice::Required),
-        ToolChoice::Function {
-            tool_type,
-            function,
-        } if tool_type == "function" => Ok(ChatToolChoice::Function {
-            name: function.name.clone(),
-        }),
-        ToolChoice::AllowedTools { tools, .. } => bail_invalid_request!(
-            "allowed_tools tool_choice is not supported yet: {}.",
-            tools.iter().map(ToolReference::identifier).join(", ")
-        ),
-        _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
+        ToolChoice::Object(ToolChoiceObject::Function { function }) => {
+            Ok(ChatToolChoice::Function {
+                name: function.name.clone(),
+            })
+        }
+        ToolChoice::Object(ToolChoiceObject::AllowedTools { allowed_tools }) => {
+            let names = allowed_tools
+                .tools
+                .iter()
+                .map(|tool| {
+                    if tool.tool_type != "function" {
+                        bail_invalid_request!(
+                            param = "tool_choice",
+                            "Only function tools are supported in allowed_tools."
+                        );
+                    }
+                    Ok(tool.function.name.clone())
+                })
+                .collect::<Result<_, ApiError>>()?;
+            Ok(ChatToolChoice::AllowedTools {
+                mode: allowed_tools.mode,
+                names,
+            })
+        }
     }
 }
 
@@ -474,9 +490,10 @@ mod tests {
     use thiserror_ext::AsReport as _;
     use validator::Validate;
     use vllm_chat::{
-        AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
-        ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        KimiK3ChatRenderer, KimiK3Variant, SamplingParams as VllmSamplingParams,
+        AllowedToolsMode, AssistantContentBlock, AssistantToolCall, ChatContentPart,
+        ChatMessage as VllmChatMessage, ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice,
+        GenerationPromptMode, KimiK3ChatRenderer, KimiK3Variant,
+        SamplingParams as VllmSamplingParams,
     };
     use vllm_text::{
         Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide, output::TextDecodeOptions,
@@ -492,7 +509,8 @@ mod tests {
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
         AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
-        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceObject,
+        ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -1769,12 +1787,11 @@ mod tests {
     fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
         let request = ChatCompletionRequest {
             tools: Some(Vec::new()),
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
+            tool_choice: Some(ToolChoice::Object(ToolChoiceObject::Function {
                 function: crate::routes::openai::utils::types::FunctionChoice {
                     name: "f".to_string(),
                 },
-            }),
+            })),
             ..base_request()
         };
 
@@ -1811,12 +1828,11 @@ mod tests {
                 },
                 defer_loading: None,
             }]),
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
+            tool_choice: Some(ToolChoice::Object(ToolChoiceObject::Function {
                 function: crate::routes::openai::utils::types::FunctionChoice {
                     name: "get_weather".to_string(),
                 },
-            }),
+            })),
             ..base_request()
         };
 
@@ -1834,6 +1850,94 @@ mod tests {
             }
         );
         assert!(prepared.options.is_named_tool_choice);
+    }
+
+    /// The nested Chat Completions `allowed_tools` shape lowers to an
+    /// allowed-tools choice, while every declared tool stays in the request.
+    #[test]
+    fn prepare_chat_request_lowers_allowed_tools_tool_choice() {
+        let tool = |name: &str| json!({"type": "function", "function": {"name": name}});
+        for (mode, expected_mode) in [
+            ("auto", AllowedToolsMode::Auto),
+            ("required", AllowedToolsMode::Required),
+        ] {
+            let request = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [tool("get_weather"), tool("get_time")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": mode, "tools": [tool("get_time")]},
+                },
+            }))
+            .unwrap();
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{mode}: {error:?}"));
+
+            let tool_names = prepared.chat_request.tool_context.initial_tools.iter();
+            assert_eq!(
+                tool_names.map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+                ["get_weather", "get_time"]
+            );
+            assert_eq!(
+                prepared.chat_request.tool_choice(),
+                &ChatToolChoice::AllowedTools {
+                    mode: expected_mode,
+                    names: vec!["get_time".to_string()],
+                },
+                "{mode}"
+            );
+            assert!(!prepared.options.is_named_tool_choice);
+        }
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_invalid_allowed_tools() {
+        let prepare = |allowed: serde_json::Value| {
+            let request = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+                "tool_choice": {"type": "allowed_tools", "allowed_tools": allowed},
+            }))
+            .unwrap();
+            prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect_err("invalid allowed_tools")
+        };
+
+        let errors = [
+            json!({"mode": "auto", "tools": [{"type": "function", "function": {"name": "f"}}]}),
+            json!({"mode": "required", "tools": []}),
+            json!({"mode": "auto", "tools": [{"type": "custom", "function": {"name": "f"}}]}),
+        ]
+        .map(prepare);
+
+        expect![[r#"
+            [
+                InvalidRequest {
+                    message: "tool_choice function `f` was not found in the available tools",
+                    param: None,
+                },
+                InvalidRequest {
+                    message: "tool_choice requires at least one available tool",
+                    param: None,
+                },
+                InvalidRequest {
+                    message: "Only function tools are supported in allowed_tools.",
+                    param: Some(
+                        "tool_choice",
+                    ),
+                },
+            ]
+        "#]]
+        .assert_debug_eq(&errors);
     }
 
     #[test]

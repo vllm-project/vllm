@@ -322,7 +322,9 @@ mod tests {
     use crate::output::ChatOutputProcessor;
     use crate::parser::unified::{HfTemplateError, ResponseTemplate};
     use crate::parser::{ParserSelection, ToolStrictLevel};
-    use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
+    use crate::request::{
+        AllowedToolsMode, ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext,
+    };
 
     fn tokenizer() -> Arc<TestTokenizer> {
         Arc::new(
@@ -458,6 +460,15 @@ mod tests {
             );
             assert_eq!(
                 run(tool_parser, reasoning_parser, text, ChatToolChoice::None).await,
+                (none_content.to_string(), vec![])
+            );
+            // An empty allowed-tools list allows no call, like `none`.
+            let no_tools_allowed = ChatToolChoice::AllowedTools {
+                mode: AllowedToolsMode::Auto,
+                names: Vec::new(),
+            };
+            assert_eq!(
+                run(tool_parser, reasoning_parser, text, no_tools_allowed).await,
                 (none_content.to_string(), vec![])
             );
         }
