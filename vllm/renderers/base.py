@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 import weakref
 from abc import ABC, abstractmethod
@@ -48,6 +49,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -115,6 +117,10 @@ class BaseRenderer(ABC, Generic[_T]):
         self._resources.callback(logger.debug, f"[shutdown] {self.__class__.__name__}")
         self._finalizer = weakref.finalize(self, self._resources.close)
 
+        # Work on a copy so the cached tokenizer passed in is never modified.
+        if isinstance(tokenizer, HfTokenizer):
+            tokenizer = copy.copy(tokenizer)
+            self._prepare_tokenizer(tokenizer)
         self.tokenizer = tokenizer
 
         # Background multimodal warmup task (a future returned by
@@ -213,6 +219,24 @@ class BaseRenderer(ABC, Generic[_T]):
             self._resources.callback(self._mm_processor_cache.close)
         if self._mm_processor_only_cache:
             self._resources.callback(self._mm_processor_only_cache.close)
+
+        # HF fast tokenizers apply per-call truncation and padding by
+        # mutating their shared Rust backend, so concurrent calls on the
+        # render pool can silently use another request's `max_length`.
+        # Pool last: multimodal processors may add tokens while they are
+        # created, and the pooled copies only see tokens added before this.
+        if isinstance(self.tokenizer, HfTokenizer):
+            maybe_make_thread_pool(
+                self.tokenizer, config.model_config.renderer_num_workers + 1
+            )
+
+    def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
+        """Modify the renderer's copy of an HF tokenizer before it is pooled.
+
+        Changes made after `BaseRenderer.__init__` do not reach the pooled
+        copies.
+        """
+        return
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -472,10 +496,11 @@ class BaseRenderer(ABC, Generic[_T]):
         # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399
         # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421
 
-        # Here we take the max of the two to determine if a token id is
-        # truly out-of-vocabulary.
+        # Only multimodal placeholders may exceed the model vocab: they are
+        # replaced before the embedding lookup. A text-only model embeds every
+        # id, so tokenizer-only ids (e.g. Kimi's reserved tokens) are rejected.
         max_token_id = self.model_config.get_vocab_size() - 1
-        if tokenizer is not None:
+        if tokenizer is not None and self.model_config.is_multimodal_model:
             max_token_id = max(tokenizer.max_token_id, max_token_id)
         # A negative id is out of vocabulary just like an over-large one,
         # but is not caught by the upper-bound check below. Reject it here

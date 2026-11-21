@@ -33,7 +33,12 @@ TopLogprobsParam: TypeAlias = Annotated[
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
 
-MMPayload: TypeAlias = Literal["tensors", "none"]
+MMPayload: TypeAlias = Literal["tensors", "metadata", "none"]
+
+# Range of a request priority, in the body or the `X-Vllm-Priority` header:
+# int32, the type of `priority` in the Rust frontend.
+PRIORITY_MIN = -(2**31)
+PRIORITY_MAX = 2**31 - 1
 
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
@@ -114,9 +119,11 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     num_accepted_draft_tokens: int
     num_draft_tokens: int
     num_spec_tokens: int
+    num_verified_draft_tokens: int
     # Ordered per-verify-step arrays; populated only at the `detailed` level.
     per_step_accepted: list[int] | None = None
     per_step_drafted: list[int] | None = None
+    per_step_verified: list[int] | None = None
 
 
 class PerRequestMetrics(OpenAIBaseModel):

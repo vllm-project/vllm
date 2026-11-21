@@ -313,3 +313,47 @@ def test_flash_attn4_mixed_causal(
     )
 
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+# ---- FlashInfer mixed-causal metadata test ----
+
+
+@pytest.mark.parametrize("causal_dtype", [torch.bool, torch.int32])
+def test_flashinfer_mixed_causal_metadata(causal_dtype: torch.dtype):
+    pytest.importorskip("flashinfer")
+
+    from vllm.v1.attention.backends.flashinfer import _fill_mixed_causal_metadata
+
+    device = "cuda"
+    window_left = 3
+    # (query_len, seq_len, causal); the empty last request is CUDA graph padding.
+    reqs = [(4, 10, True), (6, 6, False), (1, 9, False), (2, 12, True), (0, 0, False)]
+    num_tokens = 16  # 13 query tokens + 3 padding tokens
+    query_lens, seq_lens, causal = zip(*reqs)
+    query_start_loc = torch.tensor([0, *query_lens], device=device).cumsum(0)
+    bounds = torch.full((2, num_tokens), -1, dtype=torch.int32, device=device)
+    token_causal = torch.ones(num_tokens, dtype=torch.bool, device=device)
+    _fill_mixed_causal_metadata(
+        query_start_loc.to(torch.int32),
+        torch.tensor(seq_lens, dtype=torch.int32, device=device),
+        torch.tensor(causal, dtype=causal_dtype, device=device),
+        num_tokens,
+        {window_left: bounds},
+        token_causal,
+    )
+
+    expected_bounds, expected_causal = [], []
+    for query_len, seq_len, is_causal in reqs:
+        for pos in range(seq_len - query_len, seq_len):
+            visible = [
+                k
+                for k in range(seq_len)
+                if abs(k - pos) <= window_left and (k <= pos or not is_causal)
+            ]
+            expected_bounds.append([visible[0], visible[-1]])
+            expected_causal.append(is_causal)
+    num_padding = num_tokens - len(expected_causal)
+    expected_bounds += [[0, 0]] * num_padding
+    expected_causal += [False] * num_padding
+    assert bounds.T.tolist() == expected_bounds
+    assert token_causal.tolist() == expected_causal
