@@ -53,7 +53,7 @@ class XgrammarBackend(StructuredOutputBackend):
 
             # not self.tokenizer.vocab_size as self.tokenizer.vocab
             # collapses all decoded errors into a single token.
-            tokenizer_info = xgr.TokenizerInfo(  # type: ignore
+            full_vocab_tokenizer_info = xgr.TokenizerInfo(  # type: ignore
                 encoded_vocab=self.tokenizer.vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43
                 vocab_type=xgr.VocabType.RAW
@@ -62,6 +62,16 @@ class XgrammarBackend(StructuredOutputBackend):
                 vocab_size=self.vocab_size,
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
+            )
+            # Mistral tokenizers have no added_tokens_decoder, so blank their
+            # control tokens ([INST], [TOOL_CALLS], ...) by id.
+            special_token_ids = set(self.tokenizer.all_special_ids)
+            tokenizer_info = xgr.TokenizerInfo.from_vocab_and_metadata(
+                [
+                    "" if token_id in special_token_ids else token
+                    for token_id, token in enumerate(self.tokenizer.vocab)
+                ],
+                full_vocab_tokenizer_info.dump_metadata(),
             )
         elif is_plamo3 and callable(
             init_xgrammar := getattr(self.tokenizer, "init_xgrammar", None)

@@ -13,14 +13,19 @@ Issue #60580: xgrammar only treats tokens that decode to an empty string as
 special, so a tokenizer's control tokens (e.g. `<|im_start|>`) matched
 grammar text and could be sampled inside a JSON string. Structural tags and
 Lark grammars, which can name such tokens, must still be able to emit them.
+Mistral tokenizers (Tekken and SentencePiece) take a separate branch with the
+same requirement.
 """
 
 import json
+from importlib.resources import files
 
 import pytest
-from transformers import AutoTokenizer
+from mistral_common.protocol.instruct.validator import ValidationMode
+from transformers import AutoTokenizer, MistralCommonBackend
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.utils import allocate_token_bitmask
@@ -174,3 +179,64 @@ def test_token_naming_grammars_can_emit_special_tokens(
     grammar.fill_bitmask(bitmask, 0)
     assert _token_allowed(bitmask[0], IM_START)
     assert grammar.accept_tokens("req", [IM_START])
+
+
+# Tokenizer files bundled with mistral-common: Tekken and SentencePiece (v3).
+@pytest.fixture(
+    scope="module",
+    params=["tekken_240911.json", "mistral_instruct_tokenizer_240323.model.v3"],
+)
+def mistral_backend(request) -> XgrammarBackend:
+    path = files("mistral_common") / "data" / request.param
+    tokenizer = MistralTokenizer(
+        MistralCommonBackend(tokenizer_path=str(path), mode=ValidationMode.test)
+    )
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
+    )
+    return XgrammarBackend(
+        vllm_config, tokenizer=tokenizer, vocab_size=len(tokenizer.vocab)
+    )
+
+
+@pytest.mark.parametrize(
+    "request_type, grammar_spec",
+    [
+        (StructuredOutputOptions.JSON, '{"type": "string"}'),
+        (StructuredOutputOptions.REGEX, '"[^"]*"'),
+        (StructuredOutputOptions.GRAMMAR, 'root ::= "\\"" [^"]* "\\""'),
+    ],
+)
+def test_mistral_special_tokens_masked_until_grammar_ends(
+    mistral_backend: XgrammarBackend, request_type, grammar_spec
+):
+    tokenizer = mistral_backend.tokenizer
+    vocab = tokenizer.get_vocab()
+    eos = tokenizer.eos_token_id
+    grammar = mistral_backend.compile_grammar(
+        request_type, grammar_spec, stop_token_ids={eos}
+    )
+    bitmask = allocate_token_bitmask(1, mistral_backend.vocab_size)
+
+    assert grammar.accept_tokens("req", [vocab['"'], vocab["The"]])
+    grammar.fill_bitmask(bitmask, 0)
+    # [INST], [TOOL_CALLS], </s>, ... are not text inside the string.
+    assert not any(_token_allowed(bitmask[0], i) for i in tokenizer.all_special_ids)
+
+    assert grammar.accept_tokens("req", [vocab['"']])
+    grammar.fill_bitmask(bitmask, 0)
+    assert not _token_allowed(bitmask[0], vocab["[TOOL_CALLS]"])
+    assert _token_allowed(bitmask[0], eos)
+
+
+def test_mistral_lark_grammar_can_emit_special_tokens(
+    mistral_backend: XgrammarBackend,
+):
+    tool_calls = mistral_backend.tokenizer.get_vocab()["[TOOL_CALLS]"]
+    grammar = mistral_backend.compile_grammar(
+        StructuredOutputOptions.GRAMMAR, f'start: <[{tool_calls}]> "x"'
+    )
+    bitmask = allocate_token_bitmask(1, mistral_backend.vocab_size)
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask[0], tool_calls)
+    assert grammar.accept_tokens("req", [tool_calls])
