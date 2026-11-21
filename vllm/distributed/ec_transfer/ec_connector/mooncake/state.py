@@ -189,6 +189,30 @@ class SchedulerTransferTable:
         self._transition(record, SchedulerTransferState.AVAILABLE)
         return record, True
 
+    def observe_abandoned(self, transfer_id: str, mm_hash: str, now: float) -> bool:
+        """Fail a transfer the Consumer reports no producer will write.
+
+        Returns whether a waiting transfer was failed. A report that beats the
+        request leaves a tombstone, so the request fails when it arrives.
+        """
+        record = self._records.get(transfer_id)
+        if record is None:
+            record = SchedulerTransfer(
+                transfer_id=transfer_id,
+                request_id="",
+                mm_hash=mm_hash,
+                state=SchedulerTransferState.WAITING_EVENT,
+                spec=None,
+                deadline=None,
+            )
+            self._insert(record)
+        elif not self._identity_matches(record, mm_hash):
+            return False
+        if record.state is not SchedulerTransferState.WAITING_EVENT:
+            return False
+        self.mark_unavailable(transfer_id, now)
+        return True
+
     def touch_available(self, transfer_id: str, deadline: float) -> None:
         record = self._records.get(transfer_id)
         if record is not None and record.state is SchedulerTransferState.AVAILABLE:
