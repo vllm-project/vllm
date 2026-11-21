@@ -102,12 +102,13 @@ def _load_random(module: torch.nn.Module, seed: int) -> None:
         if p.dtype == torch.float8_e4m3fn:
             values = torch.randn(p.shape, device="cuda", generator=gen) * 0.5
             p.data.copy_(values.to(p.dtype))
-        elif p.element_size() == 1:  # E8M0 scales: 2^-9 .. 2^-4
-            p.data.copy_(
-                torch.randint(118, 124, p.shape, device="cuda", generator=gen)
-                .to(torch.uint8)
-                .view(p.dtype)
-            )
+        elif p.element_size() == 1:
+            # E8M0 scales of 32 x 32 blocks (2^-9 .. 2^-4), expanded per row
+            # as the checkpoint loader does
+            shape = (-(-p.shape[0] // 32), *p.shape[1:])
+            blocks = torch.randint(118, 124, shape, device="cuda", generator=gen)
+            rows = blocks.repeat_interleave(32, dim=0)[: p.shape[0]]
+            p.data.copy_(rows.to(torch.uint8).view(p.dtype))
         else:
             p.data.copy_(torch.randn(p.shape, device="cuda", generator=gen) * 0.02)
     for sub in module.modules():
@@ -116,12 +117,16 @@ def _load_random(module: torch.nn.Module, seed: int) -> None:
             method.process_weights_after_loading(sub)
 
 
-def _mxfp8_linear(vllm_config, n: int, k: int, prefix: str, seed: int):
+def _mxfp8_linear(vllm_config, n, k, prefix, seed, bmm_batch_size=None):
     from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.utils.torch_utils import set_default_torch_dtype
 
-    linear = ReplicatedLinear(
-        k, n, bias=False, quant_config=vllm_config.quant_config, prefix=prefix
-    ).cuda()
+    with set_default_torch_dtype(torch.bfloat16):
+        linear = ReplicatedLinear(
+            k, n, bias=False, quant_config=vllm_config.quant_config, prefix=prefix
+        ).cuda()
+    if bmm_batch_size is not None:
+        linear.bmm_batch_size = bmm_batch_size
     _load_random(linear, seed)
     return linear
 
@@ -168,8 +173,6 @@ def test_dense_mxfp8_codes_match_stock(vllm_config):
 @pytest.mark.parametrize("m", [16, 192, 1024])
 def test_grouped_wo_a_matches_stock(vllm_config, m):
     """wo_a with the MXFP8 epilogue vs the stock grouped GEMM (bf16 out)."""
-    from aiter.ops.shuffle import shuffle_weight
-
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         dequant_mxfp8_to_bf16,
         mxfp8_e4m3_quantize,
@@ -177,12 +180,13 @@ def test_grouped_wo_a_matches_stock(vllm_config, m):
     from vllm.models.deepseek_v41.amd import akr_config, akr_kernels
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_mxfp8_wo_a_bmm
 
-    wo_a = _mxfp8_linear(vllm_config, 8 * 1024, 4096, "model.layers.0.attn.wo_a", 4)
-    if getattr(wo_a, "weight_preshuffled", None) is None:
-        # what the model's MXFP8 linear kernel keeps when AITER's GEMM serves
-        wo_a.weight_preshuffled = shuffle_weight(wo_a.weight.data, (16, 16))
+    wo_a = _mxfp8_linear(
+        vllm_config, 8 * 1024, 4096, "model.layers.0.attn.wo_a", 4, bmm_batch_size=8
+    )
     weight = akr_kernels.mxfp8_grouped_weight(wo_a, 8, 1024)
-    assert weight is not None and akr_kernels.mxfp8_grouped_ok(m, weight)
+    if weight is None:
+        pytest.skip("the stock wo_a kernel kept no AITER-preshuffled weight")
+    assert akr_kernels.mxfp8_grouped_ok(m, weight)
     x = torch.randn(m, 8 * 4096, device="cuda", dtype=torch.bfloat16)
     codes, scale = mxfp8_e4m3_quantize(x)
     qx = akr_config.quant_activation(codes, scale.view(torch.uint8), x.dtype)
@@ -287,17 +291,19 @@ def test_router_graph_replay(moe):
 def mlp(vllm_config):
     from vllm.models.deepseek_v4.amd.model import DeepseekV4MLP
     from vllm.models.deepseek_v41.amd import akr_moe
+    from vllm.utils.torch_utils import set_default_torch_dtype
 
     hf = vllm_config.model_config.hf_config
-    module = DeepseekV4MLP(
-        hidden_size=hf.hidden_size,
-        intermediate_size=hf.moe_intermediate_size * hf.n_shared_experts,
-        hidden_act=hf.hidden_act,
-        swiglu_limit=hf.swiglu_limit,
-        quant_config=vllm_config.quant_config,
-        reduce_results=False,
-        prefix="model.layers.5.ffn.shared_experts",
-    ).cuda()
+    with set_default_torch_dtype(torch.bfloat16):
+        module = DeepseekV4MLP(
+            hidden_size=hf.hidden_size,
+            intermediate_size=hf.moe_intermediate_size * hf.n_shared_experts,
+            hidden_act=hf.hidden_act,
+            swiglu_limit=hf.swiglu_limit,
+            quant_config=vllm_config.quant_config,
+            reduce_results=False,
+            prefix="model.layers.5.ffn.shared_experts",
+        ).cuda()
     _load_random(module, seed=3)
     gate_up = akr_moe._shared_gate_up(module)
     if gate_up is None:

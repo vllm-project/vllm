@@ -84,8 +84,15 @@ class AmdKernelsConfig:
     select are built at startup instead of stalling every DP rank while
     serving."""
 
+    serving_transient_gib: float = Field(default=20.0, ge=0)
+    """DeepSeek-V4.1: with routes on, the KV cache sizing keeps at least this
+    much torch memory growth (GiB) free for serving transients, since the
+    routes' graphs and workspaces leave less headroom than the stock kernels
+    (a 32k-token prefill chunk beside a large decode batch otherwise ran out of
+    memory). 0 keeps the measured value."""
+
     def compile_factors(self) -> CompileFactors:
-        return get_compile_factors(self, {"prefill_warmup"})
+        return get_compile_factors(self, {"prefill_warmup", "serving_transient_gib"})
 
 
 @config
