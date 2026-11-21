@@ -15,6 +15,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 
 use crate::error::{ApiError, chat_submit_error, text_submit_error};
+use crate::routes::openai::utils::types::{ChatMessage, ContentPart, MessageContent};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
@@ -54,6 +55,77 @@ fn check_max_tokenize_tokens(count: usize, limit: usize, qualifier: &str) -> Res
         });
     }
     Ok(())
+}
+
+fn estimate_chat_tokens(
+    tokenizer: &vllm_text::tokenizer::DynTokenizer,
+    messages: &[ChatMessage],
+) -> usize {
+    let mut total = 0;
+    for message in messages {
+        match message {
+            ChatMessage::System { content, .. }
+            | ChatMessage::User { content, .. }
+            | ChatMessage::Tool { content, .. }
+            | ChatMessage::Developer { content, .. }
+            | ChatMessage::Custom { content, .. } => {
+                total += estimate_content_tokens(tokenizer, content);
+            }
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+                reasoning,
+                name: _,
+            } => {
+                if let Some(content) = content {
+                    total += estimate_content_tokens(tokenizer, content);
+                }
+                if let Some(reasoning) = reasoning {
+                    total += tokenizer.estimate_max_token(reasoning);
+                }
+                if let Some(tool_calls) = tool_calls {
+                    for tool_call in tool_calls {
+                        total += tokenizer.estimate_max_token(&tool_call.function.name);
+                        if let Some(arguments) = &tool_call.function.arguments {
+                            total += tokenizer.estimate_max_token(arguments);
+                        }
+                    }
+                }
+            }
+            ChatMessage::Function { content, name } => {
+                total += tokenizer.estimate_max_token(name);
+                total += tokenizer.estimate_max_token(content);
+            }
+        }
+    }
+    total
+}
+
+fn estimate_content_tokens(
+    tokenizer: &vllm_text::tokenizer::DynTokenizer,
+    content: &MessageContent,
+) -> usize {
+    match content {
+        MessageContent::Text(text) => tokenizer.estimate_max_token(text),
+        MessageContent::Parts(parts) => {
+            let mut sum = 0;
+            for part in parts {
+                match part {
+                    ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                        sum += tokenizer.estimate_max_token(text);
+                    }
+                    ContentPart::ToolReference { name } => {
+                        sum += tokenizer.estimate_max_token(name);
+                    }
+                    ContentPart::ImageUrl { .. }
+                    | ContentPart::VideoUrl { .. }
+                    | ContentPart::AudioUrl { .. }
+                    | ContentPart::InputAudio { .. } => {}
+                }
+            }
+            sum
+        }
+    }
 }
 
 pub async fn tokenize(
@@ -121,6 +193,11 @@ async fn tokenize_chat(
     max_tokenize_tokens: Option<usize>,
 ) -> Result<(Vec<u32>, bool), ApiError> {
     state.base_model_names().check(req.model.as_deref())?;
+    let tokenizer = state.chat.text().tokenizer();
+    if let Some(limit) = max_tokenize_tokens {
+        let estimated = estimate_chat_tokens(&tokenizer, &req.messages);
+        check_max_tokenize_tokens(estimated, limit, "at least ")?;
+    }
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
     // enforced in `normalize_generation_prompt_mode` inside `into_chat_request`.
@@ -162,10 +239,17 @@ pub async fn detokenize(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
+    use std::sync::Arc;
 
-    use super::{check_max_tokenize_tokens, resolve_max_tokenize_tokens, tokenize_request_id};
+    use axum::http::{HeaderMap, HeaderValue};
+    use vllm_tokenizer::Tokenizer;
+
+    use super::{
+        check_max_tokenize_tokens, estimate_chat_tokens, resolve_max_tokenize_tokens,
+        tokenize_request_id,
+    };
     use crate::error::ApiError;
+    use crate::routes::openai::utils::types::{ChatMessage, ContentPart, MessageContent, ToolCall};
 
     #[test]
     fn resolve_max_tokenize_tokens_explicit() {
@@ -210,5 +294,86 @@ mod tests {
         let id = tokenize_request_id(&headers).unwrap();
         assert!(id.starts_with("tokenize-"));
         assert_ne!(id, "tokenize-");
+    }
+
+    #[test]
+    fn estimate_chat_tokens_sums_message_text_and_tools() {
+        struct MockTokenizer(usize);
+        impl Tokenizer for MockTokenizer {
+            fn encode(
+                &self,
+                _text: &str,
+                _add_special_tokens: bool,
+            ) -> vllm_tokenizer::Result<Vec<u32>> {
+                Ok(Vec::new())
+            }
+            fn encode_ordinary(&self, _text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+                Ok(Vec::new())
+            }
+            fn decode(
+                &self,
+                _tokens: &[u32],
+                _skip_special_tokens: bool,
+            ) -> vllm_tokenizer::Result<String> {
+                Ok(String::new())
+            }
+            fn vocab_size(&self) -> usize {
+                100
+            }
+            fn token_to_id(&self, _token: &str) -> Option<u32> {
+                None
+            }
+            fn id_to_token(&self, _id: u32) -> Option<String> {
+                None
+            }
+            fn estimate_max_token(&self, text: &str) -> usize {
+                text.len().checked_div(self.0).unwrap_or(0)
+            }
+        }
+
+        // Each token is at most 10 characters.
+        let tokenizer: vllm_text::tokenizer::DynTokenizer = Arc::new(MockTokenizer(10));
+
+        let messages = vec![
+            ChatMessage::System {
+                content: MessageContent::Text("0123456789".to_string()), // 10 chars -> 1 token
+                name: None,
+            },
+            ChatMessage::User {
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "01234567890123456789".to_string(), // 20 chars -> 2 tokens
+                    },
+                    ContentPart::Refusal {
+                        refusal: "0123456789".to_string(), // 10 chars -> 1 token
+                    },
+                    ContentPart::ToolReference {
+                        name: "tool_name_".to_string(), // 10 chars -> 1 token
+                    },
+                ]),
+                name: None,
+            },
+            ChatMessage::Assistant {
+                content: Some(MessageContent::Text("0123456789".to_string())), // 10 chars -> 1 token
+                name: None,
+                reasoning: Some("0123456789".to_string()), // 10 chars -> 1 token
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: crate::routes::openai::utils::types::FunctionCallResponse {
+                        name: "func_name_".to_string(), // 10 chars -> 1 token
+                        arguments: Some("01234567890123456789".to_string()), // 20 chars -> 2 tokens
+                    },
+                }]),
+            },
+            ChatMessage::Function {
+                name: "func_name_".to_string(),    // 10 chars -> 1 token
+                content: "0123456789".to_string(), // 10 chars -> 1 token
+            },
+        ];
+
+        let estimated = estimate_chat_tokens(&tokenizer, &messages);
+        // Total expected: 1 + 2 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 1 = 12 tokens
+        assert_eq!(estimated, 12);
     }
 }
