@@ -80,6 +80,8 @@ A PR that adds significant complexity or a substantial amount of new code must b
 
 Ensure that all changes to vLLM are sound and do not violate existing contracts. Specifically, verify that all affected deployments which share an execution pathway with the changed code will remain correct. Trace related implementations, alternative backends sharing the same flow, and affected call sites of modified functions.
 
+Use the [vLLM security review skill](../review-vllm-security/SKILL.md) when a change affects how vLLM handles untrusted input, how callers can consume shared resources, or who can access data or privileged actions. Verify the relevant safeguards on each affected entry point and backend.
+
 When adding features or changing contracts, ensure that relevant feature compatibility is assessed. Identify any potential incompatibilities or breaking changes and justify them explicitly in the PR notes.
 
 When adding functionality, consider parallels with existing designs and identify opportunities to simplify and unify them rather than adding a separate implementation alongside them.
