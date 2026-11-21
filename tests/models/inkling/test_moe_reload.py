@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+from transformers import InklingTextConfig
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.model import ModelConfig
@@ -18,7 +19,6 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.utils import kernel_parameters
-from vllm.models.inkling.configs import InklingModelConfig
 from vllm.models.inkling.nvidia.moe import InklingMoE
 from vllm.platforms import current_platform
 
@@ -38,13 +38,18 @@ _SHAPES = {
 class _Model(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        config = InklingModelConfig(
+        config = InklingTextConfig(
             hidden_size=H,
-            intermediate_size=N,
+            moe_intermediate_size=N,
             n_routed_experts=E,
             n_shared_experts=1,
             num_experts_per_tok=2,
             shared_expert_sink=True,
+            # Checkpoint fields the upstream config class does not define.
+            gate_activation="sigmoid",
+            norm_after_topk=True,
+            use_gate_bias=False,
+            use_global_scale=False,
         )
         quant_config = ModelOptNvFp4Config(
             is_checkpoint_nvfp4_serialized=True,
