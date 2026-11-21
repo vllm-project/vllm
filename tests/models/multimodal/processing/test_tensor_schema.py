@@ -139,9 +139,7 @@ def initialize_dummy_model(
 ):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
-    vllm_config = VllmConfig(
-        model_config=model_config, cache_config=CacheConfig(block_size=16)
-    )
+    vllm_config = VllmConfig(model_config=model_config, cache_config=CacheConfig())
     with set_current_vllm_config(vllm_config=vllm_config):
         init_distributed_environment(
             world_size=1,
@@ -182,8 +180,13 @@ def test_model_tensor_schema(model_id: str):
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
-    if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
-        pytest.skip("GLM-5.3-Flash is not supported on XPU")
+    xpu_unsupported_models = {
+        "zai-org/GLM-5.3-Flash",
+        "tencent/Hy4-preview",
+        "tencent/Hy4",
+    }
+    if current_platform.is_xpu() and model_id in xpu_unsupported_models:
+        pytest.skip(f"{model_id} is not supported on XPU")
 
     if (
         model_id == "thinkingmachines/Inkling-2-Small"

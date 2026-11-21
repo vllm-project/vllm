@@ -224,9 +224,7 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
     Decode runs through `IndexerCPDecode`. Prefill uses the base Triton
     kernels.
 
-    CUDAGraph: v2 FULL capture records the model with
-    `cudagraph_runtime_mode=NONE` (see `ModelCudaGraphManager.capture`), so
-    a `CUDAGraphMode.FULL` guard never fires and a stream-capturing skip
+    CUDAGraph: skipping FULL mode or stream capture
     would bake the non-CP indexer into decode graphs. Persistent buffers keep
     this path allocation-free so CP is what gets captured.
     """
@@ -296,8 +294,7 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
 
             # Dynamo tracing cannot capture the TP collective; decode graphs
             # are recorded from eager warmup+capture, not from compile.
-            # Do not skip on CUDAGraphMode.FULL or stream-capturing: v2 records
-            # FULL graphs with runtime_mode=NONE, and skipping capture would
+            # Do not skip on CUDAGraphMode.FULL or stream-capturing: this would
             # put the non-CP indexer into the replayed decode graph.
             if (
                 torch.compiler.is_compiling()

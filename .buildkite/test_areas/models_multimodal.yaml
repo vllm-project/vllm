@@ -37,6 +37,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
     - pytest -v -s models/multimodal/generation/test_mm_prefix_lm.py -m core_model
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
+    - pytest -v -s models/multimodal/generation/test_qwen3_vl.py -m core_model
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Standard) 2: qwen3 + gemma"
@@ -84,6 +85,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Unlimited-OCR-2"
+      automatic_shard: true
       device: mi355_dpx
       dind: false
       timeout_in_minutes: 30
@@ -206,6 +208,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Multimodal FlashInfer Autotuning"
   key: multi-modal-flashinfer-autotuning
+  automatic_shard: true
   device: b200-k8s
   num_devices: 2
   timeout_in_minutes: 30

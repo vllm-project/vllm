@@ -109,6 +109,25 @@ def _supports_router_bf16x3_device() -> bool:
     return get_cdna_version() in (3, 4)
 
 
+def _pooling_uses_default_gemm() -> bool:
+    # Importing a foreign platform can reload torch extension libraries.
+    from vllm.platforms.rocm import get_cdna_version
+
+    # FYI: AITER's gfx950 split-K rows are less exact than F.linear, within tolerance.
+    return get_cdna_version() in (3, 4)
+
+
+def _pooling_projection(
+    input_size: int, output_size: int, prefix: str
+) -> ReplicatedLinear:
+    layer = ReplicatedLinear(
+        input_size, output_size, bias=False, quant_config=None, prefix=prefix
+    )
+    if not _pooling_uses_default_gemm():
+        layer.quant_method = MuseSparkTorchLinearMethod()
+    return layer
+
+
 def token_sharded_stream_supported(vllm_config: VllmConfig) -> bool:
     """Whether the residual stream may be sharded by token across the TP ranks."""
     pc = vllm_config.parallel_config
@@ -275,24 +294,12 @@ class MuseSparkMoE(nn.Module):
         )
 
         hidden_size = config.moe_hidden_size
-        # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
-        # BF16-accumulating kernels for these shapes.
-        self.pooler: ReplicatedLinear | None = ReplicatedLinear(
-            config.hidden_size,
-            hidden_size,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.pooler",
+        self.pooler: ReplicatedLinear | None = _pooling_projection(
+            config.hidden_size, hidden_size, f"{prefix}.pooler"
         )
-        self.pooler.quant_method = MuseSparkTorchLinearMethod()
-        self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
-            hidden_size,
-            config.hidden_size,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.unpooler",
+        self.unpooler: ReplicatedLinear | None = _pooling_projection(
+            hidden_size, config.hidden_size, f"{prefix}.unpooler"
         )
-        self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
         if self.pooler is not None:
             self.pre_expert_norm: MuseSparkRMSNorm | None = MuseSparkRMSNorm(

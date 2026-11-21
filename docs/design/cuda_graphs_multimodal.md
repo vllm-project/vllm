@@ -22,6 +22,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `KimiK25ForConditionalGeneration` | `Kimi-K2.5, Kimi-K2.6` | ✅︎ | ❌︎ | ❌︎ |
 | `KimiK3ForConditionalGeneration` | `Kimi-K3` | ✅︎ | ❌︎ | ❌︎ |
+| `Lfm3VlForConditionalGeneration` | `LFM3-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
 | `Mistral3ForConditionalGeneration` | `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
 | `PixtralForConditionalGeneration` | `Pixtral`, Mistral-format `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
@@ -33,6 +34,15 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
 | `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
 | `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
+
+Audio encoders use the same manager and protocol:
+
+| Architecture | Models | Graph scope | Attention backends |
+| ------------ | ------ | ----------- | ------------------ |
+| `Qwen3ASRForConditionalGeneration` | `Qwen3-ASR` | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+| `Qwen3OmniMoeThinkerForConditionalGeneration` | `Qwen3-Omni` (audio tower) | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+
+For these audio towers the conv frontend runs eagerly before each replay; token budgets count encoder output tokens, and the smallest budget is one attention window (104 tokens, 8 s of audio). Other attention backends keep the audio tower eager. `encoder_cudagraph_max_vision_items_per_batch` also caps the number of audio clips per graph.
 
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
