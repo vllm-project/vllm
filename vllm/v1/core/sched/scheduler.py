@@ -2459,6 +2459,7 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
+            aux_objects = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
@@ -2499,6 +2500,8 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    if self.aux_output_connector is not None:
+                        aux_objects = self.aux_output_connector.pop_aux_objects(req_id)
                     if (
                         prefill_stats is not None
                         and kv_transfer_params is not None
@@ -2562,6 +2565,7 @@ class Scheduler(SchedulerInterface):
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                         watermarking=watermarking,
+                        aux_objects=aux_objects,
                     )
                 )
             else:

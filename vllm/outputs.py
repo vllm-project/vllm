@@ -81,6 +81,11 @@ class CompletionOutput:
             single-sequence (`n == 1`) requests.
         weight_versions: Contiguous weight version spans over output-token indexes.
             Set on the final output only.
+        aux_objects: For a request with `aux_namespace`, `(key, start, end)` of
+            the shared objects that hold its auxiliary outputs from its
+            `aux_prompt_start` on, in position order: positions `[start, end)`
+            are the first `end - start` rows of object `key`. Set on the final
+            output only.
 
     """
 
@@ -96,6 +101,7 @@ class CompletionOutput:
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
+    aux_objects: list[tuple[str, int, int]] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -245,6 +251,7 @@ class RequestOutput:
                             completion.routed_experts = next_completion.routed_experts
                         # Like finish_reason, spans come only with the terminal output.
                         completion.weight_versions = next_completion.weight_versions
+                        completion.aux_objects = next_completion.aux_objects
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:

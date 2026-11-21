@@ -12,11 +12,18 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
+    AuxObject,
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
     retained_objects,
+)
+from vllm.distributed.aux_output_connector.object_store import (
+    AuxObjects,
+    AuxObjectWriter,
+    MooncakeAuxObjectStore,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -41,6 +48,43 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
+class _ObjectRun:
+    """Rows a namespace request computed since it was last scheduled, from
+    `start` on, and the objects still to write from them."""
+
+    start: int = -1
+    end: int = -1
+    chunks: list[np.ndarray] = field(default_factory=list)
+    writes: list[AuxObject] = field(default_factory=list)
+
+    def add(self, token_start: int, rows: np.ndarray) -> None:
+        if self.start < 0:
+            self.start = self.end = token_start
+        self.chunks.append(rows.copy())
+        self.end += len(rows)
+
+    def take_ready(self) -> AuxObjects:
+        """Objects whose rows are all here. Later writes start at or after
+        the end of the last one, so earlier rows are dropped."""
+        ready = [write for write in self.writes if write[2] <= self.end]
+        if not ready:
+            return []
+        self.writes = [write for write in self.writes if write[2] > self.end]
+        rows = np.concatenate(self.chunks)
+        objects = [
+            (key, {"routed_experts": rows[start - self.start : end - self.start]})
+            for key, start, end in ready
+        ]
+        keep = min(
+            (start for _, start, _ in self.writes),
+            default=max(end for _, _, end in ready),
+        )
+        self.chunks = [rows[keep - self.start :]]
+        self.start = keep
+        return objects
+
+
+@dataclass(slots=True)
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
@@ -51,6 +95,7 @@ class _WorkerRequestState:
     pending_outputs: int = 0
     # Terminal event received; teardown waits for in-flight step outputs.
     finished: bool = False
+    run: _ObjectRun | None = None
 
 
 @dataclass(slots=True)
@@ -67,6 +112,7 @@ class PendingAuxOutput:
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
+    runs: dict[str, _ObjectRun] = field(default_factory=dict)
 
     def enqueue_cpu_copy(
         self, num_sampled: np.ndarray, num_rejected: np.ndarray
@@ -100,6 +146,7 @@ class AuxOutputWorkerConnector:
         self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
+        self._writer: AuxObjectWriter | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -135,6 +182,18 @@ class AuxOutputWorkerConnector:
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
+        config = vllm_config.aux_output_config
+        if config.object_key_prefix is not None:
+            self._writer = AuxObjectWriter(
+                MooncakeAuxObjectStore.create(
+                    config.mooncake_config_path, config.object_hard_pin
+                ),
+                max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
+                stall_timeout_s=min(
+                    config.object_put_stall_timeout_s,
+                    envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS / 2,
+                ),
+            )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
@@ -161,6 +220,8 @@ class AuxOutputWorkerConnector:
             for request_id in pending_output.request_ids:
                 if (state := self._requests.get(request_id)) is not None:
                     state.pending_outputs += 1
+                    if state.run is not None:
+                        pending_output.runs[request_id] = state.run
         return pending_output
 
     def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
@@ -207,6 +268,7 @@ class AuxOutputWorkerConnector:
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
         outputs: dict[str, AuxRequestOutput] = {}
+        objects: AuxObjects = []
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
         for request_id, token_start, start, end, sampled, rejected in zip(
@@ -232,6 +294,10 @@ class AuxOutputWorkerConnector:
                 "auxiliary output rejected-token count is invalid"
             )
             rows = routed_experts[start : end - rejected]
+            if (run := pending.runs.get(request_id)) is not None:
+                run.add(int(token_start), rows)
+                objects.extend(run.take_ready())
+                continue
 
             capture_start = token_start
             capture_cursor = state.capture_cursor
@@ -269,6 +335,7 @@ class AuxOutputWorkerConnector:
                 else:
                     materialize_outputs.append((request_id, emit_start, token_end))
 
+        self._put_objects(objects)
         # A consumer may reuse a block produced earlier in the same batch.
         self._publish_blocks(block_batches)
 
@@ -333,6 +400,11 @@ class AuxOutputWorkerConnector:
             for _, rows in blocks:
                 buffer.release_block(rows)
 
+    def _put_objects(self, objects: AuxObjects) -> None:
+        if objects:
+            assert self._writer is not None
+            self._writer.put(objects)
+
     def _teardown(self, request_ids: Iterable[str]) -> None:
         """Drop finished requests' temporary state after publishing key releases."""
         buffer = self._buffer
@@ -358,7 +430,16 @@ class AuxOutputWorkerConnector:
         assert metadata.generation >= self._generation, (
             "auxiliary output metadata generation moved backwards"
         )
+        if self._writer is not None:
+            self._writer.check()
         with self._lock:
+            objects: AuxObjects = []
+            for request_id, writes in metadata.object_writes.items():
+                run = self._requests[request_id].run
+                assert run is not None
+                run.writes.extend(writes)
+                objects.extend(run.take_ready())
+            self._put_objects(objects)
             namespace = str(self._generation)
             hashes = metadata.retained_block_hashes or ()
             retained_keys = routed_experts_keys(hashes, namespace)
@@ -388,6 +469,9 @@ class AuxOutputWorkerConnector:
                     assert emit_start <= state.emit_cursor, (
                         "auxiliary output Scheduler emit cursor moved ahead"
                     )
+            for request_id in metadata.namespace_runs:
+                state = self._requests.setdefault(request_id, _WorkerRequestState())
+                state.run = _ObjectRun()
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
@@ -411,11 +495,16 @@ class AuxOutputWorkerConnector:
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()
-            if self._store is not None:
-                try:
-                    self._store.close()
-                finally:
-                    self._store = None
+            writer, self._writer = self._writer, None
+            try:
+                if writer is not None:
+                    writer.close()
+            finally:
+                if self._store is not None:
+                    try:
+                        self._store.close()
+                    finally:
+                        self._store = None
 
 
 def get_aux_output_connector(

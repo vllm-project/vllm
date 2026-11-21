@@ -5,9 +5,10 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import TYPE_CHECKING, Any
 
@@ -94,6 +95,11 @@ def salt_aux_outputs(
         request.block_hashes = None
 
 
+AuxObject = tuple[str, int, int]
+"""`(key, start, end)`: positions `[start, end)` are the first `end - start`
+rows of the object `key`, whose first position is `start`."""
+
+
 @dataclass(slots=True)
 class PackedBlockHashes:
     """Contiguous, self-contained block hashes for scheduler-worker IPC."""
@@ -114,12 +120,24 @@ class AuxOutputConnectorMetadata:
     finished_requests: tuple[str, ...]
     retained_block_hashes: PackedBlockHashes | None = None
     released_block_hashes: PackedBlockHashes | None = None
+    namespace_runs: tuple[str, ...] = ()
+    object_writes: dict[str, list[AuxObject]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
+
+
+@dataclass(slots=True)
+class _NamespaceRequest:
+    request: Request
+    namespace: str
+    prompt_start: int
+    listing: list[AuxObject] = field(default_factory=list)
+    written: int = 0
+    running: bool = False
 
 
 class AuxOutputSchedulerConnector:
@@ -168,6 +186,11 @@ class AuxOutputSchedulerConnector:
                 "KV cache group, prefix-cache hits on KV block boundaries, at "
                 "most one hash look-ahead token and no prefix replay."
             )
+        self._key_prefix = key_prefix
+        self._namespaces: dict[str, _NamespaceRequest] = {}
+        self._runs: list[str] = []
+        self._writes: dict[str, list[AuxObject]] = {}
+        self._listings: dict[str, list[AuxObject]] = {}
 
     def build_connector_meta(
         self,
@@ -179,6 +202,9 @@ class AuxOutputSchedulerConnector:
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             request = requests[request_id]
+            if (namespace := self._namespace(request)) is not None:
+                self._run_namespace(request, namespace)
+                continue
             if self._skips(request):
                 continue
             self._sent_hash_counts.setdefault(request_id, 0)
@@ -208,6 +234,12 @@ class AuxOutputSchedulerConnector:
             if block_hashes is not None
         )
         self._finished_requests = {}
+        for state in self._namespaces.values():
+            if state.running:
+                request = state.request
+                self._write_blocks(
+                    state, request.num_computed_tokens - request.num_in_flight_tokens
+                )
         metadata = AuxOutputConnectorMetadata(
             self._generation,
             scheduled_requests,
@@ -215,9 +247,78 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             self._pack_hashes(self._retained_hashes),
             self._pack_hashes(self._released_hashes),
+            tuple(self._runs),
+            self._writes,
         )
         self._retained_hashes, self._released_hashes = [], []
+        self._runs, self._writes, self._listings = [], {}, {}
         return metadata
+
+    def _namespace(self, request: Request) -> str | None:
+        params = request.sampling_params
+        if self._key_prefix is None or params is None:
+            return None
+        return params.aux_namespace
+
+    def _run_namespace(self, request: Request, namespace: str) -> None:
+        """Start a run of a namespace request that is scheduled: the worker
+        keeps the rows it computes from here on."""
+        state = self._namespaces.get(request.request_id)
+        if state is None:
+            state = _NamespaceRequest(request, namespace, self._emit_start(request))
+            self._namespaces[request.request_id] = state
+        if state.running:
+            return
+        state.running = True
+        state.written = request.num_computed_tokens
+        self._runs.append(request.request_id)
+
+    def _object_key(self, state: _NamespaceRequest, start: int) -> str:
+        block_hash = state.request.block_hashes[
+            (start + self._block_size) // self._hash_block_size - 1
+        ]
+        return f"{self._key_prefix}/{state.namespace}/{block_hash.hex()}"
+
+    def _write_blocks(self, state: _NamespaceRequest, limit: int) -> None:
+        """Write the blocks of the current run that end at `limit` or before,
+        and before the last token: the row of that token's position is the
+        one the next token is sampled from, and another run may sample it."""
+        end = min(limit, state.request.num_tokens - 1)
+        end -= end % self._block_size
+        writes = [
+            (self._object_key(state, start), start, start + self._block_size)
+            for start in range(state.written, end, self._block_size)
+        ]
+        if writes:
+            self._writes.setdefault(state.request.request_id, []).extend(writes)
+            state.written = end
+
+    def _end_run(self, state: _NamespaceRequest, end: int, limit: int) -> None:
+        """End the current run: write its blocks up to `limit`, and list its
+        positions up to `end` after those the listing covers, as blocks and a
+        tail object for the positions after the last full block."""
+        request = state.request
+        end = min(end, request.num_tokens - 1)
+        self._write_blocks(state, limit)
+        listing = state.listing
+        covered = listing[-1][2] if listing else state.prompt_start
+        boundary = end - end % self._block_size
+        listing.extend(
+            (self._object_key(state, start), start, start + self._block_size)
+            for start in range(
+                covered - covered % self._block_size, boundary, self._block_size
+            )
+        )
+        if end > max(boundary, covered):
+            key = f"{self._key_prefix}/{state.namespace}/tail/{uuid.uuid4().hex}"
+            listing.append((key, boundary, end))
+            self._writes.setdefault(request.request_id, []).append((key, boundary, end))
+        state.running = False
+
+    def pop_aux_objects(self, request_id: str) -> list[AuxObject] | None:
+        """The listing of a namespace request that finished since the last
+        step, which its final output carries."""
+        return self._listings.pop(request_id, None)
 
     @staticmethod
     def _emit_start(request: Request) -> int:
@@ -244,6 +345,9 @@ class AuxOutputSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
+        if self._namespace(request) is not None:
+            aligned = (num_local + num_external) % self._block_size == 0
+            return num_external if aligned else 0
         if self._skips(request):
             return num_external
         num_hit = num_local + num_external
@@ -344,6 +448,9 @@ class AuxOutputSchedulerConnector:
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
+        if self._namespace(request) is not None:
+            self._finish_namespace(request)
+            return
         if self._skips(request):
             return
         request_id = request.request_id
@@ -369,10 +476,24 @@ class AuxOutputSchedulerConnector:
                 self._retained_hashes.extend(keys)
         self._release_unheld()
 
-    @staticmethod
-    def _skips(request: Request) -> bool:
+    def _finish_namespace(self, request: Request) -> None:
+        """End the run of a finished namespace request and keep its listing
+        for its final output: the positions whose tokens it returned."""
+        state = self._namespaces.pop(request.request_id, None)
+        if state is None:
+            return
+        num_computed = request.num_computed_tokens
+        self._end_run(state, num_computed - request.num_in_flight_tokens, num_computed)
+        self._listings[request.request_id] = state.listing
+        self._finished_requests[request.request_id] = None
+
+    def _skips(self, request: Request) -> bool:
+        """Whether the request has no rows here: it skips its auxiliary
+        outputs, or delivers them as objects."""
         params = request.sampling_params
-        return params is not None and not params.return_aux_outputs
+        return params is not None and (
+            not params.return_aux_outputs or self._namespace(request) is not None
+        )
 
     @staticmethod
     def _pack_hashes(hashes: Sequence[bytes]) -> PackedBlockHashes | None:
