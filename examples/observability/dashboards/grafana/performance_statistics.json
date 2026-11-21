@@ -1322,7 +1322,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(vllm:iteration_tokens_total_count[$__interval])",
+          "expr": "rate(vllm:iteration_tokens_total_sum[$__interval])",
           "hide": false,
           "instant": false,
           "legendFormat": "Overall Iteration TPS",
