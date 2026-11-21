@@ -24,6 +24,19 @@ tp_size`.
 from dataclasses import dataclass
 from functools import cache
 
+MAX_REMOTE_RANKS = 1024
+
+
+def validate_remote_topology(remote_dp_size: int, remote_tp_size: int) -> None:
+    """Bound rank mapping and handshake work before expanding the topology."""
+    if remote_dp_size < 1 or not 1 <= remote_tp_size <= (
+        MAX_REMOTE_RANKS // remote_dp_size
+    ):
+        raise ValueError(
+            "remote_dp_size and remote_tp_size must describe a topology of "
+            f"1 to {MAX_REMOTE_RANKS} remote ranks"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class WriteTarget:
@@ -86,6 +99,7 @@ def validate_write_tp_topology(
     """Reject TP pairs that the WRITE mapping cannot express."""
     if producer_tp_size <= 0 or consumer_tp_size <= 0:
         raise ValueError("TP sizes must be positive")
+    validate_remote_topology(1, consumer_tp_size)
     larger = max(producer_tp_size, consumer_tp_size)
     smaller = min(producer_tp_size, consumer_tp_size)
     if larger % smaller != 0:

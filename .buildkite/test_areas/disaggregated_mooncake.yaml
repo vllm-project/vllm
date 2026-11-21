@@ -34,6 +34,9 @@ steps:
         - image-build-amd
       source_file_dependencies:
         - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+        - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+        - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+        - vllm/v1/engine/core.py
         - tests/v1/kv_connector/mooncake_integration/
         - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
         - tests/utils.py
@@ -44,7 +47,28 @@ steps:
         - requirements/test/rocm.txt
       commands:
         # Same full accuracy/TP sweep, using same-host HIP GPU transport.
-        - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
+        - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py -k test_rocm_pd_accuracy
+
+- label: ":amd: (MI355 DPX) Mooncake request validation"
+  key: mooncake-request-validation
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+    - image-build-amd
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+    - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/v1/engine/core.py
+    - tests/v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
+    - >-
+      pytest -v -s
+      v1/kv_connector/mooncake_integration/test_accuracy_rocm.py::test_invalid_transfer_params_preserve_serving
 
 - label: ":nvidia: (L4) Mooncake EC TCP E2E"
   key: mooncake-ec-tcp-e2e-2-gpus

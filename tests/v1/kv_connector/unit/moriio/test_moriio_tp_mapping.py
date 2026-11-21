@@ -85,6 +85,11 @@ def test_mla_fan_in_with_mamba_still_writes_state_from_every_producer():
     assert (target.remote_slice, target.remote_slices) == (1, 2)
 
 
+def test_write_tp_mapping_bounds_remote_ranks():
+    with pytest.raises(ValueError, match="remote ranks"):
+        compute_write_tp_mapping(0, 1, 1025, 1, True, False)
+
+
 @pytest.mark.parametrize(
     ("producer_tp", "consumer_tp", "heads", "is_mla", "match"),
     [
