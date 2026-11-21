@@ -17,7 +17,7 @@ use crate::error::{Error, Result, bail_multimodal, multimodal};
 pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
 
 impl MultimodalModelInfo {
-    /// Preprocess all fetched image frames as one batch and build per-item
+    /// Preprocess all fetched image frames in one call and build per-item
     /// features.
     #[tracing::instrument(
         name = "mm_stage",
@@ -35,8 +35,25 @@ impl MultimodalModelInfo {
         let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Image.to_string(),
         })?;
-        let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
-        let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
+        // A processor may split the images into consecutive batches (one per
+        // image when their tensors cannot share a shape); items keep order.
+        let batches = self.preprocess_images(support, &frames, preprocessing_context).await?;
+        let mut replacements = Vec::with_capacity(frames.len());
+        let mut items = Vec::with_capacity(frames.len());
+        let mut hashes = frames.iter().map(|frame| frame.hash.clone());
+        let mut uuids = uuids.into_iter();
+        for preprocessed in batches {
+            let batch = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
+            let len = batch.len();
+            replacements.extend(batch);
+            items.extend(item::build_batched_items(
+                &support.spec,
+                preprocessed,
+                hashes.by_ref().take(len).collect(),
+                uuids.by_ref().take(len).collect(),
+                model_dtype,
+            )?);
+        }
         if replacements.len() != frames.len() {
             bail_multimodal!(
                 "number of image prompt replacements {} does not match number of images {}",
@@ -44,9 +61,6 @@ impl MultimodalModelInfo {
                 frames.len()
             );
         }
-        let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
-        let items =
-            item::build_batched_items(&support.spec, preprocessed, hashes, uuids, model_dtype)?;
 
         Ok(PreparedMedia {
             modality: Modality::Image,
@@ -67,7 +81,7 @@ impl MultimodalModelInfo {
         support: &VisionModalitySupport,
         image_frames: &[Arc<ImageFrame>],
         preprocessing_context: VisionPreprocessingContext,
-    ) -> Result<PreprocessedEncoderInputs> {
+    ) -> Result<Vec<PreprocessedEncoderInputs>> {
         let processor = Arc::clone(&support.processor);
         let images = image_frames
             .iter()
@@ -77,7 +91,7 @@ impl MultimodalModelInfo {
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
             let images = images.iter().collect::<Vec<_>>();
-            Ok(processor.preprocess_with_context(&images, &preprocessing_context)?)
+            Ok(processor.preprocess_items_with_context(&images, &preprocessing_context)?)
         })
         .await
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?

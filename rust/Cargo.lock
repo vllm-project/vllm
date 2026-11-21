@@ -2208,6 +2208,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json5"
+version = "1.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c1d229cedc4e210dd2e2a6cdc59e36ce28e7338fb69367d0d2566e26de7d599"
+dependencies = [
+ "serde",
+ "ucd-trie",
+]
+
+[[package]]
 name = "lalrpop-util"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2286,7 +2296,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.16.0"
-source = "git+https://github.com/smg-project/smg?rev=2787f7cde21e0a2511f481994d731c98109020af#2787f7cde21e0a2511f481994d731c98109020af"
+source = "git+https://github.com/smg-project/smg?rev=3359c44226f3b7e8952cb58241d71b614d66a816#3359c44226f3b7e8952cb58241d71b614d66a816"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5385,6 +5395,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
+name = "ucd-trie"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f20bdbfc9915686faa18fb5bbe8b4552778505defbf9f12289beefbc44092a6"
+
+[[package]]
 name = "unic-char-property"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5982,6 +5998,7 @@ dependencies = [
  "futures",
  "hf-hub",
  "itertools 0.14.0",
+ "json5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

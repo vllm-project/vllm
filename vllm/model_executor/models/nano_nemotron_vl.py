@@ -584,6 +584,9 @@ class NanoNemotronVLMultiModalProcessor(
                 img_end_token_ids=hf_processor._img_end_token_ids,
                 img_context_token_ids=hf_processor._img_context_token_ids,
                 video_temporal_patch_size=T,
+                select_token_ids=(
+                    video_pruning_rate is None or video_pruning_rate <= 0.0
+                ),
             )
 
         return PromptReplacement(
@@ -1287,14 +1290,18 @@ class NemotronH_Nano_VL_V2(
     def _process_video_input(
         self, video_input: NanoNemotronVLVideoPixelInputs
     ) -> tuple[torch.Tensor, ...]:
-        """Process video input and create final embeddings with video content
-        and indicator tokens."""
+        """Process video input, merging indicator-token embeddings only for EVS."""
         T = self.video_temporal_patch_size
 
         if T > 1:
             video_embeddings = self._extract_video_embeddings_temporal(video_input)
         else:
             video_embeddings = self._process_image_input(video_input)
+
+        video_pruning_rate = self.video_pruning_rate
+        if video_pruning_rate is None or video_pruning_rate <= 0.0:
+            return video_embeddings
+        assert video_pruning_rate is not None
 
         final_video_embeddings: tuple[torch.Tensor, ...] = ()
 
@@ -1304,7 +1311,6 @@ class NemotronH_Nano_VL_V2(
         frame_h, frame_w = pixel_values.shape[-2], pixel_values.shape[-1]
         rows = int(frame_h * downsample_ratio // patch_size)
         cols = int(frame_w * downsample_ratio // patch_size)
-        video_pruning_rate = self.video_pruning_rate
         video_num_frames = video_input["num_patches"].tolist()
         video_frames_indices = video_input["frames_indices"].split(video_num_frames)
         # Calculate video feature dimensions (number of frames and
@@ -1317,27 +1323,19 @@ class NemotronH_Nano_VL_V2(
             num_tubelets = math.ceil(num_frames / T) if T > 1 else num_frames
             assert single_video_embeddings.shape[0] % num_tubelets == 0
 
-            if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                # Start of EVS-specific code
-                retention_mask = compute_retention_mask(
-                    single_video_embeddings,
-                    video_size_thw=(num_tubelets, rows, cols),
-                    spatial_merge_size=1,
-                    q=video_pruning_rate,
-                )
+            retention_mask = compute_retention_mask(
+                single_video_embeddings,
+                video_size_thw=(num_tubelets, rows, cols),
+                spatial_merge_size=1,
+                q=video_pruning_rate,
+            )
 
-                # apply retention mask
-                single_video_embeddings = single_video_embeddings[retention_mask]
+            # apply retention mask
+            single_video_embeddings = single_video_embeddings[retention_mask]
 
-                # calculate the actual number of retained tokens per frame
-                retention_mask_thw = retention_mask.reshape(num_tubelets, rows, cols)
-                num_tokens_per_frame = (
-                    retention_mask_thw.sum(dim=(1, 2)).long().tolist()
-                )
-                # End of EVS-specific code
-            else:
-                feature_size = single_video_embeddings.shape[0] // num_tubelets
-                num_tokens_per_frame = [feature_size] * num_tubelets
+            # calculate the actual number of retained tokens per frame
+            retention_mask_thw = retention_mask.reshape(num_tubelets, rows, cols)
+            num_tokens_per_frame = retention_mask_thw.sum(dim=(1, 2)).long().tolist()
 
             final_video_embeddings += (
                 self._create_final_video_embeddings(

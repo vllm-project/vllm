@@ -223,7 +223,7 @@ fn raw_parts_from_proto(
                 pb::Modality::Image,
                 pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
             ) => MediaContentPart::ImageUrl {
-                url,
+                url: url.into(),
                 detail: None,
                 uuid,
                 max_long_side_pixel: None,
@@ -240,7 +240,7 @@ fn raw_parts_from_proto(
                 pb::Modality::Video,
                 pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
             ) => MediaContentPart::VideoUrl {
-                url,
+                url: url.into(),
                 uuid,
                 fps: video_fps,
                 max_long_side_pixel: None,
@@ -260,7 +260,10 @@ fn raw_parts_from_proto(
             (
                 pb::Modality::Audio,
                 pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::AudioUrl { url, uuid },
+            ) => MediaContentPart::AudioUrl {
+                url: url.into(),
+                uuid,
+            },
             (pb::Modality::Audio, pb::media_item::Source::RawBytes(data)) => {
                 MediaContentPart::AudioData {
                     data,

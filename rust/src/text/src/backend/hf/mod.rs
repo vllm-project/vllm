@@ -19,7 +19,7 @@ use vllm_tokenizer::{
 use self::config::{GenerationConfig, load_generation_config, parse_sampling_defaults};
 pub use self::config::{
     HfChatTemplate, HfNamedChatTemplate, HfSpecialTokens, HfTokenizerConfig, ModelConfig,
-    NamedSpecialToken, load_model_config, load_tokenizer_config,
+    NamedSpecialToken, load_model_config, load_model_config_json, load_tokenizer_config,
 };
 pub use self::model_files::{
     HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource,

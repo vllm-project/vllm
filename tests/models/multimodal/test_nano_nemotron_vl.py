@@ -233,6 +233,30 @@ class _CharTokenizer:
         return BatchEncoding({"input_ids": self.encode(text)})
 
 
+@pytest.mark.parametrize("select_token_ids", [True, False])
+def test_nemotron_video_repl_embedding_mask(select_token_ids: bool):
+    tokenizer = _CharTokenizer()
+    img_context_token_ids = [3]
+    repl = NanoNemotronVLProcessor.get_video_repl(
+        tokens_per_frame=[2],
+        frames_indices=[0],
+        frame_duration_ms=500,
+        tokenizer=tokenizer,
+        img_start_token_ids=[1],
+        img_end_token_ids=[2],
+        img_context_token_ids=img_context_token_ids,
+        select_token_ids=select_token_ids,
+    )
+
+    if select_token_ids:
+        assert repl.is_embed is not None
+        assert repl.is_embed(repl.full).tolist() == [
+            token_id in img_context_token_ids for token_id in repl.full
+        ]
+    else:
+        assert repl.is_embed is None
+
+
 _NORM_MEAN = [0.485, 0.456, 0.406]
 _NORM_STD = [0.229, 0.224, 0.225]
 
