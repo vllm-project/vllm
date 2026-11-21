@@ -103,6 +103,8 @@ class _FakeConnector(moriio_connector.MoRIIOConnector):  # type: ignore[name-def
 
 
 class _FakeWorker(moriio_connector.MoRIIOConnectorWorker):  # type: ignore[name-defined]
+    incarnation = "worker-1"
+
     def __init__(self, **attrs):
         for k, v in attrs.items():
             setattr(self, k, v)
@@ -213,6 +215,7 @@ def _gate_vllm_config(
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
+        instance_id="1",
         kv_transfer_config=SimpleNamespace(
             kv_connector_extra_config={
                 "read_mode": read_mode,
@@ -367,6 +370,7 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
             _tail_spec(block_size=2 * kpool)
         )
     vllm_config = SimpleNamespace(
+        instance_id="1",
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1),
         speculative_config=None,

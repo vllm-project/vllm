@@ -108,6 +108,10 @@ class RemoteAllocInfo:
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
+    # Incarnation of the consumer that allocated the blocks ("" from a peer
+    # that does not send one). A producer compares it with the incarnation
+    # its sessions were built for to detect a consumer that restarted.
+    incarnation: str = ""
     completion_request_id: str | None = None
     completion_notify_port: int | None = None
     completion_remote_ip: str | None = None
@@ -152,6 +156,10 @@ class MoRIIOAgentMetadata(
     # Layer name -> index of its first region in kv_caches_base_addr. Peers can
     # register different layers (a pipeline stage holds a slice of them).
     layer_base_addr_index: dict[str, int] = {}
+    # Identifies one launch of the peer. It changes when the peer restarts, and
+    # with it the peer's engine key, memory registrations and QPs, so sessions
+    # built for an older incarnation must not be used ("" from older peers).
+    incarnation: str = ""
 
 
 class RoleManager:
@@ -224,6 +232,12 @@ class HandshakeError(MoRIIOError):
 
 class TransferError(MoRIIOError):
     """Exception raised when transfer fails."""
+
+    pass
+
+
+class StalePeerError(MoRIIOError):
+    """The peer restarted since the sessions for it were built."""
 
     pass
 
