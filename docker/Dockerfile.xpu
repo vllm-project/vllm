@@ -21,17 +21,12 @@ COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.py
 COPY tools/build_rust.sh tools/build_rust.sh
 
-# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
-# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Build with a stable version so this target snapshot is keyed only by Rust
-# inputs. The child stage below relinks the crates that embed the exact version.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash tools/build_rust.sh
 
-# Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
@@ -237,10 +232,16 @@ ENV VLLM_TARGET_DEVICE=xpu
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=.git,target=.git \
-    uv pip install --no-build-isolation --no-deps .
-
-RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
+
+ARG VLLM_WHEEL_URL=""
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --upgrade --pre "${VLLM_WHEEL_URL:-vllm}" \
+      --index https://wheels.vllm.ai/nightly/xpu/ \
+      --index https://download.pytorch.org/whl/xpu \
+      --index-strategy unsafe-first-match \
+    --find-links https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/ && \
+    cp "$(python -c 'import importlib.metadata; print(importlib.metadata.distribution("vllm").locate_file("vllm/_version.py"))')" \
+     vllm/_version.py
 
 ENTRYPOINT ["vllm", "serve"]
