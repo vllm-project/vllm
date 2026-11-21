@@ -24,6 +24,7 @@ from vllm.models.deepseek_v4.xpu.dspark import (
 from vllm.models.deepseek_v4.xpu.model import (
     DeepseekV4ForCausalLM as TargetV4XPU,
 )
+from vllm.models.deepseek_v32.nvidia.model import DeepseekV32ForCausalLM
 from vllm.models.deepseek_v41.nvidia import dspark as dsv41_dspark
 from vllm.models.deepseek_v41.nvidia.dspark import (
     DSparkDeepseekV4ForCausalLM as V41Nvidia,
@@ -164,3 +165,42 @@ def test_nvidia_dspark_context_wkv_proj_respects_ignored_layers(
 
     assert len(captured_quant_configs) == 1
     assert captured_quant_configs[0] is (None if skip_wkv else quant_config)
+
+
+class _BackboneBuilt(Exception):
+    pass
+
+
+@pytest.mark.cpu_test
+def test_deepseek_v32_quant_config_sees_fused_qkv_a_proj(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The quant config must know `fused_qkv_a_proj` when the backbone builds its
+    layers, or checkpoints that leave `q_a_proj`/`kv_a_proj_with_mqa` unquantized
+    (e.g. nvidia/DeepSeek-V3.2-NVFP4) get a quantized fused layer and fail to load.
+    """
+
+    def capture_mapping(*, vllm_config, prefix):
+        raise _BackboneBuilt(dict(vllm_config.quant_config.packed_modules_mapping))
+
+    monkeypatch.setattr(
+        DeepseekV32ForCausalLM, "model_cls", staticmethod(capture_mapping)
+    )
+    quant_config = Fp8Config(is_checkpoint_fp8_serialized=True)
+    configure_quant_config(quant_config, DeepseekV32ForCausalLM)
+    hf_config = SimpleNamespace(
+        model_type="deepseek_v32",
+        q_lora_rank=1536,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config), quant_config=quant_config
+    )
+
+    with pytest.raises(_BackboneBuilt) as built:
+        DeepseekV32ForCausalLM(vllm_config=vllm_config)
+
+    mapping = built.value.args[0]
+    assert mapping["fused_qkv_a_proj"] == ["q_a_proj", "kv_a_proj_with_mqa"]
+    assert mapping["wk_weights_proj"] == ["wk", "weights_proj"]

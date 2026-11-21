@@ -78,7 +78,6 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -1861,10 +1860,9 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                if direct_reload_enabled():
-                    # a failed direct finish cannot be retried: end the
-                    # session so that a new full update can start
-                    self._end_weight_update(refresh=False)
+                # a failed finish cannot be retried: end the session so that
+                # a new full update can start
+                self._end_weight_update(refresh=False)
                 raise
             finally:
                 self._weight_update_kv_cache_loan.close()
