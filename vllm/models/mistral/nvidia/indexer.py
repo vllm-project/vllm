@@ -36,7 +36,12 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
     get_max_prefill_buffer_size,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayerConfig,
+    MLAAttentionSpec,
+    SparseCacheRole,
+)
 
 
 class MistralIndexerCache(nn.Module, AttentionLayerBase):
@@ -60,8 +65,8 @@ class MistralIndexerCache(nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C] as expected by the indexer kernels.
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return MLAAttentionSpec(
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -69,6 +74,7 @@ class MistralIndexerCache(nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def forward(self): ...
 
