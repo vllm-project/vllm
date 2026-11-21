@@ -8,6 +8,8 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.parser.engine.events import SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -123,16 +125,45 @@ class LlamaJsonParser(ParserEngine):
         self._tool_start_token_id = self.vocab.get(TOOL_START)
         # Some Llama templates omit TOOL_START and begin directly with JSON.
         self._at_output_start = True
+        # Output that starts with a bare "{" may be a plain JSON answer. Hold it
+        # until the end and validate it like the non-streaming path does.
+        self._bare_json_text: str | None = None
+        self._bare_json_events: list[SemanticEvent] = []
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         super()._reset(initial_state)
         self._at_output_start = True
+        self._bare_json_text = None
+        self._bare_json_events = []
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        if self._bare_json_text is None:
+            return super().finish_streaming()
+        return self._events_to_delta(self._engine.finish(), finished=True)
+
+    def _events_to_delta(
+        self,
+        events: list[SemanticEvent],
+        finished: bool = False,
+    ) -> DeltaMessage | None:
+        if self._bare_json_text is None:
+            return super()._events_to_delta(events, finished=finished)
+        self._bare_json_events.extend(events)
+        if not finished:
+            return None
+        text, events = self._bare_json_text, self._bare_json_events
+        self._bare_json_text, self._bare_json_events = None, []
+        if _validate_complete_tool_output(text) is False:
+            return DeltaMessage(content=text)
+        return super()._events_to_delta(events, finished=True)
 
     def _preprocess_feed(
         self,
         delta_text: str,
         delta_token_ids: Sequence[int],
     ) -> tuple[str, Sequence[int]]:
+        if self._bare_json_text is not None:
+            self._bare_json_text += delta_text
         if not delta_text or not self._at_output_start:
             return delta_text, delta_token_ids
 
@@ -140,6 +171,7 @@ class LlamaJsonParser(ParserEngine):
         if self._suppress_tool_calls or not delta_text.startswith("{"):
             return delta_text, delta_token_ids
 
+        self._bare_json_text = delta_text
         delta_text = TOOL_START + delta_text
         if not delta_token_ids:
             return delta_text, delta_token_ids

@@ -8,6 +8,7 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.engine.parser_engine import ParserEngine, ToolCallSlot
 from vllm.parser.llama_json import (
     TOOL_START,
@@ -368,6 +369,37 @@ def test_tool_choice_none_streaming_preserves_bare_json(
     text = '{"name":"a","arguments":{"x":1}}'
 
     results = _stream(parser, mock_request, text, chunk_size)
+
+    assert "".join(delta.content or "" for delta in results if delta) == text
+    assert all(not delta.tool_calls for delta in results if delta)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 5])
+@pytest.mark.parametrize("with_tools", [False, True])
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"city": "Paris", "temp_c": 18}',
+        '{"name": "Evelyn", "age": 28}',
+        "{}",
+        '{"name": "a", "parameters": {"x',
+    ],
+)
+def test_streaming_bare_json_answer_is_content(
+    parser,
+    chunk_size,
+    with_tools,
+    text,
+):
+    # Non-streaming returns these as content; streaming must not drop them or
+    # turn them into tool calls.
+    request = ChatCompletionRequest(
+        messages=[],
+        model="test",
+        tools=[{"type": "function", "function": {"name": "a"}}] if with_tools else None,
+    )
+
+    results = _stream(parser, request, text, chunk_size)
 
     assert "".join(delta.content or "" for delta in results if delta) == text
     assert all(not delta.tool_calls for delta in results if delta)
