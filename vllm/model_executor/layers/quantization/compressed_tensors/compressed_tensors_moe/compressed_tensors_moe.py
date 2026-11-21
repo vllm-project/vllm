@@ -5,6 +5,7 @@
 import torch
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (
+    QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
 )
@@ -62,6 +63,19 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
         format = scheme_dict.get("format")
+
+        if format == "lut-b":
+            if not isinstance(weight_quant, QuantizationArgs):
+                raise ValueError("LUT-B MoE expects QuantizationArgs for its weights.")
+            from .compressed_tensors_moe_lut_b import (
+                CompressedTensorsLutBMoEMethod,
+            )
+
+            return CompressedTensorsLutBMoEMethod(
+                weight_quant,
+                input_quant,
+                layer.moe_config,
+            )
 
         if quant_config._is_mxfp4_w4a8_fp8(weight_quant, input_quant):
             from .compressed_tensors_moe_w4a8_mxfp4 import (
