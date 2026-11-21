@@ -1,0 +1,3 @@
+# Core BYOG harness runtime dependencies.
+pydantic>=2.7,<3
+PyYAML>=6.0,<7

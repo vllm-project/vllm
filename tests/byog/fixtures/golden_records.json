@@ -1,0 +1,170 @@
+{
+  "resolved_job": {
+    "schema_version": 1,
+    "job_id": "default",
+    "attempt_id": "att-golden-001",
+    "spec_name": "golden-smoke",
+    "matrix_coords": {},
+    "serve_config": {
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "revision": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "serve_env": {},
+    "hardware": {
+      "gpu": ["h200"],
+      "count": 1,
+      "nodes": 1
+    },
+    "workloads": [
+      {
+        "name": "gsm8k",
+        "kind": "eval",
+        "execution_mode": "server",
+        "lifecycle": "reset_cache",
+        "allow_lifecycle_fallback": false,
+        "evidence_source": "harness",
+        "platforms": ["nvidia", "rocm"],
+        "entrypoint": "tools.byog.executor.evals.gsm8k.plugin:GSM8KEvalRunner",
+        "protocol_version": "1.0",
+        "assets": {},
+        "publication_policy": {
+          "reviewed": true,
+          "allow_question_text": true,
+          "allow_reference_answer": true,
+          "allow_model_response": true,
+          "note": "MIT licensed GSM8K"
+        },
+        "quality_thresholds": [
+          {
+            "metric": "accuracy",
+            "min_value": 0.4,
+            "max_value": null
+          }
+        ],
+        "required_for_quality": true,
+        "params": {
+          "num_questions": 6,
+          "repeats": 1,
+          "concurrency": [1]
+        }
+      }
+    ],
+    "timeout_s": 600,
+    "source_tier": "community",
+    "resolved_config_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "run_result": {
+    "schema_version": 1,
+    "job_id": "default",
+    "attempt_id": "att-golden-001",
+    "spec_name": "golden-smoke",
+    "source_tier": "community",
+    "execution_status": "completed",
+    "quality_state": "passed",
+    "started_at": "2026-11-20T18:00:00Z",
+    "finished_at": "2026-11-20T18:00:12Z",
+    "duration_s": 12.0,
+    "harness_version": "0.1.0-phase0",
+    "vllm_commit": "0123456789abcdef0123456789abcdef01234567",
+    "image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "requested_hardware": {"gpu": ["h200"], "count": 1, "nodes": 1},
+    "observed_hardware": {"platform": "nvidia", "gpu_id": "h200", "gpu_count": 1},
+    "combo_key": {"gpu": "h200", "gpu_count": 1, "model": "Qwen/Qwen2.5-0.5B-Instruct"},
+    "resolved_config_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "measurements": [
+      {
+        "workload": "gsm8k",
+        "kind": "eval",
+        "point_id": "c1",
+        "execution_mode": "server",
+        "protocol_version": "1.0",
+        "requested_lifecycle": "reset_cache",
+        "protocol_variant": "reset_cache",
+        "lifecycle_fallback_reason": null,
+        "evidence_source": "harness",
+        "compatibility_rule_version": "1",
+        "compatibility_components": {
+          "workload": "gsm8k",
+          "point_id": "c1",
+          "protocol_variant": "reset_cache",
+          "hardware": {"gpu_id": "h200", "gpu_count": 1}
+        },
+        "compatibility_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "status": "completed",
+        "quality_state": "passed",
+        "threshold_checks": [
+          {
+            "metric": "accuracy",
+            "observed": 1.0,
+            "min_value": 0.4,
+            "max_value": null,
+            "passed": true
+          }
+        ],
+        "metrics": {"accuracy": 1.0, "invalid_rate": 0.0},
+        "attempted": 6,
+        "completed": 6,
+        "scoring_denominator": 6,
+        "model_errors": 0,
+        "infra_errors": 0,
+        "error_message": null,
+        "artifacts": ["evals/gsm8k/samples.jsonl"]
+      }
+    ],
+    "withheld_artifacts": [],
+    "errors": []
+  },
+  "bundle_manifest": {
+    "schema_version": 1,
+    "job_id": "default",
+    "attempt_id": "att-golden-001",
+    "files": [
+      {
+        "path": "result.json",
+        "size_bytes": 1024,
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    ]
+  },
+  "eval_sample": {
+    "schema_version": 1,
+    "workload": "gsm8k",
+    "dataset_id": "gsm8k_test",
+    "dataset_revision": "fixture-override",
+    "sample_id": "gsm8k-0000",
+    "question": "Sam has 12 apples and gives 5 apples to a friend.",
+    "reference_answer": "7",
+    "media_refs": [],
+    "withheld_reason": null
+  },
+  "eval_rendered_input": {
+    "schema_version": 1,
+    "workload": "gsm8k",
+    "dataset_id": "gsm8k_test",
+    "input_hash": "1234567890abcdef",
+    "dataset_revision": "fixture-override",
+    "sample_id": "gsm8k-0000",
+    "rendered_input": "Question: Sam has 12 apples...\nAnswer:",
+    "withheld_reason": null
+  },
+  "eval_response": {
+    "schema_version": 1,
+    "workload": "gsm8k",
+    "point_id": "c1",
+    "dataset_id": "gsm8k_test",
+    "dataset_revision": "fixture-override",
+    "sample_id": "gsm8k-0000",
+    "input_hash": "1234567890abcdef",
+    "repeat": 0,
+    "concurrency": 1,
+    "model_response": "12 - 5 = 7. The answer is 7.",
+    "extracted_answer": "7",
+    "score": 1.0,
+    "correct": true,
+    "error_kind": "none",
+    "error_message": null,
+    "latency_s": 0.05,
+    "output_tokens": 8,
+    "withheld_reason": null
+  }
+}

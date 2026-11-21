@@ -1,0 +1,64 @@
+group: BYOG
+depends_on:
+  - image-build-cpu
+steps:
+- label: ":computer: (CPU) BYOG Harness Unit, Contract & Lockfile Tests"
+  key: byog-cpu-tests
+  timeout_in_minutes: 15
+  device: cpu-small
+  source_file_dependencies:
+    - tools/byog/
+    - tests/byog/
+    - docker/Dockerfile.byog
+    - .buildkite/test_areas/byog.yaml
+  commands:
+    - python3 /vllm-workspace/tools/byog/compile_requirements.py --check
+    - PYTHONPATH=/vllm-workspace pytest -v -s -c byog/pytest.ini byog/
+
+- label: ":nvidia: (H200 MIG 18GB) BYOG End-to-End GPU Smoke (GSM8K + HTTP + Direct)"
+  key: byog-nvidia-gpu-smoke
+  timeout_in_minutes: 25
+  device: h200_18gb
+  depends_on:
+    - image-build
+  working_dir: /vllm-workspace
+  artifact_paths:
+    - "byog-ci-out/**/*"
+  source_file_dependencies:
+    - tools/byog/
+    - tests/byog/
+    - docker/Dockerfile.byog
+    - .buildkite/test_areas/byog.yaml
+  commands:
+    - |
+      set -euo pipefail
+      rm -rf /tmp/byog-venv ./byog-ci-out
+      if command -v uv >/dev/null 2>&1; then
+        uv venv /tmp/byog-venv --python "$(command -v python3)"
+        uv pip install --python /tmp/byog-venv/bin/python -r tools/byog/requirements.lock
+      else
+        python3 -m venv /tmp/byog-venv
+        /tmp/byog-venv/bin/pip install --no-cache-dir -r tools/byog/requirements.lock
+      fi
+      BYOG_PY=/tmp/byog-venv/bin/python
+      PYTHONPATH=/vllm-workspace "$BYOG_PY" -m tools.byog catalog list
+      PYTHONPATH=/vllm-workspace "$BYOG_PY" -m tools.byog validate --spec tests/byog/fixtures/smoke_gpu_spec.yaml
+      PYTHONPATH=/vllm-workspace "$BYOG_PY" -m tools.byog run \
+        --spec tests/byog/fixtures/smoke_gpu_spec.yaml \
+        --out ./byog-ci-out \
+        --image "${IMAGE_TAG:-vllm-ci-unknown}" \
+        --vllm-commit "${BUILDKITE_COMMIT:-}"
+      BUNDLE_PATH="$(find ./byog-ci-out -name bundle.tar.gz | head -n 1)"
+      PYTHONPATH=/vllm-workspace "$BYOG_PY" -m tools.byog validate-bundle "$BUNDLE_PATH"
+      RESULT_JSON="$(dirname "$BUNDLE_PATH")/result.json"
+      CLEANUP_JSON="$(dirname "$BUNDLE_PATH")/logs/cleanup.json"
+      "$BYOG_PY" -c '
+      import json, pathlib, sys
+      res = json.loads(pathlib.Path(sys.argv[1]).read_text())
+      assert res["execution_status"] == "completed", res
+      assert res["quality_state"] == "passed", res
+      cleanup = json.loads(pathlib.Path(sys.argv[2]).read_text())
+      assert cleanup and all(c.get("terminated_pgid") is True for c in cleanup), cleanup
+      assert all(c.get("vram_reclaimed") is not False for c in cleanup), cleanup
+      print("GPU Smoke Assertions OK:", res["quality_state"], len(res["measurements"]))
+      ' "$RESULT_JSON" "$CLEANUP_JSON"

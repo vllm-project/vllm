@@ -1,0 +1,182 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Compile and verify `tools/byog/requirements.lock` from `requirements.d/*.txt`."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+BYOG_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BYOG_DIR.parent.parent
+REQ_DIR = BYOG_DIR / "requirements.d"
+LOCK_FILE = BYOG_DIR / "requirements.lock"
+INPUT_HASH_PREFIX = "# Input-SHA256: "
+
+
+def _normalize_pkg_name(name: str) -> str:
+    return name.strip().lower().replace("_", "-").replace(".", "-")
+
+
+def compute_inputs_hash(req_dir: Path = REQ_DIR) -> tuple[list[Path], str]:
+    files = sorted(req_dir.glob("*.txt"), key=lambda p: p.name)
+    h = hashlib.sha256()
+    for path in files:
+        h.update(path.name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    return files, h.hexdigest()
+
+
+def _parse_required_packages(req_files: list[Path]) -> set[str]:
+    required: set[str] = set()
+    for path in req_files:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or line.startswith("-"):
+                continue
+            # Extract distribution name before version/marker/extra operators.
+            name_chars: list[str] = []
+            for ch in line:
+                if ch in "<>=!~;[ ":
+                    break
+                name_chars.append(ch)
+            name = "".join(name_chars).strip()
+            if name:
+                required.add(_normalize_pkg_name(name))
+    return required
+
+
+def _parse_locked_packages(lock_text: str) -> dict[str, str]:
+    locked: dict[str, str] = {}
+    for raw_line in lock_text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        if "==" not in line:
+            continue
+        pkg, ver = line.split("==", 1)
+        ver = ver.split(";", 1)[0].strip().rstrip("\\").strip()
+        locked[_normalize_pkg_name(pkg)] = ver
+    return locked
+
+
+def check_lockfile(
+    req_dir: Path = REQ_DIR, lock_file: Path = LOCK_FILE
+) -> tuple[bool, str]:
+    """Offline deterministic freshness & completeness check for requirements.lock."""
+    if not lock_file.is_file():
+        return False, f"Lockfile missing: '{lock_file}'."
+
+    req_files, expected_hash = compute_inputs_hash(req_dir)
+    if not req_files:
+        return False, f"No requirements files found in '{req_dir}'."
+
+    lock_text = lock_file.read_text(encoding="utf-8")
+    recorded_hash: str | None = None
+    for line in lock_text.splitlines():
+        if line.startswith(INPUT_HASH_PREFIX):
+            recorded_hash = line[len(INPUT_HASH_PREFIX) :].strip()
+            break
+
+    if recorded_hash is None:
+        return False, (
+            f"Lockfile '{lock_file}' is missing '{INPUT_HASH_PREFIX}' header. "
+            "Run: python3 tools/byog/compile_requirements.py"
+        )
+    if recorded_hash != expected_hash:
+        return False, (
+            f"Lockfile '{lock_file}' is stale: inputs SHA256={expected_hash}, "
+            f"lockfile records {recorded_hash}. "
+            "Run: python3 tools/byog/compile_requirements.py"
+        )
+
+    required_pkgs = _parse_required_packages(req_files)
+    locked_pkgs = _parse_locked_packages(lock_text)
+    missing = sorted(required_pkgs - set(locked_pkgs))
+    if missing:
+        return False, (
+            f"Lockfile '{lock_file}' does not pin required package(s): "
+            f"{', '.join(missing)}."
+        )
+
+    return True, (
+        f"Lockfile OK: {len(locked_pkgs)} pinned packages "
+        f"(inputs={expected_hash[:12]})."
+    )
+
+
+def compile_lockfile(req_dir: Path = REQ_DIR, lock_file: Path = LOCK_FILE) -> None:
+    """Compile `requirements.d/*.txt` into `requirements.lock` via `uv pip compile`."""
+    uv_bin = shutil.which("uv")
+    if uv_bin is None:
+        raise RuntimeError(
+            "`uv` is required to regenerate tools/byog/requirements.lock."
+        )
+    req_files, inputs_hash = compute_inputs_hash(req_dir)
+    if not req_files:
+        raise RuntimeError(f"No requirement files found in '{req_dir}'.")
+
+    rel_inputs = [str(p.resolve().relative_to(REPO_ROOT.resolve())) for p in req_files]
+    cmd = [
+        uv_bin,
+        "pip",
+        "compile",
+        "--no-header",
+        "--no-annotate",
+        "--python-version",
+        "3.12",
+        "--python-platform",
+        "x86_64-unknown-linux-gnu",
+        *rel_inputs,
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"`uv pip compile` failed (exit {proc.returncode}):\n{proc.stderr}"
+        )
+
+    header = (
+        "# Auto-generated by tools/byog/compile_requirements.py (do not edit).\n"
+        f"{INPUT_HASH_PREFIX}{inputs_hash}\n"
+        "# Regenerate: python3 tools/byog/compile_requirements.py\n"
+    )
+    lock_file.write_text(header + proc.stdout, encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Compile or check tools/byog/requirements.lock."
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify offline that requirements.lock matches requirements.d/*.txt.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.check:
+        ok, msg = check_lockfile()
+        stream = sys.stdout if ok else sys.stderr
+        print(msg, file=stream)
+        return 0 if ok else 1
+
+    compile_lockfile()
+    ok, msg = check_lockfile()
+    print(msg)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
