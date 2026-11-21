@@ -164,7 +164,7 @@ Instead of expanding per-request sampling states to match per-logit shapes, MRV2
 
 ## 7. Modularity
 
-MRV2 emphasizes modularity. Compared to V1's large, entangled `gpu_model_runner.py`, MRV2 splits feature logic across dedicated files (for example, `mrope_utils.py`, `penalties.py`, and many others).
+MRV2 emphasizes modularity. Compared to V1's large, entangled `gpu_model_runner.py`, MRV2 splits feature logic across dedicated files (for example, `mm/rope.py`, `penalties.py`, and many others).
 
 It also consolidates model inputs into an `InputBatch` class and reduces direct model-runner attribute coupling.
 
