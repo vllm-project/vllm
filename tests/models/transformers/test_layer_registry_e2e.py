@@ -39,7 +39,14 @@ def tiny_llama_path(tmp_path_factory):
 
 # Registered names of the layers the backend can
 # currently route to hw-agnostic implementations.
-_COVERED_LAYERS = ("rms_norm", "silu_and_mul")
+_COVERED_LAYERS = (
+    "rms_norm",
+    "silu_and_mul",
+    # Also reported by the fused `QKVParallelLinear` and
+    # `MergedColumnParallelLinear`, which inherit the registered name.
+    "column_parallel_linear",
+    "row_parallel_linear",
+)
 
 
 def _layer_providers(model) -> dict[str, str]:
@@ -98,12 +105,11 @@ def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llam
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
     vllm_providers, vllm_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    # Both replaceable layers present in a Llama block must be vLLM's here.
-    assert vllm_providers == {"rms_norm": "vllm", "silu_and_mul": "vllm"}
+    assert vllm_providers == dict.fromkeys(_COVERED_LAYERS, "vllm")
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     hw_providers, hw_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    assert hw_providers == {"rms_norm": "hw_agnostic", "silu_and_mul": "hw_agnostic"}
+    assert hw_providers == dict.fromkeys(_COVERED_LAYERS, "hw_agnostic")
 
     check_logprobs_close(
         outputs_0_lst=vllm_outputs,
@@ -111,3 +117,22 @@ def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llam
         name_0="vllm",
         name_1="hw_agnostic",
     )
+
+
+def test_hw_agnostic_rejects_quantization(monkeypatch, vllm_runner, tiny_llama_path):
+    """The hw-agnostic linear layers are unquantized, so building the model fails
+    with a message naming the flag instead of a generic quant-method error."""
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    # In-process engine core, so the worker's error reaches the caller.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        pytest.raises(ValueError, match="not supported with VLLM_USE_HW_AGNOSTIC"),
+        vllm_runner(
+            tiny_llama_path,
+            model_impl="transformers",
+            quantization="fp8",
+            max_model_len=64,
+            enforce_eager=True,
+        ),
+    ):
+        pass

@@ -53,13 +53,11 @@ from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
     default_pooling_type,
 )
-from vllm.model_executor.models.transformers.utils import (
-    recursive_replace_linear,
-)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     maybe_prefix,
+    recursive_replace_linear,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (

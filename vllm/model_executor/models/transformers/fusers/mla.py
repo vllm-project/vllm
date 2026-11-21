@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, ClassVar
 from torch import fx, nn
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor import hw_agnostic
 from vllm.model_executor.models.transformers.fusers.base import StackedFuser
 from vllm.model_executor.models.transformers.fusers.rms_norm import RMSNormFuser
 from vllm.model_executor.models.transformers.fx_utils import (
@@ -268,6 +268,9 @@ class MLAFuser(StackedFuser):
             assert self.q_b_proj_name is not None
             q_a = module.get_submodule(q_a_proj_name)
             kv_a = module.get_submodule(self.kv_a_proj_name)
+            MergedColumnParallelLinear = hw_agnostic.resolve(
+                "linear", "MergedColumnParallelLinear"
+            )
             merged = MergedColumnParallelLinear(
                 input_size=q_a.in_features,
                 output_sizes=[q_a.out_features, kv_a.out_features],
