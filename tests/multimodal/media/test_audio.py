@@ -15,7 +15,9 @@ import vllm.envs as envs
 from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
+    NoAudioStreamError,
     load_audio,
+    load_audio_pyav,
     load_audio_soundfile,
     load_audio_torchcodec,
 )
@@ -425,6 +427,42 @@ def test_load_audio_auto_falls_back_when_libtorchcodec_unloadable(
         with pytest.raises(ImportError, match="torchcodec audio backend"):
             load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
         audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+
+@pytest.mark.parametrize("torchcodec_available", [True, False])
+def test_load_audio_auto_corrupt_input_is_not_a_missing_audio_stream(
+    torchcodec_available,
+):
+    """Undecodable bytes must fail as corrupt audio on the `auto` backend.
+
+    libsndfile does not recognise them either, which `load_audio_soundfile`
+    reports as `NoAudioStreamError`; callers treat that error as "valid media
+    without an audio track" and would silently drop the input.
+    """
+    corrupt = BytesIO(b"not a real audio file" * 64)
+    with pytest.raises(ValueError, match="Invalid or corrupted") as exc_info:
+        if torchcodec_available:
+            load_audio(corrupt, sr=None, backend="auto")
+        else:
+            with patch.object(
+                audio_module, "load_audio_torchcodec", side_effect=ImportError
+            ):
+                load_audio(corrupt, sr=None, backend="auto")
+    assert not isinstance(exc_info.value, NoAudioStreamError)
+
+
+def test_load_audio_auto_reaches_pyav_for_video_without_torchcodec(video_assets):
+    """Without torchcodec, `auto` must still decode a video's audio track.
+
+    libsndfile cannot read video containers, so the chain has to go on to PyAV
+    instead of reporting the video as having no audio stream.
+    """
+    video_path = video_assets[0].video_path
+    ref_audio, ref_sr = load_audio_pyav(video_path, sr=None)
+    with patch.object(audio_module, "load_audio_torchcodec", side_effect=ImportError):
+        audio, sr = load_audio(video_path, sr=None, backend="auto")
     assert sr == ref_sr
     np.testing.assert_array_equal(ref_audio, audio)
 

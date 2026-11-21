@@ -34,7 +34,7 @@ from vllm.logger import init_logger
 from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
 
-from .audio import AudioEmbeddingMediaIO, AudioMediaIO
+from .audio import AudioEmbeddingMediaIO, AudioMediaIO, VideoAudioMediaIO
 from .base import MediaDecodedBudget, MediaIO, MediaWithBytes
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoEmbeddingMediaIO, VideoMediaIO
@@ -494,31 +494,61 @@ class MediaConnector:
     def fetch_audio(
         self,
         audio_url: str,
+        *,
+        from_video: bool = False,
     ) -> tuple[np.ndarray, int | float]:
-        """Load audio from a URL."""
-        audio_io = AudioMediaIO(
+        """Load audio from a URL.
+
+        Args:
+            audio_url: The URL to load the audio from.
+            from_video: Whether the URL is a video whose audio track is
+                extracted. The video limits then apply instead of the audio
+                clip ones, so that only the video validation rejects it.
+
+        """
+        audio_io_cls = VideoAudioMediaIO if from_video else AudioMediaIO
+        audio_io = audio_io_cls(
             decoded_budget=self.decoded_budget, **self.media_io_kwargs.get("audio", {})
         )
 
         return self.load_from_url(
             audio_url,
             audio_io,
-            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            fetch_timeout=(
+                envs.VLLM_VIDEO_FETCH_TIMEOUT
+                if from_video
+                else envs.VLLM_AUDIO_FETCH_TIMEOUT
+            ),
         )
 
     async def fetch_audio_async(
         self,
         audio_url: str,
+        *,
+        from_video: bool = False,
     ) -> tuple[np.ndarray, int | float]:
-        """Asynchronously fetch audio from a URL."""
-        audio_io = AudioMediaIO(
+        """Asynchronously fetch audio from a URL.
+
+        Args:
+            audio_url: The URL to load the audio from.
+            from_video: Whether the URL is a video whose audio track is
+                extracted. The video limits then apply instead of the audio
+                clip ones, so that only the video validation rejects it.
+
+        """
+        audio_io_cls = VideoAudioMediaIO if from_video else AudioMediaIO
+        audio_io = audio_io_cls(
             decoded_budget=self.decoded_budget, **self.media_io_kwargs.get("audio", {})
         )
 
         return await self.load_from_url_async(
             audio_url,
             audio_io,
-            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            fetch_timeout=(
+                envs.VLLM_VIDEO_FETCH_TIMEOUT
+                if from_video
+                else envs.VLLM_AUDIO_FETCH_TIMEOUT
+            ),
         )
 
     def fetch_image(

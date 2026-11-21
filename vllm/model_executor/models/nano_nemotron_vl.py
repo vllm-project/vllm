@@ -24,6 +24,7 @@ from vllm.config.multimodal import (
     MultiModalDummyOptions,
     VideoDummyOptions,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
@@ -84,6 +85,10 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     cached_encode,
+)
+from vllm.multimodal.utils import (
+    VIDEO_AUDIO_UUID_PREFIX,
+    get_use_audio_in_video,
 )
 from vllm.multimodal.video_prune.evs import (
     compute_retained_tokens_count,
@@ -213,11 +218,12 @@ class NanoNemotronVLMultiModalInputs(TypedDict, total=False):
 
 class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> NanoNemotronVLProcessor:
-        # Not accepted by NanoNemotronVLProcessor.__init__
-        kwargs.pop("truncation", None)
+        # Audio extraction is handled by this model's processor wrapper.
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        for key in ("truncation", "load_audio_from_video", "use_audio_in_video"):
+            kwargs.pop(key, None)
 
-        return self.ctx.init_processor(
-            NanoNemotronVLProcessor,
+        return NanoNemotronVLProcessor(
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             video_token=self.get_video_token(),
@@ -713,12 +719,14 @@ class NanoNemotronVLMultiModalProcessor(
         merged_kwargs = mm_config.merge_mm_processor_kwargs(
             inputs.hf_processor_mm_kwargs
         )
-        use_audio_in_video = bool(merged_kwargs.get("use_audio_in_video", False))
+        # Resolve from the merged kwargs, honoring the HF `videos_kwargs` scope
+        # like the renderer's media loading does.
+        use_audio_in_video = get_use_audio_in_video(merged_kwargs)
 
         inputs.hf_processor_mm_kwargs = {
             k: v
             for k, v in inputs.hf_processor_mm_kwargs.items()
-            if k != "use_audio_in_video"
+            if k not in ("load_audio_from_video", "use_audio_in_video")
         }
 
         if not (use_audio_in_video and "video" in inputs.mm_data_items):
@@ -737,10 +745,67 @@ class NanoNemotronVLMultiModalProcessor(
                     f"num_videos={len(videos)}"
                 )
             audio_items = audios.get_all()
-            has_audio = [True] * len(videos)
+            audio_uuids = list((inputs.mm_uuid_items or {}).get("audio") or ())
+            # Pad so a request without UUIDs still yields one entry per audio.
+            audio_uuids += [None] * (len(audio_items) - len(audio_uuids))
+            # A `None` audio item is also a data-less reference to an audio
+            # item the client sent before; only the renderer's prefixed UUID
+            # marks a video without an audio track.
+            silent = [
+                audio is None
+                and (uuid is None or uuid.startswith(VIDEO_AUDIO_UUID_PREFIX))
+                for audio, uuid in zip(audio_items, audio_uuids, strict=True)
+            ]
+            data_less = [
+                audio is None and not is_silent
+                for audio, is_silent in zip(audio_items, silent, strict=True)
+            ]
+            if any(data_less):
+                # The audio data is not in the request and this path cannot
+                # read it back from the processor cache, which stores processed
+                # kwargs. Failing here beats silently dropping the track.
+                raise VLLMValidationError(
+                    "This request references an audio track by UUID without "
+                    "sending its data, and `use_audio_in_video` needs the audio "
+                    "data to interleave it with the video. Send the audio data "
+                    "again.",
+                    parameter="audio_url",
+                )
+            has_audio = [not is_silent for is_silent in silent]
+            if not all(has_audio):
+                # The renderer degrades a video without an audio track to a
+                # None audio entry, which cannot be passed to the HF processor
+                # as real audio. Drop those entries together with their UUIDs
+                # so each remaining audio item keeps its own UUID.
+                audio_items = [audio for audio in audio_items if audio is not None]
+                audio_data = [
+                    item for item, keep in zip(audios.data, has_audio) if keep
+                ]
+                items_dict = dict(mm_items)
+                mm_uuid_items = dict(inputs.mm_uuid_items or {})
+                if audio_data:
+                    items_dict["audio"] = AudioProcessorItems(audio_data)
+                else:
+                    del items_dict["audio"]
+                if "audio" in mm_uuid_items:
+                    audio_uuids = [
+                        uuid
+                        for uuid, keep in zip(
+                            mm_uuid_items["audio"], has_audio, strict=True
+                        )
+                        if keep
+                    ]
+                    if audio_uuids:
+                        mm_uuid_items["audio"] = audio_uuids
+                    else:
+                        del mm_uuid_items["audio"]
+                mm_items = MultiModalDataItems(items_dict)
+                inputs.mm_data_items = mm_items
+                inputs.mm_uuid_items = mm_uuid_items or None
             logger.info(
-                "Using %d pre-populated audio item(s) from upstream.",
+                "Using %d pre-populated audio item(s) from upstream, has_audio=%s.",
                 len(audio_items),
+                has_audio,
             )
         else:
             # Extract audio from video bytes (library usage path).

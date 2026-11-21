@@ -9,6 +9,7 @@ from .params import (
     apply_max_tokenize_tokens,
     map_reasoning_effort,
     merge_kwargs,
+    recursively_merge_kwargs,
     resolve_max_tokenize_tokens,
 )
 from .registry import RendererRegistry, renderer_from_config
@@ -21,6 +22,7 @@ __all__ = [
     "TokenizeParams",
     "resolve_max_tokenize_tokens",
     "merge_kwargs",
+    "recursively_merge_kwargs",
     "ReasoningEffort",
     "map_reasoning_effort",
     "apply_max_tokenize_tokens",
