@@ -64,13 +64,16 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
         and one mask query per draft token follows it. True is the anchor-first
         layout, where every query predicts the next token. Read from
         `dflash_config`, falling back to the top level of the HF config, where
-        some checkpoints set it as DSpark does.
+        some checkpoints set it as DSpark does. False without a draft model config.
 
         Raises:
             ValueError: If `dflash_config` and the top level set different values.
 
         """
-        hf_config = self.spec_config.draft_model_config.hf_config
+        draft_model_config = self.spec_config.draft_model_config
+        if draft_model_config is None:
+            return False
+        hf_config = draft_model_config.hf_config
         dflash_config = getattr(hf_config, "dflash_config", None) or {}
         nested = dflash_config.get("sample_from_anchor")
         top_level = getattr(hf_config, "sample_from_anchor", None)
