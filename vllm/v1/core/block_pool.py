@@ -30,6 +30,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_block_hashes,
     to_event_extra_keys,
 )
+from vllm.v1.core.prefix_cache_miss_attribution import RecentEvictions
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -171,6 +172,10 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+
+        # Optional bounded history of evicted block hashes. Installed by
+        # KVCacheManager only when miss attribution (#60044) is enabled.
+        self.recent_evictions: RecentEvictions | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -767,6 +772,9 @@ class BlockPool:
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
+
+        if self.recent_evictions is not None:
+            self.recent_evictions.add(evicted_hashes)
 
         self._emit_block_removed_events(evicted_hashes)
         return True
