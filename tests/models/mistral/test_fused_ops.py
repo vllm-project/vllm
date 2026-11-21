@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
     CompilationMode,
     VllmConfig,
@@ -30,6 +31,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (  # noqa: E402
 )
 
 if current_platform.is_rocm():
+    from vllm.models.mistral.amd.indexer import MistralIndexerCache  # noqa: E402
     from vllm.models.mistral.amd.ops.indexer import (  # noqa: E402
         fused_indexer_k_norm_rope,
         fused_indexer_k_norm_rope_cache_write,
@@ -351,6 +353,17 @@ def test_indexer_k_cache_write(
         cache = cache.contiguous()
 
     if current_platform.is_rocm():
+        # The model's indexer layer requests pages of this cache's geometry.
+        vllm_config = _eager_config()
+        with set_current_vllm_config(vllm_config):
+            k_cache = MistralIndexerCache(
+                head_dim=head_dim + 4,
+                dtype=torch.uint8,
+                prefix="indexer.k_cache",
+                cache_config=CacheConfig(block_size=block_size),
+            )
+        spec = k_cache.get_kv_cache_config(vllm_config).spec
+        assert spec.page_size_bytes == cache[0].numel() * cache.element_size()
         _check_indexer_cache_readers(cache, k[:num_slots], slot_mapping, block_size)
 
 

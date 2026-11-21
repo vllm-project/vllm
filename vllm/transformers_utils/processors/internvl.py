@@ -18,6 +18,7 @@ from transformers import (
     ImageProcessingMixin,
     TensorType,
 )
+from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
 
 from vllm.multimodal.image import convert_image_mode
@@ -302,6 +303,7 @@ class InternVLChatImageProcessor(ImageProcessingMixin):
         **kwargs,
     ) -> BatchFeature:
         images_lst = [images] if not isinstance(images, list) else images
+        images_lst = [to_pil_image(image) for image in images_lst]
 
         pixel_values_lst = self._images_to_pixel_values_lst(
             images_lst,

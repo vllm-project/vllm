@@ -497,7 +497,7 @@ mod tests {
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id)
+        resolve_request_context(headers, request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {
@@ -930,7 +930,7 @@ mod tests {
         }];
         request.add_generation_prompt = Some(false);
         request.continue_final_message = true;
-        request.skip_special_tokens = false;
+        request.skip_special_tokens = Some(false);
         request.chat_template_kwargs = Some(HashMap::from([("foo".to_string(), json!("bar"))]));
 
         let prepared = prepare_chat_request(
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(
             prepared.chat_request.decode_options,
             TextDecodeOptions {
-                skip_special_tokens: false,
+                skip_special_tokens: Some(false),
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
@@ -1036,7 +1036,7 @@ mod tests {
         assert_eq!(
             prepared.chat_request.decode_options,
             TextDecodeOptions {
-                skip_special_tokens: true,
+                skip_special_tokens: None,
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,

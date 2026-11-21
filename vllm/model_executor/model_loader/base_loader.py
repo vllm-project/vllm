@@ -13,8 +13,13 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload.direct import (
+    direct_reload_enabled,
+    track_loaded_params,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
+    log_layer_backends,
     process_weights_after_loading,
 )
 from vllm.platforms import current_platform
@@ -97,30 +102,38 @@ class BaseModelLoader(ABC):
                     time_after_load - time_before_load,
                 )
 
-            logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            try:
+                logger.debug("Loading weights on %s ...", load_device)
+                if direct_reload_enabled():
+                    track_loaded_params(model)  # what every update must load again
+                self.load_weights(model, model_config)
 
-            # Release transient tensors held by PyTorch's caching allocator
-            # before weight post-processing and raw CUDA driver allocations.
-            gc.collect()
-            torch.accelerator.empty_cache()
+                # Release transient tensors held by PyTorch's caching allocator
+                # before weight post-processing and raw CUDA driver allocations.
+                gc.collect()
+                torch.accelerator.empty_cache()
 
-            # Log peak GPU memory after loading weights. This is needed
-            # to have test coverage on peak memory for online quantization.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                peak_memory = torch.accelerator.max_memory_allocated()
-                logger.debug_once(
-                    "Peak GPU memory after loading weights: %s GiB",
-                    format_gib(peak_memory),
-                )
+                # Log peak GPU memory after loading weights. This is needed
+                # to have test coverage on peak memory for online quantization.
+                if current_platform.is_cuda_alike() or current_platform.is_xpu():
+                    peak_memory = torch.accelerator.max_memory_allocated()
+                    logger.debug_once(
+                        "Peak GPU memory after loading weights: %s GiB",
+                        format_gib(peak_memory),
+                    )
 
-            # Process weights into kernel format. Note that when using online
-            # quantization, weights are (typically) quantized as they are loaded.
-            if _has_online_quant(model):
-                finalize_layerwise_processing(model, model_config)
+                # Process weights into kernel format. Note that when using online
+                # quantization, weights are (typically) quantized as they are loaded.
+                if _has_online_quant(model):
+                    finalize_layerwise_processing(model, model_config)
 
-            process_weights_after_loading(model, model_config, target_device)
-            log_online_quantization_time(vllm_config)
+                process_weights_after_loading(model, model_config, target_device)
+                log_online_quantization_time(vllm_config)
+            except Exception:
+                # The model runner logs the backends of a loaded model. A
+                # failed load never reaches it, but its selections were made.
+                log_layer_backends(model, model_config, load_failed=True)
+                raise
 
             gc.collect()
             torch.accelerator.empty_cache()
