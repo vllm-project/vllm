@@ -83,6 +83,18 @@ The `apply` method is where the implementations perform
 
 The core fused MoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes, the workspace datatype and the fused MoE output shape as outputs of the workspace_shapes() method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEModularKernel::forward()` and passed on to the `FusedMoEExpertsModular::apply()` method. The workspaces could then be used as intermediate buffers in the fused MoE implementation.
 
+#### Indexed Humming routing
+
+Humming can select different row block sizes for its two expert projections.
+`moe_align_block_size_pair` prepares both routing layouts from the same top-k
+indices and expert map. On Hopper, batches of at most 64 routed rows with block
+sizes up to 256 use a single Triton launch. Other shapes and architectures use
+the existing alignment operator; equal block sizes share one alignment.
+This selection is independent of model dimensions and quantization format and
+requires no additional configuration. It does not change weight padding or GEMM
+tuning. DeepEP deferred globalization and scatter metadata retain their existing
+paths.
+
 #### finalize_weight_and_reduce_impl()
 
 It is sometimes efficient to perform TopK weight application and Reduction inside the `FusedMoEExpertsModular::apply()`. Find an example [here](https://github.com/vllm-project/vllm/pull/20228). We have a `TopKWeightAndReduce` abstract class to facilitate such implementations. Please refer to the TopKWeightAndReduce section.
