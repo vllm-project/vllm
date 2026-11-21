@@ -26,6 +26,7 @@ meta:
     mi350x: verified
     mi355x: verified
     dgx_station_gb300: verified
+    dgx_spark_gb10: verified
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -1927,10 +1928,97 @@ presets:
       runs use DSpark's synthetic golden acceptance length (3.51); the preset
       keeps real block rejection for ordinary serving and accuracy evaluation.
 
+  dgx_spark_tp3:
+    label: "3x Spark TP3 (serving)"
+    hardware: dgx_spark_gb10
+    strategy: multi_node_tp
+    variants: [default]
+    workload: "Assistant serving and long-context RAG (1M context)"
+    description: "TP3 across three GB10 unified-memory nodes (one GPU each) on a 200G CX-7 RoCE triangle. Runs the pinned b12x fork image - mainline vLLM is load-blocked on GB10 for this model; the fork carries the loader, the kernels and runtime TP3 head padding. Serving-first: a 4.8 GB KV reservation (~4.85M-token pool, ~4.6x at 1M context) with DSpark k=5 speculative decode (~2x the no-spec lane single-stream), one serialized prefill plus an interactive-admission threshold (a chat arriving beside any deep prefill gets its first token in ~1 s), and the host-side engram hash kit from the source repo. A capacity-first 5.5 GB no-spec profile ships in the source repo as the documented alternative for deep-concurrent RAG."
+    source: { label: "DeepSeek-V4.1-Flash-TP3-3x-DGX-Spark", href: "https://github.com/PrblyElect/DeepSeek-V4.1-Flash-TP3-3x-DGX-Spark", key: "dsv41flash-gb10-spark-tp3", revision: e5c3351 }
+    image: "eugr/spark-vllm-b12x:nightly-20261015@sha256:03a956544e9f9b4b7ba91690469fbe7848bdbef29a7d2e0f5788368467bb3595"
+    select:
+      nodes: 3
+    args:
+      - "--max-model-len"
+      - "1048576"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--kv-cache-memory-bytes"
+      - "4.8g"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--block-size"
+      - "256"
+      - "--max-parallel-prefills"
+      - "1"
+      - "--prefill-policy"
+      - "decode-aware"
+      - "--prefill-compute-share"
+      - "0.2"
+      - "--max-num-prefill-tokens-per-step"
+      - "2048"
+      - "--long-prefill-token-threshold"
+      - "1024"
+      - "--engram-config"
+      - '{"cpu_offload":false,"table_memory":"disk"}'
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":5,"draft_tensor_parallel_size":3,"draft_sample_method":"greedy","rejection_sample_method":"block"}'
+    env:
+      NCCL_BUFFSIZE: "1048576"
+      NCCL_LL128_BUFFSIZE: "262144"
+      NCCL_PROTO: "^LL128"
+      NCCL_MAX_NCHANNELS: "8"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,garbage_collection_threshold:0.6"
+      DS41_ENGRAM_HOST_HASH: "1"
+    points:
+      tp3_c1:
+        label: "1"
+        concurrency: 1
+        default: true
+        description: "~74 tok/s single-stream with speculative decode (~2x the no-spec lane); ~1 s first token beside any deep prefill."
+      tp3_c4:
+        label: "4"
+        concurrency: 4
+        description: "~160 tok/s aggregate."
+      tp3_c8:
+        label: "8"
+        concurrency: 8
+        description: "~225 tok/s aggregate (the max-num-seqs cap); per-stream thinning, zero preemptions."
+    runbook: |
+      Three DGX Sparks (GB10, 128 GiB unified memory each) wired as a full
+      CX-7 RoCE triangle - three cables, one /24 per pair, MTU 9000 - plus a
+      management LAN. Set `NCCL_IB_HCA` (the RoCE pair, from `ibdev2netdev`)
+      and `NCCL_SOCKET_IFNAME` (the management interface) on every boot.
+
+      Measured at this posture (idle lane, counting-task prompts): 1
+      stream ~74 tok/s (~2x the no-spec lane); aggregate ~160 at 4, ~225 at
+      8 streams; a short request decoding beside a ~350K-token prefill runs
+      ~30-40 tok/s with the decode share (worst gap under a second), and a
+      chat arriving beside any deep prefill gets its first token in ~1 s.
+      The ~4.85M-token pool covers ~4.6 concurrent 1M requests; the
+      whole-pool fill is certified clean (~3.4K tok/s aggregate on deep
+      fills, free-memory trough ~2 GB above the conservative floor).
+
+      Speculative decode is the default: at this 4.8 GB reservation it
+      survives the deep-prefill transient (it did not at capacity-size
+      pools - the capacity-first profile in the source repo runs without
+      it). The host-side engram hash kit (patches/ in the source repo)
+      cuts the per-step host sync; stage the kit before boot and keep
+      DS41_ENGRAM_HOST_HASH=1. The aggregate sweep is not monotone below 4
+      streams - the 2-stream point dips under 1-stream. Bring-up,
+      acceptance gates and the failure ledger ship in the source repo.
+
 hardware_notes:
   dgx_station_gb300:
     title: "Weights in Grace memory (UVA offload)"
     body: "Single GB300 with both Engram tables and 60 GiB of routed experts in pinned Grace memory (UVA offload). Measured on a nightly image; vLLM 0.31.0 carries every flag this row uses. The first boot on a new flag set runs a 75-90 min FlashInfer autotune; keep /root/.cache/vllm on a persistent volume."
+
+  dgx_spark_gb10:
+    title: "GB10 unified memory (3x DGX Spark)"
+    body: "Three single-GPU GB10 nodes at TP3 need the pinned b12x fork image: mainline vLLM is load-blocked on GB10 for this model, and the fork carries the DeepseekV41 loader, the b12x kernels and runtime TP3 head padding. Unified memory makes host RAM part of the serving budget: the default NCCL buffer sizing pins ~4.7 GiB of unreclaimable host RAM per node (the caps in the preset cut it to ~139 MiB), the engram tables stay disk-resident, and ~2 GiB of headroom per box absorbs the deep-prefill transient. Speculative decode at a capacity-size KV pool does not survive that transient; at the preset's 4.8 GB serving reservation it does - that boundary is the split between the source repo's two profiles."
 
 guide: |
   ## Overview
