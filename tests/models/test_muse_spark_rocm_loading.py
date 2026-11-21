@@ -368,7 +368,7 @@ def test_pooler_gemm_dispatch_follows_the_cdna_version(
     monkeypatch.setitem(
         sys.modules,
         "vllm.platforms.rocm",
-        SimpleNamespace(get_cdna_version=lambda: cdna),
+        SimpleNamespace(get_cdna_version=lambda: cdna, on_gfx1250=lambda: False),
     )
     layer = amd_model._pooling_projection(16, 8, "pooler")
     expected = (

@@ -590,8 +590,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pre-install shared ROCm runtime dependencies.
 COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
-    && rm -rf /tmp/ci-base-requirements
+    python3 -m pip list --format=freeze \
+        | grep -E '^(torch|torchvision|torchaudio|triton|amd-torch-device-gfx1250|amd-torchvision-device-gfx1250)==' \
+        > /tmp/torch-pins.txt \
+    && uv pip install --system -c /tmp/torch-pins.txt -r /tmp/ci-base-requirements/rocm.txt \
+    && rm -rf /tmp/ci-base-requirements /tmp/torch-pins.txt
 
 # Enable fast and less brittle model downloads in tests.
 ENV HF_XET_HIGH_PERFORMANCE=1
@@ -736,7 +739,7 @@ RUN curl -k -O https://raw.githubusercontent.com/ROCm/vllm/refs/heads/gfx1250_be
 RUN pip3 uninstall -y triton && \
     git clone https://github.com/triton-lang/triton.git && \
     cd triton && \
-    git checkout aedd1f6 && \
+    git checkout 12225a8 && \
     TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
 
 CMD ["/bin/bash"]

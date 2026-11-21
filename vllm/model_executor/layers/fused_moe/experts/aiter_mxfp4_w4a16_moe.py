@@ -140,7 +140,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-        should_use_cdna4_mx_scale_swizzle,
+        get_aiter_mx_scale_swizzle,
     )
     from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
@@ -270,10 +270,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
     # SILU: silu(gate) * up — same kernel, just no "+1" residual in swiglu.
     swiglu_add_residual = activation != MoEActivation.SILU
 
-    # Weight loading already swizzled the block scales on gfx950, so the kernel
-    # has to be told; the load-time swizzle and this gate must agree or the
-    # kernel indexes a swizzled buffer as if it were linear.
-    swz = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    swz = get_aiter_mx_scale_swizzle()
 
     # AITER's gfx950 Gluon a16w4 kernel (default backend="None"/auto-detect
     # picks it) calls a Triton-Gluon AMD API that isn't available in vLLM's
