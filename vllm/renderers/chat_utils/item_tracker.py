@@ -268,11 +268,25 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @property
     def media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
-        return self._media_io_kwargs or (
+        kwargs = self._media_io_kwargs or (
             self._model_config.multimodal_config.media_io_kwargs
             if self._model_config.multimodal_config
             else None
         )
+        # The HF video processor's frame caps apply unless --media-io-kwargs
+        # or the request overrides them.
+        video_defaults = self._video_sampling_defaults
+        if not video_defaults:
+            return kwargs
+        kwargs = dict(kwargs or {})
+        kwargs["video"] = {**video_defaults, **kwargs.get("video", {})}
+        return kwargs
+
+    @cached_property
+    def _video_sampling_defaults(self) -> dict[str, Any]:
+        if not self._model_config.is_multimodal_model:
+            return {}
+        return self.mm_processor.info.get_video_frame_limits()
 
     @property
     def allowed_local_media_path(self):

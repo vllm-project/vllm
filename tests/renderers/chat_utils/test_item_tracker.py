@@ -8,6 +8,24 @@ import pytest
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 
 
+def test_media_io_kwargs_default_to_video_processor_frame_caps(monkeypatch):
+    mm_processor = MagicMock()
+    mm_processor.info.get_video_frame_limits.return_value = {
+        "max_frames": 384,
+        "min_frames": 4,
+    }
+    monkeypatch.setattr(
+        AsyncMultiModalItemTracker, "mm_processor", property(lambda self: mm_processor)
+    )
+    tracker = AsyncMultiModalItemTracker(
+        MagicMock(), media_io_kwargs={"video": {"max_frames": 16, "fps": 1}}
+    )
+
+    assert tracker.media_io_kwargs == {
+        "video": {"max_frames": 16, "min_frames": 4, "fps": 1}
+    }
+
+
 @pytest.mark.asyncio
 async def test_resolve_items_runs_modalities_concurrently_and_preserves_order():
     """Media fetches overlap while modality and item order are preserved."""
