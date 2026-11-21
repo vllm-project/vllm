@@ -2560,13 +2560,25 @@ class EngineCoreProc(EngineCore):
 
     def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler
-        if aborted_reqs:
-            # Map client_index to list of request_ids that belong to that client.
-            by_client = defaultdict[int, set[str]](set)
-            for request in aborted_reqs:
-                by_client[request.client_index].add(request.request_id)
-            for client_index, req_ids in by_client.items():
-                self._send_abort_outputs_to_client(list(req_ids), client_index)
+        connector = getattr(self.scheduler, "aux_output_connector", None)
+        by_client = defaultdict[int, list[EngineCoreOutput]](list)
+        for request in aborted_reqs:
+            by_client[request.client_index].append(
+                EngineCoreOutput(
+                    request.request_id,
+                    [],
+                    finish_reason=FinishReason.ABORT,
+                    aux_objects=(
+                        connector.pop_aux_objects(request.request_id)
+                        if connector is not None
+                        else None
+                    ),
+                )
+            )
+        for client_index, outputs in by_client.items():
+            finished = [output.request_id for output in outputs]
+            eco = EngineCoreOutputs(finished_requests=finished, outputs=outputs)
+            self.output_queue.put_nowait((client_index, eco))
 
 
 class DPEngineCoreProc(EngineCoreProc):

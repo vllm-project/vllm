@@ -3876,6 +3876,17 @@ class Scheduler(SchedulerInterface):
         if sync_blocks_to_evict and not self.recompute_kv_load_failures:
             self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
 
+        if self.aux_output_connector is not None:
+            rewound = self.aux_output_connector.invalidate_kv(
+                (self.requests[req_id] for req_id in sync_failed_req_ids),
+                invalid_block_ids,
+            )
+            if not should_fail:
+                self.running = remove_all(self.running, set(rewound))
+                timestamp = time.monotonic()
+                for request in rewound:
+                    self._preempt_request(request, timestamp, drop_stale_output=True)
+
         if should_fail:
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
             logger.error(

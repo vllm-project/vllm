@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import TYPE_CHECKING, Any
@@ -138,6 +138,9 @@ class _NamespaceRequest:
     listing: list[AuxObject] = field(default_factory=list)
     written: int = 0
     running: bool = False
+    in_worker: bool = False
+    preempted: int | None = None
+    valid: int | None = None
 
 
 class AuxOutputSchedulerConnector:
@@ -154,6 +157,7 @@ class AuxOutputSchedulerConnector:
         # Terminal events are delivered with the next connector metadata.
         self._finished_requests: dict[str, PackedBlockHashes | None] = {}
         self._generation = 0
+        self._kv_cache_manager = kv_cache_manager
         coordinator = kv_cache_manager.coordinator
         self._group_id = getattr(coordinator, "full_attention_group_id", None) or 0
         self._block_pool = kv_cache_manager.block_pool
@@ -262,16 +266,26 @@ class AuxOutputSchedulerConnector:
 
     def _run_namespace(self, request: Request, namespace: str) -> None:
         """Start a run of a namespace request that is scheduled: the worker
-        keeps the rows it computes from here on."""
+        keeps the rows it computes from here on. A preempted run ends first,
+        and its objects are written from the rows its worker kept."""
         state = self._namespaces.get(request.request_id)
         if state is None:
             state = _NamespaceRequest(request, namespace, self._emit_start(request))
             self._namespaces[request.request_id] = state
         if state.running:
             return
-        state.running = True
+        self._end_preempted(state)
+        state.running = state.in_worker = True
         state.written = request.num_computed_tokens
         self._runs.append(request.request_id)
+
+    def _end_preempted(self, state: _NamespaceRequest) -> None:
+        """End the run of a preempted namespace request at the positions it
+        computed before the last token it holds: its stale output has been
+        delivered or dropped by now, and a dropped step computed no position
+        before that token but prompt positions."""
+        if state.preempted is not None:
+            self._end_run(state, state.preempted, state.preempted)
 
     def _object_key(self, state: _NamespaceRequest, start: int) -> str:
         block_hash = state.request.block_hashes[
@@ -284,6 +298,8 @@ class AuxOutputSchedulerConnector:
         and before the last token: the row of that token's position is the
         one the next token is sampled from, and another run may sample it."""
         end = min(limit, state.request.num_tokens - 1)
+        if state.valid is not None:
+            end = min(end, state.valid)
         end -= end % self._block_size
         writes = [
             (self._object_key(state, start), start, start + self._block_size)
@@ -299,6 +315,8 @@ class AuxOutputSchedulerConnector:
         tail object for the positions after the last full block."""
         request = state.request
         end = min(end, request.num_tokens - 1)
+        if state.valid is not None:
+            end = min(end, state.valid)
         self._write_blocks(state, limit)
         listing = state.listing
         covered = listing[-1][2] if listing else state.prompt_start
@@ -314,6 +332,7 @@ class AuxOutputSchedulerConnector:
             listing.append((key, boundary, end))
             self._writes.setdefault(request.request_id, []).append((key, boundary, end))
         state.running = False
+        state.preempted = state.valid = None
 
     def pop_aux_objects(self, request_id: str) -> list[AuxObject] | None:
         """The listing of a namespace request that finished since the last
@@ -477,15 +496,53 @@ class AuxOutputSchedulerConnector:
         self._release_unheld()
 
     def _finish_namespace(self, request: Request) -> None:
-        """End the run of a finished namespace request and keep its listing
-        for its final output: the positions whose tokens it returned."""
-        state = self._namespaces.pop(request.request_id, None)
+        """Record where a preempted namespace request stopped computing; its
+        run ends when it is scheduled again, once its stale output is
+        delivered or dropped. End the run of a finished one and keep its
+        listing for its final output: the positions whose tokens it returned.
+        """
+        state = self._namespaces.get(request.request_id)
         if state is None:
             return
         num_computed = request.num_computed_tokens
-        self._end_run(state, num_computed - request.num_in_flight_tokens, num_computed)
+        if not request.is_finished():
+            state.running = False
+            state.preempted = num_computed
+            return
+        del self._namespaces[request.request_id]
+        if state.running:
+            self._end_run(
+                state, num_computed - request.num_in_flight_tokens, num_computed
+            )
+        self._end_preempted(state)
         self._listings[request.request_id] = state.listing
-        self._finished_requests[request.request_id] = None
+        if state.in_worker:
+            self._finished_requests[request.request_id] = None
+
+    def invalidate_kv(
+        self, requests: Iterable[Request], invalid_block_ids: set[int]
+    ) -> list[Request]:
+        """Evict the blocks of the requests with rows a failed synchronous KV
+        load affected from their first invalid block on, and keep the objects
+        of a namespace request among them to the positions before it. Return
+        those requests: they must compute again from there in a new run, as
+        their rows only move forward and the store keeps the first copy."""
+        affected = []
+        for request in requests:
+            params = request.sampling_params
+            if params is not None and not params.return_aux_outputs:
+                continue
+            (block_ids,) = self._kv_cache_manager.get_block_ids(request.request_id)
+            first = next(
+                index
+                for index, block_id in enumerate(block_ids)
+                if block_id in invalid_block_ids
+            )
+            self._kv_cache_manager.evict_blocks(set(block_ids[first:]))
+            if (state := self._namespaces.get(request.request_id)) is not None:
+                state.valid = first * self._block_size
+            affected.append(request)
+        return affected
 
     def _skips(self, request: Request) -> bool:
         """Whether the request has no rows here: it skips its auxiliary
@@ -514,7 +571,14 @@ class AuxOutputSchedulerConnector:
         return self._pack_hashes(block_hashes[num_sent:num_keyed])
 
     def reset(self) -> None:
-        """Start a new auxiliary output namespace after a prefix-cache reset."""
+        """Start a new auxiliary output namespace after a prefix-cache reset.
+
+        The worker drops its runs, so the runs of preempted namespace requests
+        end now; their listings are kept.
+        """
+        for state in self._namespaces.values():
+            self._end_preempted(state)
+            state.in_worker = False
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
         self._computed_from.clear()
