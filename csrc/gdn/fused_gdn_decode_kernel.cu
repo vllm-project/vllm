@@ -67,6 +67,14 @@ load_state4<__nv_bfloat16>(const __nv_bfloat16* state) {
                      __bfloat162float(hi.x), __bfloat162float(hi.y));
 }
 
+template <>
+__device__ __forceinline__ float4 load_state4<__half>(const __half* state) {
+  const __half2 lo = *reinterpret_cast<const __half2*>(state);
+  const __half2 hi = *reinterpret_cast<const __half2*>(state + 2);
+  return make_float4(__half2float(lo.x), __half2float(lo.y), __half2float(hi.x),
+                     __half2float(hi.y));
+}
+
 template <typename StateT>
 __device__ __forceinline__ void store_state4(StateT* state, float4 value);
 
@@ -83,6 +91,13 @@ __device__ __forceinline__ void store_state4<__nv_bfloat16>(
       __floats2bfloat162_rn(value.x, value.y);
   *reinterpret_cast<__nv_bfloat162*>(state + 2) =
       __floats2bfloat162_rn(value.z, value.w);
+}
+
+template <>
+__device__ __forceinline__ void store_state4<__half>(__half* state,
+                                                     float4 value) {
+  *reinterpret_cast<__half2*>(state) = __floats2half2_rn(value.x, value.y);
+  *reinterpret_cast<__half2*>(state + 2) = __floats2half2_rn(value.z, value.w);
 }
 
 constexpr int kDimK = 128;
@@ -548,8 +563,9 @@ void fused_gdn_decode_post_conv_mtp(
   const auto state_scalar_type = state.scalar_type();
   STD_TORCH_CHECK(
       state.is_cuda() && (state_scalar_type == ScalarType::Float ||
-                          state_scalar_type == ScalarType::BFloat16),
-      "state must be a CUDA float32 or bfloat16 tensor");
+                          state_scalar_type == ScalarType::BFloat16 ||
+                          state_scalar_type == ScalarType::Half),
+      "state must be a CUDA float32, bfloat16, or float16 tensor");
   STD_TORCH_CHECK(output_gate.is_cuda() &&
                       output_gate.scalar_type() == ScalarType::BFloat16,
                   "output_gate must be a CUDA bfloat16 tensor");
@@ -657,6 +673,12 @@ void fused_gdn_decode_post_conv_mtp(
         launch.template operator()<float, ValueHeadsPerKeyHead, true>();
       } else {
         launch.template operator()<float, ValueHeadsPerKeyHead, false>();
+      }
+    } else if (state_scalar_type == ScalarType::Half) {
+      if (output_gate_activation == "sigmoid") {
+        launch.template operator()<__half, ValueHeadsPerKeyHead, true>();
+      } else {
+        launch.template operator()<__half, ValueHeadsPerKeyHead, false>();
       }
     } else {
       if (output_gate_activation == "sigmoid") {
