@@ -521,6 +521,38 @@ def _aux_outputs_params(
     return SamplingParams(max_tokens=max_tokens, return_aux_outputs=return_aux_outputs)
 
 
+@pytest.mark.parametrize("return_aux_outputs", [True, False])
+def test_aux_outputs_flag_is_fixed_for_a_session(return_aux_outputs):
+    scheduler = create_scheduler()
+
+    def chunk(flag: bool) -> Request:
+        (request,) = create_requests(
+            num_requests=1,
+            num_tokens=8,
+            req_ids=["session"],
+            sampling_params=SamplingParams(
+                max_tokens=1, logprobs=2, return_aux_outputs=flag
+            ),
+        )
+        request.resumable = True
+        return request
+
+    session = chunk(return_aux_outputs)
+    scheduler.add_request(session)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=["session"], sampled_token_ids=[[0]]),
+    )
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    update = chunk(not return_aux_outputs)
+    scheduler.add_request(update)
+    assert session.status == RequestStatus.WAITING
+    assert session.sampling_params.return_aux_outputs == return_aux_outputs
+    assert update.sampling_params.return_aux_outputs != return_aux_outputs
+    assert session.sampling_params.logprobs is None
+
+
 def test_aux_outputs_opt_out_is_not_recorded():
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)
@@ -561,38 +593,28 @@ def test_aux_outputs_opt_out_is_not_recorded():
     assert metadata.finished_requests == ("recorded",)
 
 
-def _routed_experts_config(enabled: bool) -> SimpleNamespace:
-    return SimpleNamespace(
-        aux_output_config=SimpleNamespace(enable_return_routed_experts=enabled)
-    )
+@pytest.mark.parametrize("salt", [None, "user"])
+@pytest.mark.parametrize("pooling", [True, False], ids=["pooling", "records"])
+def test_aux_output_cache_salt_keeps_recording_salt(salt, pooling):
+    params = None if pooling else _aux_outputs_params(True)
+    assert aux_output_cache_salt(salt, params) == salt
 
 
-@pytest.mark.parametrize(
-    "return_aux_outputs,recording,salted",
-    [(True, True, False), (False, True, True), (False, False, False)],
-    ids=["records", "skips", "skips-without-recording"],
-)
-def test_aux_output_cache_salt(return_aux_outputs, recording, salted):
-    params = _aux_outputs_params(return_aux_outputs)
-    config = _routed_experts_config(recording)
-    for salt in (None, "user"):
-        got = aux_output_cache_salt(salt, params, config)
-        assert (got != salt) == salted
-        assert aux_output_cache_salt(salt, None, config) == salt
-
-
-@pytest.mark.parametrize("skipped_salt", [None, "user"])
-def test_aux_output_cache_salt_cannot_be_forged(skipped_salt):
-    config = _routed_experts_config(True)
-    skipped = aux_output_cache_salt(skipped_salt, _aux_outputs_params(False), config)
-    forged = aux_output_cache_salt(skipped, _aux_outputs_params(True), config)
-    assert forged != skipped
+def test_aux_output_cache_salt_is_injective():
+    salts = [None, "", "user", "other"]
+    salts += [aux_output_cache_salt(s, _aux_outputs_params(False)) for s in salts]
+    salts.append("vllm-aux:user")
+    outputs = [
+        aux_output_cache_salt(s, _aux_outputs_params(flag))
+        for s in salts
+        for flag in (True, False)
+    ]
+    assert len(set(outputs)) == len(outputs)
 
 
 def test_aux_outputs_opt_out_prefix_cache_is_separate():
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)
-    config = _routed_experts_config(True)
 
     def run(request_id: str, return_aux_outputs: bool) -> int:
         params = _aux_outputs_params(return_aux_outputs, max_tokens=1)
@@ -601,7 +623,7 @@ def test_aux_outputs_opt_out_prefix_cache_is_separate():
             num_tokens=48,
             req_ids=[request_id],
             sampling_params=params,
-            cache_salt=aux_output_cache_salt(None, params, config),
+            cache_salt=aux_output_cache_salt(None, params),
         )
         scheduler.add_request(request)
         scheduler_output = scheduler.schedule()

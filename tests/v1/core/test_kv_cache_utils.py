@@ -1209,17 +1209,24 @@ def test_frontend_block_hashes_count_check():
 
 
 @pytest.mark.parametrize(
-    "return_aux_outputs,cache_salt,engine_hashed",
+    "recording,return_aux_outputs,cache_salt,engine_hashed",
     [
-        (True, None, False),
-        (True, "user", False),
-        (False, None, True),
-        (True, "vllm-aux:user", True),
+        (True, True, None, False),
+        (True, True, "user", False),
+        (True, False, None, True),
+        (True, True, "vllm-aux:user", True),
+        (False, False, None, False),
     ],
-    ids=["records", "records-salted", "skips", "records-reserved-salt"],
+    ids=[
+        "records",
+        "records-salted",
+        "skips",
+        "records-reserved-salt",
+        "skips-without-recording",
+    ],
 )
 def test_aux_output_salt_ignores_frontend_block_hashes(
-    return_aux_outputs, cache_salt, engine_hashed
+    recording, return_aux_outputs, cache_salt, engine_hashed
 ):
     from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
     from vllm.v1.engine.core import EngineCore
@@ -1246,7 +1253,7 @@ def test_aux_output_salt_ignores_frontend_block_hashes(
     engine = SimpleNamespace(
         mm_receiver_cache=None,
         vllm_config=SimpleNamespace(
-            aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
+            aux_output_config=SimpleNamespace(enabled=recording),
             watermark_config=None,
         ),
         prefix_hash_config=PrefixHashConfig(

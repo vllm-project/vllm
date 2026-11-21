@@ -58,20 +58,13 @@ _AUX_SALT_PREFIX = "vllm-aux:"
 
 
 def aux_output_cache_salt(
-    cache_salt: str | None,
-    sampling_params: SamplingParams | None,
-    vllm_config: VllmConfig,
+    cache_salt: str | None, sampling_params: SamplingParams | None
 ) -> str | None:
     """Salt a request by the auxiliary outputs its KV blocks carry. A request
-    that skips them on a server recording routed experts has blocks without
-    recorded routing, so it gets a salt in the reserved form, which no other
-    request can produce."""
+    that skips them has blocks without recorded routing, so it gets a salt in
+    the reserved form, which no other request can produce."""
     salt: dict[str, Any] = {}
-    if (
-        sampling_params is not None
-        and not sampling_params.return_aux_outputs
-        and vllm_config.aux_output_config.enable_return_routed_experts
-    ):
+    if sampling_params is not None and not sampling_params.return_aux_outputs:
         salt["aux_outputs"] = False
     if not salt and not (cache_salt or "").startswith(_AUX_SALT_PREFIX):
         return cache_salt
@@ -79,13 +72,11 @@ def aux_output_cache_salt(
     return _AUX_SALT_PREFIX + json.dumps(salt, sort_keys=True)
 
 
-def salt_aux_outputs(request: EngineCoreRequest, vllm_config: VllmConfig) -> None:
-    """Apply aux_output_cache_salt to a request entering the engine. Frontend
-    prompt hashes do not include a changed salt, so they are dropped and the
-    engine hashes the prompt."""
-    cache_salt = aux_output_cache_salt(
-        request.cache_salt, request.sampling_params, vllm_config
-    )
+def salt_aux_outputs(request: EngineCoreRequest) -> None:
+    """Apply aux_output_cache_salt to a request entering an engine that records
+    auxiliary outputs. Frontend prompt hashes do not include a changed salt, so
+    they are dropped and the engine hashes the prompt."""
+    cache_salt = aux_output_cache_salt(request.cache_salt, request.sampling_params)
     if cache_salt != request.cache_salt:
         request.cache_salt = cache_salt
         request.block_hashes = None

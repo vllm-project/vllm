@@ -12,7 +12,7 @@ from vllm.engine.protocol import StreamingInput
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import STREAM_FINISHED, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.async_llm import AsyncLLM, InputStreamError
 from vllm.v1.engine.output_processor import RequestOutputCollector
 
 
@@ -280,3 +280,44 @@ async def test_handle_inputs_stops_after_session_finished(
     sent = [call.args[0] for call in llm._add_request.await_args_list]
     # Both chunks then the final request, or only the first chunk.
     assert sent == ([reqs[1], reqs[2], reqs[0]] if session_live else [reqs[1]])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chunk_flags,num_sent",
+    [
+        ((False, False), 2),
+        ((None, False), 1),
+        ((False, None), 1),
+        ((False, True), 1),
+    ],
+    ids=["opt-out-throughout", "default-then-opt-out", "opt-out-then-default", "flip"],
+)
+async def test_input_stream_keeps_first_chunk_return_aux_outputs(
+    chunk_flags: tuple[bool | None, ...],
+    num_sent: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    llm, reqs = _make_streaming_llm(monkeypatch, num_chunks=len(chunk_flags))
+
+    async def chunks():
+        for i, flag in enumerate(chunk_flags):
+            yield StreamingInput(
+                prompt=f"frame-{i}",
+                sampling_params=None
+                if flag is None
+                else SamplingParams(max_tokens=4, return_aux_outputs=flag),
+            )
+
+    with mock.patch(
+        "vllm.v1.engine.async_llm.extract_prompt_components",
+        return_value=("", None, None),
+    ):
+        queue = await llm._add_streaming_input_request(
+            "r1", chunks(), SamplingParams(max_tokens=4)
+        )
+        await queue._input_stream_task
+
+    sent = [call.args[0] for call in llm._add_request.await_args_list]
+    assert sent == [*reqs[1 : num_sent + 1], reqs[0]]
+    assert isinstance(queue.output, InputStreamError) == (num_sent < len(chunk_flags))

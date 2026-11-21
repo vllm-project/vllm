@@ -447,15 +447,15 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    trace_decode_token_ids: list[int] | None = None
+    """If provided, forces the engine to emit this predetermined sequence of
+    token IDs during decoding instead of sampling randomly. Real logprobs are
+    still computed. Conflict checking is performed at the engine level."""
     return_aux_outputs: bool = True
     """Set False to skip this request's auxiliary outputs: its routed experts
     are neither recorded nor returned, and it gets no sampling masks, sample
     logprobs or logprob_token_ids. Its prefix-cache blocks are kept apart from
     those of requests that record routed experts."""
-    trace_decode_token_ids: list[int] | None = None
-    """If provided, forces the engine to emit this predetermined sequence of
-    token IDs during decoding instead of sampling randomly. Real logprobs are
-    still computed. Conflict checking is performed at the engine level."""
 
     @staticmethod
     def from_optional(
@@ -496,6 +496,7 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
+        return_aux_outputs: bool = True,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -563,6 +564,7 @@ class SamplingParams(
             repetition_detection=repetition_detection,
             routed_experts_prompt_start=routed_experts_prompt_start,
             trace_decode_token_ids=trace_decode_token_ids,
+            return_aux_outputs=return_aux_outputs,
         )
 
     def __post_init__(self) -> None:

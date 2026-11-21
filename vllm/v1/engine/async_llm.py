@@ -652,6 +652,7 @@ class AsyncLLM(EngineClient):
             cancelled = False
             errored = False
             any_added = False
+            return_aux_outputs: bool | None = None
             try:
                 async for input_chunk in input_stream:
                     # Stop once the session has finished (aborted or errored).
@@ -666,6 +667,11 @@ class AsyncLLM(EngineClient):
                         self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
+                    if any_added and sp.return_aux_outputs != return_aux_outputs:
+                        raise VLLMValidationError(
+                            "return_aux_outputs cannot change within an input stream."
+                        )
+                    return_aux_outputs = sp.return_aux_outputs
                     # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
