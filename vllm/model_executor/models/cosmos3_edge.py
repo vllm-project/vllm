@@ -36,6 +36,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -575,6 +576,7 @@ class Cosmos3EdgeForConditionalGeneration(
     SupportsMultiModal,
     SupportsPP,
     SupportsMRoPE,
+    SupportsEagle3,
 ):
     """Cosmos3 Edge model with a SigLIP2 vision encoder.
 
@@ -582,6 +584,10 @@ class Cosmos3EdgeForConditionalGeneration(
         - self.visual: SigLIP2 encoder + patch merger + projector
         - self.language_model: Cosmos3EdgeForCausalLM (pure attention + RoPE)
     """
+
+    # Each HF block is loaded as attention then MLP. DFlash stores HF block
+    # ids, and the shared helper has already added 1, so capture at 2*(i+1).
+    eagle_aux_hidden_state_layer_scale = 2
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
