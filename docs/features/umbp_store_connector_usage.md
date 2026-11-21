@@ -9,6 +9,13 @@ restores them when a later request shares a prefix that has left GPU memory.
 - MORI built with UMBP (`BUILD_UMBP=ON`), importable as `mori`.
 - Prefix caching enabled.
 
+For hybrid speculative models, UMBP retains each cache group's replay window
+using that group's DCP sharding. An unsharded draft keeps its original token
+block size even when the target uses DCP; its sliding-window pages are required
+alongside the target checkpoint for a reusable prefix. With fine-grained prefix
+hits enabled, store retention follows the lookup coordinator's hash alignment,
+including the full sliding-window pages preceding a partial tail.
+
 ## Embedded mode
 
 Embedded mode is the default. Each vLLM worker owns a private DRAM pool in its

@@ -21,6 +21,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_scheduler_output,
     mori_has_umbp,
 )
+from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
     scheduler as umbp_scheduler,
 )
@@ -48,14 +49,26 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    MambaManager,
     SlidingWindowManager,
 )
-from vllm.v1.kv_cache_interface import KVCacheTensor, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheGroup,
+    KVCacheTensor,
+    MambaSpec,
+    MLAAttentionSpec,
+    SparseCacheRole,
+)
+from vllm.v1.request import Request
 
 mori_available = importlib.util.find_spec("mori") is not None
 
@@ -214,6 +227,82 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
 
     assert [plan.block_id for plan in plans if plan.group_id == 0] == [1, 2, 3, 4]
     assert [plan.block_id for plan in plans if plan.group_id == 1] == [6, 8]
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+@pytest.mark.parametrize("partial_hits", [False, True])
+@pytest.mark.parametrize("length", [2047, 9215, 10191, 16383, 32511])
+def test_unsharded_draft_keeps_replay_window(dcp_size, partial_hits, length):
+    """Target DCP must not change the draft pages retained before a checkpoint."""
+    config = VllmConfig(
+        cache_config=CacheConfig(
+            block_size=64, enable_prefix_caching=True, prefix_match_unit=128
+        ),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=8,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="UMBPStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"enable_partial_hash_hits": partial_hits},
+        ),
+    )
+    target = AttentionSpec(
+        block_size=9216 // dcp_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    draft = AttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        dcp_sharded=False,
+    )
+    state = MambaSpec(block_size=1152, shapes=((4,),), dtypes=(torch.float32,))
+    cache = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroup(
+                {"target": target},
+                FullAttentionManager.config(),
+                target.block_size,
+                dcp_sharded=True,
+            ),
+            KVCacheGroup(
+                {"state": state},
+                MambaManager.config(enable_prefix_caching=True),
+                state.block_size,
+                dcp_sharded=False,
+            ),
+            KVCacheGroup(
+                {"draft": draft},
+                SlidingWindowManager.config(sliding_window=2048),
+                draft.block_size,
+                dcp_sharded=False,
+            ),
+        ],
+        prefix_cache_retention_interval=0,
+    )
+    scheduler = UMBPStoreConnectorScheduler(config, cache, None, None)
+    request = Request("replay", [42] * length, SamplingParams(max_tokens=8), None)
+    try:
+        assert scheduler.block_size == 9216
+        assert scheduler._lookup_coordinator is not None
+        assert scheduler._lookup_coordinator.enable_partial_hash_hits == partial_hits
+        unit = 128 if partial_hits else 9216
+        boundary = (length - 1) // unit * unit
+        first = max(0, boundary - 2047) // 1152
+        end = boundary // 1152
+        # Positional stores must retain full pages before the handed-off tail.
+        mask = scheduler._store_mask(request, 2, range(length // 1152))
+        assert mask is None or all(mask[index] for index in range(first, end)), mask
+    finally:
+        scheduler.close()
 
 
 def test_single_sliding_window_stores_a_replayable_tail():
@@ -840,8 +929,9 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         ),
     ],
 )
-def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
-    """A hash-only tail survives request cleanup, then restores byte for byte."""
+@pytest.mark.parametrize("request_state", ["running", "finished"])
+def test_hybrid_boundary_restores_every_byte(socket_dir, device, request_state):
+    """A boundary restores target, state, and draft SWA bytes exactly."""
     if device == "cpu":
         runtime = MemoryRuntime()
     else:
@@ -851,6 +941,14 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
             )
         )
     config = _hybrid_kv_cache_config()
+    config.kv_cache_groups.append(
+        new_kv_cache_group(
+            ["draft"],
+            SlidingWindowManager.layer_config(
+                uniform_spec(config.kv_cache_groups[0]), sliding_window=32
+            ),
+        )
+    )
     groups = config.kv_cache_groups
     config = replace(
         config,
@@ -906,21 +1004,32 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         num_computed_tokens=12,
         block_hashes=[b"a", b"b", b"c"],
     )
-    source_ids = ([1], [2])
+    source_ids = tuple([block_id] for block_id in range(1, len(groups) + 1))
     scheduler.update_state_after_alloc(
         request, SimpleNamespace(get_block_ids=lambda group_ids: source_ids), 0
     )
-    sources = [pool.blocks[1], pool.blocks[2]]
-    pool.touch(sources)
-    assert not scheduler.register_finished_partial_tail(
-        request, source_ids, [(1, 2, 12)]
-    )
-    assert scheduler.request_finished(request, source_ids) == (False, None)
-    pool.free_blocks(sources)
-    output = make_scheduler_output(finished={"tail"})
+    sources = [pool.blocks[block_ids[0]] for block_ids in source_ids]
+    if request_state == "finished":
+        pool.touch(sources)
+        assert not scheduler.register_finished_partial_tail(
+            request, source_ids, [(1, 2, 12)]
+        )
+        assert scheduler.request_finished(request, source_ids) == (False, None)
+        pool.free_blocks(sources)
+        output = make_scheduler_output(finished={"tail"})
+    else:
+        output = make_scheduler_output(
+            new_reqs=[
+                SimpleNamespace(
+                    req_id="tail", num_computed_tokens=0, block_ids=source_ids
+                )
+            ],
+            scheduled_tokens={"tail": 12},
+            block_state=SimpleNamespace(boundary_state_offloads={"tail": [(1, 2, 12)]}),
+        )
     try:
         metadata = scheduler.build_connector_meta(output)
-        assert len(metadata.store_plans) == 2
+        assert len(metadata.store_plans) == len(groups)
         worker.enqueue_stores(metadata)
         worker.wait_for_save()
         deadline = time.monotonic() + 10
@@ -933,14 +1042,19 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
                 )
             )
             time.sleep(0.001)
-        assert [block.ref_cnt for block in sources] == [0, 0]
+        assert [block.ref_cnt for block in sources] == [0] * len(groups)
         for cache in caches.values():
             cache.zero_()
 
         request.request_id = "replay"
         assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)
+        destination_ids = tuple(
+            [block_id] for block_id in range(len(groups) + 1, 2 * len(groups) + 1)
+        )
         scheduler.update_state_after_alloc(
-            request, SimpleNamespace(get_block_ids=lambda group_ids: ([3], [4])), 12
+            request,
+            SimpleNamespace(get_block_ids=lambda group_ids: destination_ids),
+            12,
         )
         output.finished_req_ids = set()
         worker.start_load_kv(None, scheduler.build_connector_meta(output))
@@ -950,9 +1064,11 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
             time.sleep(0.001)
         assert finished == (None, {"replay"})
         assert worker.get_failed_recving() == set()
-        for block_id, (name, cache) in enumerate(caches.items(), 3):
+        for block_ids, (name, cache) in zip(
+            destination_ids, caches.items(), strict=True
+        ):
             expected = torch.zeros_like(cache)
-            expected[block_id] = pages[name]
+            expected[block_ids[0]] = pages[name]
             assert torch.equal(cache, expected), name
         counters = worker.get_kv_connector_stats().reduce()
         page_bytes = sum(group.page_size_bytes for group in groups)
