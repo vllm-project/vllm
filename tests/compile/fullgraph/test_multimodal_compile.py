@@ -174,7 +174,6 @@ def test_paddleocr_vl_compilation(
         compilation_counter.expect(num_models_seen=expected_models),
         vllm_runner(
             "PaddlePaddle/PaddleOCR-VL",
-            trust_remote_code=True,
             max_model_len=2048,
             limit_mm_per_prompt={"image": 1},
             gpu_memory_utilization=0.5,

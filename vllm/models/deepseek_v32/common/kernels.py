@@ -648,7 +648,9 @@ def fused_norm_rope(
         mla_k_scale = _dummy((1,), torch.float32, device)
 
     if q_c_out is None:
-        q_c_out = torch.empty_like(q_c)
+        # empty_like's default would keep a one-token column slice's row stride;
+        # the low-latency GEMM tables behind q_b_proj and wq_b only take packed rows.
+        q_c_out = torch.empty_like(q_c, memory_format=torch.contiguous_format)
     kv_c_out_stride = 0
     k_pe_out_stride = 0
     index_k_out_stride = 0

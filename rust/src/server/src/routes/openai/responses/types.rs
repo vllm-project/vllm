@@ -370,8 +370,7 @@ pub struct ResponsesRequest {
     pub stop: Option<StringOrArray>,
     #[serde(default)]
     pub ignore_eos: bool,
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    pub skip_special_tokens: Option<bool>,
     /// Accepted as a no-op, as on chat completions.
     #[allow(dead_code)]
     #[serde(default = "default_true")]
@@ -424,8 +423,9 @@ impl crate::routes::openai::utils::types::Normalizable for ResponsesRequest {}
 /// One typed input/output item of [`ResponsesInput::Items`].
 ///
 /// Variants cover the supported Responses API history surface: messages,
-/// function calls, function call outputs, and reasoning items. Other item
-/// types (`custom_tool_call`, `mcp_call`, ...) fail deserialization;
+/// function calls, function call outputs, and reasoning items, plus the
+/// `additional_tools` items that declare tools. Other item types
+/// (`custom_tool_call`, `mcp_call`, ...) fail deserialization;
 /// `item_reference` is kept to report that it requires the response store.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", remote = "Self")]
@@ -436,6 +436,10 @@ pub enum ResponseInputItem {
     FunctionCall(ResponseInputFunctionCall),
     FunctionCallOutput(ResponseInputFunctionCallOutput),
     Reasoning(ResponseInputReasoning),
+    /// Tools declared in the input instead of in `tools`, as Codex does.
+    /// They are moved into the request tools before the input is converted;
+    /// see `tools.rs`.
+    AdditionalTools(ResponseInputAdditionalTools),
     ItemReference {},
 }
 
@@ -546,6 +550,13 @@ pub struct ResponseInputFunctionCallOutput {
     pub id: Option<String>,
     #[serde(default)]
     pub status: Option<ResponseItemStatus>,
+}
+
+/// One `additional_tools` input item. Its tools are deserialized like the
+/// top-level `tools`; its `role` (always `developer`) is not read.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ResponseInputAdditionalTools {
+    pub tools: Vec<ResponsesTool>,
 }
 
 /// One `reasoning` input item (assistant reasoning in history).
@@ -803,6 +814,7 @@ impl serde::Serialize for ResponseObject {
 mod tests {
     use expect_test::expect;
     use serde_json::json;
+    use thiserror_ext::AsReport as _;
 
     use super::*;
 
@@ -887,6 +899,28 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown variant `custom_tool_call`"));
+    }
+
+    #[test]
+    fn additional_tools_items_are_validated_like_top_level_tools() {
+        for (tools, expected) in [
+            (json!("oops"), "expected a sequence"),
+            (
+                json!([{"type": "custom", "name": "exec"}]),
+                "unknown variant `custom`",
+            ),
+        ] {
+            let error = serde_json::from_value::<ResponsesRequest>(json!({
+                "input": [
+                    {"type": "additional_tools", "role": "developer", "tools": tools},
+                    {"role": "user", "content": "hi"},
+                ],
+            }))
+            .unwrap_err();
+
+            let report = error.to_report_string();
+            assert!(report.contains(expected), "{report}");
+        }
     }
 
     #[test]
