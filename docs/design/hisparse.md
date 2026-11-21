@@ -71,8 +71,10 @@ GPU block pool. The scheduler accounts for this reservation before admitting
 requests. The buffer count is per layout, independent of the number of requests.
 
 With one buffer, the next layer waits for writeback before loading its history.
-With more buffers, a CUDA copy stream prefetches other layers while the active
-layer computes. A second stream copies new rows back. Completion of a chunk
+With more buffers, a device copy stream prefetches other layers while the active
+layer computes. A second stream copies new rows back. Both streams use the same
+HiSparse batched DMA and completion events as decode. Backends declare support
+for this producer path with `supports_layerwise_prefill`. Completion of a chunk
 waits for its writebacks, including partial tails, before P/D handoff.
 The scheduler publishes sealed prefix pages after the workers acknowledge them.
 

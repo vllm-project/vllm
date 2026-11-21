@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 class HiSparseBackend:
     supports_shared_host_pool = False
+    supports_layerwise_prefill = False
     stats_dtype = torch.uint64
 
     def check_available(self) -> None:
@@ -75,12 +76,13 @@ class HiSparseBackend:
     def swap_blocks_batch(
         self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor
     ) -> None:
-        """Enqueue device-to-host copies on the current stream."""
+        """Enqueue batched copies between host and device on the current stream."""
         raise NotImplementedError
 
 
 class CUDAHiSparseBackend(HiSparseBackend):
     supports_shared_host_pool = True
+    supports_layerwise_prefill = True
 
     def check_available(self) -> None:
         names = (

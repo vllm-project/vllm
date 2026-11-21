@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import chain
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -26,6 +26,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import HiSparseHotManager
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.binding import get_kv_sharing_readers
+from vllm.v1.hisparse.dma import DMADescriptors, HiSparseDMA
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -48,15 +49,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
-class _DMADescriptors(NamedTuple):
-    src: torch.Tensor
-    dst: torch.Tensor
-    sizes: torch.Tensor
-    src_np: np.ndarray
-    dst_np: np.ndarray
-    sizes_np: np.ndarray
-
-
 @dataclass(slots=True)
 class _SlotMappingStaging:
     stream: torch.Stream
@@ -65,18 +57,6 @@ class _SlotMappingStaging:
     candidates: tuple[SparseKVRowMirror, ...] = ()
     num_tokens: int = 0
     source_index: int = 0
-
-
-def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
-    src, dst, sizes = (torch.empty(size, dtype=torch.int64) for _ in range(3))
-    return _DMADescriptors(
-        src,
-        dst,
-        sizes,
-        src.numpy(),
-        dst.numpy(),
-        sizes.numpy(),
-    )
 
 
 _METRICS_INTERVAL = 2000
@@ -295,10 +275,7 @@ class HiSparseConnectorWorker:
                     pin_memory=True,
                 ),
             )
-        self._dma_free_descriptors: list[_DMADescriptors] = []
-        self._pending_dma_descriptors: deque[tuple[torch.Event, _DMADescriptors]] = (
-            deque()
-        )
+        self.dma = HiSparseDMA(self.backend)
         self._dma_submitted = False
         self._per_layer_mirrored: set[int] = set()
         self._in_step = False
@@ -421,7 +398,7 @@ class HiSparseConnectorWorker:
             # Without a forward, no TP collective keeps rank 0 from recording
             # a shared event again before every rank has issued its wait.
             get_tp_group().barrier()
-        self._release_completed_dma_descriptors()
+        self.dma.release_completed()
         self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         if self._slot_mapping_staging is not None:
@@ -585,21 +562,9 @@ class HiSparseConnectorWorker:
             self._metrics_pending = True
         return stats
 
-    def _release_completed_dma_descriptors(self) -> None:
-        pending = self._pending_dma_descriptors
-        while pending and pending[0][0].query():
-            _, descriptors = pending.popleft()
-            self._dma_free_descriptors.append(descriptors)
-
-    def _acquire_dma_descriptors(self, size: int) -> _DMADescriptors:
-        for index, descriptors in enumerate(self._dma_free_descriptors):
-            if descriptors.src.numel() >= size:
-                return self._dma_free_descriptors.pop(index)
-        return _allocate_dma_descriptors(size)
-
     def _submit_dma_descriptors(
         self,
-        descriptors: _DMADescriptors,
+        descriptors: DMADescriptors,
         descriptor_count: int,
         transfer_ids: tuple[int, ...] = (),
         ready_event: torch.Event | None = None,
@@ -610,16 +575,12 @@ class HiSparseConnectorWorker:
             stream.wait_stream(torch.accelerator.current_stream())
         else:
             stream.wait_event(ready_event)
-        completion_event = torch.Event()
-        with stream:
-            self.backend.swap_blocks_batch(
-                descriptors.src[:descriptor_count],
-                descriptors.dst[:descriptor_count],
-                descriptors.sizes[:descriptor_count],
-            )
-            self.host_write_event.record(stream)
-            completion_event.record(stream)
-        self._pending_dma_descriptors.append((completion_event, descriptors))
+        completion_event = self.dma.submit(
+            stream,
+            descriptors,
+            descriptor_count,
+            host_write_event=self.host_write_event,
+        )
         self._dma_submitted = True
         if transfer_ids:
             self._pending_transfer_events.append((completion_event, transfer_ids))
@@ -659,7 +620,7 @@ class HiSparseConnectorWorker:
         mirrors = self._row_mirrors
         num_layers = len(layer_indices)
         descriptor_count = len(mirrors) * num_layers
-        descriptors = self._acquire_dma_descriptors(descriptor_count)
+        descriptors = self.dma.acquire(descriptor_count)
         destination_starts = self._row_mirror_destination_starts
         row_counts = self._row_mirror_counts
         for descriptor_offset, layer_index in enumerate(layer_indices):
@@ -736,17 +697,16 @@ class HiSparseConnectorWorker:
         self,
         transfers: list[SparseKVPageTransfer],
         *,
-        stream: torch.Stream | None = None,
+        completion_event: torch.Event | None = None,
     ) -> None:
         if not transfers:
             return
-        if stream is None:
+        if completion_event is None:
             if not self.is_host_writer:
                 return
-            stream = self.dma_stream
-        assert stream is not None
-        completion_event = torch.Event()
-        completion_event.record(stream)
+            assert self.dma_stream is not None
+            completion_event = torch.Event()
+            completion_event.record(self.dma_stream)
         transfer_ids = tuple(transfer.transfer_id for transfer in transfers)
         self._pending_transfer_events.append((completion_event, transfer_ids))
         self._enqueued_transfer_ids.extend(transfer_ids)
@@ -762,7 +722,7 @@ class HiSparseConnectorWorker:
             return
         num_layers = len(self.cache_handles)
         descriptor_count = len(transfers) * num_layers
-        descriptors = self._acquire_dma_descriptors(descriptor_count)
+        descriptors = self.dma.acquire(descriptor_count)
         host_rows = np.fromiter(
             (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
             dtype=np.int64,
@@ -796,15 +756,8 @@ class HiSparseConnectorWorker:
             )
             descriptors.sizes_np[descriptor_slice] = self.kernel_block_size * row_bytes
         stream = torch.accelerator.current_stream()
-        self.backend.swap_blocks_batch(
-            descriptors.src[:descriptor_count],
-            descriptors.dst[:descriptor_count],
-            descriptors.sizes[:descriptor_count],
-        )
-        completion_event = torch.Event()
-        completion_event.record(stream)
-        self._pending_dma_descriptors.append((completion_event, descriptors))
-        self._record_transfer_completion(transfers, stream=stream)
+        completion = self.dma.submit(stream, descriptors, descriptor_count)
+        self._record_transfer_completion(transfers, completion_event=completion)
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
         if self.cache_handles[0].runtime.eager_host_mirror:
@@ -817,7 +770,7 @@ class HiSparseConnectorWorker:
             return
         num_layers = len(self.cache_handles)
         descriptor_count = len(transfers) * num_layers
-        descriptors = self._acquire_dma_descriptors(descriptor_count)
+        descriptors = self.dma.acquire(descriptor_count)
         destination_rows = np.fromiter(
             (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
             dtype=np.int64,
@@ -944,7 +897,7 @@ class HiSparseConnectorWorker:
                 self._dma_submitted = False
             else:
                 self.host_write_event.record(compute_stream)
-        self._release_completed_dma_descriptors()
+        self.dma.release_completed()
 
     def _finish_previous_step(self) -> None:
         """Mirror the previous step's draft-layer rows, then hand its pages over.

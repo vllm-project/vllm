@@ -33,7 +33,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.config.attention import HiSparseConfig
+from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
@@ -124,9 +124,18 @@ def test_layerwise_hybrid_planner_reserves_workspace_before_admission(monkeypatc
         "get_hisparse_backend_cls",
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
-    config = VllmConfig(model_config=ModelConfig(max_model_len=128))
-    config.attention_config.hisparse_config = HiSparseConfig(
-        prefill_layerwise_num_buffers=2
+    config = VllmConfig(
+        model_config=ModelConfig(
+            max_model_len=128, enforce_eager=True, hf_overrides={"index_topk": 8}
+        ),
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(prefill_layerwise_num_buffers=2)
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={"host_pool_gib": 1},
+        ),
     )
     config.cache_config.kv_cache_layout = "BLHNC"
     main = MLAAttentionSpec(

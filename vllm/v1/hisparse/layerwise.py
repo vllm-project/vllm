@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.stats import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
 from vllm.v1.hisparse.backend import get_hisparse_backend
+from vllm.v1.hisparse.dma import DMADescriptors, HiSparseDMA
 from vllm.v1.hisparse.layout import layerwise_buffer_groups
 from vllm.v1.hisparse.runtime import (
     drop_hisparse_host_pool,
@@ -96,11 +97,12 @@ def attach_layerwise_hooks(model: torch.nn.Module, cache_config: KVCacheConfig) 
 
 
 def copy_descriptors(
+    dma: HiSparseDMA,
     host: torch.Tensor,
     gpu: torch.Tensor,
     spans: np.ndarray,
     to_gpu: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[DMADescriptors, int]:
     """CPU DMA pointer lists for MLA views, including padded kernel pages."""
     row_bytes = gpu.shape[-1] * gpu.element_size()
     if any(
@@ -126,18 +128,18 @@ def copy_descriptors(
                 h, g, count = h + take, g + take, count - take
         spans = np.asarray(pieces, dtype=np.int64)
 
-    def addresses(cache: torch.Tensor, rows: np.ndarray) -> torch.Tensor:
-        block, offset = np.divmod(rows, cache.shape[-2])
-        return torch.from_numpy(
-            cache.data_ptr()
-            + cache.element_size()
-            * (block * cache.stride(0) + offset * cache.stride(-2))
+    count = len(spans)
+    descriptors = dma.acquire(count)
+    src = descriptors.src_np[:count]
+    dst = descriptors.dst_np[:count]
+    host_ptrs, gpu_ptrs = (src, dst) if to_gpu else (dst, src)
+    for col, (cache, ptrs) in enumerate(((host, host_ptrs), (gpu, gpu_ptrs))):
+        block, offset = np.divmod(spans[:, col], cache.shape[-2])
+        ptrs[:] = cache.data_ptr() + cache.element_size() * (
+            block * cache.stride(0) + offset * cache.stride(-2)
         )
-
-    host_ptrs = addresses(host, spans[:, 0])
-    gpu_ptrs = addresses(gpu, spans[:, 1])
-    sizes = torch.from_numpy(spans[:, 2] * row_bytes)
-    return (host_ptrs, gpu_ptrs, sizes) if to_gpu else (gpu_ptrs, host_ptrs, sizes)
+    descriptors.sizes_np[:count] = spans[:, 2] * row_bytes
+    return descriptors, count
 
 
 class LayerwiseWorker:
@@ -145,22 +147,23 @@ class LayerwiseWorker:
         self.config = config
         self.cache_config = cache_config
         self.host_pool = get_hisparse_host_pool(config, cache_config)
-        self.load = torch.cuda.Stream()
-        self.save = torch.cuda.Stream()
+        device = torch.accelerator.current_stream().device
+        self.load = torch.Stream(device=device)
+        self.save = torch.Stream(device=device)
+        self.dma = HiSparseDMA(get_hisparse_backend())
         self.closed = False
         self.step: LayerwiseStep | None = None
         self.host: dict[str, torch.Tensor] = {}
         self.slots: dict[str, torch.Tensor] = {}
         self.rings: dict[int, list[str]] = {}
         self.following: dict[str, str] = {}
-        self.ready: dict[str, torch.cuda.Event] = {}
+        self.ready: dict[str, torch.Event] = {}
         self.finished: set[str] = set()
         self.hooks: list[torch.utils.hooks.RemovableHandle] = []
         self.stats = HiSparseKVConnectorStats()
         self.bytes_per_row = 0
         self.completed: list[int] = []
         self.copied: list[int] = []
-        self.descriptors: list[tuple[torch.Tensor, ...]] = []
         self.writer = (
             not cache_config.hisparse_shared_host_pool
             or get_tensor_model_parallel_rank() == 0
@@ -204,33 +207,34 @@ class LayerwiseWorker:
         self.step = meta.layerwise
         self.read_spans = np.asarray(self.step.reads, dtype=np.int64).reshape(-1, 3)
         self.write_spans = np.asarray(self.step.writes, dtype=np.int64).reshape(-1, 3)
-        self.load.wait_stream(torch.cuda.current_stream())
+        self.load.wait_stream(torch.accelerator.current_stream())
         for ring in self.rings.values():
             self.prefetch(ring[0])
 
-    def transfer(self, name: str, spans: np.ndarray, *, to_gpu: bool) -> None:
+    def transfer(
+        self, name: str, spans: np.ndarray, stream: torch.Stream, *, to_gpu: bool
+    ) -> torch.Event:
         if not spans.size:
-            return
-        descriptors = copy_descriptors(self.host[name], self.slots[name], spans, to_gpu)
-        get_hisparse_backend().swap_blocks_batch(*descriptors)
-        self.descriptors.append(descriptors)
+            return stream.record_event()
+        descriptors, count = copy_descriptors(
+            self.dma, self.host[name], self.slots[name], spans, to_gpu
+        )
+        return self.dma.submit(stream, descriptors, count)
 
     def prefetch(self, name: str) -> None:
-        with torch.cuda.stream(self.load):
-            self.transfer(name, self.read_spans, to_gpu=True)
-            self.ready[name] = self.load.record_event()
+        self.ready[name] = self.transfer(name, self.read_spans, self.load, to_gpu=True)
 
     def before(self, name: str, module, args) -> None:
         if self.step is not None:
-            torch.cuda.current_stream().wait_event(self.ready.pop(name))
+            torch.accelerator.current_stream().wait_event(self.ready.pop(name))
 
     def after(self, name: str, module, args, output) -> None:
         if self.step is None:
             return
-        self.save.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self.save):
-            if self.writer:
-                self.transfer(name, self.write_spans, to_gpu=False)
+        self.save.wait_stream(torch.accelerator.current_stream())
+        if self.writer:
+            released = self.transfer(name, self.write_spans, self.save, to_gpu=False)
+        else:
             released = self.save.record_event()
         if following := self.following.get(name):
             self.load.wait_event(released)
@@ -255,7 +259,7 @@ class LayerwiseWorker:
                 int(self.write_spans[:, 2].sum()) * self.bytes_per_row
             )
         self.completed.extend(self.step.sealed_pages)
-        self.descriptors.clear()
+        self.dma.release_completed()
         self.finished.clear()
         self.step = None
 
