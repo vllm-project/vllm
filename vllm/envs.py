@@ -1089,8 +1089,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "715827880")
     ),
-    # Maximum bytes allowed by model-specific media preprocessing checks.
-    # Set to 0 to disable.
+    # Maximum estimated bytes per prompt in supported media preprocessors.
+    # Set to 0 to disable the preprocessing checks.
     "VLLM_MAX_MEDIA_PREPROCESSING_BYTES": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", "715827880")
     ),
