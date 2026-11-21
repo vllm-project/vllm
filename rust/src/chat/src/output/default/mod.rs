@@ -314,6 +314,7 @@ mod tests {
     use vllm_parser::output_grammar::BuiltOutputGrammar;
     use vllm_text::output::{DecodedTextEvent, Finished};
     use vllm_text::{DecodedText, SampledDelta};
+    use vllm_tokenizer::Tokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
     use xgrammar_structural_tag::format::Format;
 
@@ -751,6 +752,91 @@ mod tests {
         )
         .unwrap();
         assert_eq!(request.decode_options.skip_special_tokens, Some(false));
+    }
+
+    #[tokio::test]
+    async fn mistral_pre_v11_tool_calls_survive_detokenization() {
+        let tokenizer = Arc::new(TestTokenizer::new().with_special_token("[TOOL_CALLS]", 256));
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let mut request = ChatRequest {
+            tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)
+                .unwrap(),
+            ..ChatRequest::for_test()
+        };
+        let mut processor = DefaultChatOutputProcessor::new(
+            &mut request,
+            "mistralai/Mistral-7B-Instruct-v0.3",
+            tokenizer.clone(),
+            &ParserSelection::Explicit("mistral".to_string()),
+            &ParserSelection::None,
+            None,
+        )
+        .unwrap();
+        processor.initialize(&[]).unwrap();
+
+        let tokens = tokenizer
+            .encode(
+                r#"[TOOL_CALLS] [{"name":"search","arguments":{"query":"vllm"},"id":"a1b2c3d4e"}]"#,
+                false,
+            )
+            .unwrap();
+        let mut decoder = tokenizer.create_decode_stream(
+            &[],
+            request.decode_options.skip_special_tokens.unwrap_or(true),
+            0,
+        );
+        let mut decoded = Vec::new();
+        for token in tokens {
+            decoder.push_token(token).unwrap();
+            decoded.extend(decoder.next_chunk());
+        }
+        let (tail, _) = decoder.flush(None).unwrap();
+        decoded.extend(tail);
+        let last = decoded.len() - 1;
+        let events = stream::iter(
+            decoded.into_iter().enumerate().map(move |(index, decoded)| {
+                Ok(DecodedTextEvent::TextDelta {
+                    decoded,
+                    sampled: SampledDelta::default(),
+                    finished: (index == last).then(|| {
+                        Box::new(Finished {
+                            usage: vllm_llm::TokenUsage::default(),
+                            finish_reason: crate::FinishReason::Stop(None),
+                            kv_transfer_params: None,
+                            ec_transfer_params: None,
+                            spec_decode_metrics: None,
+                            weight_versions: None,
+                            routed_experts: None,
+                            timestamps: Default::default(),
+                        })
+                    }),
+                })
+            }),
+        );
+        let events = Box::new(processor).process(events.boxed()).unwrap().collect::<Vec<_>>().await;
+        let Some(Ok(ChatEvent::Done { message, .. })) = events.last() else {
+            panic!("expected done");
+        };
+        let calls: Vec<_> =
+            message.tool_calls().map(|call| (&call.name, &call.arguments)).collect();
+        expect_test::expect![[r#"
+            (
+                "",
+                [
+                    (
+                        "search",
+                        "{\"query\":\"vllm\"}",
+                    ),
+                ],
+            )
+        "#]]
+        .assert_debug_eq(&(message.text(), calls));
     }
 
     #[test]
