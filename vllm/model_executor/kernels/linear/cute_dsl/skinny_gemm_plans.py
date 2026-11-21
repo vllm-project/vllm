@@ -61,9 +61,151 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     },
 }
 
+# SM90, keyed by capability (9, 0) so it also selects H100 / H800 / H20; every
+# entry was measured on an H200 (132 SMs, 4.8 TB/s) only. TP=1 local shapes of
+# dense Qwen3 / Llama-3.1 models, plus the two BF16 projections of the Qwen3.5 /
+# 3.6 MoE models. Every 4-token entry was also checked inside
+# a running model (nsys, 4 concurrent requests); 4-token cells that win in
+# isolation but lose there are left out. static_k entries have no k_unroll:
+# the static path is fully unrolled.
+SM90_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
+    # Qwen3.5 / 3.6 MoE shared-expert gate (one output).
+    (1, 2048): {
+        1: SkinnyGemmConfig(1, 256, 1, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 256, 1, vector_width=4, static_k=2048),
+        4: SkinnyGemmConfig(4, 256, 1),
+    },
+    # Qwen3.5 / 3.6 MoE GDN fused b/a projection.
+    (64, 2048): {
+        1: SkinnyGemmConfig(1, 256, 1),
+        2: SkinnyGemmConfig(2, 256, 1),
+        4: SkinnyGemmConfig(4, 256, 1, k_unroll=4),
+    },
+    # Qwen3-4B attention output projection.
+    (2560, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4, vector_width=4),
+        4: SkinnyGemmConfig(4, 128, 4),
+    },
+    # Qwen3-4B down projection.
+    (2560, 9728): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=9728),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=9728),
+    },
+    # Qwen3-8B / Llama-3.1-8B attention output projection.
+    (4096, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=2, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 64, 4, vector_width=4, static_k=4096),
+    },
+    # Qwen3-8B down projection.
+    (4096, 12288): {
+        1: SkinnyGemmConfig(1, 256, 4, vector_width=4, static_k=12288),
+        2: SkinnyGemmConfig(2, 64, 4, vector_width=4, static_k=12288),
+        4: SkinnyGemmConfig(4, 128, 4, vector_width=4, static_k=12288),
+    },
+    # Llama-3.1-8B down projection. M=4 is left to cuBLAS: it wins in isolation
+    # but loses inside the model (measured with nsys at 4 concurrent requests).
+    (4096, 14336): {
+        1: SkinnyGemmConfig(1, 224, 1, vector_width=4, static_k=14336),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=14336),
+    },
+    # Qwen3-14B attention output projection.
+    (5120, 5120): {
+        1: SkinnyGemmConfig(1, 64, 4, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 4, vector_width=4, static_k=5120),
+    },
+    # Qwen3-32B attention output projection.
+    (5120, 8192): {
+        1: SkinnyGemmConfig(1, 256, 2, vector_width=2, static_k=8192),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=8192),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4),
+    },
+    # Qwen3-14B down projection.
+    (5120, 17408): {
+        1: SkinnyGemmConfig(1, 64, 4, static_k=17408),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=17408),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4),
+    },
+    # Qwen3-32B down projection.
+    (5120, 25600): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=25600),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=25600),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4),
+    },
+    # Qwen3-4B fused QKV projection.
+    (6144, 2560): {
+        1: SkinnyGemmConfig(1, 32, 4, static_k=2560),
+        2: SkinnyGemmConfig(2, 32, 4, static_k=2560),
+    },
+    # Qwen3-8B / Llama-3.1-8B fused QKV projection.
+    (6144, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=2, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 3, vector_width=2, static_k=4096),
+    },
+    # Qwen3-14B fused QKV projection.
+    (7168, 5120): {
+        1: SkinnyGemmConfig(1, 64, 2, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=5120),
+    },
+    # Qwen3-32B fused QKV projection.
+    (10240, 5120): {
+        1: SkinnyGemmConfig(1, 128, 2, vector_width=2, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 4, vector_width=4, static_k=5120),
+    },
+    # Qwen3-4B fused gate/up projection.
+    (19456, 2560): {
+        1: SkinnyGemmConfig(1, 64, 4, vector_width=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 2, vector_width=2, static_k=2560),
+        4: SkinnyGemmConfig(4, 32, 2, vector_width=4, static_k=2560),
+    },
+    # Qwen3-8B fused gate/up projection.
+    (24576, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=2, static_k=4096),
+        4: SkinnyGemmConfig(4, 32, 4, vector_width=4, static_k=4096),
+    },
+    # Llama-3.1-8B fused gate/up projection.
+    (28672, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=2, static_k=4096),
+    },
+    # Qwen3-14B fused gate/up projection.
+    (34816, 5120): {
+        1: SkinnyGemmConfig(1, 64, 1, vector_width=2, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 2, vector_width=4, static_k=5120),
+    },
+    # Qwen3-32B fused gate/up projection.
+    (51200, 5120): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 2, vector_width=4, static_k=5120),
+    },
+    # Llama-3.1-8B LM head.
+    (128256, 4096): {
+        1: SkinnyGemmConfig(1, 256, 4, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 256, 4, vector_width=4, static_k=4096),
+    },
+    # Qwen3-4B LM head.
+    (151936, 2560): {
+        1: SkinnyGemmConfig(1, 64, 4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 4),
+    },
+    # Qwen3-8B LM head.
+    (151936, 4096): {
+        1: SkinnyGemmConfig(1, 256, 4, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 256, 4, vector_width=4, static_k=4096),
+    },
+    # Qwen3-14B / Qwen3-32B LM head.
+    (151936, 5120): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 2, vector_width=4, static_k=5120),
+    },
+}
+
 SKINNY_GEMM_PLANS_BY_CAPABILITY: dict[
     tuple[int, int] | None, dict[tuple[int, int], SkinnyGemmPlan]
 ] = {
+    (9, 0): SM90_SKINNY_GEMM_PLANS,
     (12, 1): SM121_SKINNY_GEMM_PLANS,
 }
 
