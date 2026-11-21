@@ -149,6 +149,7 @@ NIXL pull transfers with `--decode-context-parallel-size` greater than 1 require
     - Each vLLM worker needs a unique port on its host; using the same port number across different hosts is fine
     - For TP/DP deployments, each worker's port on a node is computed as: base_port + dp_rank (e.g., with `--data-parallel-size=2` and base_port=5600, dp_rank 0..1 use port 5600, 5601 on that node).
     - Used for the initial NIXL handshake between the prefiller and the decoder
+    - If the listener fails before it is ready, engine startup raises `NIXL handshake listener failed to start on <host>:<port>`. For a port conflict, choose an unused base port and assign non-overlapping port ranges to independent deployments on the same host.
 
 - `VLLM_NIXL_SIDE_CHANNEL_HOST`: Host for side channel communication
     - Default: "localhost"
