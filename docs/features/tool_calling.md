@@ -177,6 +177,13 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
+Parsers that use the shared parser engine's argument type correction, such as
+Gemma 4 and Qwen3 XML, use the `additionalProperties` schema to interpret values
+under dynamic keys. For example, a parameter declared as `dict[str, int] | None`
+returns `{"bolts": 7}` when the tool call contains `{"bolts": "7"}`.
+If the schema allows a string, a value such as `"002"` is preserved under a
+dynamic key, including in named fields of an object stored at that key.
+
 When a custom structured-output grammar includes reasoning or tool-call
 delimiters, its token constraints must match the configured parser. See
 [Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).

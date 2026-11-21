@@ -1356,6 +1356,7 @@ class TestGemma4NestedSchemaCoercion:
                                     "language": {"type": "string"},
                                     "min_stars": {"type": "integer"},
                                 },
+                                "additionalProperties": {"type": "integer"},
                             },
                         },
                     },
@@ -1371,7 +1372,7 @@ class TestGemma4NestedSchemaCoercion:
         text = (
             "<|tool_call>call:search{"
             'query:<|"|>vllm<|"|>,'
-            "filters:{language:python,min_stars:100}}"
+            "filters:{language:python,min_stars:100,min_forks:7}}"
             "<tool_call|>"
         )
         result = parser_with_tools.extract_tool_calls(text, mock_request)
@@ -1380,6 +1381,7 @@ class TestGemma4NestedSchemaCoercion:
         assert args["filters"]["language"] == "python"
         assert args["filters"]["min_stars"] == 100
         assert isinstance(args["filters"]["min_stars"], int)
+        assert args["filters"]["min_forks"] == 7
 
 
 # ── Tests for bare "thought" without channel opener ──────────────────

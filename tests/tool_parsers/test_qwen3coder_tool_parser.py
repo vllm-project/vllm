@@ -7,9 +7,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from openai.types.responses.function_tool import FunctionTool
+from pydantic import BaseModel
 from xgrammar import StructuralTag
 
-from tests.tool_parsers.utils import ToolState, ToolStateWithHeader
+from tests.tool_parsers.utils import ToolState, ToolStateWithHeader, run_tool_extraction
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -1227,6 +1228,31 @@ def test_none_tool_calls_filtered(qwen3_tool_parser):
     args = json.loads(valid[0].function.arguments)
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_typed_maps_in_json_parameter_text(qwen3_tokenizer, streaming):
+    class Inventory(BaseModel):
+        counts: dict[str, int]
+        codes: dict[str, int | str]
+
+    tool = ChatCompletionToolsParam(
+        type="function",
+        function={"name": "inventory", "parameters": Inventory.model_json_schema()},
+    )
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=[tool])
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=[tool])
+    output = (
+        "<tool_call>\n<function=inventory>\n"
+        '<parameter=counts>{"bolts":"7"}</parameter>\n'
+        '<parameter=codes>{"padded":"002","plain":"2"}</parameter>\n'
+        "</function>\n</tool_call>"
+    )
+    _, (call,) = run_tool_extraction(parser, output, request, streaming=streaming)
+    assert json.loads(call.function.arguments) == {
+        "counts": {"bolts": 7},
+        "codes": {"padded": "002", "plain": "2"},
+    }
 
 
 def test_anyof_parameter_not_double_encoded(qwen3_tokenizer):
