@@ -19,3 +19,12 @@
 - **Signals from shared resources.** Check timing, cache-hit indicators, and
   operational metadata when changing what callers can learn about shared
   state. Tie guarantees to the documented cache and deployment assumptions.
+
+## Published advisory examples
+
+Check diagnostics for both
+disclosure and unbounded output.
+
+- [Validation error disclosure](https://github.com/vllm-project/vllm/security/advisories/GHSA-hwrm-c4cx-rf4j)
+- [Error representation across frontends](https://github.com/vllm-project/vllm/security/advisories/GHSA-hgg8-fqqc-vfmw)
+- [Metric label cardinality](https://github.com/vllm-project/vllm/security/advisories/GHSA-5fj9-pfhr-6j48)

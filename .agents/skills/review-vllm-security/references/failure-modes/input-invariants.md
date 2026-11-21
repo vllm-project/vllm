@@ -31,3 +31,11 @@
   state when possible. On failure after registration, use the normal
   request-failure and rollback path. Verify that rejected work leaves no stale
   metadata and that subsequent inference succeeds.
+
+## Published advisory examples
+
+Use the effective model bounds in
+each frontend and keep invalid request or compilation errors request-local.
+
+- [Rust and Python token ID bounds](https://github.com/vllm-project/vllm/security/advisories/GHSA-qff2-492f-9fm4)
+- [Structured-output error containment](https://github.com/vllm-project/vllm/security/advisories/GHSA-85xf-c7hm-whqw)

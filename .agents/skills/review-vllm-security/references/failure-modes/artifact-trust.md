@@ -25,3 +25,12 @@
   when a new path consumes cached files.
 - **Dependency guarantees.** Verify loader safeguards across the supported
   versions and paths of the dependency, including legacy and fallback readers.
+
+## Published advisory examples
+
+Verify both artifact
+resolution and actual code or object loading.
+
+- [Model code trust control](https://github.com/vllm-project/vllm/security/advisories/GHSA-7972-pg2x-xr59)
+- [Artifact revision propagation](https://github.com/vllm-project/vllm/security/advisories/GHSA-3ww4-5jv9-j5gm)
+- [Shared-memory deserialization boundary](https://github.com/vllm-project/vllm/security/advisories/GHSA-6757-hggm-hp2w)

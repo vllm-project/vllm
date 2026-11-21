@@ -25,3 +25,11 @@
 - **Decode failure.** Return a request error for unusable results, partial
   reads, or unexpected dimensions. Verify that a failed decode cannot return
   a buffer from an earlier request, including on native and hardware backends.
+
+## Published advisory examples
+
+Check media acquisition and
+format restrictions throughout model-specific paths.
+
+- [Media connector coverage](https://github.com/vllm-project/vllm/security/advisories/GHSA-4hhp-h66f-j5j7)
+- [Process-wide decoder safeguards](https://github.com/vllm-project/vllm/security/advisories/GHSA-mm38-5g96-7j6x)

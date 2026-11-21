@@ -32,3 +32,11 @@
 - **Sessions and peers.** Bind tool sessions and connector actions to the
   intended principal, instance, or authorized peer. Verify that caller
   headers and IDs cannot take over a session or redirect an action.
+
+## Published advisory examples
+
+Verify authorization and trust
+settings at the route and operation that consume input.
+
+- [Route authentication](https://github.com/vllm-project/vllm/security/advisories/GHSA-94f4-hr76-p5j6)
+- [Template trust gate](https://github.com/vllm-project/vllm/security/advisories/GHSA-x567-49g5-p4cf)

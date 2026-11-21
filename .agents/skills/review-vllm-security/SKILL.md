@@ -43,7 +43,8 @@ for a reported vulnerability.
 
 ## Detailed checks by change
 
-Start with the families for each affected change type.
+Start with the families for each affected change type. Each file includes
+examples from published advisories.
 
 | Change type | Checklist files |
 | --- | --- |
@@ -63,8 +64,6 @@ For a limit regression, use a small configured cap or a stubbed consumer.
 Check valid boundary behavior and rejection before expensive work. For
 shared-state changes, follow a failed or cancelled request with a valid one,
 or interleave two requests and verify their results and cleanup independently.
-See [Published advisory examples](references/advisory-evidence.md) for
-cases behind these checks.
 
 [budgets]: references/failure-modes/resource-budgets.md
 [input]: references/failure-modes/input-invariants.md

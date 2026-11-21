@@ -31,3 +31,12 @@
 - **Shared adaptation and counters.** Scope mutable parser, estimator,
   scheduler, and accounting state to the expected owner. Verify that one
   request updates another request's behavior only where sharing is intended.
+
+## Published advisory examples
+
+Preserve cache ownership and namespace
+through transformations, errors, and eviction.
+
+- [Shared cache identity](https://github.com/vllm-project/vllm/security/advisories/GHSA-rh6f-3x46-j33q)
+- [Cache salt through tool continuations](https://github.com/vllm-project/vllm/security/advisories/GHSA-935w-9g4m-p28p)
+- [Mirrored cache consistency](https://github.com/vllm-project/vllm/security/advisories/GHSA-ph3r-5jfg-f84f)

@@ -27,3 +27,11 @@
 - **Template execution.** Apply trust policy, permitted template context, and
   execution limits to model-provided templates and alternate renderers.
   Review template argument preparation as well as the render itself.
+
+## Published advisory examples
+
+Bound worker occupancy and apply
+compilation controls across supported backends.
+
+- [Template rendering resources](https://github.com/vllm-project/vllm/security/advisories/GHSA-542m-9234-8gvf)
+- [Structured-output regex compilation](https://github.com/vllm-project/vllm/security/advisories/GHSA-48jh-3gj7-fg8v)

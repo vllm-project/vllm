@@ -42,3 +42,13 @@
 - **Overrides and parity.** Check where request, model, backend, and operator
   settings merge. Verify that aliases, overrides, fallback loaders, and
   backend-specific work honor the effective policy and budget.
+
+## Published advisory examples
+
+Limit transport reads, media materialization, and
+total prompt or media work across the request.
+
+- [HTTP headers](https://github.com/vllm-project/vllm/security/advisories/GHSA-rxc4-3w6r-4v47)
+- [Media downloads](https://github.com/vllm-project/vllm/security/advisories/GHSA-p6g9-7v3x-m8mv)
+- [Request-wide media budget](https://github.com/vllm-project/vllm/security/advisories/GHSA-5r3c-5x4v-8gjh)
+- [Prompt list fan-out](https://github.com/vllm-project/vllm/security/advisories/GHSA-87x5-vmc3-756j)
