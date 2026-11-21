@@ -272,6 +272,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
+        routed_scale_prefolded: bool = False,
         routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     ):
         super().__init__()
@@ -280,6 +281,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
+        self.routed_scale_prefolded = routed_scale_prefolded
         self.routed_scale_mode = routed_scale_mode
         self.gate = gate
         self.shared_expert_gate = shared_expert_gate
@@ -430,7 +432,15 @@ class MoERunner(MoERunnerInterface):
         model's decoder layer must compensate with matching divisions.
         """
         if self.routed_scaling_factor != 1.0:
-            if (
+            if self.routed_scale_prefolded and fused_output.dtype != torch.float16:
+                return shared_output, fused_output
+            if self.routed_scale_prefolded and shared_output is not None:
+                # fused_output's contribution is already baked into the
+                # prefolded weights, but FP16 range is tight, so invert the
+                # scale on shared_output instead (decoder layer compensates
+                # with a matching division), regardless of routed_scale_mode.
+                shared_output *= 1.0 / self.routed_scaling_factor
+            elif (
                 self.routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
                 and shared_output is not None
                 and fused_output.dtype == torch.float16
