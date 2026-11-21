@@ -11,7 +11,11 @@ import requests
 from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
-from tests.v1.utils import check_request_balancing
+from tests.v1.utils import (
+    check_request_balancing,
+    get_engine_request_counts,
+    get_prometheus_metrics,
+)
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
@@ -202,3 +206,25 @@ async def test_completion_streaming(
 
     # Check request balancing via Prometheus metrics if DP_SIZE > 1
     check_request_balancing(server, int(DP_SIZE))
+
+
+def test_session_turns_stay_on_one_engine(server: RemoteOpenAIServer) -> None:
+    """The turns of a session that sends `X-Session-ID` reach one DP engine,
+    whichever API server process accepts each connection, so the session keeps
+    reusing that engine's prefix cache."""
+    num_turns = 8
+    before = get_engine_request_counts(get_prometheus_metrics(server))
+
+    for turn in range(num_turns):
+        # A new connection per request, so the turns spread across the API
+        # server processes.
+        response = requests.post(
+            server.url_for("v1/completions"),
+            headers={"X-Session-ID": "session-a"},
+            json={"model": MODEL_NAME, "prompt": f"Turn {turn}", "max_tokens": 4},
+        )
+        response.raise_for_status()
+
+    after = get_engine_request_counts(get_prometheus_metrics(server))
+    served = sorted(after[e] - before.get(e, 0) for e in after)
+    assert served == [0] * (len(served) - 1) + [num_turns], after

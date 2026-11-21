@@ -217,6 +217,8 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.engine_inflight = Counter()
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
+    client.lb_local_waiting = []
+    client.lb_local_waiting_for = None
     client.eng_start_index = 0
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
@@ -408,6 +410,41 @@ def test_dplb_finished_requests_release_inflight():
 
     assert client.engine_inflight[engine] == 0
     assert req.request_id not in client.reqs_in_flight
+
+
+def _route_and_finish_session_turn(client: DPLBAsyncMPClient) -> bytes:
+    req = make_request(SamplingParams(max_tokens=1))
+    req.session_id = "session-a"
+    engine = client.get_core_engine_for_request(req)
+    outputs = EngineCoreOutputs(finished_requests={req.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+    return engine
+
+
+def test_dplb_session_stays_on_one_engine_between_snapshots():
+    """This client's guesses for a session's earlier turns stay in
+    `lb_engines` until the next coordinator snapshot; they must not push the
+    session's next turns to another engine."""
+    client = _make_dplb_client(num_engines=2, client_count=4)
+
+    engines = {_route_and_finish_session_turn(client) for _ in range(4)}
+
+    assert len(engines) == 1
+
+
+@pytest.mark.parametrize(("running", "stays"), [(1, True), (2, False)])
+def test_dplb_session_leaves_engine_more_than_one_request_busier(
+    running: int, stays: bool
+):
+    """A session tolerates its engine being one request busier than the
+    least-loaded one, e.g. while a snapshot still counts its previous turn."""
+    client = _make_dplb_client(num_engines=2)
+    session_engine = _route_and_finish_session_turn(client)
+    snapshot = [[0, 0, 0.0], [0, 0, 0.0]]
+    snapshot[client.core_engines.index(session_engine)] = [0, running, 0.0]
+    client.lb_engines = snapshot
+
+    assert (_route_and_finish_session_turn(client) == session_engine) is stays
 
 
 @pytest.mark.parametrize("final_sent", [False, True])
