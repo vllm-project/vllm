@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use expect_test::expect;
 use futures::executor::block_on;
 use futures::{TryStreamExt as _, stream};
 use openai_harmony::chat::{Message, Role};
@@ -205,6 +206,78 @@ fn interrupted_analysis_message_is_preserved() {
             routed_experts: None,
         })
     );
+}
+
+fn length_finished() -> Finished {
+    Finished {
+        finish_reason: FinishReason::Length,
+        ..finished()
+    }
+}
+
+/// Generation can stop inside a message header, e.g. when `max_tokens` cuts
+/// `<|start|>assistant<|channel|>final` before `<|message|>`. Like Python, the
+/// unparsed tokens of that message come back as text.
+#[test]
+fn eos_inside_message_header_returns_raw_header_text() {
+    let encoding = harmony_encoding().unwrap();
+    let message_token = encoding.tokenizer().encode_with_special_tokens("<|message|>")[0];
+    let tokens = completion_tokens(&[
+        text_message("analysis", "think"),
+        text_message("final", "Paris"),
+    ]);
+    let final_header_end = tokens.iter().rposition(|&t| t == message_token).unwrap();
+
+    let results: Vec<_> = [&tokens[..1], &tokens[..final_header_end]]
+        .into_iter()
+        .map(|truncated| {
+            let events = block_on(collect_events(
+                HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+                vec![
+                    decoded_start(),
+                    decoded_tokens(truncated.to_vec(), None, Some(length_finished())),
+                ],
+            ));
+            let Some(ChatEvent::Done {
+                message,
+                finish_reason,
+                ..
+            }) = events.into_iter().last()
+            else {
+                panic!("expected done");
+            };
+            (message, finish_reason)
+        })
+        .collect();
+
+    expect![[r#"
+        [
+            (
+                AssistantMessage {
+                    content: [
+                        Text {
+                            text: "<|channel|>",
+                        },
+                    ],
+                },
+                Length,
+            ),
+            (
+                AssistantMessage {
+                    content: [
+                        Reasoning {
+                            text: "think",
+                        },
+                        Text {
+                            text: "<|start|>assistant<|channel|>final",
+                        },
+                    ],
+                },
+                Length,
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&results);
 }
 
 #[test]
