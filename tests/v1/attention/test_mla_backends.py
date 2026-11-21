@@ -1958,7 +1958,6 @@ def _fp8_cache_roundtrip(tensor: torch.Tensor, scale: float) -> torch.Tensor:
 
 def _run_backend_correctness(
     default_vllm_config,
-    dist_init,
     workspace_init,
     batch_spec_name: str,
     model: str,
@@ -2306,6 +2305,8 @@ def _run_backend_correctness(
         input_size=kv_lora_rank,
         output_size=num_q_heads * (qk_nope_head_dim + v_head_dim),
         bias=False,
+        tp_rank=0,
+        tp_size=1,
     ).to(device=device, dtype=dtype)
 
     # Set the mock weights to match our reference implementation
@@ -2499,7 +2500,7 @@ def _run_backend_correctness(
 )
 def test_backend_correctness(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     workspace_init,
     batch_spec_name: str,
     model: str,
@@ -2513,7 +2514,6 @@ def test_backend_correctness(
 ):
     _run_backend_correctness(
         default_vllm_config,
-        dist_init,
         workspace_init,
         batch_spec_name,
         model,
@@ -2539,7 +2539,7 @@ def test_backend_correctness(
 )
 def test_chunked_context_backend_correctness(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     workspace_init,
     prefill_backend: MLAPrefillBackendEnum,
     qk_nope_head_dim: int,
@@ -2576,7 +2576,6 @@ def test_chunked_context_backend_correctness(
         )
     _run_backend_correctness(
         default_vllm_config,
-        dist_init,
         workspace_init,
         batch_spec_name=batch_spec_name,
         model="deepseek-ai/DeepSeek-R1",
