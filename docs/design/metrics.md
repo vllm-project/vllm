@@ -386,6 +386,30 @@ We use this concept for the `vllm:cache_config_info` metric:
 vllm:cache_config_info{block_size="16",cache_dtype="auto",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
 ```
 
+The labels describe the resolved runtime configuration. For hybrid models such
+as DeepSeek-V4 and DeepSeek-V4.1, KV cache groups can use different block sizes,
+so `block_size` is not necessarily the value passed to `--block-size`:
+
+| Label | Meaning |
+| --- | --- |
+| `block_size` | Scheduler allocation granularity: the smallest block size across the KV cache groups. |
+| `user_specified_block_size` | Whether a block size was explicitly supplied, not whether the runtime `block_size` still equals that value. |
+| `effective_attention_block_size` | Full-attention block size in tokens, including decode context parallelism, or `None` when unavailable. |
+| `num_gpu_blocks` | Number of blocks in the device KV cache pool. |
+| `kv_cache_size_tokens` | Estimated per-data-parallel-engine token capacity, accounting for the cache groups. |
+| `kv_cache_max_concurrency` | Estimated per-data-parallel-engine concurrency for requests at `max_model_len`. |
+
+For example, groups with block sizes of 256, 64, 8, and 4 report
+`block_size="4"`, even when `--block-size 256` was supplied. This does not mean
+that every attention layer uses four-token blocks.
+
+Do not calculate hybrid-model token capacity as `num_gpu_blocks * block_size`.
+A request consumes blocks from multiple groups, each with its own granularity
+and retention requirements. Use `kv_cache_size_tokens` and
+`kv_cache_max_concurrency` for capacity planning instead. The token estimate is
+`int(kv_cache_max_concurrency * max_model_len)`; these are configuration-based
+capacity estimates, not live occupancy or measured serving throughput.
+
 However, `prometheus_client` has
 [never supported Info metrics in multiprocessing mode](https://github.com/prometheus/client_python/pull/300) -
 for [unclear reasons](gh-pr:7279#discussion_r1710417152). We
