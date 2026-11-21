@@ -381,7 +381,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.W_UV_dcp: torch.Tensor | None = None
         if self.dcp_world_size > 1:
             query_dtype = (
-                torch.float8_e4m3fn
+                current_platform.fp8_dtype()
                 if is_quantized_kv_cache(self.kv_cache_dtype)
                 and self.kv_cache_dtype != "fp8_ds_mla"
                 else dtype
@@ -779,15 +779,12 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 cos_sin_cache=cos_sin_cache,
             )
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            cache = self.kv_cache
-            if cache.dtype != torch.float8_e4m3fn:
-                cache = cache.view(torch.float8_e4m3fn)
             mqa_q = fused_mla_decode_q_concat_kv_cache_insert(
                 ql_nope,
                 q_pe,
                 kv_c_normed,
                 k_pe,
-                cache,
+                self.kv_cache,
                 slot_mapping,
                 q_scale_inv=self._q_scale_inv,
                 cache_scale_inv=self._k_scale_inv,
@@ -1059,16 +1056,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             )
             # Plain per-tensor fp8: quant q/k/v (unscaled, matching forward_mha's
             # unscaled `.to(fp8)`) and insert the fp8 latent (scaled by _k_scale).
-            kv_cache = self.kv_cache
-            if kv_cache.dtype != torch.float8_e4m3fn:
-                kv_cache = kv_cache.view(torch.float8_e4m3fn)
             q, k, v = fused_mla_qkv_quant_kv_cache_fp8_insert(
                 q,
                 k_nope,
                 k_pe,
                 kv_c_normed,
                 v,
-                kv_cache,
+                self.kv_cache,
                 slot_mapping,
                 self._one_scale,
                 self._one_scale,
