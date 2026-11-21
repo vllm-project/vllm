@@ -3,7 +3,10 @@
 
 from typing import Any
 
+from typing_extensions import override
+
 from vllm.config import VllmConfig
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -17,7 +20,8 @@ from vllm.utils.async_utils import make_async
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+from .inputs.tokenize import get_truncation_indices
+from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -124,3 +128,35 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
             prompt["multi_modal_uuids"] = mm_uuids
 
         return conversation, prompt
+
+    @override
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        tokens_prompt = super()._tokenize_prompt(prompt, params)
+
+        # With an explicit side, the tokenizer does not truncate the prompt (see
+        # `TokenizeParams.get_encode_kwargs`), so truncate it here and keep BOS,
+        # the only token that mistral-common adds, as its own truncation does.
+        # Multimodal prompts are sliced again after placeholder expansion (see
+        # `_truncate_expanded_prompt`), which would cut BOS anyway.
+        if (
+            params.truncation_side is None
+            or not params.add_special_tokens
+            or prompt.get("multi_modal_data")
+            or prompt.get("multi_modal_uuids")
+        ):
+            return tokens_prompt
+
+        tokenizer = self.get_tokenizer()
+        token_ids = tokens_prompt["prompt_token_ids"]
+        truncation = params._truncation_slice(tokenizer, len(token_ids))
+        if truncation is not None and token_ids[:1] == [tokenizer.bos_token_id]:
+            special_tokens_mask = [1] + [0] * (len(token_ids) - 1)
+            kept = get_truncation_indices(truncation, special_tokens_mask)
+            if kept is not None:
+                tokens_prompt["prompt_token_ids"] = [token_ids[i] for i in kept]
+
+        return tokens_prompt
