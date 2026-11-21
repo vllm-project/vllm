@@ -5129,6 +5129,69 @@ async fn chat_structured_outputs_use_configured_backend() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_forced_tool_choice_constrains_phi4_mini_calls() {
+    // A choice that obliges a call must reach the engine as a grammar for
+    // phi-4-mini's `functools[..]` call list, not as an unconstrained request.
+    let tool_choices = [
+        json!("required"),
+        json!({"type": "function", "function": {"name": "get_weather"}}),
+    ];
+    for tool_choice in tool_choices {
+        let chat_backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                ChatLlm::new(TextLlm::new(llm, chat_backend.clone()), chat_backend)
+                    .with_tool_call_parser(ParserSelection::Explicit("phi4_mini_json".to_string()))
+            },
+            |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                let structured_outputs =
+                    params.structured_outputs.as_ref().expect("structured outputs");
+                let constraint = &structured_outputs.params.constraint;
+                let tag = constraint.as_structural_tag().expect("structural tag");
+                assert!(tag.contains(r#""value":"functools[""#), "{tag}");
+            },
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": "What is the weather in Rome?"}],
+                            "max_tokens": 2,
+                            "tools": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {"city": {"type": "string"}},
+                                        "required": ["city"]
+                                    }
+                                }
+                            }],
+                            "tool_choice": tool_choice,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn openai_return_weight_versions_reports_spans_on_final_choice() {
     for endpoint in ["/v1/chat/completions", "/v1/completions"] {
         for stream in [false, true] {
