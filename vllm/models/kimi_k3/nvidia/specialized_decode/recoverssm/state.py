@@ -253,7 +253,7 @@ def _build_deferred(
         rows[:live].copy_(slots[:live], non_blocking=True)
     rows[live : max(m.num_reqs, num_spec_decodes)].fill_(-1)
     eager = None
-    if builder.vllm_config.cache_config.mamba_cache_mode == "align":
+    if builder.vllm_config.cache_config.enable_prefix_caching:
         assert isinstance(builder.kv_cache_spec, MambaSpec)
         block = builder.kv_cache_spec.block_size
         margin = 2 * (builder.num_spec + 1)

@@ -491,9 +491,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = patched_processor
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        hf_model.model_name, trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(hf_model.model_name)
 
     original_generate = hf_model.model.generate
 
@@ -1054,6 +1052,40 @@ def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def gemma3n_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for Gemma 3n."""
+
+    def generate_greedy_logprobs_limit(
+        prompts, max_tokens, num_logprobs, images=None, audios=None, videos=None
+    ):
+        # Gemma 3n keeps one hidden state per altup branch, so the logprobs cannot
+        # be rebuilt from them; take the logits the model itself produced.
+        all_inputs = hf_model.get_inputs(
+            prompts, images=images, videos=videos, audios=audios
+        )
+        outputs = []
+        for inputs in all_inputs:
+            output = hf_model.model.generate(
+                **hf_model.wrap_device(inputs),
+                do_sample=False,
+                max_new_tokens=max_tokens,
+                output_logits=True,
+                return_dict_in_generate=True,
+            )
+            logprobs = []
+            for logits in output.logits:
+                topk = torch.log_softmax(logits[0].float(), dim=-1).topk(num_logprobs)
+                logprobs.append(dict(zip(topk.indices.tolist(), topk.values.tolist())))
+            output_ids = output.sequences[0][-len(logprobs) :].tolist()
+            outputs.append(
+                (output_ids, hf_model.tokenizer.decode(output_ids), logprobs)
+            )
+        return outputs
+
+    hf_model.generate_greedy_logprobs_limit = generate_greedy_logprobs_limit  # type: ignore[method-assign]
+    return hf_model
+
+
 def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4.1V."""
     hf_processor = hf_model.processor
@@ -1205,7 +1237,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
 def moondream3_processor(model: str):
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    return Moondream3Processor.from_pretrained(model, trust_remote_code=True)
+    return Moondream3Processor.from_pretrained(model)
 
 
 def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:

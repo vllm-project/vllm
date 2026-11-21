@@ -3,12 +3,19 @@
 """Checkpoint name mapping and weight loading for the ROCm Muse Spark model."""
 
 import importlib
+import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 import vllm.models.muse_spark.amd.model as amd_model
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.models.muse_spark.amd.model import (
     MuseSparkForCausalLM,
     MuseSparkModel,
@@ -253,9 +260,13 @@ def test_aiter_kv_workspace_only_for_cache_readers(
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
     layer.impl = AiterFlashAttentionImpl.__new__(AiterFlashAttentionImpl)
-    layer.impl.sliding_window = None
+    layer.impl.sliding_window = (-1, -1)
+    layer.impl.num_heads = 1
     layer.impl.num_kv_heads = 1
     layer.impl.head_size = 64
+    layer.impl.alibi_slopes = None
+    layer.impl.sinks = None
+    layer.impl._fast_verify = False
     layer.kv_sharing_target_layer_name = "source" if sharing else None
     layer.kv_cache_update_bypass = bypass
     monkeypatch.setattr(
@@ -280,3 +291,89 @@ def test_aiter_kv_workspace_only_for_cache_readers(
         spec, ["attn"], default_vllm_config, torch.device("cpu")
     )
     assert (builder.kv_sharing_workspace is not None) == (sharing or bypass)
+
+
+@pytest.mark.parametrize(
+    "expert_parallel,reduce_dtype,supported",
+    [(True, "fp32", True), (False, "bf16", True), (False, "fp32", False)],
+)
+def test_token_sharded_stream_needs_ep_or_a_bf16_tp_reduction(
+    monkeypatch, expert_parallel: bool, reduce_dtype: str, supported: bool
+) -> None:
+    from vllm import envs
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", reduce_dtype)
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_SP_MIN_TOKENS", 1024)
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=expert_parallel,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        use_sequence_parallel_moe=False,
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(mlp_layer_types=["sparse"] * 4)
+        ),
+    )
+    assert amd_model.token_sharded_stream_supported(vllm_config) is supported
+
+
+@pytest.mark.parametrize(
+    "online, rejected",
+    [
+        ({"targets": {"*layers.0.feed_forward.experts*": "mxfp4"}}, False),
+        ({"targets": {"*o_proj": "fp8_per_tensor"}}, True),
+        ({"linear": "fp8_per_tensor", "moe": "mxfp4"}, True),
+    ],
+)
+def test_online_quantization_of_bf16_checkpoints_only_targets_experts(
+    dist_init, online, rejected
+) -> None:
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(**online))
+    model = torch.nn.Module()
+    with set_current_vllm_config(
+        VllmConfig(model_config=ModelConfig(dtype=torch.bfloat16))
+    ):
+        model.o_proj = ReplicatedLinear(
+            64,
+            64,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            prefix="model.layers.0.self_attn.o_proj",
+        )
+    if rejected:
+        with pytest.raises(NotImplementedError, match="only on the routed experts"):
+            amd_model._reject_online_quantized_linears(model)
+    else:
+        amd_model._reject_online_quantized_linears(model)
+
+
+@pytest.mark.parametrize(
+    "cdna, default_gemm",
+    [(2, False), (3, True), (4, True), (5, False)],
+    ids=["cdna2", "cdna3", "cdna4", "cdna5"],
+)
+def test_pooler_gemm_dispatch_follows_the_cdna_version(
+    monkeypatch, dist_init, cdna, default_gemm
+) -> None:
+    """Fails if the pooler or unpooler leaves the default unquantized GEMM
+    dispatch on CDNA3 and CDNA4, or leaves PyTorch linear on any other CDNA."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.platforms.rocm",
+        SimpleNamespace(get_cdna_version=lambda: cdna),
+    )
+    layer = amd_model._pooling_projection(16, 8, "pooler")
+    expected = (
+        UnquantizedLinearMethod
+        if default_gemm
+        else amd_model.MuseSparkTorchLinearMethod
+    )
+    assert type(layer.quant_method) is expected

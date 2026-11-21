@@ -265,14 +265,27 @@ def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: 
     assert torch.equal(full_state, ref_state)
 
 
-@pytest.mark.parametrize("offset", [16, 144, 256])
+@pytest.mark.parametrize(
+    ("backend", "offset"),
+    [
+        ("flashkda", 16),
+        ("flashkda", 144),
+        ("flashkda", 256),
+        # The Triton path checkpoints on its 64-token chunk boundaries.
+        ("triton", 64),
+        ("triton", 256),
+    ],
+)
 @pytest.mark.parametrize("dim_first", [False, True])
 @pytest.mark.parametrize("num_spec", [0, 3])
 @torch.inference_mode()
-def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, offset):
+def test_prefill_checkpoint_resumes_suffix(
+    monkeypatch, dim_first, num_spec, backend, offset
+):
     """Restoring both cached states must reproduce an uninterrupted prefill."""
     from types import SimpleNamespace
 
+    from vllm.model_executor.layers.mamba import kda_checkpoint
     from vllm.model_executor.layers.mamba.checkpoint import (
         MambaPrefillCheckpointMetadata,
     )
@@ -284,9 +297,10 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
     from vllm.v1.worker.workspace import WorkspaceManager
 
-    if kda._resolve_kda_prefill_backend("auto", D, torch.bfloat16, -5) != "flashkda":
-        pytest.skip("requires FlashKDA")
-    import vllm._flashkda_C  # noqa: F401
+    if backend == "flashkda":
+        if kda._resolve_kda_prefill_backend("auto", D, torch.bfloat16, -5) != backend:
+            pytest.skip("requires FlashKDA")
+        import vllm._flashkda_C  # noqa: F401
 
     torch.manual_seed(42)
     device = torch.device("cuda")
@@ -301,7 +315,8 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     layer.local_projection_size = heads * D
     layer.kda_safe_gate = True
     layer.kda_lower_bound = -5.0
-    layer.kda_prefill_backend = "flashkda"
+    layer.kda_prefill_backend = backend
+    layer.kda_decode_backend = "triton"
     layer._conv_state_dim_first = dim_first
     layer.conv1d = SimpleNamespace(
         weight=torch.randn(width, 1, 4, device=device) * 0.1, bias=None
@@ -309,18 +324,22 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     layer.A_log = torch.randn(1, 1, heads, 1, device=device) * 0.1
     layer.dt_bias = torch.randn(heads * D, device=device) * 0.1
     state_shape = (2, heads, D, D)
-    layer._flashkda_buffer_specs = (
-        (state_shape, torch.float32),
-        (state_shape, torch.float32),
-        (
-            (torch.ops._flashkda_C.get_workspace_size(2 * length, heads, 2),),
-            torch.uint8,
-        ),
-        ((1, 2 * length, heads, D), torch.bfloat16),
-    )
+    if backend == "flashkda":
+        layer._flashkda_buffer_specs = (
+            (state_shape, torch.float32),
+            (state_shape, torch.float32),
+            (
+                (torch.ops._flashkda_C.get_workspace_size(2 * length, heads, 2),),
+                torch.uint8,
+            ),
+            ((1, 2 * length, heads, D), torch.bfloat16),
+        )
+    else:
+        layer._triton_checkpoint_spec = (state_shape, torch.float32)
     layer._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(state_len=3)
     workspace = WorkspaceManager(device)
     monkeypatch.setattr(kda, "current_workspace_manager", lambda: workspace)
+    monkeypatch.setattr(kda_checkpoint, "current_workspace_manager", lambda: workspace)
     conv_shape = (width, state_len) if dim_first else (state_len, width)
     num_slots = 5 + (num_spec + 1 if num_spec else 0)
     conv_storage = torch.zeros(
@@ -395,7 +414,7 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
         out = torch.empty(
             1, qkv.shape[0], heads, D, device=device, dtype=torch.bfloat16
         )
-        layer._forward(qkv, g, b, out)
+        layer._forward(qkv, g, b, out, g[0])
         return out[:, spec_tokens:]
 
     checkpoint = MambaPrefillCheckpointMetadata(

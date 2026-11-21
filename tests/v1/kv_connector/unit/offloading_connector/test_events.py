@@ -111,7 +111,7 @@ def _group_config(
     assert tokens_per_chunk % tokens_per_hash == 0
     if mamba:
         # A recurrent group: one state per chunk, offloaded in align mode.
-        manager_config = MambaManager.config(mamba_cache_mode="align")
+        manager_config = MambaManager.config(enable_prefix_caching=True)
         sliding_window_size_in_chunks = 1
         event_spec = _MAMBA_EVENT_SPEC
     else:
