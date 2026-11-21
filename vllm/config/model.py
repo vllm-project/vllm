@@ -332,9 +332,6 @@ class ModelConfig:
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
-    disable_cascade_attn: bool = True
-    """Deprecated: cascade attention has been removed, so this has no effect.
-    It will be removed in v0.33.0."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -461,6 +458,7 @@ class ModelConfig:
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_shm_cache_buffer_name: InitVar[str | None] = None
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
@@ -502,7 +500,6 @@ class ModelConfig:
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
-            "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
             "config_format",
@@ -518,6 +515,7 @@ class ModelConfig:
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
             "mm_shm_cache_max_object_size_mb",
+            "mm_shm_cache_buffer_name",
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
@@ -603,6 +601,7 @@ class ModelConfig:
         mm_processor_cache_type: MMCacheType | None,
         mm_hasher_algorithm: MMHasherAlgorithm | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_shm_cache_buffer_name: str | None,
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
@@ -904,6 +903,7 @@ class ModelConfig:
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_hasher_algorithm=mm_hasher_algorithm,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_shm_cache_buffer_name=mm_shm_cache_buffer_name,
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
@@ -1437,6 +1437,17 @@ class ModelConfig:
         return convert_type
 
     def _verify_quantization(self) -> None:
+        from vllm.config.quantization import (
+            _DEFERRED_ONLINE_SHORTHANDS,
+            _ONLINE_SHORTHANDS,
+            merge_quantization_config,
+            resolve_quantization_config,
+        )
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        requested_quantization = self.quantization
         supported_quantization = me_quant.QUANTIZATION_METHODS
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
@@ -1519,13 +1530,56 @@ class ModelConfig:
                     f"({self.quantization})."
                 )
 
+        # Keep the NVFP4 loader selected above, but preserve the requested
+        # MXFP4 conversion as an online overlay.
+        if (
+            quant_cfg is not None
+            and requested_quantization == "mxfp4"
+            and self.quantization == "modelopt_fp4"
+        ):
+            online_args = resolve_quantization_config(
+                requested_quantization, self.quantization_config
+            )
+            # Explicit targets (even {}) replace the shorthand's global defaults.
+            if online_args is None or online_args.targets is None:
+                online_args = merge_quantization_config(
+                    _ONLINE_SHORTHANDS[requested_quantization], online_args
+                )
+            self.quantization_config = online_args
+
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."
                 )
-            current_platform.verify_quantization(self.quantization)
+            online_args = resolve_quantization_config(
+                self.quantization, self.quantization_config
+            )
+            # Activation-only overrides do not replace checkpoint weights.
+            has_online_weights = online_args is not None and (
+                any(
+                    spec is not None and spec.weight is not None
+                    for spec in (online_args.linear, online_args.moe)
+                )
+                or any(
+                    isinstance(target, str) or target.weight is not None
+                    for target in (online_args.targets or {}).values()
+                )
+            )
+            quant_cls = me_quant.get_quantization_config(self.quantization)
+            # Without checkpoint metadata, mxfp4/mxfp8 may still be online
+            # shorthands; keep their existing model-level validation.
+            is_checkpoint_quantization = not issubclass(
+                quant_cls, OnlineQuantizationConfig
+            ) and (
+                quant_cfg is not None
+                or self.quantization not in _DEFERRED_ONLINE_SHORTHANDS
+            )
+            # Layer selection determines which checkpoint methods still execute.
+            defer_platform_check = has_online_weights and is_checkpoint_quantization
+            if not defer_platform_check:
+                current_platform.verify_quantization(self.quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
             if self.allow_deprecated_quantization:
@@ -2547,6 +2601,7 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3_text": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
+    "shieldgemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
 
 
