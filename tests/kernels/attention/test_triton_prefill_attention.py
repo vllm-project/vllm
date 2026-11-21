@@ -493,3 +493,62 @@ def test_narrow_tile_needs_the_alignment_hint(monkeypatch) -> None:
     assert capture.kwargs["BLOCK_DMODEL_TAIL"] == 16, "still a 64 + 16 split"
     assert capture.kwargs["HEAD_STRIDE_ALIGNED_8"] is False
     assert capture.kwargs["BLOCK_N"] == 32
+
+
+@pytest.fixture
+def max_shared_memory(monkeypatch, request):
+    """Fit tiles to the given shared memory per block, as on a CUDA device."""
+    monkeypatch.setattr(prefill_ops.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        prefill_ops, "get_max_shared_memory_bytes", lambda: request.param
+    )
+    prefill_ops._fit_block_to_shared_memory.cache_clear()
+    yield request.param
+    prefill_ops._fit_block_to_shared_memory.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("max_shared_memory", "dtype", "head_dim", "expected"),
+    [
+        # The 16-row tile still misses 64 KiB (T4) at 8 warps, but fits at 4.
+        pytest.param(64 * 1024, torch.float32, 512, (16, 4), id="64k-fp32-512"),
+        pytest.param(64 * 1024, torch.float32, 256, (16, 8), id="64k-fp32-256"),
+        pytest.param(64 * 1024, torch.float16, 512, (16, 8), id="64k-fp16-512"),
+        pytest.param(99 * 1024, torch.float32, 512, (16, 8), id="99k-fp32-512"),
+        pytest.param(227 * 1024, torch.float32, 512, (32, 8), id="227k-fp32-512"),
+    ],
+    indirect=["max_shared_memory"],
+)
+def test_drops_to_4_warps_only_when_the_16_row_tile_misses(
+    monkeypatch, max_shared_memory, dtype, head_dim, expected
+) -> None:
+    capture = _capture_tile_config(
+        monkeypatch, is_rocm=False, on_gfx1x=False, dtype=dtype, head_dim=head_dim
+    )
+    assert (capture.kwargs["BLOCK_M"], capture.kwargs["num_warps"]) == expected
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="the fit is CUDA only")
+@pytest.mark.parametrize("max_shared_memory", [64 * 1024], indirect=True)
+def test_4_warp_tile_matches_the_reference(max_shared_memory) -> None:
+    """Run the float32 head-dim-512 tile picked for 64 KiB on any CUDA GPU."""
+    torch.manual_seed(42)
+    B, S, H, D = 2, 256, 8, 512
+    seq_lens = torch.full((B,), S, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+    q, k, v = (
+        torch.randn(B * S, H, D, dtype=torch.float32, device=DEVICE_TYPE)
+        for _ in range(3)
+    )
+    o = torch.zeros_like(q)
+    context_attention_fwd(q, k, v, o, b_start_loc, seq_lens, S, is_causal=False)
+
+    o_ref = torch.zeros_like(o)
+    for i in range(B):
+        start = b_start_loc[i].item()
+        end = start + seq_lens[i].item()
+        o_ref[start:end] = ref_masked_attention(
+            q[start:end], k[start:end], v[start:end], is_causal=False
+        )
+    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
