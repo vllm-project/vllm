@@ -11,6 +11,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -70,6 +71,11 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             varlen_decode=self.enable_adaptive_verification,
         )
         super().init_cudagraph_manager(cudagraph_mode)
+
+    def load_model(self, target_model: nn.Module) -> None:
+        if self.vllm_config.kernel_config.enable_jit_warmup:
+            _PREPARE_PREFILL_WARMUP.register_warmup()
+        super().load_model(target_model)
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -451,7 +457,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         return self.draft_tokens[:num_reqs]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_num_reqs", "max_model_len"])
 def _prepare_prefill_inputs_kernel(
     target_input_ids_ptr,  # [src_tokens] int32
     target_positions_ptr,  # [src_tokens] int64
@@ -534,6 +540,60 @@ def _prepare_prefill_inputs_kernel(
             mask = block < max_num_reqs
             tl.store(out_seq_lens_ptr + block, 0, mask=mask)
             tl.store(last_token_indices_ptr + block, 0, mask=mask)
+
+
+def standalone_prefill_block_sizes(max_num_batched_tokens: int) -> tuple[int, ...]:
+    """Power-of-two `BLOCK_SIZE` values `prepare_prefill_inputs` can launch.
+
+    The launch uses `min(512, next_power_of_2(max(query_lens) + 2))`. A query
+    is at least one token, so the smallest width is 4.
+    """
+    limit = min(512, next_power_of_2(max(max_num_batched_tokens, 1) + 2))
+    sizes: list[int] = []
+    size = 4
+    while size <= limit:
+        sizes.append(size)
+        size *= 2
+    return tuple(sizes)
+
+
+class _PreparePrefillWarmup(VllmJitKernel[int]):
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[int]:
+        return list(
+            standalone_prefill_block_sizes(
+                vllm_config.scheduler_config.max_num_batched_tokens
+            )
+        )
+
+    def compile(self, block_size: int) -> None:
+        from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+            TritonWarmupTensor,
+        )
+
+        i32 = TritonWarmupTensor(torch.int32)
+        i64 = TritonWarmupTensor(torch.int64)
+        _prepare_prefill_inputs_kernel.warmup(
+            i32,
+            i64,
+            i32,
+            i64,
+            i32,
+            i64,
+            i64,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            1,
+            1,
+            BLOCK_SIZE=block_size,
+            grid=(1,),
+        )
+        self._compiled_cache[block_size] = True
+
+
+_PREPARE_PREFILL_WARMUP = _PreparePrefillWarmup()
 
 
 def prepare_prefill_inputs(
