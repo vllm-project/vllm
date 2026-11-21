@@ -41,8 +41,6 @@ from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import ChatParams, TokenizeParams
-from vllm.renderers.chat_utils import ChatTemplateConfig
-from vllm.renderers import TokenizeParams
 from vllm.renderers.chat_utils import (
     AsyncMultiModalItemTracker,
     ChatTemplateConfig,
