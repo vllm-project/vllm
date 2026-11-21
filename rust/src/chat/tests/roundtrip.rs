@@ -864,6 +864,9 @@ async fn load_roundtrip_backends(case: &RoundtripCase) -> Result<vllm_chat::Load
         case.model_id,
         LoadModelBackendsOptions {
             renderer: RendererSelection::Auto,
+            // Roundtrips render and parse text only; some cases are multimodal
+            // checkpoints the Rust frontend serves only as text.
+            language_model_only: true,
             ..Default::default()
         },
     )
