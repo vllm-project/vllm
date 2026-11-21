@@ -142,6 +142,11 @@ pub struct OutputGrammarContext<'a> {
 /// Errors produced while building an output grammar.
 #[derive(Debug, Error)]
 pub enum OutputGrammarError {
+    #[error("Dynamo output grammar failed: {error:#}")]
+    Dynamo {
+        #[source]
+        error: anyhow::Error,
+    },
     /// A model-specific structural-tag builder rejected its inputs.
     #[error("failed to build output grammar")]
     Build(#[from] xgrammar_structural_tag::Error),

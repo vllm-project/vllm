@@ -182,7 +182,11 @@ impl ChatBackend for HfChatBackend {
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions<'_>,
     ) -> Result<DynChatOutputProcessor> {
-        if self.model_type == "gpt_oss" {
+        if self.model_type == "gpt_oss"
+            && crate::parser::unified::UnifiedParserFactory::global()
+                .dynamo_family("gpt_oss")
+                .is_none()
+        {
             validate_harmony_parser_overrides(options.tool_call_parser, options.reasoning_parser)?;
             return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
         }
@@ -190,7 +194,11 @@ impl ChatBackend for HfChatBackend {
         Ok(Box::new(
             DefaultChatOutputProcessor::with_response_template(
                 request,
-                &self.model_id,
+                if self.model_type == "gpt_oss" {
+                    "gpt_oss"
+                } else {
+                    &self.model_id
+                },
                 self.tokenizer.clone(),
                 &self.response_template,
                 options.tool_call_parser,
@@ -598,6 +606,47 @@ mod tests {
             error.to_report_string(),
             "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires VLLM_USE_DYNAMO_RUST_PARSER=1"]
+    async fn dynamo_unified_gpt_oss_uses_model_type_for_local_checkpoint() {
+        use futures::StreamExt as _;
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"gpt_oss"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+        assert_eq!(backend.model_id, "test-model");
+        let mut request = request_with_user_text("hello");
+        let mut processor = backend
+            .new_chat_output_processor(
+                &mut request,
+                NewChatOutputProcessorOptions {
+                    tool_strict_level: None,
+                    tool_call_parser: &ParserSelection::Auto,
+                    reasoning_parser: &ParserSelection::Auto,
+                },
+            )
+            .unwrap();
+        processor.initialize(&[]).unwrap();
+        let decoded = futures::stream::iter([Ok(vllm_text::output::DecodedTextEvent::TextDelta {
+            decoded: vllm_text::DecodedText::unattributed(
+                "<|start|>assistant<|channel|>analysis<|message|>thought<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>",
+            ),
+            sampled: vllm_text::SampledDelta::default(),
+            finished: None,
+        })]);
+        let events = processor
+            .process(decoded.boxed())
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(event, crate::ChatEvent::BlockDelta {kind:crate::AssistantBlockKind::Reasoning,delta,..} if delta=="thought")));
+        assert!(events.iter().any(|event| matches!(event, crate::ChatEvent::BlockDelta {kind:crate::AssistantBlockKind::Text,delta,..} if delta=="answer")));
     }
 
     #[test]

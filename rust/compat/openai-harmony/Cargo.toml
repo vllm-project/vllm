@@ -1,0 +1,12 @@
+[package]
+name = "openai-harmony"
+version = "0.0.8+vllm.compat"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+openai-harmony.workspace = true
+
+[lints]
+workspace = true

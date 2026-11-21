@@ -652,7 +652,7 @@ mod tests {
                         output_token_count: 4,
                         prompt_cache_usage: Default::default(),
                     },
-                    reasoning_tokens: 3,
+                    reasoning_tokens: Some(3),
                 },
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
@@ -683,7 +683,7 @@ mod tests {
         let ChatEvent::Done { usage, .. } = &events[4] else {
             panic!("expected done");
         };
-        assert_eq!(usage.reasoning_tokens, 3);
+        assert_eq!(usage.reasoning_tokens, Some(3));
         assert_eq!(usage.output_token_count, 4);
     }
 }

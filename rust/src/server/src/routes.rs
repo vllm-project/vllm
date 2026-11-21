@@ -76,7 +76,7 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
             error: ErrorDetail {
                 message: format!(
                     "{method} {} is not supported by the Rust frontend yet. \
-                     Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend.",
+                     Disable VLLM_USE_RUST_FRONTEND and VLLM_USE_DYNAMO_RUST_PARSER to use the Python frontend.",
                     path.as_str()
                 ),
                 error_type: "NotImplementedError".to_string(),

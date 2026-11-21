@@ -5,6 +5,7 @@
 
 mod beam;
 mod combined;
+mod dynamo;
 mod gemma4;
 mod hf;
 mod hy;
@@ -14,6 +15,7 @@ mod muse;
 
 pub use beam::BeamUnifiedParser;
 pub use combined::CombinedParser;
+pub use dynamo::{DynamoUnifiedParser, REGISTERED_UNIFIED_FAMILIES, canonical_unified_family};
 pub use gemma4::Gemma4UnifiedParser;
 pub use hf::{HfPosition, HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
@@ -231,6 +233,10 @@ mod tests {
 
 /// Incremental parser that extracts reasoning and tool-call events from assistant output.
 pub trait UnifiedParser: Send {
+    /// Whether reasoning events carry the original model-token attributions.
+    fn provides_reasoning_token_counts(&self) -> bool {
+        true
+    }
     /// Construct a boxed parser instance for one request stream.
     fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
     where
@@ -283,6 +289,11 @@ pub trait UnifiedParser: Send {
 #[derive(Debug, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::unified", mangle))]
 pub enum UnifiedParserError {
+    #[error("Dynamo v2 unified parser failed: {error:#}")]
+    Dynamo {
+        #[source]
+        error: anyhow::Error,
+    },
     /// The parser is built from inputs other than tools and a tokenizer, so
     /// [`UnifiedParser::create`] cannot construct it.
     #[error("the `{parser}` unified parser is built from {built_from}, not by name")]

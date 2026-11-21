@@ -939,12 +939,12 @@ mod tests {
                     cache_creation_token_count: 4,
                 },
             },
-            reasoning_tokens: 2,
+            reasoning_tokens: Some(2),
         });
 
         assert_eq!(usage.input_tokens_details.cached_tokens, 3);
         assert_eq!(usage.input_tokens_details.cache_write_tokens, 4);
-        assert_eq!(usage.output_tokens_details.reasoning_tokens, 2);
+        assert_eq!(usage.output_tokens_details.reasoning_tokens, Some(2));
         assert_eq!(usage.total_tokens, 12);
     }
 

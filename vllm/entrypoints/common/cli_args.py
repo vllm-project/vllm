@@ -630,6 +630,10 @@ def init_parser_plugin(args: argparse.Namespace):
 
 
 def validate_api_server_args(args: argparse.Namespace):
+    # The Rust unified registry validates these names before accepting requests.
+    if envs.VLLM_USE_DYNAMO_RUST_PARSER:
+        return
+
     from vllm.reasoning import ReasoningParserManager
 
     valid_tool_parses = ToolParserManager.list_registered()

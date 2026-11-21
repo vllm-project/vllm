@@ -213,7 +213,7 @@ impl DefaultChatOutputProcessor {
         else {
             return Ok(None);
         };
-        if tool_name != reasoning_name {
+        if !factory.equivalent_names(tool_name, reasoning_name) {
             return Err(Error::IncompatibleParserSelections {
                 tool: tool_name.unwrap_or("none").to_owned(),
                 reasoning: reasoning_name.unwrap_or("none").to_owned(),
@@ -231,7 +231,9 @@ impl DefaultChatOutputProcessor {
         };
         let parser: Box<dyn UnifiedParser> = match parser_name {
             names::HF => Box::new(HfUnifiedParser::new(template()?, tools, tokenizer)),
-            names::BEAM => Box::new(BeamUnifiedParser::new(template()?, tools, tokenizer)),
+            names::BEAM if factory.dynamo_family(parser_name).is_none() => {
+                Box::new(BeamUnifiedParser::new(template()?, tools, tokenizer))
+            }
             _ => factory.create(parser_name, tools, tokenizer)?,
         };
 

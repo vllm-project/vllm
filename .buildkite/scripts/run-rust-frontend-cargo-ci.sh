@@ -128,6 +128,17 @@ run_tests() {
     --all-features \
     --locked \
     --no-fail-fast
+
+  log_section "Testing Dynamo v2 unified parser integration"
+  local grammar_dir
+  grammar_dir="$(mktemp -d)"
+  DYNAMO_VLLM_GRAMMAR_DIR="$grammar_dir" VLLM_USE_DYNAMO_RUST_PARSER=1 cargo test \
+    --manifest-path rust/Cargo.toml --locked -p vllm-chat \
+    --test dynamo_unified -- --ignored
+  VLLM_USE_DYNAMO_RUST_PARSER=1 cargo test \
+    --manifest-path rust/Cargo.toml --locked -p vllm-chat -p vllm-server \
+    --lib dynamo_unified -- --ignored
+  uv run --script rust/src/chat/tests/dynamo_grammar_replay.py "$grammar_dir"
 }
 
 install_rust_toolchain

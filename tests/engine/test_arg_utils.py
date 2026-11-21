@@ -34,6 +34,26 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(
+    "rust,dynamo", [(False, False), (False, True), (True, False), (True, True)]
+)
+def test_dynamo_unified_parser_names_stay_out_of_python_engine_config(
+    monkeypatch, tmp_path, rust, dynamo
+):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", str(int(rust)))
+    monkeypatch.setenv("VLLM_USE_DYNAMO_RUST_PARSER", str(int(dynamo)))
+    args = EngineArgs(model=str(tmp_path), reasoning_parser="mistral_4")
+    config = args.create_structured_outputs_config()
+    args._set_default_reasoning_config_args()
+    if dynamo:
+        assert config.reasoning_parser == ""
+        assert args.reasoning_config is None
+    else:
+        assert config.reasoning_parser == "mistral_4"
+        assert args.reasoning_config.reasoning_parser == "mistral_4"
+    assert args.reasoning_parser == "mistral_4"
+
+
+@pytest.mark.parametrize(
     ("type", "value", "expected"),
     [
         (int, "42", 42),

@@ -438,7 +438,7 @@ async fn harmony_assistant_event_stream(
                     y.yield_ok(AssistantEvent::Done {
                         usage: ChatTokenUsage {
                             engine: finished.usage,
-                            reasoning_tokens: state.reasoning_tokens,
+                            reasoning_tokens: Some(state.reasoning_tokens),
                         },
                         timestamps: finished.timestamps,
                         spec_decode_metrics: finished.spec_decode_metrics,
