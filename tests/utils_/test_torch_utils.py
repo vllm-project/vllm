@@ -17,6 +17,7 @@ from vllm.utils.torch_utils import (
     set_random_seed,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
+    weak_ref_tensor,
     weak_ref_tensors,
 )
 
@@ -37,6 +38,21 @@ def test_weak_ref_tensors_does_not_keep_nested_tensors_alive() -> None:
     nbytes = hidden.nbytes + aux.nbytes
     allocated = torch.accelerator.memory_allocated()
     del hidden, aux
+    assert torch.accelerator.memory_allocated() == allocated - nbytes
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_weak_ref_tensor_zero_size_view_does_not_keep_base_alive() -> None:
+    kv_lora = torch.empty(2048, 512, device="cuda")
+    kv_c, k_pe = kv_lora.split([512, 0], dim=-1)
+    result = weak_ref_tensor(k_pe)
+    assert result.shape == k_pe.shape
+    assert result.stride() == k_pe.stride()
+    assert result.dtype == k_pe.dtype
+    assert result.device == k_pe.device
+    nbytes = kv_lora.nbytes
+    allocated = torch.accelerator.memory_allocated()
+    del kv_lora, kv_c, k_pe
     assert torch.accelerator.memory_allocated() == allocated - nbytes
 
 
