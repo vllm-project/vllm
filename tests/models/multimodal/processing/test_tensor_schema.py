@@ -183,6 +183,9 @@ def test_model_tensor_schema(model_id: str):
     if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")
 
+    if model_id == "tencent/Hy4" and current_platform.is_xpu():
+        pytest.skip("HY V4 is not supported on XPU")
+
     if (
         model_id == "thinkingmachines/Inkling-2-Small"
         and not current_platform.is_cuda()
