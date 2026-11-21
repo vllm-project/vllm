@@ -75,8 +75,6 @@ The three supported scoring functions are as illustrated in the figure below.
 !!! note
     The second-generation GTE model (mGTE-TRM) is named `NewForSequenceClassification`. The name `NewForSequenceClassification` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewForSequenceClassification"]}'` to specify the use of the `GteNewForSequenceClassification` architecture.
 
-    Native Transformers `GteConfig` uses RoPE even when `position_embedding_type` is absent; vLLM handles this automatically.
-
 !!! note
     For the native Transformers copy of mGTE-TRM (`model_type: gte`, no `trust_remote_code`), set `--hf-overrides '{"architectures": ["GteForSequenceClassification"]}'` to serve LoRA adapters trained with Transformers' `GteForSequenceClassification`, which target the split `q_proj`, `k_proj`, `v_proj`, `gate_proj` and `up_proj` modules. Adapters trained on the remote-code model, which target the fused `qkv_proj` and `up_gate_proj`, keep using `GteNewForSequenceClassification`.
 
