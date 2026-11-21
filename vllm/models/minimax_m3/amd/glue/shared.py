@@ -55,7 +55,7 @@ class SharedWeights:
 
 def fp8_rows(linear) -> tuple[torch.Tensor, torch.Tensor]:
     """`linear`'s FP8 weight [N, K] and per-row E8M0 scales [N, K / 32] (uint8)."""
-    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
+    from vllm.model_executor.kernels.linear.mxfp8.aiter import row_major_weight
 
     # row-major even when AITER's FlyDSL MXFP8 linear preshuffled it in place
     w = row_major_weight(linear)
@@ -153,7 +153,7 @@ def build_shared_weights(
             "shared_w2_bf16": shuffle_weight(dequant_bf16(dn, dn_s), layout=(16, 16))
         }
     elif decode:
-        from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        from vllm.model_executor.kernels.linear.mxfp8.aiter import (
             row_major_weight,
         )
 
