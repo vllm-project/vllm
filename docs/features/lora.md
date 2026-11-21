@@ -89,6 +89,9 @@ Requests can specify the LoRA adapter as if it were any other model via the `mod
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
 LoRA adapter requests if they were provided and `max_loras` is set high enough).
 
+The `/tokenize` and `/detokenize` endpoints also accept a loaded LoRA adapter name in the `model` field and use the base
+model's tokenizer.
+
 The following is an example request
 
 ```bash
