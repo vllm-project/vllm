@@ -7,10 +7,10 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.models.inkling.amd import sconv_swa_attn as amd_sconv_swa_attn
-from vllm.models.inkling.amd import short_conv as amd_short_conv
-from vllm.models.inkling.amd.ops import qkvr_prep as amd_qkvr_prep
-from vllm.models.inkling.amd.ops import sconv as amd_sconv
+from vllm.models.inkling.common import sconv_swa_attn as common_sconv_swa_attn
+from vllm.models.inkling.common import short_conv as common_short_conv
+from vllm.models.inkling.common.ops import qkvr_prep as common_qkvr_prep
+from vllm.models.inkling.common.ops import sconv as common_sconv
 from vllm.models.inkling.nvidia import sconv_swa_attn as nvidia_sconv_swa_attn
 from vllm.models.inkling.nvidia import short_conv as nvidia_short_conv
 from vllm.models.inkling.nvidia.ops import qkvr_prep as nvidia_qkvr_prep
@@ -21,10 +21,10 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 _is_rocm = current_platform.is_rocm()
-qkvr_prep = amd_qkvr_prep if _is_rocm else nvidia_qkvr_prep
-sconv = amd_sconv if _is_rocm else nvidia_sconv
-sconv_swa_attn = amd_sconv_swa_attn if _is_rocm else nvidia_sconv_swa_attn
-short_conv = amd_short_conv if _is_rocm else nvidia_short_conv
+qkvr_prep = common_qkvr_prep if _is_rocm else nvidia_qkvr_prep
+sconv = common_sconv if _is_rocm else nvidia_sconv
+sconv_swa_attn = common_sconv_swa_attn if _is_rocm else nvidia_sconv_swa_attn
+short_conv = common_short_conv if _is_rocm else nvidia_short_conv
 
 _cap = (
     current_platform.get_device_capability()

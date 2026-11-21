@@ -5,13 +5,13 @@
 import pytest
 import torch
 
-from vllm.models.inkling.amd.ops.fa4_rel_attention import (
+from vllm.models.inkling.common.ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
     inkling_fa4_rel_attention,
     use_gfx950_gluon_decode,
     use_gfx950_gluon_extend,
 )
-from vllm.models.inkling.amd.ops.rel_attention_decode import (
+from vllm.models.inkling.common.ops.rel_attention_decode import (
     decode_split_count,
     use_split_kv_decode,
 )
@@ -106,7 +106,7 @@ def test_split_kv_dispatch_thresholds():
 
 
 def test_gfx950_gluon_dispatch_is_strict(monkeypatch: pytest.MonkeyPatch):
-    import vllm.models.inkling.amd.ops.fa4_rel_attention as rel_attention
+    import vllm.models.inkling.common.ops.fa4_rel_attention as rel_attention
 
     monkeypatch.setattr(rel_attention, "on_gfx950", lambda: True)
     assert use_gfx950_gluon_decode(max_query_len=1, page_size=128, head_dim=128)
@@ -309,6 +309,69 @@ def test_split_kv_decode_matches_reference(
         window_left,
     )
     torch.testing.assert_close(actual.float(), expected.float(), atol=3e-2, rtol=3e-2)
+
+
+@torch.inference_mode()
+def test_split_kv_decode_padded_row_is_zero():
+    """A CUDA-graph padding row has cache_seqlens 0. Split-KV decode must store
+    zeros for it, not 0 / 0 = NaN, and leave the real rows unchanged."""
+    torch.manual_seed(43)
+    device = "cuda"
+    page_size = 16
+    kv_lens = [257, 0]
+    batch_size = len(kv_lens)
+    num_heads = 8
+    num_kv_heads = 1
+    rel_extent = 64
+    max_pages = (max(kv_lens) + page_size - 1) // page_size
+    assert use_split_kv_decode(
+        max_query_len=1, max_kv_len=8192, page_size=page_size, window_left=-1
+    )
+
+    q = torch.randn(batch_size, num_heads, HEAD_DIM, device=device)
+    q = torch.nn.functional.normalize(q.float(), dim=-1).to(DTYPE)
+    key_cache = torch.randn(
+        batch_size * max_pages, page_size, num_kv_heads, HEAD_DIM, device=device
+    )
+    key_cache = torch.nn.functional.normalize(key_cache.float(), dim=-1).to(DTYPE)
+    value_cache = torch.randn_like(key_cache)
+    rel_logits = torch.randn(
+        batch_size, num_heads, rel_extent, device=device, dtype=DTYPE
+    )
+    block_table = torch.arange(
+        batch_size * max_pages, device=device, dtype=torch.int32
+    ).view(batch_size, max_pages)
+
+    actual = inkling_fa4_rel_attention(
+        q,
+        key_cache,
+        value_cache,
+        block_table=block_table,
+        cache_seqlens=torch.tensor(kv_lens, device=device, dtype=torch.int32),
+        cu_seqlens_q=torch.arange(batch_size + 1, device=device, dtype=torch.int32),
+        max_seqlen_q=1,
+        softmax_scale=1.0 / HEAD_DIM,
+        causal=True,
+        window_size=(-1, -1),
+        rel_extent=rel_extent,
+        rel_logits=rel_logits,
+        max_kv_len=8192,
+    )
+    expected = _reference(
+        q[:1],
+        key_cache,
+        value_cache,
+        rel_logits[:1],
+        block_table[:1],
+        [1],
+        kv_lens[:1],
+        rel_extent,
+        None,
+    )
+    torch.testing.assert_close(
+        actual[:1].float(), expected.float(), atol=3e-2, rtol=3e-2
+    )
+    assert torch.equal(actual[1], torch.zeros_like(actual[1]))
 
 
 @pytest.mark.parametrize(
