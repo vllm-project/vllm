@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -102,6 +103,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
+        # Passed only when set, so FlashInfer keeps its own default otherwise.
+        self.fused_finalize_kwargs = (
+            {}
+            if envs.VLLM_FLASHINFER_MOE_FUSED_FINALIZE is None
+            else {"use_fused_finalize": envs.VLLM_FLASHINFER_MOE_FUSED_FINALIZE}
+        )
 
         def _per_expert(value: float | None) -> torch.Tensor | None:
             if value is None:
@@ -393,6 +400,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
+            **self.fused_finalize_kwargs,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
