@@ -60,6 +60,7 @@ MAX_DEPTH = 8  # attribute hops from a registered module
 NOT_COMPARED = (
     ".kv_cache",
     ".supported_lora_modules",  # set order, varies with the hash seed
+    ".punica_wrapper",  # LoRA indices of the last batch
     ".expert_load_view",
     ".num_unpadded_tokens_tensors",
     "._ckpt_",
