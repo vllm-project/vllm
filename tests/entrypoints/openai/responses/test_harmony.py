@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import math
 import time
 from typing import Any
 
@@ -30,6 +31,185 @@ from .conftest import (
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "openai/gpt-oss-20b"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("top_logprobs", [0, 3])
+async def test_output_logprobs(server, stream, top_logprobs):
+    """Output-text probabilities exclude Harmony headers and reasoning tokens."""
+    async with server.get_async_client() as client:
+        response = await _collect_logprob_response(
+            client,
+            input="Say hello in Chinese in one short sentence.",
+            max_output_tokens=256,
+            top_logprobs=top_logprobs,
+            stream=stream,
+        )
+        assert response.output_text
+        _assert_text_logprobs(response, top_logprobs=top_logprobs)
+        if not stream and top_logprobs == 0:
+            baseline = await client.responses.create(
+                model=MODEL_NAME,
+                input="Say hello in Chinese in one short sentence.",
+                reasoning={"effort": "low"},
+                temperature=0,
+                max_output_tokens=256,
+            )
+            assert baseline.status == "completed"
+            assert baseline.output_text
+            assert all(
+                content.logprobs is None
+                for item in baseline.output
+                if item.type == "message"
+                for content in item.content
+            )
+
+
+def _logprob_values(logprobs):
+    return [
+        (
+            lp.token,
+            lp.logprob,
+            [(top.token, top.logprob) for top in lp.top_logprobs],
+        )
+        for lp in logprobs
+    ]
+
+
+async def _collect_logprob_response(client, *, stream, top_logprobs=3, **kwargs):
+    response = await client.responses.create(
+        model=MODEL_NAME,
+        include=["message.output_text.logprobs"],
+        top_logprobs=top_logprobs,
+        temperature=0,
+        reasoning={"effort": "low"},
+        stream=stream,
+        **kwargs,
+    )
+    if not stream:
+        return response
+
+    events = [event async for event in response]
+    assert events[-1].type in ("response.completed", "response.incomplete")
+    response = events[-1].response
+    for item in response.output:
+        if item.type != "message":
+            continue
+        for content_index, content in enumerate(item.content):
+            deltas = [
+                event
+                for event in events
+                if event.type == "response.output_text.delta"
+                and event.item_id == item.id
+                and event.content_index == content_index
+            ]
+            done = [
+                event
+                for event in events
+                if event.type == "response.output_text.done"
+                and event.item_id == item.id
+                and event.content_index == content_index
+            ]
+            assert "".join(event.delta for event in deltas) == content.text
+            if not content.text:
+                # A length limit can stop during reasoning, before any text item
+                # is streamed. The final response then has an empty text part.
+                assert content.logprobs == []
+                assert deltas == done == []
+                continue
+            assert len(done) == 1
+            assert (
+                [value for event in deltas for value in _logprob_values(event.logprobs)]
+                == _logprob_values(done[0].logprobs)
+                == _logprob_values(content.logprobs)
+            )
+    return response
+
+
+def _assert_text_logprobs(response, *, top_logprobs=3):
+    for item in response.output:
+        if item.type != "message":
+            assert "logprobs" not in item.model_dump()
+            continue
+        for content in item.content:
+            assert bool(content.logprobs) == bool(content.text)
+            assert (
+                bytes(byte for lp in content.logprobs for byte in lp.bytes).decode(
+                    "utf-8", errors="replace"
+                )
+                == content.text
+            )
+            for lp in content.logprobs:
+                assert math.isfinite(lp.logprob) and lp.logprob <= 0
+                assert len(lp.top_logprobs) == top_logprobs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_output_logprobs_unicode_and_length(server, stream, truncated):
+    """Length limits and multibyte text retain consistent API probabilities."""
+    async with server.get_async_client() as client:
+        response = await _collect_logprob_response(
+            client,
+            stream=stream,
+            input=(
+                "Write a detailed story of at least 1000 words about a cat."
+                if truncated
+                else "Repeat exactly this text, with no explanation: 你好，世界！🌍🫠"
+            ),
+            max_output_tokens=16 if truncated else 256,
+        )
+    _assert_text_logprobs(response)
+    if truncated:
+        assert response.status == "incomplete"
+        assert response.incomplete_details.reason == "max_output_tokens"
+    else:
+        assert response.status == "completed"
+        assert "你好" in response.output_text
+        assert "🌍" in response.output_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_output_logprobs_function_round_trip(server, stream):
+    """Function arguments have no text probabilities; the final answer does."""
+    history = [{"role": "user", "content": "Get the weather at 48.85, 2.35."}]
+    async with server.get_async_client() as client:
+        response = await _collect_logprob_response(
+            client,
+            stream=stream,
+            input=history,
+            tools=[GET_WEATHER_SCHEMA],
+            tool_choice={"type": "function", "name": "get_weather"},
+            max_output_tokens=256,
+        )
+        _assert_text_logprobs(response)
+        calls = [item for item in response.output if item.type == "function_call"]
+        assert len(calls) == 1
+        assert calls[0].name == "get_weather"
+        assert set(json.loads(calls[0].arguments)) == {"latitude", "longitude"}
+        history.extend(item.model_dump() for item in response.output)
+        history.append(
+            {
+                "type": "function_call_output",
+                "call_id": calls[0].call_id,
+                "output": '{"temperature_celsius": 17}',
+            }
+        )
+        response = await _collect_logprob_response(
+            client,
+            stream=stream,
+            input=history,
+            tools=[GET_WEATHER_SCHEMA],
+            tool_choice="none",
+            max_output_tokens=256,
+        )
+    assert response.status == "completed"
+    assert "17" in response.output_text
+    _assert_text_logprobs(response)
+
 
 GET_WEATHER_SCHEMA = {
     "type": "function",

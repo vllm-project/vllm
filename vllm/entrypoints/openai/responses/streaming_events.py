@@ -57,6 +57,7 @@ from openai.types.responses import (
     response_function_web_search,
     response_output_text,
     response_text_delta_event,
+    response_text_done_event,
 )
 from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
@@ -409,7 +410,10 @@ def emit_text_output_done_events(
             output_index=state.current_output_index,
             content_index=state.current_content_index,
             text=text,
-            logprobs=[],
+            logprobs=[
+                response_text_done_event.Logprob(**lp.model_dump())
+                for lp in _to_stream_logprobs(logprobs or [])
+            ],
             item_id=state.current_item_id,
         )
     )
