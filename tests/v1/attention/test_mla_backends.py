@@ -368,7 +368,10 @@ def _bare_mla_layer(
     layer.quant_config = None
     layer.layer_name = "test"
     layer.act_dtype = torch.float32
-    layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
+    layer.impl = SimpleNamespace(
+        process_weights_after_loading=lambda act_dtype: None,
+        process_kv_scales_after_loading=lambda layer: None,
+    )
 
     monkeypatch.setattr(
         mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
