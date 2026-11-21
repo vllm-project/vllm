@@ -24,6 +24,27 @@ Beyond the optimization levels, three mechanisms reduce time-to-first-token on r
 - **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile. On CUDA and ROCm, the flag also turns off the extensible KV cache (see [GPU Memory Utilization](#gpu-memory-utilization)), whose measured sizing already skips the CUDA-graph memory estimation pass.
 - **Serve without CUDA graphs using `--enforce-eager`.** Skips both compilation and CUDA-graph capture for the fastest possible startup, at the cost of steady-state decode performance. Useful for development loops and for measuring how much of a boot is compile/capture.
 
+### Checkpoint Prefetching
+
+When using the default safetensors loader and loading strategy, vLLM
+checks the checkpoint filesystem type in `/proc/mounts` on Linux. On NFS
+(`nfs` or `nfs4`), Lustre (`lustre`), and WekaFS (`wekafs`), vLLM automatically
+prefetches checkpoint files into the OS page cache in the background if their
+total size is at most 90% of available RAM. This can reduce model loading time
+on network storage.
+
+This policy does not apply to dedicated loaders such as `fastsafetensors` or
+`instanttensor`, or when `enable_multithread_load` is enabled in
+`model_loader_extra_config`. The multithreaded loader accepts only the default
+strategy or `lazy` and does not automatically prefetch.
+
+Use `--safetensors-load-strategy=lazy` to disable automatic prefetching, or
+`--safetensors-load-strategy=prefetch` to enable prefetching explicitly on any
+filesystem. Explicit prefetching also bypasses the memory threshold; vLLM
+warns if the checkpoint size exceeds it. Use
+`--safetensors-prefetch-num-threads` and `--safetensors-prefetch-block-size` to
+tune prefetch concurrency and read size.
+
 ## GPU Memory Utilization
 
 On CUDA and ROCm, vLLM sizes the KV cache from the memory actually free after
