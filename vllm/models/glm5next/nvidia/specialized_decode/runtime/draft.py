@@ -94,6 +94,17 @@ class SpecializedDraft(LayerStages):
         self.embed_tokens = predictor.embed_tokens
         self.fused_embedding = self.ar_norm is not None and self._build_embedding()
 
+    @classmethod
+    def for_target(cls, predictor, config) -> "SpecializedDraft":
+        """The executor of the MTP draft layers, for this GPU."""
+        from . import is_hopper
+
+        if is_hopper():
+            from ..hopper.decode import HopperSpecializedDraft
+
+            return HopperSpecializedDraft(predictor, config)
+        return cls(predictor, config)
+
     def _build_embedding(self) -> bool:
         """Whether the embedding's all-reduce can take the boundary mailbox."""
         assert self.ar_norm is not None

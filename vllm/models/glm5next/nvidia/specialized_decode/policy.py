@@ -3,7 +3,8 @@
 """Which implementation each stage runs for a step of `tokens` tokens (requests x
 tokens per request). Every entry is a `batch_table` spec; token counts an entry
 leaves out run the stock kernels. `additional_config["policy"]` replaces entries
-by name, e.g. `{"moe": "1-4:per_route,8-16:grouped"}`."""
+by name, e.g. `{"moe": "1-4:per_route,8-16:grouped"}`. GB300 runs `DEFAULT`,
+Hopper (SM90) runs `HOPPER`, each with its own stage names."""
 
 from collections.abc import Mapping
 
@@ -64,15 +65,48 @@ DEFAULT = {
 }
 
 
+# The Hopper (SM90) executor's stages (`hopper/`), by token count. Every stage
+# kernel holds up to 32 rows (the MoE kernel's row cap): plain decode of 1-32
+# requests and MTP5 verify steps of 1-5 requests. "auto" takes the stage
+# module's own choice for the token count (e.g. the boundary's
+# `DEFAULT_MODES`); a stage-specific name pins one (e.g. the boundary's
+# "lamport2"). "" runs a stage stock at every token count; the other stages
+# keep their Hopper kernels.
+HOPPER = {
+    # All-reduce + mHC post + mHC pre + RMSNorm of every backbone boundary.
+    "boundary": "1-32:auto",
+    # Router, routed and shared experts of the 42 MoE layers.
+    "moe": "1-32:auto",
+    # The MLP of the 3 dense layers.
+    "dense_mlp": "1-32:auto",
+    # The 34 KDA layers: in_proj, conv / delta rule / gated norm, o_proj.
+    "kda": "1-32:auto",
+    # The 11 DSA layers: projections, indexer, KV insert, sparse attention,
+    # value up-projection, o_proj.
+    "dsa": "1-32:auto",
+    # The LM head shard GEMM and the logits all-gather of verify steps.
+    "logits_head": "1-32:auto",
+    "logits_gather": "1-32:auto",
+    # The MTP draft layer: its all-reduce + residual add + RMSNorm boundaries,
+    # and the DSA and MoE stages above on its layer.
+    "draft_boundary": "1-32:auto",
+    "draft_dsa": "1-32:auto",
+    "draft_moe": "1-32:auto",
+}
+
+
 class Policy:
-    def __init__(self, overrides: Mapping[str, str] | None = None):
+    def __init__(
+        self,
+        overrides: Mapping[str, str] | None = None,
+        default: Mapping[str, str] = DEFAULT,
+    ):
         overrides = dict(overrides or {})
-        unknown = overrides.keys() - DEFAULT.keys()
+        unknown = overrides.keys() - default.keys()
         if unknown:
             raise ValueError(f"Unknown specialized decode policy entries: {unknown}")
-        self.tables = {
-            stage: batch_table(spec) for stage, spec in (DEFAULT | overrides).items()
-        }
+        specs = dict(default) | overrides
+        self.tables = {stage: batch_table(spec) for stage, spec in specs.items()}
 
     def __call__(self, stage: str, tokens: int) -> str | None:
         """The implementation `stage` runs at `tokens`, None for stock."""
