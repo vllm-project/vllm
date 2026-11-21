@@ -99,6 +99,7 @@ pub(crate) struct SpecDecodeMetrics {
     num_accepted_tokens: u64,
     accepted_per_pos: HashMap<u64, u64>,
     num_verified_tokens: u64,
+    draft_per_pos: HashMap<u64, u64>,
 }
 
 /// Computed speculative decoding statistics (delta between before/after benchmark).
@@ -157,6 +158,7 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
     let mut num_draft_tokens: u64 = 0;
     let mut num_accepted_tokens: u64 = 0;
     let mut accepted_per_pos: HashMap<u64, u64> = HashMap::new();
+    let mut draft_per_pos: HashMap<u64, u64> = HashMap::new();
     let mut num_verified_tokens: u64 = 0;
     let mut found_spec_decode = false;
 
@@ -179,20 +181,28 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
             None => continue,
         };
 
-        if metric_name.contains("num_drafts") {
-            num_drafts += val;
-        } else if metric_name.contains("num_draft_tokens") {
-            num_draft_tokens += val;
-        } else if metric_name.contains("num_accepted_tokens_per_pos") {
+        // Per-position counters first: their names extend the totals' names.
+        let per_pos = if metric_name.contains("num_accepted_tokens_per_pos") {
+            Some(&mut accepted_per_pos)
+        } else if metric_name.contains("num_draft_tokens_per_pos") {
+            Some(&mut draft_per_pos)
+        } else {
+            None
+        };
+        if let Some(per_pos) = per_pos {
             // Parse position label: position="N"
             if let Some(start) = line.find("position=\"") {
                 let start = start + "position=\"".len();
                 if let Some(end) = line[start..].find('"')
                     && let Ok(pos) = line[start..start + end].parse::<u64>()
                 {
-                    *accepted_per_pos.entry(pos).or_insert(0) += val;
+                    *per_pos.entry(pos).or_insert(0) += val;
                 }
             }
+        } else if metric_name.contains("num_drafts") {
+            num_drafts += val;
+        } else if metric_name.contains("num_draft_tokens") {
+            num_draft_tokens += val;
         } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
         } else if metric_name.contains("num_verified_tokens_total") {
@@ -210,6 +220,7 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
         num_accepted_tokens,
         accepted_per_pos,
         num_verified_tokens,
+        draft_per_pos,
     })
 }
 
@@ -243,7 +254,15 @@ pub(crate) fn compute_spec_decode_stats(
             let before_val = before.accepted_per_pos.get(&pos).copied().unwrap_or(0);
             let after_val = after.accepted_per_pos.get(&pos).copied().unwrap_or(before_val);
             let delta_pos = after_val.saturating_sub(before_val);
-            per_pos_rates.push(delta_pos as f64 / delta_drafts as f64);
+            // Over the drafts that reached this position.
+            let after_drafted = after.draft_per_pos.get(&pos).copied().unwrap_or(0);
+            let before_drafted = before.draft_per_pos.get(&pos).copied().unwrap_or(0);
+            let drafted = after_drafted.saturating_sub(before_drafted);
+            per_pos_rates.push(if drafted > 0 {
+                delta_pos as f64 / drafted as f64
+            } else {
+                f64::NAN
+            });
         }
     }
 
@@ -2113,6 +2132,8 @@ vllm:num_requests_running{engine=\"1\"} 16
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
             num_verified_tokens: 0,
+            // fixed-length drafts: every draft reaches every position
+            draft_per_pos: per_pos.iter().map(|&(pos, _)| (pos, drafts)).collect(),
         }
     }
 
@@ -2128,6 +2149,8 @@ vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\",engine=\"0\"} 
 vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\",engine=\"0\"} 40.0
 vllm:spec_decode_num_verified_tokens_total{model_name=\"m\",engine=\"0\"} 500.0
 vllm:spec_decode_num_verified_tokens_per_pos_total{position=\"0\",engine=\"0\"} 150.0
+vllm:spec_decode_num_draft_tokens_per_pos_total{position=\"0\",engine=\"0\"} 150.0
+vllm:spec_decode_num_draft_tokens_per_pos_total{position=\"1\",engine=\"0\"} 120.0
 vllm:num_requests_running{model_name=\"m\"} 0
 ";
         let m = parse_spec_decode_metrics(text).unwrap();
@@ -2136,6 +2159,7 @@ vllm:num_requests_running{model_name=\"m\"} 0
         assert_eq!(m.num_accepted_tokens, 300);
         assert_eq!(m.num_verified_tokens, 500);
         assert_eq!(m.accepted_per_pos, [(0, 80), (1, 40)].into_iter().collect());
+        assert_eq!(m.draft_per_pos, [(0, 150), (1, 120)].into_iter().collect());
     }
 
     #[test]
@@ -2191,6 +2215,27 @@ vllm:prefix_cache_queries_total{model_name=\"m\"} 0
     }
 
     #[test]
+    fn test_compute_spec_decode_stats_per_position_rate_over_drafts_at_position() {
+        // 100 drafts, but only 50 reached position 2 (e.g. dynamic SD).
+        let before = make_metrics(100, 250, 100, &[(0, 50), (1, 30), (2, 20)]);
+        let after = SpecDecodeMetrics {
+            draft_per_pos: [(0, 200), (1, 200), (2, 100)].into_iter().collect(),
+            ..make_metrics(200, 500, 305, &[(0, 140), (1, 110), (2, 55)])
+        };
+        let before = SpecDecodeMetrics {
+            draft_per_pos: [(0, 100), (1, 100), (2, 50)].into_iter().collect(),
+            ..before
+        };
+
+        let stats = compute_spec_decode_stats(&before, &after).unwrap();
+
+        assert_eq!(stats.per_position_acceptance_rates.len(), 3);
+        assert!((stats.per_position_acceptance_rates[0] - 0.9).abs() < 1e-9);
+        assert!((stats.per_position_acceptance_rates[1] - 0.8).abs() < 1e-9);
+        assert!((stats.per_position_acceptance_rates[2] - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_compute_spec_decode_stats_zero_draft_tokens_returns_none() {
         let before = make_metrics(0, 100, 80, &[]);
         let after = make_metrics(0, 100, 80, &[]);
@@ -2213,7 +2258,11 @@ vllm:prefix_cache_queries_total{model_name=\"m\"} 0
 
     #[test]
     fn test_compute_spec_decode_stats_new_positions_in_after() {
-        let before = make_metrics(50, 150, 100, &[(0, 40)]);
+        // position 1 accepted nothing before, so it has no accepted series yet
+        let before = SpecDecodeMetrics {
+            draft_per_pos: [(0, 50), (1, 50)].into_iter().collect(),
+            ..make_metrics(50, 150, 100, &[(0, 40)])
+        };
         let after = make_metrics(150, 450, 320, &[(0, 130), (1, 80)]);
 
         let stats = compute_spec_decode_stats(&before, &after).unwrap();

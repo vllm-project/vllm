@@ -104,3 +104,10 @@ all-`n == 1` workloads):
 | `num_draft_tokens` | `vllm:spec_decode_num_draft_tokens_total` |
 | `num_accepted_draft_tokens` | `vllm:spec_decode_num_accepted_tokens_total` |
 | `num_verified_draft_tokens` | `vllm:spec_decode_num_verified_tokens_total` |
+
+The per-position counters `vllm:spec_decode_num_accepted_tokens_per_pos_total`
+and `vllm:spec_decode_num_draft_tokens_per_pos_total` (label `position`) give
+the per-position acceptance rate, accepted over drafted at each position. A
+draft shorter than `num_speculative_tokens` (for example under dynamic
+speculative decoding) does not count toward the positions it did not reach, so divide by the per-position draft counter rather than by
+`vllm:spec_decode_num_drafts_total`.
