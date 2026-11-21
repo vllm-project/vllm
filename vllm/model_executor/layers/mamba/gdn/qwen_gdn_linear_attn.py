@@ -888,7 +888,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 state_len=self.conv_kernel_size - 1
             )
         self.enable_packed_recurrent_decode = (
-            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE and self.beta_scale == 1.0
         )
         # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated RMS
         # norm that reads z strided from the packed qkvz projection and
@@ -2571,7 +2571,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=out_buf,
             ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             use_qk_l2norm_in_kernel=True,
-            beta_scale=self.beta_scale,
         )
         return
 
