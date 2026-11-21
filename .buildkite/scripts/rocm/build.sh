@@ -14,7 +14,9 @@
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
 #   promote  Copy the stack, runtime and test-deps images a PR's CI built into the trusted repo
-#            (/ci rocm cache), so main reuses them after the merge instead of rebuilding them.
+#            (after a trusted /ci run or approval), so main reuses them after the merge
+#            instead of rebuilding them.
+#   check    Fail (exit 3) a PR to main whose new stack is not in the trusted repo yet.
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
@@ -44,10 +46,20 @@ MODE=$2
 REPO=${ROCM_CI_REPO:?ROCM_CI_REPO must be set (by ci-infra or release-pipeline.yaml)}
 TRUSTED=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}
 
-# promote (/ci rocm cache) runs in every nightly, as an optional step: without a request, leave
-# before the builder, the build context and the tag fetch.
+# promote and check run in every nightly, as optional steps: without a request (promote) or a PR
+# to main (check), leave before the builder, the build context and the tag fetch.
+MAIN=${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}
+if [[ $MODE == check && ( ${BUILDKITE_PULL_REQUEST:-false} == false
+      || ${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-$MAIN} != "$MAIN" ) ]]; then
+  echo "Not a PR to $MAIN: nothing to check" >&2; exit 0
+fi
 if [[ $MODE == promote ]]; then
-  [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "No /ci rocm cache request: nothing to promote" >&2; exit 0; }
+  [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "No ROCm image cache request: nothing to promote" >&2; exit 0; }
+  # Only a build created through the API (the cache workflow), not one a trigger step started:
+  # Buildkite sets both, and a build's env cannot override them. This guards builds of main
+  # commits only: a build of another commit runs its own build.sh.
+  [[ ${BUILDKITE_SOURCE:-} == api && -z ${BUILDKITE_TRIGGERED_FROM_BUILD_ID:-} ]] \
+    || { echo "promote runs only in a build created through the API" >&2; exit 2; }
   [[ $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
     || { echo "ROCM_PROMOTE_PR or ROCM_PROMOTE_SHA is malformed" >&2; exit 2; }
   [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
@@ -90,6 +102,7 @@ esac
 # for sccache's S3 credentials: their fallback builder uses the host network, under its own name.
 B=vllm-rocm net=()
 [[ $MODE == release* ]] && B=vllm-rocm-release net=(--driver-opt network=host)
+if [[ $MODE != check ]]; then   # check only reads the registry
 if ! docker buildx inspect "$B" >/dev/null 2>&1; then
   if [[ -S /run/buildkit/buildkitd.sock ]]; then
     drv=(--driver remote unix:///run/buildkit/buildkitd.sock)
@@ -103,6 +116,7 @@ if ! docker buildx inspect "$B" >/dev/null 2>&1; then
 fi
 export BUILDX_BUILDER=$B
 docker buildx version
+fi
 
 # ---------------------------------------------------------------------------
 # Build context — an export of HEAD
@@ -111,7 +125,7 @@ docker buildx version
 # COPY on file modes, which drift on shared agents. umask 022 gives every agent git's modes.
 [[ $(git rev-parse HEAD) == $(git rev-parse "${BUILDKITE_COMMIT:-HEAD}^{commit}") ]] \
   || { echo "HEAD is not BUILDKITE_COMMIT ($BUILDKITE_COMMIT)" >&2; exit 1; }
-if [[ $MODE != promote ]]; then   # promote copies images: no context, no version
+if [[ $MODE != promote && $MODE != check ]]; then   # no context, no version
 umask 022
 rm -rf .rocm-src && mkdir .rocm-src
 git archive HEAD | tar -x --no-same-permissions -C .rocm-src -f -
@@ -302,7 +316,7 @@ ensure() {
     rm -f "$mf"; echo "bake recorded no digest for $ref" >&2; return 1
   fi
   rm -f "$mf"
-  # /ci rocm cache copies only images this job pushed, and a runtime or test-deps only if this job
+  # promote copies only images this job pushed, and a runtime or test-deps only if this job
   # also pushed the image it was built on: other PRs' CI can push to this PR's tags first, and
   # metadata outlives a retried job. A new stack voids what an earlier attempt recorded on another.
   local parent=none
@@ -435,8 +449,44 @@ case $MODE in
     fi
     ;;
 
+  check)
+    # The "ROCm image cache" step: a PR that changes the stack waits for promote to copy its
+    # stack into $TRUSTED, so main need not rebuild it after the merge. A convenience gate, not a
+    # security boundary.
+    git fetch -q --filter=tree:0 origin "$MAIN" \
+      && mb=$(git merge-base HEAD FETCH_HEAD) && [[ -n $mb ]] \
+      || { echo "cannot read main's merge base" >&2; exit 1; }
+    keys=$(keys_at "$mb") || { echo "cannot compute the keys of $mb" >&2; exit 1; }
+    read -r mKs _ <<<"$keys"
+    note() {
+      if [[ -n ${1:-} ]]; then
+        echo "$2" >&2
+        buildkite-agent annotate --style "$1" --context rocm-image-cache "$2" || true
+      else
+        buildkite-agent annotation remove --context rocm-image-cache >/dev/null 2>&1 || true
+      fi
+    }
+    if [[ $Ks == "$mKs" ]]; then
+      echo "This PR does not change the ROCm stack" >&2; exit 0
+    fi
+    rc=0; git diff --quiet "$mb" HEAD -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
+      || rc=$?
+    if ((rc == 1)); then
+      note info "ROCm image cache: recipe differs from main: main rebuilds the stack after merge"
+      exit 0
+    fi
+    ((rc == 0)) || { echo "cannot diff the recipe against $mb" >&2; exit 1; }
+    if d=$(digest "$TRUSTED:stack-$STACK-$Ks") && d=$(digest "$TRUSTED:stack-$STACK-$Ks-wheels"); then
+      echo "$TRUSTED has this PR's stack" >&2; note; exit 0
+    else
+      rc=$?; ((rc == 1)) || exit $rc   # a registry error is not a miss
+    fi
+    note warning "ROCm image not cached yet: a maintainer or trusted reviewer must comment /ci run, or approve this commit and then comment /ci run."
+    exit 3
+    ;;
+
   promote)
-    # /ci rocm cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
+    # ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
     # ROCM_PROMOTE_SHA pushed. Copy them here under the keys main's keys_at gives that commit, if
     # it was built with main's recipe; main reuses each once it gets that key. The runtime and
     # test-deps are copied only over a parent of #ROCM_PROMOTE_PR's, never over one main built: an

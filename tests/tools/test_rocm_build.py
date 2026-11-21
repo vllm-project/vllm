@@ -159,6 +159,7 @@ exit 0
     )
     (fake / "buildkite-agent").write_text(
         """#!/bin/bash
+[[ $1 == annotat* ]] && { echo "$*" >> "$CALLS"; exit 0; }
 [[ $1 == meta-data && $2 == set ]] && echo "meta $3 $4" >> "$CALLS"
 [[ $1 == meta-data ]] && { echo "ref@sha256:$(printf '0%.0s' {1..64})"; exit 0; }
 echo "upload ${PWD##*/}/$3" >> "$CALLS"
@@ -455,7 +456,7 @@ def test_a_pr_that_changes_the_stack_builds_it_without_waiting(tmp_path):
 
 
 def test_only_images_the_build_pushed_can_be_cached(tmp_path):
-    # /ci rocm cache copies rocm-rocm-*-built: never an image this PR's CI reused, since
+    # promote copies rocm-rocm-*-built: never an image this PR's CI reused, since
     # other PRs' CI can push to its tags first, nor one built on a parent it reused (a
     # retried job whose stack another PR replaced).
     stack = r"rocm/vllm-dev:pr7-stack-rocm-\w+"
@@ -651,6 +652,7 @@ def promote(tmp_path: Path, images: list[str], **env: str):
             "ROCM_PROMOTE_PR": "7",
             "ROCM_PROMOTE_SHA": "a" * 40,
             "ROCM_PROMOTE_IMAGES": " ".join(images),
+            "BUILDKITE_SOURCE": "api",
             **env,
         },
     )
@@ -749,9 +751,124 @@ def test_promote_skips_tags_main_already_has(tmp_path):
         ([PR_WHEELS, PR_STACK], {"ROCM_CI_REPO": "rocm/vllm-dev"}, "only pushes"),
         ([PR_WHEELS, PR_STACK], {"ROCM_PROMOTE_PR": "7 x"}, "malformed"),
         ([PR_WHEELS, PR_STACK], {"ROCM_PROMOTE_SHA": "a" * 39}, "malformed"),
+        # Only the cache workflow's API build, not a trigger step a PR uploaded.
+        ([PR_WHEELS, PR_STACK], {"BUILDKITE_SOURCE": "trigger_job"}, "the API"),
+        ([PR_WHEELS, PR_STACK], {"BUILDKITE_SOURCE": "ui"}, "the API"),
+        (
+            [PR_WHEELS, PR_STACK],
+            {"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "b0"},
+            "the API",
+        ),
     ],
 )
 def test_promote_refuses_what_main_would_not_build(tmp_path, images, env, message):
     status, stderr, calls = promote(tmp_path, images, **env)
     assert status != 0 and message in stderr
     assert not copied(calls)
+
+
+# The "ROCm image cache" step: a PR that changes the stack fails it until promote has
+# copied its stack into rocm/vllm-ci.
+STACK_CHANGE = "docker/Dockerfile.rocm_base"
+PR_KS = hashlib.sha256(
+    f"layers: zstd-3, mtimes kept\n100644 blob changed {STACK_CHANGE}\n".encode()
+).hexdigest()[:16]
+
+
+def check(tmp_path: Path, **env: str):
+    return run_build(
+        tmp_path,
+        "check",
+        **{
+            "ROCM_CI_REPO": "rocm/vllm-dev",
+            "BUILDKITE_PULL_REQUEST": "7",
+            "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main",
+            "CHANGED": STACK_CHANGE,
+            **env,
+        },
+    )
+
+
+def annotations(calls: list[str]) -> list[str]:
+    return [c for c in calls if c.startswith("annotat")]
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"BUILDKITE_PULL_REQUEST": "false"},
+        {},
+        # Only PRs to main can be cached.
+        {"BUILDKITE_PULL_REQUEST": "7", "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "v0.20"},
+    ],
+)
+def test_check_passes_builds_that_are_not_prs_to_main(tmp_path, env):
+    status, stderr, calls = run_build(
+        tmp_path, "check", CHANGED=STACK_CHANGE, FAILURE="registry", **env
+    )
+    assert status == 0, stderr
+    assert calls == []
+    assert not (tmp_path / ".rocm-src").exists()
+
+
+def test_check_passes_a_pr_that_keeps_mains_stack(tmp_path):
+    # Requirements change the runtime only: main's stack is the PR's.
+    status, stderr, calls = check(
+        tmp_path, CHANGED="requirements/rocm.txt", FAILURE="registry"
+    )
+    assert status == 0, stderr
+    assert not any(a.startswith("annotate") for a in annotations(calls))
+
+
+def test_check_passes_a_pr_that_changes_the_recipe(tmp_path):
+    # promote would refuse its images: main rebuilds the stack after the merge.
+    status, stderr, calls = check(tmp_path, RECIPE_DIFF="1", FAILURE="registry")
+    assert status == 0, stderr
+    (note,) = annotations(calls)
+    assert "--style info" in note and "recipe differs from main" in note
+
+
+def test_check_passes_a_pr_whose_stack_main_has(tmp_path):
+    status, stderr, calls = check(
+        tmp_path,
+        existing=(
+            f"rocm/vllm-ci:stack-rocm-{PR_KS}-wheels",
+            f"rocm/vllm-ci:stack-rocm-{PR_KS}",
+        ),
+    )
+    assert status == 0, stderr
+    # A retry after promote clears the failed attempt's note.
+    assert annotations(calls) == ["annotation remove --context rocm-image-cache"]
+    assert not any(c.startswith(("builder", "bake", "create")) for c in calls)
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        (),
+        # The PR's own untrusted images do not count, nor a stack without its wheels.
+        (f"rocm/vllm-dev:pr7-stack-rocm-{PR_KS}",),
+        (f"rocm/vllm-ci:stack-rocm-{PR_KS}-wheels",),
+    ],
+)
+def test_check_fails_a_pr_whose_stack_is_not_cached(tmp_path, existing):
+    status, stderr, calls = check(tmp_path, existing=existing)
+    assert status == 3, stderr
+    (note,) = annotations(calls)
+    assert "--style warning --context rocm-image-cache" in note
+    assert "comment /ci run, or approve this commit and then comment" in note
+    assert not any(c.startswith(("builder", "bake", "create")) for c in calls)
+
+
+@pytest.mark.parametrize(
+    ("env", "status"),
+    [
+        ({"FAILURE": "fetch-main"}, 1),
+        ({"RECIPE_DIFF": "128"}, 1),
+        ({"FAILURE": "registry"}, 75),
+    ],
+)
+def test_check_fails_when_it_cannot_tell(tmp_path, env, status):
+    got, stderr, calls = check(tmp_path, **env)
+    assert got == status, stderr
+    assert not annotations(calls)

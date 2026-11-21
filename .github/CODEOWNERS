@@ -222,6 +222,7 @@ mkdocs.yaml @hmellor
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa @dllehr-amd @shen-shanshan
 /docker/Dockerfile.rocm* @tjtanaa @dllehr-amd @AndreasKaratzas
+/tools/vllm-rocm @tjtanaa @dllehr-amd @AndreasKaratzas
 /vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
