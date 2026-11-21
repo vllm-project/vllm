@@ -460,6 +460,8 @@ class CommonAttentionMetadata:
     sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
+    # Device int32 split counts for the length-keyed FA3 graph variant.
+    deterministic_attention_splits: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
@@ -556,6 +558,9 @@ class CommonAttentionMetadata:
             ),
             seq_lens_cpu_upper_bound=maybe_slice_reqs(self.seq_lens_cpu_upper_bound),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            deterministic_attention_splits=maybe_slice_reqs(
+                self.deterministic_attention_splits
+            ),
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )

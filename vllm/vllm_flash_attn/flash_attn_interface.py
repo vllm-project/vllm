@@ -140,6 +140,8 @@ def get_scheduler_metadata(
     num_splits=0,  # Can be tuned for speed
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
+    num_splits_per_request: torch.Tensor | None = None,
+    use_fixed_mma_warpgroups: bool = False,
 ):
     cache_seqlens = maybe_contiguous(cache_seqlens)
     if headdim_v is None:
@@ -168,6 +170,11 @@ def get_scheduler_metadata(
         num_splits,
         pack_gqa,
         sm_margin,
+        *(
+            (num_splits_per_request, use_fixed_mma_warpgroups)
+            if num_splits_per_request is not None or use_fixed_mma_warpgroups
+            else ()
+        ),
     )
 
     return scheduler_metadata
@@ -216,6 +223,8 @@ def flash_attn_varlen_func(
     dynamic_causal: "torch.Tensor | None" = None,
     gather_kv_indices=None,
     gather_kv_valid_length=None,
+    split_workspace: tuple[torch.Tensor, torch.Tensor] | None = None,
+    use_fixed_mma_warpgroups: bool = False,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -279,6 +288,10 @@ def flash_attn_varlen_func(
         v_descale: descale factor for FP8 v. Same constraints as q_descale.
         num_splits: int. Number of splits for the split-KV kernel; 0 lets the kernel
            choose. FA2 only supports 0 or 1.
+        split_workspace: optional FP32 output and LSE accumulator buffers.
+            Supported by FA3 varlen split attention.
+        use_fixed_mma_warpgroups: disable the query-length-dependent FA3
+            single-warpgroup kernel variant.
         output_scale: scale for fused FP8 output quantization. FA4 only.
         fa_version: int. FlashAttention major version to dispatch to.
         s_aux: learnable per-head attention sink logits. Not supported by FA2.
@@ -340,6 +353,9 @@ def flash_attn_varlen_func(
             raise NotImplementedError(
                 "SM90 FP8 MMA noncausal full attention has known accuracy errors."
             )
+
+    if fa_version != 3 and (split_workspace is not None or use_fixed_mma_warpgroups):
+        raise ValueError("Split workspace and fixed MMA warpgroups require FA3.")
 
     assert output_scale is None or fa_version == 4, (
         f"Fused FP8 output (output_scale) is only supported by FA4, "
@@ -444,6 +460,11 @@ def flash_attn_varlen_func(
             cp_world_size,
             cp_rank,
             cp_tot_seqused_k,
+            *(
+                (*(split_workspace or (None, None)), use_fixed_mma_warpgroups)
+                if split_workspace is not None or use_fixed_mma_warpgroups
+                else ()
+            ),
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"

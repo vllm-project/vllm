@@ -201,6 +201,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     model = torch.nn.Module()
     vllm_config = SimpleNamespace(
         aux_output_config=SimpleNamespace(enabled=enabled),
+        attention_config=SimpleNamespace(deterministic_attention_split_stride=None),
         max_concurrent_batches=1,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
     )

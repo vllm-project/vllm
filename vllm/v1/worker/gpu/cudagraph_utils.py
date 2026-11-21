@@ -87,6 +87,7 @@ class BatchExecutionDescriptor:
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
     num_ubatches: int = 1
+    split_attention: bool = False
 
 
 def make_cudagraph_stats(
@@ -120,6 +121,7 @@ def _is_compatible(
     num_active_loras: int,
     max_query_len: int | None,
     num_ubatches: int,
+    split_attention: bool = False,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -139,6 +141,10 @@ def _is_compatible(
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
         and desc.num_ubatches == num_ubatches
+        and (
+            desc.cg_mode != CUDAGraphMode.FULL
+            or desc.split_attention == split_attention
+        )
     )
 
 
@@ -216,11 +222,11 @@ class CudaGraphManager:
 
         # (num_tokens, num_active_loras) -> token-keyed descriptors to try.
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
-        # (query_len, num_active_loras, num_ubatches) -> uniform decode
+        # (query_len, num_active_loras, num_ubatches, split_attention) -> uniform decode
         # descriptors indexed by request count: entry n is the smallest graph
         # that takes n requests.
         self._decode_descs: dict[
-            tuple[int, int, int], list[BatchExecutionDescriptor]
+            tuple[int, int, int, bool], list[BatchExecutionDescriptor]
         ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
@@ -315,6 +321,15 @@ class CudaGraphManager:
 
         decode_descs: list[BatchExecutionDescriptor] = []
         token_keyed_descs: list[BatchExecutionDescriptor] = []
+
+        def split_attention_cases(mode: CUDAGraphMode) -> tuple[bool, ...]:
+            stride = (
+                self.vllm_config.attention_config.deterministic_attention_split_stride
+            )
+            if mode == CUDAGraphMode.FULL and stride is not None:
+                return (False, True)
+            return (False,)
+
         # With one routine for every batch, decode batches take token-keyed graphs.
         capture_decode = separate_decode_routine and decode_mode != CUDAGraphMode.NONE
         if capture_decode and self.varlen_decode:
@@ -323,8 +338,10 @@ class CudaGraphManager:
             varlen_sizes = self.vllm_config.get_varlen_decode_cudagraph_token_sizes(
                 self.decode_query_len
             )
-            for num_tokens, num_active_loras in product(
-                varlen_sizes, self.lora_capture_cases
+            for num_tokens, num_active_loras, split_attention in product(
+                varlen_sizes,
+                self.lora_capture_cases,
+                split_attention_cases(decode_mode),
             ):
                 token_keyed_descs.append(
                     BatchExecutionDescriptor(
@@ -333,6 +350,7 @@ class CudaGraphManager:
                         num_reqs=min(num_tokens, self.max_num_reqs),
                         max_query_len=self.decode_query_len,
                         num_active_loras=num_active_loras,
+                        split_attention=split_attention,
                     )
                 )
         elif capture_decode:
@@ -346,8 +364,10 @@ class CudaGraphManager:
                 self.decode_max_reqs,
                 decode_cudagraph_capture_max_tokens(compilation_config),
             )
-            for (n, q), num_active_loras in product(
-                decode_shapes, self.lora_capture_cases
+            for (n, q), num_active_loras, split_attention in product(
+                decode_shapes,
+                self.lora_capture_cases,
+                split_attention_cases(decode_mode),
             ):
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
@@ -355,21 +375,25 @@ class CudaGraphManager:
                     num_reqs=n,
                     uniform_token_count=q,
                     num_active_loras=num_active_loras,
+                    split_attention=split_attention,
                 )
                 decode_descs.append(desc)
                 ubatch_desc = self._maybe_ubatch_twin(desc)
                 if ubatch_desc is not None:
                     decode_descs.append(ubatch_desc)
 
-        for num_tokens, num_active_loras in product(
-            prefill_sizes, self.lora_capture_cases
-        ):
-            if mixed_mode:
-                # for PIECEWISE graphs there is no limit on requests when replaying
-                # i.e. no request padding is needed, so we leave it as None.
-                # For breakable PW graphs, break-point kernels read the real batch
-                # from the forward context; in-graph kernels handle the token padding
-                # themselves from the padded slot_mapping (rows with slot == -1).
+        if mixed_mode:
+            for num_tokens, num_active_loras, split_attention in product(
+                prefill_sizes,
+                self.lora_capture_cases,
+                split_attention_cases(mixed_mode),
+            ):
+                # for PIECEWISE graphs there is no limit on requests when
+                # replaying i.e. no request padding is needed, so we leave it
+                # as None. For breakable PW graphs, break-point kernels read
+                # the real batch from the forward context; in-graph kernels
+                # handle the token padding themselves from the padded
+                # slot_mapping (rows with slot == -1).
                 num_reqs = None
                 if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
@@ -378,6 +402,7 @@ class CudaGraphManager:
                     num_tokens=num_tokens,
                     num_reqs=num_reqs,
                     num_active_loras=num_active_loras,
+                    split_attention=split_attention,
                 )
                 token_keyed_descs.append(desc)
 
@@ -395,14 +420,19 @@ class CudaGraphManager:
             self._capture_descs[mode] = descs
 
         # A uniform decode batch looks up its request count among the graphs of
-        # its own query length, so one query length never shadows another.
+        # its own query length and split mode, so splits never shadow unsplit.
         decode_groups: defaultdict[
-            tuple[int, int, int], list[BatchExecutionDescriptor]
+            tuple[int, int, int, bool], list[BatchExecutionDescriptor]
         ] = defaultdict(list)
         for desc in decode_descs:
             assert desc.uniform_token_count is not None
             decode_groups[
-                (desc.uniform_token_count, desc.num_active_loras, desc.num_ubatches)
+                (
+                    desc.uniform_token_count,
+                    desc.num_active_loras,
+                    desc.num_ubatches,
+                    desc.split_attention,
+                )
             ].append(desc)
         for decode_key, decode_group in decode_groups.items():
             table: list[BatchExecutionDescriptor] = []
@@ -566,6 +596,7 @@ class CudaGraphManager:
         num_active_loras: int,
         max_query_len: int | None = None,
         num_ubatches: int = 1,
+        split_attention: bool = False,
     ) -> BatchExecutionDescriptor:
         """Find the graph to run a batch with, else an eager descriptor.
 
@@ -580,7 +611,15 @@ class CudaGraphManager:
             candidates = self._candidates.get((num_tokens, effective_loras), [])
             if uniform_token_count is not None:
                 decode_descs = self._decode_descs.get(
-                    (uniform_token_count, effective_loras, num_ubatches), []
+                    (
+                        uniform_token_count,
+                        effective_loras,
+                        num_ubatches,
+                        split_attention,
+                    ),
+                    [],
+                ) or self._decode_descs.get(
+                    (uniform_token_count, effective_loras, num_ubatches, False), []
                 )
                 n = cdiv(num_tokens, uniform_token_count)
                 if n < len(decode_descs):
@@ -594,6 +633,7 @@ class CudaGraphManager:
                     effective_loras,
                     max_query_len,
                     num_ubatches,
+                    split_attention=split_attention,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -774,6 +814,11 @@ class ModelCudaGraphManager(CudaGraphManager):
                 # Prepare and park threads before capture; finish runs inside it.
                 assert self.ubatch_runner is not None
                 input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+                if desc.split_attention:
+                    input_buffers.deterministic_attention_splits[:num_reqs].fill_(1)
+                    input_batch.deterministic_attention_splits = (
+                        input_buffers.deterministic_attention_splits[:num_reqs]
+                    )
                 input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
                 set_dcp_capture_context(
                     input_batch,
@@ -815,6 +860,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
+                split_attention=desc.split_attention,
             )
 
             # Capture with dummy rows marked as padding.
@@ -908,6 +954,7 @@ def prepare_inputs_to_capture(
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
     slot_mappings_buffer: torch.Tensor | None = None,
+    split_attention: bool = False,
 ) -> AttentionState:
     if full_cudagraph and max_query_len is None:
         # Mixed graphs can replay a single prefill spanning the entire batch,
@@ -916,6 +963,12 @@ def prepare_inputs_to_capture(
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
+    if split_attention:
+        # The static split graph also handles requests whose split count is one.
+        input_buffers.deterministic_attention_splits[:num_reqs].fill_(1)
+        input_batch.deterministic_attention_splits = (
+            input_buffers.deterministic_attention_splits[:num_reqs]
+        )
     if pcp_manager is not None:
         input_batch = pcp_manager.prepare_inputs_for_capture_or_profile(input_batch)
 

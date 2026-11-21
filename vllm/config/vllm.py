@@ -888,6 +888,7 @@ class VllmConfig:
             or model.dtype != torch.bfloat16
             or model.quantization is not None
             or not current_platform.is_cuda()
+            or bi.supports_hopper_native_dispatch()
         ):
             return False
         family = bi._get_tuned_matmul_arch_family(
@@ -1588,6 +1589,33 @@ class VllmConfig:
             return
 
         self._resolve_specialized_decode_switch()
+
+        split_stride = self.attention_config.deterministic_attention_split_stride
+        if split_stride is not None:
+            from vllm.v1.attention.backends.fa3_split import (
+                FA3_MAX_DYNAMIC_SPLIT_REQUESTS,
+            )
+            from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+            if split_stride not in (512, 1024):
+                raise ValueError(
+                    "Deterministic attention split stride must be 512 or 1024."
+                )
+            if self.scheduler_config.max_num_seqs > FA3_MAX_DYNAMIC_SPLIT_REQUESTS:
+                raise ValueError(
+                    "Length-keyed FA3 supports at most "
+                    f"{FA3_MAX_DYNAMIC_SPLIT_REQUESTS} padded requests "
+                    f"(got max_num_seqs={self.scheduler_config.max_num_seqs})."
+                )
+            if (
+                self.attention_config.backend
+                not in (None, AttentionBackendEnum.FLASH_ATTN)
+                or self.attention_config.backend_per_kind
+                or self.attention_config.flash_attn_version not in (None, 3)
+            ):
+                raise ValueError("Length-keyed splits require FlashAttention 3.")
+            self.attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+            self.attention_config.flash_attn_version = 3
         self._resolve_mm_encoder_only()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
