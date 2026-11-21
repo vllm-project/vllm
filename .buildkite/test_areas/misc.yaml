@@ -895,6 +895,8 @@ steps:
   - tools/use_existing_torch.py
   - tests/tools/test_dependency_pins.py
   - docs/mkdocs/gen_files/generate_argparse.py
+  - docs/mkdocs/gen_files/generate_examples.py
+  - tests/tools/test_generate_examples.py
   - .buildkite/scripts/check-hybrid-test-deps.py
   - tools/build_hybrid_test_wheels.sh
   - requirements/build/hybrid-test-deps.txt
@@ -915,6 +917,7 @@ steps:
   - pytest -v -s tools/test_check_agent_files.py
   - pytest -v -s tools/test_check_trust_remote_code.py
   - pytest -v -s tools/test_dependency_pins.py
+  - pytest -v -s tools/test_generate_examples.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers

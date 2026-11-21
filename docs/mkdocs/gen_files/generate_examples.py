@@ -6,13 +6,11 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
-import mkdocs_awesome_nav.nav.directory as _nav_dir
-import mkdocs_gen_files
 import regex as re
 
 logger = logging.getLogger("mkdocs")
 
-ROOT_DIR = Path(__file__).parent.parent.parent.parent
+ROOT_DIR = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = ROOT_DIR / "examples"
 
 
@@ -79,7 +77,7 @@ class Example:
         if self.path.is_file():
             return self.path
         # Multi file example with a README
-        if md_paths := list(self.path.glob("*.md")):
+        if md_paths := sorted(self.path.glob("*.md")):
             return md_paths[0]
         # Multi file example without a README
         return None
@@ -131,16 +129,18 @@ class Example:
 
         def replace_link(match):
             link_text = match.group(1)
-            relative_path = match.group(2)
+            relative_path, sep, fragment = match.group(2).partition("#")
 
-            # Make relative to repo root
-            gh_file = (self.main_file.parent / relative_path).resolve()
-            gh_file = gh_file.relative_to(ROOT_DIR)
+            target = (self.main_file.parent / relative_path).resolve()
+            if not target.is_relative_to(ROOT_DIR):
+                return match.group(0)
 
             # Make GitHub URL
             url = "https://github.com/vllm-project/vllm/"
-            url += "tree/main" if self.path.is_dir() else "blob/main"
-            gh_url = f"{url}/{gh_file}"
+            url += "tree/main" if target.is_dir() else "blob/main"
+            gh_url = f"{url}/{target.relative_to(ROOT_DIR).as_posix()}"
+            if sep:
+                gh_url += f"#{fragment}"
 
             return f"[{link_text}]({gh_url})"
 
@@ -150,7 +150,7 @@ class Example:
         content = f"# {self.title}\n\n"
         url = "https://github.com/vllm-project/vllm/"
         url += "tree/main" if self.path.is_dir() else "blob/main"
-        content += f"Source <{url}/{self.path.relative_to(ROOT_DIR)}>.\n\n"
+        content += f"Source <{url}/{self.path.relative_to(ROOT_DIR).as_posix()}>.\n\n"
 
         # Use long code fence to avoid issues with
         # included files containing code fences too
@@ -173,7 +173,9 @@ class Example:
         else:
             # Multi file example without a README
             for file in self.other_files:
-                file_title = title(str(file.relative_to(self.path).with_suffix("")))
+                file_title = title(
+                    file.relative_to(self.path).with_suffix("").as_posix()
+                )
                 content += f"## {file_title}\n\n"
                 content += (
                     f'{code_fence}{file.suffix[1:]}\n--8<-- "{file}"\n{code_fence}\n\n'
@@ -185,7 +187,7 @@ class Example:
 
         content += "## Example materials\n\n"
         for file in self.other_files:
-            content += f'??? abstract "{file.relative_to(self.path)}"\n'
+            content += f'??? abstract "{file.relative_to(self.path).as_posix()}"\n'
             if file.suffix != ".md":
                 content += f"    {code_fence}{file.suffix[1:]}\n"
             content += f'    --8<-- "{file}"\n'
@@ -195,38 +197,64 @@ class Example:
         return content
 
 
-# Monkey-patch dirname_to_title in awesome-nav so that sub-directory names are
-# title-cased (e.g. "Offline Inference" instead of "Offline inference").
-_nav_dir.dirname_to_title = title
-logger.info("Generating example documentation")
-logger.debug("Root directory: %s", ROOT_DIR.resolve())
-logger.debug("Example directory: %s", EXAMPLE_DIR.resolve())
+def collect_examples(example_dir: Path = EXAMPLE_DIR) -> list[Example]:
+    """Collect single-file and multi-file examples from each category.
 
-categories = sorted(
-    p for p in EXAMPLE_DIR.iterdir() if p.is_dir() and not p.name.startswith(".")
-)
+    A multi-file example directory yields exactly one `Example`, regardless of
+    how many matching files it contains.
 
-examples = []
-glob_patterns = ["*.py", "*.md", "*.sh"]
-# Find categorised examples
-for category in categories:
-    logger.info("Processing category: %s", category.stem)
-    globs = [category.glob(pattern) for pattern in glob_patterns]
-    for path in itertools.chain(*globs):
-        examples.append(Example(path, category.stem))
-    # Find examples in subdirectories
-    globs = [category.glob(f"*/{pattern}") for pattern in glob_patterns]
-    for path in itertools.chain(*globs):
-        examples.append(Example(path.parent, category.stem))
+    Args:
+        example_dir: Directory containing one sub-directory per category.
 
-# Generate the example documentation
-for example in sorted(examples, key=lambda e: e.path.stem):
-    doc_path = f"examples/{example.category}/{example.path.stem}.md"
-    with mkdocs_gen_files.open(doc_path, "w") as f:
-        f.write(example.generate())
-    if example.main_file is not None:
-        # Point the edit button at the example's source file
-        edit_path = Path("..") / example.main_file.relative_to(ROOT_DIR)
-        mkdocs_gen_files.set_edit_path(doc_path, str(edit_path))
-    logger.debug("Example generated: %s", doc_path)
-logger.info("Total examples generated: %d", len(examples))
+    Returns:
+        The collected examples, in deterministic order.
+
+    """
+    categories = sorted(
+        p for p in example_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
+    )
+
+    examples = []
+    glob_patterns = ["*.py", "*.md", "*.sh"]
+    for category in categories:
+        logger.info("Processing category: %s", category.stem)
+        # Find categorised examples
+        globs = [category.glob(pattern) for pattern in glob_patterns]
+        for path in sorted(itertools.chain(*globs)):
+            examples.append(Example(path, category.stem))
+        # Find examples in subdirectories
+        globs = [category.glob(f"*/{pattern}") for pattern in glob_patterns]
+        for subdir in sorted({path.parent for path in itertools.chain(*globs)}):
+            examples.append(Example(subdir, category.stem))
+    return examples
+
+
+def generate_examples() -> None:
+    import mkdocs_awesome_nav.nav.directory as _nav_dir
+    import mkdocs_gen_files
+
+    # Monkey-patch dirname_to_title in awesome-nav so that sub-directory names
+    # are title-cased (e.g. "Offline Inference" instead of "Offline inference").
+    _nav_dir.dirname_to_title = title
+    logger.info("Generating example documentation")
+    logger.debug("Root directory: %s", ROOT_DIR)
+    logger.debug("Example directory: %s", EXAMPLE_DIR)
+
+    examples = collect_examples()
+
+    # Generate the example documentation
+    for example in sorted(examples, key=lambda e: e.path.stem):
+        doc_path = f"examples/{example.category}/{example.path.stem}.md"
+        with mkdocs_gen_files.open(doc_path, "w") as f:
+            f.write(example.generate())
+        if example.main_file is not None:
+            # Point the edit button at the example's source file
+            edit_path = Path("..") / example.main_file.relative_to(ROOT_DIR)
+            mkdocs_gen_files.set_edit_path(doc_path, edit_path.as_posix())
+        logger.debug("Example generated: %s", doc_path)
+    logger.info("Total examples generated: %d", len(examples))
+
+
+# mkdocs-gen-files runs this script via `runpy.run_path`
+if __name__ in {"__main__", "<run_path>"}:
+    generate_examples()
