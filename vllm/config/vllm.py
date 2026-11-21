@@ -524,7 +524,26 @@ class VllmConfig:
     additional_config: dict | SupportsCompileFactors = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
-    you are using. Contents must be hashable."""
+    you are using. Contents must be hashable.
+
+    Known keys:
+    - ``audio_bucket_seconds`` (``list[float]``): enable encoder length
+      bucketing for padded audio encoders by bucketing items into these
+      second-length rungs (e.g. ``[2, 4, 8, 16, 30]``). Off by default, and
+      only applied to adapted models (currently ``qwen2_audio``, ``canary``,
+      ``fireredasr2``, ``cohere_asr``, ``funasr``, ``glmasr``,
+      ``granite_speech``). Losslessness is per-model: ``funasr`` is approx (its
+      trailing adaptor is unmasked) and ``glmasr`` / ``granite_speech`` are
+      output-lossless within one frame (mask-less attention); the rest are
+      bit-exact (mask-aware).
+    - ``audio_bucket_budget`` (``int``): enable compute-budget merging by
+      bounding the compute (items x padded frames) of one encoder call.
+      Oversized groups split into balanced chunks while under-filled groups
+      fold into their larger neighbor (trigger = ``budget // 6``), so long
+      rungs get small per-call batches and short rungs large ones. Off by
+      default (unset = one call per rung). A budget of 16 x the largest rung in
+      frames is a good starting point.
+    """
     instance_id: str = ""
     """The ID of the vLLM instance."""
     optimization_level: OptimizationLevel = OptimizationLevel.O2

@@ -260,3 +260,82 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 
 - [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_client.py) - Upload and transcribe an audio file
 - [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+
+## Encoder Length Bucketing
+
+Padded audio encoders pad every mel to a fixed window (for example 3000 frames)
+or to the batch maximum, so a mixed-length batch computes every item at full
+length: a 2 s clip batched with a 30 s clip computes 15x more frames than it
+needs. Encoder length bucketing regroups a batch by true item length into
+fixed-length rungs (one discrete window length each), so short clips stop paying
+for long clips' padding. It is opt-in and GPU-only.
+
+### Applicability
+
+Whitelist-gated: only the adapted models below engage it. For any other model
+the config is ignored -- a warning is logged and the original forward runs, so
+setting the keys is always safe.
+
+| Model | Encoder type |
+|---|---|
+| Qwen2-Audio | fixed-window mel encoder |
+| Canary | batch-max-padded conformer |
+| FireRed-ASR2 | fixed-window conformer |
+| Cohere-ASR | batch-max-padded encoder |
+| FunASR / SenseVoice | fixed-window SANM encoder |
+| GLM-ASR | chunked, fixed-window encoder |
+| Granite-Speech | batch-max-padded conformer + QFormer projector |
+
+### Enabling
+
+```bash
+vllm serve <model> --additional-config '{"audio_bucket_seconds": [2, 4, 8, 16, 30]}'
+```
+
+```python
+llm = LLM(model="<model>", additional_config={"audio_bucket_seconds": [2, 4, 8, 16, 30]})
+```
+
+### Configuration
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `audio_bucket_seconds` | `list[float]` | unset (disabled) | Rung ladder in seconds, converted to frames at the model's frame rate. |
+| `audio_bucket_budget` | `int` | unset (no merging) | Per-call compute bound in items x padded frames (16 x the largest rung is a good start). |
+
+Items are grouped by length into rungs before the CUDA-graph decision, so each
+rung is a fixed-shape sub-batch that can use a captured graph or eager
+execution. If bucketing would not reduce the computed frames for a batch, that
+batch runs the original forward unchanged. With `audio_bucket_budget`, groups
+above the budget split into balanced chunks, and groups below `budget // 6`
+merge into the next rung up so small calls amortize fixed overhead.
+
+### Losslessness
+
+| Encoder class | Models | Guarantee |
+|---|---|---|
+| pad + explicit mask | Qwen2-Audio, Canary, FireRed-ASR2, Cohere-ASR | bit-exact: masked padding contributes nothing to softmax/conv |
+| pad + no mask + relative PE | GLM-ASR, Granite-Speech | output-lossless within one frame: output frame counts do not change with the rung |
+| mixed | FunASR/SenseVoice | approx: bit-exact SANM encoder, unmasked trailing adaptor |
+| pad + no mask + absolute PE | Whisper-style | lossy; not enabled |
+
+bf16 residuals are ULP-level kernel rounding; the measured WER delta is within
+0.001 for all adapted models.
+
+### Measured gains
+
+RTX 5090, bf16, 300 prompts, c=32, request rate `inf`; recommended per-model
+config, throughput off -> on:
+
+| Model | Config | Throughput off -> on | Delta |
+|---|---|---|---|
+| Qwen2-Audio | bucketing only | 22.0 -> 28.6 | +30% |
+| Fun-ASR / SenseVoice | bucketing + budget | 65.2 -> 114.9 | +76% |
+| FireRed-ASR2 | bucketing + budget | 45.2 -> 56.5 | +25% |
+| GLM-ASR | bucketing only | 57.5 -> 94.5 | +64% |
+| Canary | bucketing + budget | 84.0 -> 87.4 | +4% |
+| Granite-Speech | bucketing + budget | 60.2 -> 57.4 | -5% |
+| Cohere-ASR | bucketing + budget | 73.5 -> 71.8 | -2% |
+
+Fixed-window encoders gain most; batch-max-padded models need the budget for
+parity, with the gain showing at higher concurrency (Cohere-ASR +9% at c=128).

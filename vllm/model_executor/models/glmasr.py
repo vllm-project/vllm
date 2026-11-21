@@ -50,10 +50,12 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .mm_encoder_bucketing import EncoderBucketingSpec, install_encoder_bucketing
 from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
     DEFAULT_MERGE_FACTOR,
+    _as_list_chunk_counts,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
     _group_audio_embeddings,
@@ -550,6 +552,119 @@ class GlmAsrEmbeddingInputs(TensorSchema):
 GlmAsrInputs: TypeAlias = GlmAsrFeatureInputs | GlmAsrEmbeddingInputs
 
 
+
+class GlmAsrBucketingSpec(EncoderBucketingSpec):
+    """Bucketing semantics for GLM-ASR's chunked fixed-window mel encoder.
+
+    `input_features` is `[num_chunks, nmb, chunk_length]` (time last) or a
+    per-audio list of such chunk stacks; `feature_attention_mask` carries each
+    chunk's true mel-frame count and `chunk_counts` (kept on CPU) maps chunks
+    back to their audio item. Long audio is split into 30 s chunks, all padded
+    to the extractor window, so the bucketer's item is the *audio*: the rung
+    window must cover its longest chunk, and `crop` expands audio indices to
+    chunk rows.
+
+    The encoder is RoPE-based and its attention has no mask, so padding still
+    participates in softmax: output frame counts are derived from the true
+    lengths and are strictly rung-independent, while values drift slightly
+    (not bit-exact). Rungs align to 8 (conv 2x x merge 4x) so the merge stage
+    lands on its exact grid.
+    """
+
+    frames_per_second = 100  # hop_length=160 @ 16 kHz (WhisperFeatureExtractor)
+    # conv1 (k3, s1, p1) + conv2 (k3, s2, p1) receptive field: the last
+    # valid conv2 output reads input frames up to ~L+1; the probe shows
+    # rung=L clips the boundary while L+2 is exact (same conv stack as
+    # Qwen2-Audio, which uses 4).
+    context_margin = 4
+    align_to = 8  # conv 2x x merge 4x
+
+    @staticmethod
+    def _chunk_lengths_by_audio(
+        feature_attention_mask, chunk_counts
+    ) -> list[list[int]]:
+        """Per-audio lists of per-chunk true lengths."""
+        if isinstance(feature_attention_mask, list):
+            # one element per audio (its chunks stacked on dim 0)
+            groups = []
+            for m in feature_attention_mask:
+                sums = m.sum(-1)
+                groups.append(sums.tolist() if sums.dim() else [int(sums)])
+            return groups
+        lengths = feature_attention_mask.sum(-1).tolist()
+        counts = _as_list_chunk_counts(chunk_counts) if chunk_counts is not None else None
+        if counts is None:
+            return [[n] for n in lengths]
+        groups = []
+        i = 0
+        for c in counts:
+            groups.append(lengths[i : i + c])
+            i += c
+        return groups
+
+    def item_lengths(
+        self, mm_kwargs_batch: Mapping[str, object]
+    ) -> list[int] | None:
+        mask = mm_kwargs_batch.get("feature_attention_mask")
+        if mask is None:
+            return None
+        groups = self._chunk_lengths_by_audio(
+            mask, mm_kwargs_batch.get("chunk_counts")
+        )
+        # The rung window covers every chunk of the audio, so the item length
+        # is its longest chunk.
+        return [max(g) if g else 0 for g in groups]
+
+    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+        feats = mm_kwargs_batch.get("input_features")
+        if feats is None:
+            return 0
+        if isinstance(feats, list):
+            return max(int(f.shape[-1]) for f in feats)
+        return int(feats.shape[-1])  # [chunks, nmb, T]
+
+    def crop(
+        self,
+        mm_kwargs_batch: Mapping[str, object],
+        indices: list[int],
+        rung: int,
+    ) -> dict[str, object]:
+        feats = mm_kwargs_batch["input_features"]
+        mask = mm_kwargs_batch["feature_attention_mask"]
+        counts = mm_kwargs_batch.get("chunk_counts")
+
+        out: dict[str, object] = {}
+        if isinstance(feats, list):
+            # one element per audio (its chunks stacked on dim 0); select and
+            # truncate each chunk stack's time axis (always the last dim)
+            out["input_features"] = [feats[i][..., :rung] for i in indices]
+            out["feature_attention_mask"] = [mask[i][..., :rung] for i in indices]
+        else:
+            if counts is not None:
+                # expand audio indices to their chunk rows
+                spans = []
+                offset = 0
+                for c in _as_list_chunk_counts(counts):
+                    spans.append((offset, offset + c))
+                    offset += c
+                rows: list[int] = []
+                for i in indices:
+                    s, e = spans[i]
+                    rows.extend(range(s, e))
+            else:
+                rows = list(indices)
+            sel = torch.tensor(rows, dtype=torch.long, device=feats.device)
+            out["input_features"] = feats[sel, ..., :rung]
+            out["feature_attention_mask"] = mask[sel, ..., :rung]
+        if counts is not None:
+            sel_counts = torch.tensor(indices, dtype=torch.long)
+            if isinstance(counts, torch.Tensor):
+                out["chunk_counts"] = counts[sel_counts.to(counts.device)]
+            else:
+                out["chunk_counts"] = [counts[i] for i in indices]
+        return out
+
+
 class GlmAsrMultiModalProjector(nn.Module):
     """Projects audio encoder outputs to language model hidden space.
 
@@ -943,6 +1058,14 @@ class GlmAsrForConditionalGeneration(
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+        install_encoder_bucketing(
+            self,
+            {"audio": self.audio_tower},
+            GlmAsrBucketingSpec(),
+            model_type=config.model_type,
+            additional_config=getattr(vllm_config, "additional_config", None),
         )
 
     @classmethod
