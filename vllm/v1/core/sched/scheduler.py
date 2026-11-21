@@ -2247,8 +2247,27 @@ class Scheduler(SchedulerInterface):
                     # previous step.
                     continue
 
+            # A placeholder range may contain text-only positions.
+            start_idx_rel = max(0, num_computed_tokens - start_pos)
+            end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
+            curr_embeds_start, curr_embeds_end = (
+                mm_feature.mm_position.get_embeds_indices_in_range(
+                    start_idx_rel, end_idx_rel
+                )
+            )
+            if curr_embeds_start == curr_embeds_end:
+                continue
+
+            load_from_connector = (
+                self.ec_connector is not None
+                and self.ec_connector.has_cache_item(item_identifier)
+            )
+            # External loads need cache space but consume no encoder compute.
             if not self.encoder_cache_manager.can_allocate(
-                request, i, encoder_compute_budget, num_embeds_to_schedule
+                request,
+                i,
+                num_encoder_embeds if load_from_connector else encoder_compute_budget,
+                num_embeds_to_schedule,
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -2269,23 +2288,7 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
-            # Calculate the number of embeddings to schedule in the current range
-            # of scheduled encoder placeholder tokens.
-            start_idx_rel = max(0, num_computed_tokens - start_pos)
-            end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
-            curr_embeds_start, curr_embeds_end = (
-                mm_feature.mm_position.get_embeds_indices_in_range(
-                    start_idx_rel, end_idx_rel
-                )
-            )
-            # There's no embeddings in the current range of encoder placeholder tokens
-            # so we can skip the encoder input.
-            if curr_embeds_end - curr_embeds_start == 0:
-                continue
-
-            if self.ec_connector is not None and self.ec_connector.has_cache_item(
-                item_identifier
-            ):
+            if load_from_connector:
                 mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds

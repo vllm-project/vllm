@@ -6601,6 +6601,8 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     # Create MM request1
     NUM_TOKENS_1 = 50  # NOTE: includes mm tokens
     NUM_ENCODER_TOKENS_1 = 12
+    # The first request uses the whole step's local encoder compute budget.
+    scheduler.max_num_encoder_input_tokens = NUM_ENCODER_TOKENS_1
     mm_hashes_list_1 = [["hash1_1"]]
     mm_positions_1 = [[PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS_1)]]
 
@@ -7621,6 +7623,32 @@ def test_encoder_cache_accepts_matching_embed_count():
     assert compatible.request_id in scheduler_output.num_scheduled_tokens
     assert compatible.request_id not in scheduler.encoder_cache_mismatch_reqs
     assert compatible.request_id not in scheduler_output.scheduled_encoder_inputs
+
+
+@pytest.mark.parametrize("use_ec_connector", [False, True])
+def test_encoder_cache_text_only_window_preserves_freeable_entry(use_ec_connector):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1,
+        max_num_seqs=1,
+        use_ec_connector=use_ec_connector,
+        ec_role="ec_consumer",
+    )
+    manager = scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=1)
+    cached = _create_mm_request_with_embedding_positions("owner", "old", [True])
+    manager.allocate(cached, 0)
+    manager.free(cached)
+    request = _create_mm_request_with_embedding_positions("new", "image", [False, True])
+    if use_ec_connector:
+        scheduler.ec_connector.has_cache_item = Mock(return_value=True)
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {request.request_id: 1}
+    assert not output.free_encoder_mm_hashes
+    assert not output.scheduled_encoder_inputs
+    if use_ec_connector:
+        scheduler.ec_connector.has_cache_item.assert_not_called()
 
 
 def test_encoder_cache_rejects_mismatched_embed_count(caplog_vllm):
