@@ -17,6 +17,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     handshake,
     install_memory_runtime,
     make_kv_caches,
+    mori_has_umbp,
 )
 from tests.v1.kv_connector.unit.utils import (
     create_model_runner_output,
@@ -364,6 +365,21 @@ def test_runtime_config_rejects_invalid_embedded_dram_options(options, error):
         UMBPRuntimeFactory.build(
             UMBPRuntimeConfig.from_vllm(_vllm_config({"mode": "embedded", **options}))
         )
+
+
+@pytest.mark.skipif(not mori_has_umbp(), reason="MORI was built without UMBP")
+def test_embedded_dram_watermarks_default_only_when_neither_is_set():
+    from mori.cpp import UMBPConfig
+
+    unset = UMBPConfig()
+    embedded._configure_dram(unset, {"capacity_bytes": 1024})
+    assert (unset.dram.high_watermark, unset.dram.low_watermark) == (0.99, 0.97)
+
+    # Setting one keeps MORI's default for the other.
+    one = UMBPConfig()
+    embedded._configure_dram(one, {"capacity_bytes": 1024, "dram_high_watermark": 0.95})
+    assert one.dram.high_watermark == 0.95
+    assert one.dram.low_watermark == UMBPConfig().dram.low_watermark
 
 
 def test_mori_client_is_created_only_for_worker(monkeypatch, socket_dir):
