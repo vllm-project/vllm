@@ -541,14 +541,14 @@ fn validate_chat_cross_parameters(
     // OpenAI default) does not request any alternatives, so it is allowed
     // without `logprobs`.
     if req.top_logprobs.is_some_and(|n| n != 0) && !req.logprobs {
-        let mut e = validator::ValidationError::new("top_logprobs_requires_logprobs");
+        let mut e = validator::ValidationError::new("top_logprobs.requires_logprobs");
         e.message = Some("top_logprobs is only allowed when logprobs is enabled".into());
         return Err(e);
     }
 
     // 2. Validate stream_options dependency
     if req.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !req.stream {
-        let mut e = validator::ValidationError::new("stream_options_requires_stream");
+        let mut e = validator::ValidationError::new("stream_options.requires_stream");
         e.message = Some("stream_options can only be used when stream is true".into());
         return Err(e);
     }
