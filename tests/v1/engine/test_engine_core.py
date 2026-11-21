@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -436,13 +437,23 @@ def test_engine_core_concurrent_batches():
         req_id = (req_id + 1) % 2
 
 
-@pytest.mark.parametrize("encoder_only", [True, False])
-def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
-    """Encoder outputs are complete; only language-model steps need sampling."""
+def _mock_batch_queue_core() -> MagicMock:
+    """A mock EngineCore for step_with_batch_queue, without PP admission."""
     core = MagicMock()
     core.batch_queue = deque()
     core.batch_queue_size = 2
     core.deferred_step = None
+    core._pp_admission = False
+    core._idle_step = None
+    for name in ("_keep_scheduling", "_wait_for_new_request", "_on_batch_done"):
+        setattr(core, name, partial(getattr(EngineCore, name), core))
+    return core
+
+
+@pytest.mark.parametrize("encoder_only", [True, False])
+def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
+    """Encoder outputs are complete; only language-model steps need sampling."""
+    core = _mock_batch_queue_core()
     core.is_mm_encoder_only = encoder_only
     core.is_pooling_model = False
     core.scheduler.has_requests.side_effect = [True, False, False]
@@ -473,10 +484,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
 @pytest.mark.parametrize("step_fn", [EngineCore.step, EngineCore.step_with_batch_queue])
 def test_prefill_interval_counts_only_executed_steps(step_fn):
     """Prefills run every Nth executed step; empty schedules don't advance it."""
-    core = MagicMock()
-    core.batch_queue = deque()
-    core.batch_queue_size = 2
-    core.deferred_step = None
+    core = _mock_batch_queue_core()
     core.is_mm_encoder_only = False
     core.is_pooling_model = False
     core.prefill_schedule_interval = 3

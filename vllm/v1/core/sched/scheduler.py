@@ -54,6 +54,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.pp_utils import PPMicrobatchCap
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -426,6 +427,9 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.enable_prefix_caching
         )
+        self.pp_microbatch_cap = PPMicrobatchCap.create(
+            self, self.parallel_config.pipeline_parallel_size
+        )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -732,6 +736,8 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+        if self.pp_microbatch_cap is not None and token_budget > 0:
+            token_budget = self.pp_microbatch_cap.apply(token_budget)
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -782,16 +788,7 @@ class Scheduler(SchedulerInterface):
             if input_budget <= draft_slots:
                 break
 
-            if (
-                request.num_output_placeholders > 0
-                # Placeholders are included in num_computed_tokens; subtract them
-                # and add the tokens in-flight steps are sure to produce, so no
-                # further steps are needed even if all drafts are rejected.
-                and request.num_computed_tokens
-                + (1 + self._min_in_flight_output_tokens(request))
-                - request.num_output_placeholders
-                >= request.num_prompt_tokens + request.max_tokens
-            ):
+            if self._needs_no_more_steps(request):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the in-flight steps reach request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
@@ -3353,6 +3350,26 @@ class Scheduler(SchedulerInterface):
         # self.requests after they have been removed from scheduling queues.
         num_running, num_waiting = self.get_request_counts()
         return len(self.requests) > (num_running + num_waiting)
+
+    def _needs_no_more_steps(self, request: Request) -> bool:
+        return (
+            request.num_output_placeholders > 0
+            # Placeholders are included in num_computed_tokens; subtract them
+            # and add the tokens in-flight steps are sure to produce, so no
+            # further steps are needed even if all drafts are rejected.
+            and request.num_computed_tokens
+            + (1 + self._min_in_flight_output_tokens(request))
+            - request.num_output_placeholders
+            >= request.num_prompt_tokens + request.max_tokens
+        )
+
+    def has_decode_awaiting_cadence(self) -> bool:
+        """Whether a running request still needs a decode but awaits the cadence."""
+        return any(
+            self.current_step < r.next_decode_eligible_step
+            and not self._needs_no_more_steps(r)
+            for r in self.running
+        )
 
     def has_requests(self) -> bool:
         # Override the interface default to also keep the engine alive while a
