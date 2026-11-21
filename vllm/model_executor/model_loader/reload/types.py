@@ -11,7 +11,7 @@ __all__ = ["LayerTensors", "LayerReloadingInfo"]
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
 
 
-@dataclass
+@dataclass(slots=True)
 class LayerReloadingInfo:
     # model format metadata, recorded by `record_metadata_for_reloading`
     restore_metadata: LayerTensors
@@ -19,9 +19,14 @@ class LayerReloadingInfo:
     # device to materialize layers with, recorded by `record_metadata_for_reloading`
     restore_device: torch.device
 
+    # materialize on the CPU instead: online quantization of a layer that the
+    # UVA offloader targets stages its full-precision weights there
+    stage_on_cpu: bool = False
+
     # track how many elements are ready for loading, used by `online_process_loader`
     load_numel: int = 0
     load_numel_total: int | None = None
+    defer_processing: bool = False
 
     # used by `online_process_loader` to buffer args and tensors until ready to load
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
@@ -35,7 +40,9 @@ class LayerReloadingInfo:
 
     def reset(self):
         self.__init__(  # type: ignore[misc]
-            restore_metadata=self.restore_metadata, restore_device=self.restore_device
+            restore_metadata=self.restore_metadata,
+            restore_device=self.restore_device,
+            stage_on_cpu=self.stage_on_cpu,
         )
 
     def can_load(self) -> bool:

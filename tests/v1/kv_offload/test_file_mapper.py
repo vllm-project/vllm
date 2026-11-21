@@ -26,8 +26,11 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             OffloadingGroupConfig(
                 tokens_per_block=tokens_per_block,
                 layer_names=(layer_name,),
+                group_id=group_id,
             )
-            for tokens_per_block, layer_name in kwargs.get("groups", ())
+            for group_id, (tokens_per_block, layer_name) in enumerate(
+                kwargs.get("groups", ())
+            )
         ),
         worker_kv_bytes_per_block=0,
         enable_kv_cache_events=False,
@@ -44,6 +47,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         parallel=OffloadingParallelConfig(
             rank=kwargs.get("rank", 0),
             world_size=kwargs.get("world_size", 1),
+            local_world_size=kwargs.get("world_size", 1),
             tp_size=kwargs.get("tp_size", 1),
             pp_size=kwargs.get("pp_size", 1),
             pcp_size=kwargs.get("pcp_size", 1),
@@ -73,8 +77,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
 
 
 def test_get_file_name_full_structure():
-    """
-    Path must match: <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
+    """Path must match: <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin.
 
     Concretely:
       - The segment immediately after base_path must end with `_r3`

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+import gc
+
 import torch
 
 from vllm.multimodal.inputs import (
@@ -23,6 +26,7 @@ def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestD
         block_ids=([],),
         num_computed_tokens=0,
         lora_request=None,
+        prefill_token_ids=[],
         prompt_embeds=prompt_embeds,
     )
 
@@ -121,3 +125,38 @@ def test_strip_covered_mm_data_mrope() -> None:
     assert set(stripped[1].data.keys()) == {"pixel_values", "image_grid_thw"}
     # original list is not mutated
     assert set(covered.data.keys()) == {"pixel_values", "image_grid_thw"}
+
+
+def test_strip_covered_mm_data_shm_address_item() -> None:
+    """SHM address descriptors must survive stripping even when covered: the
+    worker needs the address to resolve the payload and to acknowledge the
+    sender's writer reference. Stripping it crashed the SHM receiver cache on
+    the second identical request (vllm-project/vllm#54994)."""
+    address_item = MultiModalKwargsItem(
+        {
+            "address": MultiModalFieldElem(data=4096, field=MultiModalBatchedField()),
+            "monotonic_id": MultiModalFieldElem(data=7, field=MultiModalBatchedField()),
+        }
+    )
+    feature = MultiModalFeatureSpec(
+        data=address_item,
+        mm_position=PlaceholderRange(offset=0, length=100),
+        identifier="shm_item",
+        modality="image",
+    )
+
+    stripped = strip_covered_mm_data([feature], num_computed_tokens=250)
+
+    assert stripped[0].data is address_item
+
+
+def test_unpickled_long_lists_are_untracked() -> None:
+    """Workers receive these by pickle (deepcopy takes the same __setstate__
+    path); long lists come back hidden from the cyclic GC, short ones (the
+    common per-step case) are left alone."""
+    long, short = list(range(1000)), [1, 2]
+    new = _create_new_requests_data(None)
+    new.block_ids = (long, short)
+    new = copy.deepcopy(new)
+    assert not gc.is_tracked(new.block_ids[0]) and gc.is_tracked(new.block_ids[1])
+    assert new.block_ids[0] == long

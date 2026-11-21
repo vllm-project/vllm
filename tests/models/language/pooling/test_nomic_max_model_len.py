@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: SIM117
 
+from functools import partial
+
 import pytest
 
 from ...utils import EmbedModelInfo
@@ -16,7 +18,7 @@ MODELS = [
     ),
     # EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
     # EmbedModelInfo("nomic-ai/CodeRankEmbed"),
-    EmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe"),
+    EmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe", trust_remote_code=True),
     # EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long"),
 ]
 
@@ -26,11 +28,28 @@ original_max_position_embeddings = 2048
 max_model_len = int(original_max_position_embeddings * factor)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def predownload_models():
+    """Warm the HF cache so engine startup never hits transient hub errors."""
+    from vllm.transformers_utils.repo_utils import hf_api, with_retry
+
+    for model_info in MODELS:
+        with_retry(
+            partial(
+                hf_api().snapshot_download,
+                model_info.name,
+                revision=model_info.revision,
+            ),
+            f"Error downloading {model_info.name}",
+        )
+
+
 @pytest.mark.parametrize("model_info", MODELS)
 def test_default(model_info, vllm_runner):
     with vllm_runner(
         model_info.name,
         revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         runner="pooling",
         max_model_len=None,
     ) as vllm_model:
@@ -49,6 +68,7 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
     with vllm_runner(
         model_info.name,
         revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         runner="pooling",
         max_model_len=256,
     ) as vllm_model:
@@ -62,6 +82,7 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
             with vllm_runner(
                 model_info.name,
                 revision=model_info.revision,
+                trust_remote_code=model_info.trust_remote_code,
                 runner="pooling",
                 max_model_len=1024,
             ):
@@ -72,6 +93,7 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
     with vllm_runner(
         model_info.name,
         revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         runner="pooling",
         max_model_len=1024,
     ) as vllm_model:
@@ -82,6 +104,7 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
     with vllm_runner(
         model_info.name,
         revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         runner="pooling",
         max_model_len=4096,
     ) as vllm_model:
@@ -90,7 +113,7 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_use_rope_scaling_legal(model_info, vllm_runner):
+def test_use_rope_parameters_legal(model_info, vllm_runner):
     hf_overrides = {
         "rope_parameters": {
             "rope_theta": rope_theta,
@@ -104,6 +127,7 @@ def test_use_rope_scaling_legal(model_info, vllm_runner):
     with vllm_runner(
         model_info.name,
         revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         runner="pooling",
         max_model_len=None,
         hf_overrides=hf_overrides,

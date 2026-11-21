@@ -3,16 +3,16 @@
 """Inkling logits processor (muP + LoRA aware).
 
 Inkling divides the final logits by a muP width multiplier
-(``logits_mup_width_multiplier``). This applies it two ways, depending on
+(`logits_mup_width_multiplier`). This applies it two ways, depending on
 whether an lm_head LoRA is attached:
 
-* No LoRA: fold ``1/mup`` into the lm_head GEMM alpha (fp32 epilogue) -- no
+* No LoRA: fold `1/mup` into the lm_head GEMM alpha (fp32 epilogue) -- no
   separate elementwise kernel, no extra rounding, no weight mutation.
 * LoRA attached: the LoRA manager wraps this layer in
-  ``LogitsProcessorWithLoRA``, whose ``forward`` calls
-  ``type(base_layer).forward(self=wrapper)`` -- so this ``forward`` runs with
-  ``self`` bound to the wrapper. We detect that via ``base_layer`` and take the
-  LoRA path: run the wrapper's ``_get_logits`` (base logits + the lm_head LoRA
+  `LogitsProcessorWithLoRA`, whose `forward` calls
+  `type(base_layer).forward(self=wrapper)` -- so this `forward` runs with
+  `self` bound to the wrapper. We detect that via `base_layer` and take the
+  LoRA path: run the wrapper's `_get_logits` (base logits + the lm_head LoRA
   delta), then divide the full logits by the multiplier so the delta is scaled
   too. muP thus composes with the LoRA delta, with the dispatch as the only
   model-side branching.
@@ -27,16 +27,17 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 
 class InklingLogitsProcessor(LogitsProcessor):
-    """``LogitsProcessor`` that applies Inkling's muP logits width multiplier.
+    """`LogitsProcessor` that applies Inkling's muP logits width multiplier.
 
     Args:
         vocab_size: Padded vocabulary size.
-        org_vocab_size: Unpadded vocabulary size (defaults to ``vocab_size``).
-        scale: Base logits scale (kept ``1.0`` for the served checkpoint).
+        org_vocab_size: Unpadded vocabulary size (defaults to `vocab_size`).
+        scale: Base logits scale (kept `1.0` for the served checkpoint).
         logits_as_input: Whether the input is already logits.
-        soft_cap: Optional logit soft cap (``None`` for the served checkpoint).
+        soft_cap: Optional logit soft cap (`None` for the served checkpoint).
         logits_mup_width_multiplier: muP width divisor for the final logits;
-            ``None`` or ``0`` disables it.
+            `None` or `0` disables it.
+
     """
 
     def __init__(
@@ -63,6 +64,7 @@ class InklingLogitsProcessor(LogitsProcessor):
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         # ``base_layer`` exists only on the LogitsProcessorWithLoRA wrapper,
         # which calls this forward with ``self`` bound to the wrapper. The
@@ -72,15 +74,16 @@ class InklingLogitsProcessor(LogitsProcessor):
         # lives on this class).
         if hasattr(self, "base_layer"):
             return type(self.base_layer)._lora_forward(
-                self, lm_head, hidden_states, embedding_bias
+                self, lm_head, hidden_states, embedding_bias, skip_gather
             )
-        return self._base_forward(lm_head, hidden_states, embedding_bias)
+        return self._base_forward(lm_head, hidden_states, embedding_bias, skip_gather)
 
     def _lora_forward(
         self,
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         # ``self`` is the LogitsProcessorWithLoRA wrapper here: ``_get_logits``
         # returns the base logits plus the lm_head LoRA delta. Apply the muP
@@ -90,7 +93,9 @@ class InklingLogitsProcessor(LogitsProcessor):
         if self.logits_as_input:
             logits = hidden_states
         else:
-            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+            logits = self._get_logits(
+                hidden_states, lm_head, embedding_bias, skip_gather
+            )
         # TODO: fuse this multiplication
         if logits is not None and mup:
             assert self.base_layer.soft_cap is None
@@ -103,10 +108,11 @@ class InklingLogitsProcessor(LogitsProcessor):
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         mup = self.logits_mup_width_multiplier
         if not mup:
-            return super().forward(lm_head, hidden_states, embedding_bias)
+            return super().forward(lm_head, hidden_states, embedding_bias, skip_gather)
         # Fold the muP width divisor into the lm_head GEMM alpha (fp32 epilogue):
         # no separate elementwise kernel, no bf16 rounding of scaled logits, and
         # no weight mutation. Overfit to the served checkpoint: bf16 lm_head, no
@@ -123,6 +129,8 @@ class InklingLogitsProcessor(LogitsProcessor):
             beta=0.0,
             alpha=1.0 / mup,
         )
+        if skip_gather:
+            return logits
         logits = self._gather_logits(logits)
         if logits is not None:
             logits = logits[..., : self.org_vocab_size]

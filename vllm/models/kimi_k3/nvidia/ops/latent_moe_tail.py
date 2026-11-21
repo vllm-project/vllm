@@ -22,11 +22,11 @@ _GEMM_CLUSTER_MN = (1, 8)
 _B_PRIME_STAGES = 2
 _COLLECTIVE_TOKEN_CTAS = 32
 _LAMPORT_COPY_CTAS = 32
-_LAMPORT_COPY_THREADS = 224
+_LAMPORT_COPY_THREADS = 128
 _SUPPORTED_TP_SIZES = (8, 16)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KimiK3LatentMoETailContract:
     tp_group_id: int
     tp_size: int

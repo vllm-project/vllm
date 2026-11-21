@@ -20,8 +20,7 @@ def text_llm(vllm_runner):
 
 @pytest.fixture(scope="function")
 def llm_for_failure_test(vllm_runner):
-    """
-    Fixture for testing issue #26081.
+    """Fixture for testing issue #26081.
     Uses a small max_model_len to easily trigger length errors.
     """
     with vllm_runner(
@@ -66,9 +65,27 @@ def test_multi_chat(text_llm):
     assert len(outputs) == 2
 
 
+def test_chat_priority(text_llm):
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Explain the concept of entropy."},
+    ]
+
+    # A single value is applied to every conversation.
+    outputs = text_llm.chat(messages, priority=1)
+    assert len(outputs) == 1
+
+    outputs = text_llm.chat([messages, messages], priority=[0, 1])
+    assert len(outputs) == 2
+
+    # Exception raised, if the length of priority does not match the length of
+    # conversations
+    with pytest.raises(VLLMValidationError):
+        text_llm.chat([messages, messages], priority=[0])
+
+
 def test_llm_chat_tokenization_no_double_bos(text_llm):
-    """
-    LLM.chat() should not add special tokens when using chat templates.
+    """LLM.chat() should not add special tokens when using chat templates.
     Check we get a single BOS token for llama chat.
     """
     messages = [
@@ -127,8 +144,7 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
 
 
 def test_chat_batch_failure_cleanup(llm_for_failure_test):
-    """
-    Tests that if a batch call to llm.chat() fails mid-way
+    """Tests that if a batch call to llm.chat() fails mid-way
     (e.g., due to one invalid prompt), the requests that
     were already enqueued are properly aborted and do not
     pollute the queue for subsequent calls.

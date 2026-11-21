@@ -6,6 +6,7 @@ import weakref
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 
 MODEL_NAME = "distilbert/distilgpt2"
 
@@ -39,6 +40,15 @@ def llm(vllm_runner):
 
 
 @pytest.mark.skip_global_cleanup
+def test_rejects_torch_sdpa_for_decoder(vllm_runner):
+    with pytest.raises(
+        ValueError,
+        match="only supported for multi-modal encoder attention",
+    ):
+        vllm_runner(MODEL_NAME, attention_backend="TORCH_SDPA")
+
+
+@pytest.mark.skip_global_cleanup
 def test_multiple_sampling_params(llm: LLM):
     sampling_params = [
         SamplingParams(temperature=0.01, top_p=0.95),
@@ -52,7 +62,7 @@ def test_multiple_sampling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(PROMPTS, sampling_params=sampling_params[:3])
 
     # Single SamplingParams should be applied to every prompt
@@ -74,20 +84,28 @@ def test_multiple_priority(llm: LLM):
     outputs = llm.generate(PROMPTS, sampling_params=None, priority=[0] * len(PROMPTS))
     assert len(PROMPTS) == len(outputs)
 
+    # Generate works when priority is a single value applied to every prompt
+    outputs = llm.generate(PROMPTS, sampling_params=None, priority=1)
+    assert len(PROMPTS) == len(outputs)
+
     # Exception raised, if the length of priority does not match the length of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(
             PROMPTS, sampling_params=None, priority=[0] * (len(PROMPTS) - 1)
         )
 
     # Exception raised, if the priority list is empty
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(PROMPTS, sampling_params=None, priority=[])
 
 
 def test_single_prompt_priority(llm: LLM):
     # Single string prompts should be normalized to one request.
     outputs = llm.generate(PROMPTS[0], sampling_params=None, priority=[0])
+    assert len(outputs) == 1
+
+    # Single string prompts should also accept a single priority value.
+    outputs = llm.generate(PROMPTS[0], sampling_params=None, priority=1)
     assert len(outputs) == 1
 
 

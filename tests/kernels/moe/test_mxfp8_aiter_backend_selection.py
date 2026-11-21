@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MXFP8 MoE backend selection for the AITER FlyDSL kernel (gfx950).
+"""MXFP8 MoE backend selection for the AITER kernels: FlyDSL (gfx950) and
+Triton `moe_gemm_a8w8` (gfx942).
 
-GPU-free: mocks the platform (gfx950) and the ``flydsl`` package check, then
+GPU-free: mocks the platform (gfx950) and the aiter fused-MoE enable flag, then
 exercises the oracle so the FlyDSL backend is auto-picked when usable (including
 under expert parallelism, since apply() forwards the expert_map as aiter's
-expert_mask) and skipped (native fallback) when the device/package is missing.
+expert_mask) and skipped (native fallback) when the device is unsupported or the
+aiter runtime is disabled.
 """
 
 import dataclasses
@@ -22,10 +24,14 @@ from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
 from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
     MoEActivation,
 )
+from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (  # noqa: E402
     _AITER_SWIGLU_ALPHA,
     _AITER_SWIGLU_BETA,
     AiterMxfp8Experts,
+    AiterTritonMxfp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (  # noqa: E402
     Mxfp8EmulationTritonExperts,
@@ -47,6 +53,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa:
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+
+from vllm._aiter_ops import rocm_aiter_ops  # noqa: E402  # isort: skip
 
 _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
@@ -82,8 +90,8 @@ def _gfx950():
     )
 
 
-def _flydsl_installed(present: bool):
-    return patch(f"{_AITER_MOD}.is_aiter_mxfp8_moe_available", return_value=present)
+def _aiter_moe_enabled(present: bool):
+    return patch.object(rocm_aiter_ops, "is_fused_moe_enabled", return_value=present)
 
 
 def test_aiter_mxfp8_registered():
@@ -109,13 +117,18 @@ def test_ep_supported(ep_size):
 @pytest.mark.parametrize(
     "present,ep_size,supported,reason_substr",
     [
-        (True, 1, True, None),  # gfx950 + flydsl + TP -> selectable
-        (True, 2, True, None),  # gfx950 + flydsl + EP -> selectable (expert_mask)
-        (False, 1, False, "flydsl package"),  # package missing -> clear reason
+        (True, 1, True, None),  # gfx950 + aiter MoE + TP -> selectable
+        (True, 2, True, None),  # gfx950 + aiter MoE + EP -> selectable (expert_mask)
+        (
+            False,
+            1,
+            False,
+            "does not support current device",
+        ),  # disabled -> not selected
     ],
 )
 def test_is_supported_config(present, ep_size, supported, reason_substr):
-    with _gfx950(), _flydsl_installed(present):
+    with _gfx950(), _aiter_moe_enabled(present):
         ok, reason = AiterMxfp8Experts.is_supported_config(
             AiterMxfp8Experts,
             _config(ep_size),
@@ -130,8 +143,8 @@ def test_is_supported_config(present, ep_size, supported, reason_substr):
 
 def test_explicit_moe_backend_aiter():
     """--moe-backend aiter: returns FlyDSL when usable (TP or EP), else a clear
-    ValueError when the flydsl package is missing."""
-    with _gfx950(), _flydsl_installed(True):
+    ValueError when the aiter MoE runtime is disabled."""
+    with _gfx950(), _aiter_moe_enabled(True):
         assert (
             _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
             is AiterMxfp8Experts
@@ -142,28 +155,108 @@ def test_explicit_moe_backend_aiter():
         )
     with (
         _gfx950(),
-        _flydsl_installed(False),
-        pytest.raises(ValueError, match="flydsl package"),
+        _aiter_moe_enabled(False),
+        pytest.raises(ValueError, match="does not support current device"),
     ):
         _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
 
 
 def test_gfx950_picks_aiter():
-    """Auto-select on real ROCm hardware with flydsl usable -> FlyDSL wins."""
-    # NOTE: Fp8MoeBackend.AITER_MXFP8 does not require VLLM_ROCM_USE_AITER=1
+    """Auto-select on real ROCm hardware with aiter MoE enabled -> FlyDSL wins."""
     with (
         patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=True),
-        _flydsl_installed(True),
+        _aiter_moe_enabled(True),
     ):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.AITER_MXFP8
     assert experts_cls is AiterMxfp8Experts
 
 
-def test_gfx942_picks_emulation():
-    """flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
-    dot_scaled backend wins instead."""
-    with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
+def test_no_aiter_picks_emulation():
+    """Neither AITER kernel usable (no MX hardware, not gfx942) -> EMULATION."""
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False),
+        _gfx942(False),
+    ):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.EMULATION
     assert experts_cls is Mxfp8EmulationTritonExperts
+
+
+# --- gfx942: AITER Triton moe_gemm_a8w8 --------------------------------------
+
+
+def _gfx942(on: bool):
+    return patch("vllm.platforms.rocm.on_gfx942", return_value=on)
+
+
+def _triton_config(**overrides):
+    cfg = make_dummy_moe_config(
+        num_experts=128,
+        experts_per_token=8,
+        hidden_dim=6144,
+        activation=MoEActivation.SILU,
+    )
+    fse = overrides.pop("is_fused_shared_expert_requested", False)
+    overrides.setdefault("routing_method", RoutingMethodType.DeepSeekV3)
+    cfg = dataclasses.replace(cfg, **overrides)
+    # __post_init__ derives this from the env, so set it afterwards.
+    cfg.is_fused_shared_expert_requested = fse
+    return cfg
+
+
+def test_gfx942_picks_aiter_triton():
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False),
+        _gfx942(True),
+        _aiter_moe_enabled(True),
+    ):
+        backend, experts_cls = select_mxfp8_moe_backend(_triton_config())
+    assert backend is Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8
+    assert experts_cls is AiterTritonMxfp8ExpertsMonolithic
+
+
+@pytest.mark.parametrize(
+    "gfx942,aiter_moe,overrides,reason",
+    [
+        (True, True, {}, None),
+        (False, True, {}, "current device"),  # e.g. gfx950
+        (True, False, {}, "current device"),  # VLLM_ROCM_USE_AITER_MOE=0
+        (True, True, {"has_bias": True}, "bias"),
+        (True, True, {"is_fused_shared_expert_requested": True}, "shared experts"),
+        (True, True, {"routing_method": RoutingMethodType.Llama4}, "routing method"),
+        (True, True, {"use_ep": True}, "parallel config"),
+    ],
+)
+def test_aiter_triton_is_supported_config(gfx942, aiter_moe, overrides, reason):
+    if overrides.pop("use_ep", False):
+        cfg = _triton_config()
+        overrides["moe_parallel_config"] = dataclasses.replace(
+            cfg.moe_parallel_config, ep_size=2, use_ep=True
+        )
+    with _gfx942(gfx942), _aiter_moe_enabled(aiter_moe):
+        ok, why = AiterTritonMxfp8ExpertsMonolithic.is_supported_config(
+            AiterTritonMxfp8ExpertsMonolithic,
+            _triton_config(**overrides),
+            kMxfp8Static,
+            kMxfp8Dynamic,
+            FusedMoEActivationFormat.Standard,
+        )
+    assert ok is (reason is None)
+    if reason is not None:
+        assert why is not None and reason in why
+
+
+@pytest.mark.parametrize("gfx942", [True, False])
+def test_explicit_moe_backend_aiter_triton(gfx942):
+    """--moe-backend aiter_triton_mxfp8_mxfp8 selects the gfx942 experts, and
+    raises rather than falling back where they cannot run."""
+    cfg = _triton_config(moe_backend="aiter_triton_mxfp8_mxfp8")
+    with _gfx942(gfx942), _aiter_moe_enabled(True):
+        if not gfx942:
+            with pytest.raises(ValueError, match="does not support current device"):
+                select_mxfp8_moe_backend(cfg)
+            return
+        backend, experts_cls = select_mxfp8_moe_backend(cfg)
+    assert backend is Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8
+    assert experts_cls is AiterTritonMxfp8ExpertsMonolithic

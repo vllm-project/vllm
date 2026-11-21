@@ -3,10 +3,10 @@
 """Nemotron V3 parser.
 
 The Nemotron 3 Super model uses the same tool call and reasoning
-format as Qwen3 (``<think>``/``</think>`` + ``<tool_call>`` XML).
-This config reuses :func:`qwen3_config` with a distinct name.
+format as Qwen3 (`<think>`/`</think>` + `<tool_call>` XML).
+This config reuses `qwen3_config` with a distinct name.
 
-When ``enable_thinking=False`` or ``force_nonempty_content=True`` and
+When `enable_thinking=False` or `force_nonempty_content=True` and
 content is empty, reasoning and content are swapped.
 """
 
@@ -16,13 +16,13 @@ import dataclasses
 import functools
 from typing import TYPE_CHECKING
 
-from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
+from vllm.parser.qwen3 import CHATML_TURN_BOUNDARIES, Qwen3Parser, qwen3_config
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.generate.base.protocol import DeltaMessage
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
-    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.parser.engine.parser_engine import SemanticEvent
     from vllm.parser.engine.parser_engine_config import ParserEngineConfig
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 @functools.cache
 def nemotron_v3_config(thinking: bool = True) -> ParserEngineConfig:
     return dataclasses.replace(
-        qwen3_config(thinking=thinking),
+        qwen3_config(thinking=thinking, turn_boundary_tokens=CHATML_TURN_BOUNDARIES),
         name="nemotron_v3",
         strip_trailing_reasoning_whitespace=True,
     )
@@ -41,8 +41,8 @@ def nemotron_v3_config(thinking: bool = True) -> ParserEngineConfig:
 
 class NemotronV3Parser(Qwen3Parser):
     """Nemotron V3 parser: same format as Qwen3, with Nemotron-specific
-    behavior: when ``enable_thinking=False`` or
-    ``force_nonempty_content=True`` and content is empty, swaps
+    behavior: when `enable_thinking=False` or
+    `force_nonempty_content=True` and content is empty, swaps
     reasoning and content.
     """
 

@@ -14,6 +14,7 @@ from tests.models.utils import (
     check_embeddings_close,
     get_vllm_extra_kwargs,
 )
+from vllm.utils.collection_utils import chunk_list
 
 # Most embedding models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -116,9 +117,10 @@ class VllmMtebEncoder(MtebEmbedMixin):
 
 
 class OpenAIClientMtebEncoder(MtebEmbedMixin):
-    def __init__(self, model_name: str, client):
+    def __init__(self, model_name: str, client, *, batch_size: int):
         self.model_name = model_name
         self.client = client
+        self.batch_size = batch_size
         self.rng = np.random.default_rng(seed=42)
 
     def encode(
@@ -133,10 +135,12 @@ class OpenAIClientMtebEncoder(MtebEmbedMixin):
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
 
-        embeddings = self.client.embeddings.create(
-            model=self.model_name, input=sentences
-        )
-        outputs = [d.embedding for d in embeddings.data]
+        outputs: list[list[float]] = []
+        for batch in chunk_list(sentences, self.batch_size):
+            embeddings = self.client.embeddings.create(
+                model=self.model_name, input=batch
+            )
+            outputs.extend(item.embedding for item in embeddings.data)
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
@@ -161,9 +165,14 @@ def mteb_test_embed_models(
     model_info: EmbedModelInfo,
     vllm_extra_kwargs=None,
     hf_model_callback=None,
-    atol=MTEB_EMBED_TOL,
+    atol: float | None = None,
     prompt_prefix: str | None = None,
+    vllm_model_callback=None,
 ):
+    if atol is None:
+        atol = (
+            model_info.mteb_tol if model_info.mteb_tol is not None else MTEB_EMBED_TOL
+        )
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
     # Test embed_dims, isnan and whether to use normalize
@@ -177,6 +186,9 @@ def mteb_test_embed_models(
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
+
+        if vllm_model_callback is not None:
+            vllm_model_callback(vllm_model)
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
@@ -234,6 +246,7 @@ def mteb_test_embed_models(
             revision=model_info.revision,
             is_sentence_transformer=True,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+            trust_remote_code=model_info.trust_remote_code,
         ) as hf_model:
             # e.g. setting default parameters for the encode method of hf_runner
             if hf_model_callback is not None:
@@ -264,4 +277,8 @@ def mteb_test_embed_models(
 
     # We are not concerned that the vllm mteb results are better
     # than SentenceTransformers, so we only perform one-sided testing.
-    assert st_main_score - vllm_main_score < atol
+    diff = st_main_score - vllm_main_score
+    assert diff < atol, (
+        f"diff={diff:.6g} tol={atol} model={model_info.name} "
+        f"(st={st_main_score}, vllm={vllm_main_score})"
+    )
