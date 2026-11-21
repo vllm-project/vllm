@@ -1,8 +1,9 @@
-# Mistral Large 4 specialized decode (MI350X / MI355X)
+# Mistral Large 4 specialized decode (MI350X / MI355X, MI300X / MI325X)
 
-An opt-in decode path for Mistral Large 4 at TP4 on gfx950, following
-RFC #60904. A pure decode step of 1, 2 or 4 requests (one token each) runs
-every MoE decoder layer (1-71) as one persistent FlyDSL MonoKernel launch (256
+An opt-in decode path for Mistral Large 4 at TP4 on gfx950 (and at TP8 on
+gfx942, see [below](#mi300x--mi325x-gfx942-tp8)), following RFC #60904. A
+pure decode step of 1, 2 or 4 requests (one token each) runs every MoE
+decoder layer (1-71) as one persistent FlyDSL MonoKernel launch (256
 CTAs, all resident), in "step mode": the specialized decode runs the whole
 forward. Each launch covers the input
 RMSNorm, the q / latent-KV projections with SSMax and LeRoPE, the DSA indexer
@@ -48,19 +49,43 @@ one `ValueError` listing every reason (default-deny):
 - **Config, in the model's `__init__`** (`runtime/spec.py`): pipeline, data,
   expert, decode- or prefill-context parallelism, EPLB, DBO / ubatching, LoRA,
   KV connectors or offloading, routed-expert capture, speculative decoding
-  other than DSpark (or dynamic, or more than 11 speculative tokens), sleep mode, weight transfer, CPU weight offload, stock torch.compile, the V1
+  other than DSpark (or dynamic, or more than 11 speculative tokens, or any on
+  gfx942), sleep mode, weight transfer, CPU weight offload, stock torch.compile, the V1
   model runner, a KV cache dtype other than FP8 (E4M3) or bf16, a block size
   that is not a multiple of 16, block-FP8 experts not re-quantized to a4w4.
 - **Loaded model, when the model state builds the decode** (`runtime/guards.py`):
   the layer mix (one dense layer, then MoE layers whose kinds the kernels
   build), each kernel layer's weight dtypes and shapes, the MoE backend,
-  ROCm / FlyDSL / gfx950 / 256 CUs.
+  ROCm / FlyDSL / gfx950 with 256 CUs (or gfx942 with at least 256).
 - **KV scales, after load** (`runtime/runner.py`): an FP8 latent cache whose
   KV scale is not 1.0 (the kernels read and write it unscaled).
 - **Caches, at the first planned step**: each layer's latent and indexer cache
   dtype, shape and contiguity, and the shared block ids.
 
 Every TP rank agrees on each verdict before anything collective runs.
+
+## MI300X / MI325X (gfx942, TP8)
+
+```bash
+vllm serve <Mistral-Large-4> -tp 8 --dtype bfloat16 \
+  --additional-config '{"decode_backend": "latency_specialized"}'
+```
+
+On gfx942 the decode runs at TP8 (8 local heads a rank), where the block-FP8
+checkpoint fits at about 125 GB a GPU. Leave `VLLM_FP8_MOE_REQUANT` at its
+default, `none`: the kernels read the block-FP8 (FNUZ) routed experts in place,
+and a re-quantized deployment is refused. The kernels run 256 CTAs on 256 of
+the 304 CUs. A pure decode step of 1, 2 or 4 rows is served, as on gfx950. An
+FP8 latent cache is E4M3FNUZ, as vLLM stores it on gfx942.
+Speculative decoding is refused on gfx942 for now: the TP8 verify launch (q > 1
+rows a request) is not validated.
+
+gfx942 has 64 KB of LDS and no FP4 MFMA. A split task holds 32 keys and the
+indexer's select tasks 8192, the `q_b` / `index_q` input is staged four rows at
+a time, the routed and shared experts run FP8 MFMAs on AITER's block-FP8
+storage, and the bf16 MFMA is two 16x16x16 ones. The up/gate tasks of a step
+need not fill whole CTA rounds (TP8: 384 over 256). The same schedule runs on
+both architectures; the gfx950 kernels compile to the same LLVM IR as before.
 
 ## Steps
 

@@ -65,6 +65,15 @@ from .layout import (
 __all__ = ["Ml4MonoKernel"]
 
 
+def aiter_fp8_experts(t: dict[str, torch.Tensor]) -> bool:
+    """The routed experts are block-FP8 in aiter's MoE storage (`shuffle_weight`
+    16x16 values, which carry its `is_shuffled` marker), the kernel's
+    `aiter_fp8_experts` layout."""
+    w = t["w_ug"]
+    fp8 = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    return w.dtype in fp8 and getattr(w, "is_shuffled", False)
+
+
 def prepare_ml4_weights(
     W: LayerWeights, attention_weight: AttentionWeight | str
 ) -> dict[str, torch.Tensor]:
@@ -95,9 +104,12 @@ def prepare_ml4_weights(
         raise ValueError(
             "ATOM expert storage requires MXFP4 values and scales together"
         )
-    if atom_experts:
+    if atom_experts or aiter_fp8_experts(t):
         packed = attention
         packed["w_r"] = pack_bf16(t["w_r"])
+        if not atom_experts:  # block-FP8 experts, read in place
+            packed.update({name: t[name] for name in ("w_ug", "s_ug", "w_dn", "s_dn")})
+            return packed
         packed.update(
             dict(
                 zip(
@@ -474,6 +486,7 @@ class Ml4MonoKernel:
             index_cache_dtype=self.index_cache_dtype,
             expert_mxfp4=self.expert_mxfp4,
             atom_experts=self.atom_experts,
+            aiter_fp8_experts=aiter_fp8_experts(t),
             attention_weight=self.attention_weight,
             kv_cache_layout=self.kv_cache_layout,
             kv_cache_dtype=self.kv_cache_dtype,
