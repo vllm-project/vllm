@@ -365,6 +365,9 @@ class MediaConnector:
                 f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
+        if not filepath.is_file():
+            raise ValueError(f"The file path {filepath} is not an existing file.")
+
         return media_io.load_file(filepath)
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
