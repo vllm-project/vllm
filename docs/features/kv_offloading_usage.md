@@ -109,6 +109,43 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+## Shared Memory (`/dev/shm`)
+
+`/dev/shm` is a Linux filesystem whose files are kept in RAM. On NVIDIA (CUDA)
+and Intel (XPU) GPUs, vLLM keeps the CPU tier, which holds the offloaded KV
+cache, in `/dev/shm`, so `/dev/shm` must be big enough for it. If it isn't, vLLM
+stops during startup, after loading the model, with an
+`Insufficient space in /dev/shm` error. On AMD (ROCm) GPUs, the CPU tier is in
+vLLM's own process memory instead, unless you use
+[`TieringOffloadingSpec`](#multi-tier-setup), which keeps it in `/dev/shm` there
+too.
+
+Give `/dev/shm` room for:
+
+- the CPU tier: `--kv-offloading-size` GiB, or `cpu_bytes_to_use` bytes if you
+  configure offloading with `--kv-transfer-config`;
+- with data parallelism, one CPU tier per data-parallel rank that shares this
+  `/dev/shm`: with `--data-parallel-size 2`, `--kv-offloading-size 64` needs
+  128 GiB for the two tiers;
+- what vLLM uses there without offloading, such as for communication between
+  its processes (the Kubernetes examples allow 2 to 8 GiB for this).
+
+For example, without data parallelism, `--kv-offloading-size 64` needs about
+70 GiB: 64 GiB for the CPU tier plus about 6 GiB for the rest.
+
+Containers often start with a small `/dev/shm`; Docker's default is 64 MiB.
+With Docker, pass `--shm-size` (for example `--shm-size=70g`), or `--ipc=host`
+to use the host's `/dev/shm`. On Kubernetes, mount an `emptyDir` with
+`medium: Memory` at `/dev/shm`, as in the
+[Kubernetes examples](../deployment/k8s.md#deployment-with-gpus), and set its
+`sizeLimit` (for example `70Gi`).
+
+The CPU tier also counts toward the container's memory limit, wherever it is
+kept, so raise that limit by the tier's size (64 GiB in the example above). vLLM
+fills the whole tier as it starts, not as the cache is used, so if the limit is
+too low, the container can run out of memory during startup. With `/dev/shm`,
+vLLM first logs a warning that starts with `Cgroup memory preflight`.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |

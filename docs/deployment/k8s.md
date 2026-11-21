@@ -336,6 +336,8 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
+      KV cache offloading to CPU memory can need far more shared memory than these examples give it. On NVIDIA GPUs, `--kv-offloading-size` keeps the offloaded KV cache in `/dev/shm` by default, so add the offload size to both the `shm` volume's `sizeLimit` and the container's memory limit; files in `/dev/shm` count toward that limit. For example, with `--kv-offloading-size 64`, set `sizeLimit` to about `70Gi` (the NVIDIA example's `2Gi` plus `64Gi`, with some to spare) and raise the memory limit by at least `64Gi`. For other GPUs and setups, see [Shared Memory](../features/kv_offloading_usage.md#shared-memory-devshm) in the KV offloading guide.
+
 2. Create a Kubernetes Service for vLLM
 
       Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
