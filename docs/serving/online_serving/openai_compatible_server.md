@@ -150,6 +150,8 @@ completion = client.chat.completions.create(
 
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+The `n` parameter must be at least 1 and cannot exceed the lower of
+`VLLM_MAX_N_SEQUENCES` (default: 16384) and the server's `--max-num-seqs` setting.
 
 Code example: [examples/basic/online_serving/openai_completion_client.py](../../../examples/basic/online_serving/openai_completion_client.py)
 
@@ -175,6 +177,8 @@ The following extra parameters are supported:
 
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+The `n` parameter must be at least 1 and cannot exceed the lower of
+`VLLM_MAX_N_SEQUENCES` (default: 16384) and the server's `--max-num-seqs` setting.
 
 With the Python frontend's HF renderer, an assistant message with `content` set to
 `null`, `""`, or `[]` and a non-empty top-level `refusal` string renders like an
