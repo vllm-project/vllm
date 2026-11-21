@@ -22,6 +22,20 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:installation"
 
+## MXFP4 MoE models
+
+MXFP4 MoE checkpoints, including GPT-OSS, use the native MXFP4 kernel on
+x86 CPUs with AMX support. On CPUs without that kernel, vLLM decodes expert
+weights to BF16 once during loading and uses the unquantized CPU MoE backend.
+Both automatic backend selection and `--moe-backend cpu` support this fallback;
+activations must use BF16 (`--dtype bfloat16`).
+
+The fallback requires approximately four times the packed expert-weight
+storage, plus temporary memory during loading. Size host RAM for the expanded
+weights as well as the rest of the model and KV cache. It provides model
+compatibility without AMX, but does not retain MXFP4's weight-memory savings
+or imply the performance of the native AMX kernel.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-cpu` channel of [vLLM Slack](https://slack.vllm.ai/).
