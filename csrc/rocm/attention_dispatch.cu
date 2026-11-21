@@ -71,7 +71,6 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale,
     const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type,
     bool use_interleaved_v_cache) {
   // clang-format on
   bool is_navi = is_navi_gpu();

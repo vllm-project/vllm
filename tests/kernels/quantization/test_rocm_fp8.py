@@ -31,7 +31,6 @@ fp8_only = pytest.mark.skipif(
 ENV_DEFAULTS = {
     "VLLM_ROCM_FP8_PADDING": True,
     "VLLM_ROCM_USE_AITER_FP8BMM": False,
-    "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": False,
 }
 
 SCALED_MM_CASES = [
@@ -218,8 +217,6 @@ def test_rocm_fp8_env_defaults(monkeypatch):
         ("VLLM_ROCM_FP8_PADDING", "1", True),
         ("VLLM_ROCM_USE_AITER_FP8BMM", "0", False),
         ("VLLM_ROCM_USE_AITER_FP8BMM", "1", True),
-        ("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0", False),
-        ("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "1", True),
     ],
 )
 def test_rocm_fp8_env_overrides(env_name, raw_value, expected, monkeypatch):

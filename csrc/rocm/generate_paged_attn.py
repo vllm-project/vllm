@@ -39,130 +39,73 @@ BLOCK_SIZES = [16, 32]
 #                       (template parameters T and KVT), written with the HIP
 #                       spellings hipify produces; `__half` is a distinct type
 #                       from `_Float16` for the MFMA builtins.
-#   kv_cache_enum/head_size/mfma: Fp8KVCacheDataType, head size and MFMAType
+#   kv_cache_enum/head_size: Fp8KVCacheDataType and head size
 #   query_scalar_type:  at::ScalarType of the query this variant serves
-#   kv_cache_dtype/mfma_type: the runtime strings this variant serves; mfma_type
-#                       is None when the kv-cache dtype does not split on it.
+#   kv_cache_dtype:     the runtime string this variant serves
 VARIANTS = [
     {
         "query_type": "_Float16",
         "kv_type": "_Float16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
         "head_size": 64,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "Half",
         "kv_cache_dtype": "auto",
-        "mfma_type": None,
     },
     {
         "query_type": "_Float16",
         "kv_type": "_Float16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
         "head_size": 128,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "Half",
         "kv_cache_dtype": "auto",
-        "mfma_type": None,
     },
     {
         "query_type": "__hip_bfloat16",
         "kv_type": "__hip_bfloat16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
         "head_size": 64,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "BFloat16",
         "kv_cache_dtype": "auto",
-        "mfma_type": None,
     },
     {
         "query_type": "__hip_bfloat16",
         "kv_type": "__hip_bfloat16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
         "head_size": 128,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "BFloat16",
         "kv_cache_dtype": "auto",
-        "mfma_type": None,
     },
     {
         "query_type": "_Float16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
         "head_size": 64,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "Half",
         "kv_cache_dtype": "fp8",
-        "mfma_type": "f16",
     },
     {
         "query_type": "_Float16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
         "head_size": 128,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "Half",
         "kv_cache_dtype": "fp8",
-        "mfma_type": "f16",
-    },
-    {
-        "query_type": "_Float16",
-        "kv_type": "uint8_t",
-        "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
-        "head_size": 64,
-        "mfma": "MFMAType::Fp8",
-        "query_scalar_type": "Half",
-        "kv_cache_dtype": "fp8",
-        "mfma_type": "fp8",
-    },
-    {
-        "query_type": "_Float16",
-        "kv_type": "uint8_t",
-        "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
-        "head_size": 128,
-        "mfma": "MFMAType::Fp8",
-        "query_scalar_type": "Half",
-        "kv_cache_dtype": "fp8",
-        "mfma_type": "fp8",
     },
     {
         "query_type": "__hip_bfloat16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
         "head_size": 64,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "BFloat16",
         "kv_cache_dtype": "fp8",
-        "mfma_type": "f16",
     },
     {
         "query_type": "__hip_bfloat16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
         "head_size": 128,
-        "mfma": "MFMAType::F16",
         "query_scalar_type": "BFloat16",
         "kv_cache_dtype": "fp8",
-        "mfma_type": "f16",
-    },
-    {
-        "query_type": "__hip_bfloat16",
-        "kv_type": "uint8_t",
-        "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
-        "head_size": 64,
-        "mfma": "MFMAType::Fp8",
-        "query_scalar_type": "BFloat16",
-        "kv_cache_dtype": "fp8",
-        "mfma_type": "fp8",
-    },
-    {
-        "query_type": "__hip_bfloat16",
-        "kv_type": "uint8_t",
-        "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
-        "head_size": 128,
-        "mfma": "MFMAType::Fp8",
-        "query_scalar_type": "BFloat16",
-        "kv_cache_dtype": "fp8",
-        "mfma_type": "fp8",
     },
 ]
 
@@ -174,8 +117,6 @@ def variant_name(variant):
         {"_Float16": "f16", "__hip_bfloat16": "bf16"}[variant["query_type"]],
         variant["kv_cache_dtype"],
     ]
-    if variant["mfma_type"] is not None:
-        parts.append(variant["mfma_type"])
     return "_".join(parts)
 
 
@@ -220,7 +161,7 @@ TU_HEAD = (
 TU_ENTRY = """
 ATTN_ENTRY(paged_attention_{name}_bs{block_size}) {{
   CALL_CUSTOM_LAUNCHER_OUT({query_type}, {kv_type}, {kv_cache_enum},
-                           {block_size}, {head_size}, {mfma});
+                           {block_size}, {head_size});
 }}
 """
 
@@ -235,8 +176,8 @@ ENTRIES_HEAD = (
 DISPATCH_HEAD = (
     FILE_HEAD
     + """
-  // Dispatch on kv_cache_dtype, query dtype, mfma_type, block size and head
-  // size, mirroring the template parameters of the generated entry points.
+  // Dispatch on kv_cache_dtype, query dtype, block size and head size,
+  // mirroring the template parameters of the generated entry points.
 """
 )
 
@@ -248,8 +189,8 @@ def entry_point(variant, block_size):
 def block_size_switch(variants, indent_level):
     """Switch on block_size then head_size for one dispatch group.
 
-    `variants` is the list of variants sharing (kv_cache_dtype, query dtype,
-    mfma_type); they differ in head size only.
+    `variants` is the list of variants sharing (kv_cache_dtype, query dtype);
+    they differ in head size only.
     """
     indent = " " * indent_level
     inner = " " * (indent_level + 4)
@@ -278,26 +219,20 @@ def block_size_switch(variants, indent_level):
 
 
 def group_variants():
-    """Group VARIANTS by (kv_cache_dtype, query dtype, mfma_type), in order."""
+    """Group VARIANTS by (kv_cache_dtype, query dtype), in order."""
     groups = {}
     for variant in VARIANTS:
-        key = (
-            variant["kv_cache_dtype"],
-            variant["query_scalar_type"],
-            variant["mfma_type"],
-        )
+        key = (variant["kv_cache_dtype"], variant["query_scalar_type"])
         groups.setdefault(key, []).append(variant)
     return groups
 
 
 def generate_dispatch():
     groups = group_variants()
-    # kv_cache_dtype -> query dtype -> mfma_type -> variants
+    # kv_cache_dtype -> query dtype -> variants
     by_kv_cache_dtype = {}
-    for (kv_cache_dtype, query_scalar_type, mfma_type), variants in groups.items():
-        by_kv_cache_dtype.setdefault(kv_cache_dtype, {}).setdefault(
-            query_scalar_type, {}
-        )[mfma_type] = variants
+    for (kv_cache_dtype, query_scalar_type), variants in groups.items():
+        by_kv_cache_dtype.setdefault(kv_cache_dtype, {})[query_scalar_type] = variants
 
     lines = [DISPATCH_HEAD.rstrip("\n")]
     kv_cache_dtypes = list(by_kv_cache_dtype)
@@ -307,7 +242,7 @@ def generate_dispatch():
         lines.append(f"  {keyword} ({predicate}) {{")
 
         by_query_dtype = by_kv_cache_dtype[kv_cache_dtype]
-        for dtype_index, (query_scalar_type, by_mfma) in enumerate(
+        for dtype_index, (query_scalar_type, variants) in enumerate(
             by_query_dtype.items()
         ):
             dtype_keyword = "if" if dtype_index == 0 else "else if"
@@ -315,33 +250,7 @@ def generate_dispatch():
                 f"    {dtype_keyword} (query.dtype() == "
                 f"at::ScalarType::{query_scalar_type}) {{"
             )
-
-            mfma_types = list(by_mfma)
-            # A lone arm is the catch-all and takes the no-split path: None when
-            # mfma_type is not a dimension here, "f16" when it is the only arm left
-            # (a bare `else {` would otherwise open a block with no `if`).
-            if mfma_types in ([None], ["f16"]):
-                lines.extend(block_size_switch(by_mfma[mfma_types[0]], 6))
-            else:
-                # ``mfma_type`` is matched with a plain ``else`` on the last arm,
-                # as the hand-written dispatch used to: any value other than the
-                # recognised ones keeps selecting that arm instead of failing.
-                if "f16" not in mfma_types:
-                    raise SystemExit(
-                        f"the {mfma_types} group needs an f16 arm, which is "
-                        "emitted as the catch-all else"
-                    )
-                ordered = sorted(mfma_types, key=lambda m: m == "f16")  # f16 last
-                for mfma_index, mfma_type in enumerate(ordered):
-                    if mfma_index == len(ordered) - 1:
-                        lines.append("      else {")
-                    else:
-                        mfma_keyword = "if" if mfma_index == 0 else "else if"
-                        lines.append(
-                            f'      {mfma_keyword} (mfma_type == "{mfma_type}") {{'
-                        )
-                    lines.extend(block_size_switch(by_mfma[mfma_type], 8))
-                    lines.append("      }")
+            lines.extend(block_size_switch(variants, 6))
             lines.append("    }")
 
         lines.append("    else {")
