@@ -35,13 +35,16 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
     make_block_hash_with_group_id,
+    resolve_cache_hit_alignment_tokens,
 )
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
@@ -2886,6 +2889,124 @@ def _make_two_group_scheduler(
     )
 
 
+def _make_dcp_hybrid_engine(
+    *, draft_sliding_window: bool, max_num_batched_tokens: int = 64
+) -> Scheduler | AsyncScheduler:
+    """Real scheduler with SimpleCPU offload over a hybrid layout under DCP.
+
+    Groups: Mamba with prefix caching (`BLOCK_SIZE`), DCP-sharded target attention
+    (`2 * BLOCK_SIZE`) and a replicated draft attention group (`BLOCK_SIZE`).
+    Hashes use a quarter block; the scheduler block is `2 * BLOCK_SIZE`.
+    """
+    num_blocks = 64
+    hash_block_size = BLOCK_SIZE // 4
+    config = _make_cp_vllm_config(dcp_world_size=2)
+    config.scheduler_config.async_scheduling = False
+    config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    config.cache_config.prefix_match_unit = hash_block_size
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_connector_extra_config = {"num_cpu_blocks": num_blocks}
+    attention_spec = AttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    draft_spec = AttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+        dcp_sharded=False,
+    )
+    groups = [
+        make_kv_cache_group(
+            ["mamba"],
+            MambaSpec(block_size=BLOCK_SIZE, shapes=((1, 1),), dtypes=(torch.float32,)),
+            manager_config=MambaManager.config(
+                enable_prefix_caching=True,
+                num_speculative_blocks=1,
+                num_prefill_checkpoint_blocks=1,
+                prefill_checkpoint_alignment=hash_block_size,
+            ),
+        ),
+        make_kv_cache_group(["target"], attention_spec),
+        make_kv_cache_group(
+            ["draft"],
+            draft_spec,
+            SlidingWindowManager,
+            SlidingWindowManager.config(sliding_window=2 * BLOCK_SIZE),
+        )
+        if draft_sliding_window
+        else make_kv_cache_group(["draft"], draft_spec),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=group.page_size_bytes * num_blocks,
+                layers=list(group.layer_names),
+                layer_stride=group.page_size_bytes * num_blocks,
+                block_stride=group.page_size_bytes,
+            )
+            for group in groups
+        ],
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=0,
+    )
+    kv_cache_config.cache_hit_alignment_tokens = resolve_cache_hit_alignment_tokens(
+        kv_cache_config, config, 2 * BLOCK_SIZE, hash_block_size
+    )
+    return create_scheduler(
+        config,
+        num_blocks=num_blocks,
+        kv_cache_config=kv_cache_config,
+        hash_block_size=hash_block_size,
+        scheduler_block_size=2 * BLOCK_SIZE,
+    )
+
+
+def _run_engine_request(engine: Scheduler | AsyncScheduler, prompt: list[int]) -> int:
+    """Run a request to completion; return the prefix-cache hit it started with.
+
+    Stores and loads complete one step after they are issued.
+    """
+    assert isinstance(engine.connector, SimpleCPUOffloadConnector)
+    sched = engine.connector.scheduler_manager
+    assert sched is not None
+    request = Request(
+        f"req-engine-{len(prompt)}",
+        prompt,
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(BLOCK_SIZE // 4, sha256),
+    )
+    engine.add_request(request)
+    hit_tokens = None
+    loaded: set[str] = set()
+    while not request.is_finished() or sched.has_pending_stores():
+        output = engine.schedule()
+        for new_req in output.scheduled_new_reqs:
+            hit_tokens = new_req.num_computed_tokens
+        req_ids = list(output.num_scheduled_tokens)
+        is_final = request.num_computed_tokens == request.num_tokens
+        engine.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[[99] if is_final else [] for _ in req_ids],
+                kv_connector_output=KVConnectorOutput(finished_recving=loaded),
+            ),
+        )
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, SimpleCPUOffloadMetadata)
+        if meta.store_event >= 0:
+            simulate_store_completion(sched, meta.store_event)
+        loaded = {request.request_id} if meta.load_event >= 0 else set()
+    assert hit_tokens is not None
+    return hit_tokens
+
+
 def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     """Replicated groups must not be scaled by the DCP world size.
 
@@ -3267,6 +3388,25 @@ def test_gpu_prefix_hit_refreshes_cpu_mamba_boundary() -> None:
     lru_order = cpu_pool.free_block_queue.get_all_free_blocks()
     assert lru_order[-3:] == [mamba[1], attention[1], attention[0]]
     assert lru_order.index(mamba[0]) < lru_order.index(newer[0])
+
+
+@pytest.mark.parametrize("max_num_batched_tokens", [80, 256])
+def test_dcp_hybrid_coarse_prompt_checkpoint_reaches_cpu(
+    max_num_batched_tokens: int,
+) -> None:
+    """The sliding-window draft group keeps hits on the scheduler block, so
+    the Mamba prompt checkpoint is the last scheduler-block boundary. No chunk
+    ends on it here; the CPU tier still needs that state for a hit."""
+    engine = _make_dcp_hybrid_engine(
+        draft_sliding_window=True, max_num_batched_tokens=max_num_batched_tokens
+    )
+    prompt = list(range(150))
+    boundary = 128
+    assert max_num_batched_tokens // BLOCK_SIZE * BLOCK_SIZE != boundary
+
+    assert _run_engine_request(engine, prompt) == 0
+    assert engine.reset_prefix_cache(reset_connector=False)
+    assert _run_engine_request(engine, prompt + list(range(1000, 1024))) == boundary
 
 
 def test_external_lookup_rejects_misaligned_local_prefix(caplog_vllm) -> None:
