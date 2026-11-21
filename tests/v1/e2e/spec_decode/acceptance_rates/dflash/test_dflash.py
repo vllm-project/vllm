@@ -28,6 +28,8 @@ class DFlashCorrectnessConfig:
     disable_flashinfer_sampler: bool = False
     language_model_only: bool = False
     chat_template_kwargs: dict[str, object] | None = None
+    attention_config: dict[str, object] | None = None
+    kv_cache_layout: str | None = None
 
 
 QWEN3_DFLASH = DFlashCorrectnessConfig(
@@ -71,6 +73,23 @@ QWEN3_5_4B_DFLASH2 = DFlashCorrectnessConfig(
     use_chat_completions=True,
     language_model_only=True,
     chat_template_kwargs={"enable_thinking": False},
+)
+
+# The target's aux hidden states carry four residual streams, so the draft's
+# target_hidden_size is wider than the target hidden size. Mixing MLA, RDA
+# state and draft pages needs a block-outermost layout and an MLA backend
+# without a fixed kernel block size.
+RAON_1_MINI_DFLASH2 = DFlashCorrectnessConfig(
+    model="KRAFTON/Raon-1-mini-preview",
+    draft_model="KRAFTON/Raon-1-mini-preview-dflash2",
+    expected_accuracy=0.88,
+    expected_acceptance_len=5.12 * 0.95,
+    num_speculative_tokens=7,
+    max_num_seqs=32,
+    use_chat_completions=True,
+    chat_template_kwargs={"enable_thinking": False},
+    attention_config={"backend_per_kind": {"mla_attention": "TRITON_MLA"}},
+    kv_cache_layout="BLNHC",
 )
 
 LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
@@ -123,6 +142,7 @@ def test_dflash_reference_acceptance_lengths(vllm_runner):
         pytest.param(QWEN3_8_DFLASH2_NVFP4, id="qwen3.8-dflash2-nvfp4"),
         pytest.param(QWEN3_8_DSPINE, id="qwen3.8-dspine"),
         pytest.param(QWEN3_5_4B_DFLASH2, id="qwen3.5-4b-dflash2"),
+        pytest.param(RAON_1_MINI_DFLASH2, id="raon-1-mini-dflash2"),
     ],
 )
 def test_dflash_correctness(
@@ -133,6 +153,11 @@ def test_dflash_correctness(
     """Guard GSM8K accuracy and batched acceptance length for DFlash models."""
     if config.disable_flashinfer_sampler:
         monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    if config.kv_cache_layout is not None:
+        monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", config.kv_cache_layout)
+    extra_kwargs = {}
+    if config.attention_config is not None:
+        extra_kwargs["attention_config"] = config.attention_config
 
     with vllm_runner(
         config.model,
@@ -150,6 +175,7 @@ def test_dflash_correctness(
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         language_model_only=config.language_model_only,
+        **extra_kwargs,
     ) as spec_runner:
         spec_llm = spec_runner.llm
         results = evaluate_gsm8k_offline(

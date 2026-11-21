@@ -530,6 +530,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
     ),
+    "Raon1MiniForCausalLM": _HfExamplesInfo(
+        "KRAFTON/Raon-1-mini-preview",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "RicursiveForCausalLM": _HfExamplesInfo(
         "ricursiveAI/Ripple-65B-Preview",
         extras={"nvfp4": "ricursiveAI/Ripple-65B-Preview-NVFP4"},
