@@ -34,17 +34,18 @@ struct UnifiedParserState {
     /// Running count of tokens attributed to reasoning. Kept solely to
     /// produce the final count on `Done`; per-delta counts are carried by
     /// each `TextDelta` event itself.
-    reasoning_tokens: usize,
+    reasoning_tokens: Option<usize>,
 }
 
 impl UnifiedParserState {
     /// Create one fresh unified parsing state for a new streamed response.
     fn new(parser: Box<dyn UnifiedParser>) -> Self {
+        let reasoning_tokens = parser.provides_reasoning_token_counts().then_some(0);
         Self {
             parser,
             parser_failed: false,
             open_call_index: None,
-            reasoning_tokens: 0,
+            reasoning_tokens,
         }
     }
 
@@ -136,8 +137,12 @@ impl UnifiedParserState {
                     // By construction this counts exactly the tokens emitted to
                     // the client as reasoning, so the parser-failure fallback
                     // needs no special handling.
-                    self.reasoning_tokens += piece.attributions.len();
-                    push_piece_delta(events, AssistantBlockKind::Reasoning, piece);
+                    if let Some(count) = &mut self.reasoning_tokens {
+                        *count += piece.attributions.len();
+                        push_piece_delta(events, AssistantBlockKind::Reasoning, piece);
+                    } else {
+                        push_text_delta(events, AssistantBlockKind::Reasoning, piece.text);
+                    }
                 }
                 UnifiedParserEvent::ToolCall(item) => {
                     self.process_tool_item(item, events)?;
@@ -515,7 +520,7 @@ mod tests {
     fn done_usage(reasoning_tokens: usize) -> ChatTokenUsage {
         ChatTokenUsage {
             engine: vllm_llm::TokenUsage::default(),
-            reasoning_tokens,
+            reasoning_tokens: Some(reasoning_tokens),
         }
     }
 

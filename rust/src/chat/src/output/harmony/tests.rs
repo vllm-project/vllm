@@ -194,7 +194,7 @@ fn interrupted_analysis_message_is_preserved() {
                     output_token_count: 0,
                     prompt_cache_usage: Default::default(),
                 },
-                reasoning_tokens: 1,
+                reasoning_tokens: Some(1),
             },
             timestamps: Default::default(),
             spec_decode_metrics: None,
@@ -317,7 +317,10 @@ fn reasoning_token_counts(events: &[ChatEvent]) -> (Vec<usize>, usize) {
     let ChatEvent::Done { usage, .. } = events.last().unwrap() else {
         panic!("expected done");
     };
-    (deltas, usage.reasoning_tokens)
+    (
+        deltas,
+        usage.reasoning_tokens.expect("native Harmony counts tokens"),
+    )
 }
 
 #[test]

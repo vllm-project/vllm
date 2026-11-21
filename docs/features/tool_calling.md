@@ -181,6 +181,38 @@ When a custom structured-output grammar includes reasoning or tool-call
 delimiters, its token constraints must match the configured parser. See
 [Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).
 
+### Experimental Dynamo v2 unified parsers (Rust frontend)
+
+Set `VLLM_USE_DYNAMO_RUST_PARSER=1` to enable the Rust frontend with frontend-crates v2 unified parsers for reasoning, visible content, and tool calls. Set only `VLLM_USE_RUST_FRONTEND=1` to use the Rust frontend with vLLM’s native parsers. Both parser options must select the same family or equivalent aliases. Automatic selection resolves both together for recognized model names.
+
+```bash
+VLLM_USE_DYNAMO_RUST_PARSER=1 \
+  vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
+  --tool-call-parser qwen3_coder --reasoning-parser qwen3_coder
+```
+
+| Unified family | Additional accepted names |
+| --- | --- |
+| `deepseek_v4` | |
+| `deepseek_v41` | |
+| `gemma4` | |
+| `glm47` | |
+| `hermes` | |
+| `qwen3` | `qwen3_coder`, `qwen3_xml` |
+| `nemotron_v3` | `nemotron3` |
+| `minimax_m3` | `minimax-m3` |
+| `muse_glimmer` | |
+| `muse_spark` | `muse_spark_open`, `muse`, `musespark` |
+| `beam` | |
+| `kimi_k2` | |
+| `kimi_k3` | `kimi-k3` |
+| `mistral_4` | |
+| `gpt_oss` | `harmony` |
+
+The `qwen3` family uses Qwen3-Coder XML tool syntax. Use `hermes` for Qwen3-0.6B, which emits JSON tool calls. MiniMax M2 has no v2 unified parser. Families absent from this registry retain their native vLLM behavior. GPT-OSS uses the Dynamo unified path even when a local checkpoint directory has a different name; Beam uses the Dynamo registry without requiring a checkpoint response template.
+
+Harmony uses vLLM's pinned implementation through a private compatibility package so the dependency graph follows vLLM's TLS policy. Tool calls are published after validation because vLLM cannot retract provisional argument fragments. Reasoning text is preserved, and reasoning-token counts are omitted when the parser cannot supply model-token attribution. Engine prompt and completion token counts remain available. Strict tool calling requires a v2 structural-tag builder for the selected family; unsupported constraints return an error. Set `DYNAMO_PARSERS_DEBUG=1` to print which Dynamo unified parser runs.
+
 ### Checkpoint Response Templates (`hf`)
 
 Checkpoints can define a `response_template` in `tokenizer_config.json` to describe their reasoning, content, and tool-call wire format. Select the

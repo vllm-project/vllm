@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import vllm.entrypoints.common.cli_args as cli_args_module
+import vllm.envs as envs
 from tests.utils import VLLM_PATH
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.common.cli_args import (
@@ -42,6 +43,37 @@ def vllm_parser():
 @pytest.fixture
 def serve_parser():
     return _build_vllm_parsers()["vllm serve"]
+
+
+@pytest.mark.parametrize(
+    "rust,dynamo", [(False, False), (False, True), (True, False), (True, True)]
+)
+def test_dynamo_unified_names_are_validated_by_the_selected_frontend(
+    monkeypatch, serve_parser, rust, dynamo
+):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", str(int(rust)))
+    monkeypatch.setenv("VLLM_USE_DYNAMO_RUST_PARSER", str(int(dynamo)))
+    monkeypatch.setenv("VLLM_USE_RUST_BENCH", "0")
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_PATH", "/candidate/vllm-rs")
+    assert (rust or dynamo) == envs.VLLM_USE_RUST_FRONTEND
+    assert (
+        "/candidate/vllm-rs" if rust or dynamo else None
+    ) == envs.VLLM_RUST_FRONTEND_PATH
+    args = serve_parser.parse_args(
+        [
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "mistral_4",
+            "--reasoning-parser",
+            "mistral_4",
+        ]
+    )
+    args.structured_outputs_config.reasoning_parser = "mistral_4"
+    if dynamo:
+        cli_args_module.validate_api_server_args(args)
+    else:
+        with pytest.raises(KeyError, match="invalid tool call parser"):
+            cli_args_module.validate_api_server_args(args)
 
 
 def test_cors_origins_require_explicit_opt_in(serve_parser):
