@@ -89,6 +89,7 @@ class FakeState:
 def make_impl(qk_rope, kv_dtype="fp8_e4m3", num_heads=2, topk_width=TOPK):
     impl = object.__new__(FlashInferMLASparseSM90Impl)
     impl.num_heads = num_heads
+    impl.use_shardq = False
     impl.head_size = HEAD + qk_rope
     impl.scale = (HEAD + qk_rope) ** -0.5
     impl.kv_lora_rank = HEAD
@@ -108,7 +109,10 @@ def make_batch(rows, topk_rows, own_blocks):
     for t, row in enumerate(topk_rows):
         topk[t, : len(row)] = torch.tensor(row, dtype=torch.int32)
     return SimpleNamespace(
-        req_id_per_token=req_id, block_table=block_table, block_size=BLOCK_SIZE
+        req_id_per_token=req_id,
+        block_table=block_table,
+        block_size=BLOCK_SIZE,
+        topk_start=0,
     )
 
 
@@ -563,3 +567,93 @@ def test_supports_combination_gates(monkeypatch, default_vllm_config):
     assert call() is None
     monkeypatch.setattr(sm90_mod, "has_flashinfer_sm90_nope_mla", lambda: False)
     assert "requires FlashInfer" in (call() or "")
+
+
+def test_shardq_reads_rank_local_topk_after_decodes(monkeypatch):
+    """All heads attend the rank's compact indices after the decode prefix."""
+    monkeypatch.setattr(
+        sm90_mod, "triton_convert_req_index_to_global_index", ref_convert
+    )
+    impl, _ = make_impl(0, kv_dtype="auto", num_heads=2)
+    impl.topk_indices_buffer[:, 0] = torch.tensor([1, 7, 13, 3])
+    meta = make_batch(2, [[7], [13]], [3])
+    meta.topk_start = 1
+    meta.state = FakeState(TOPK)
+    meta.state.kv_indptr[1:3] = torch.tensor([1, 2])
+    q = torch.randn(2, 8, HEAD, dtype=torch.bfloat16)
+    cache = torch.zeros(4, BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
+    out, _ = impl.forward_mqa(q, cache, meta, SimpleNamespace())
+    assert out.shape == q.shape
+    assert meta.state.wrapper.run_args[1].shape == (2, 8, 0)
+    assert meta.state.kv_indices[:2].tolist() == [
+        3 * BLOCK_SIZE + 7,
+        3 * BLOCK_SIZE + 13,
+    ]
+
+
+@pytest.mark.parametrize("num_decode", [0, 1])
+def test_shardq_plans_rank_local_rows_and_preserves_decode(monkeypatch, num_decode):
+    """Rank-local host bounds and device row IDs refer to the same original queries."""
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder.state = FakeState(TOPK)
+    builder._adaptive_verification = False
+    plan_calls = []
+    builder.shardq_state = SimpleNamespace(plan=lambda *args: plan_calls.append(args))
+    meta_cls = sm90_mod.FlashInferMLASparseSM90Metadata
+    meta = object.__new__(meta_cls)
+    local = object.__new__(meta_cls)
+    rows = torch.tensor([0, 2, 5], dtype=torch.int64)
+    meta.shardq = SimpleNamespace(
+        num_decode_tokens=num_decode,
+        local_token_ids=rows,
+        local_token_ids_cpu=rows.numpy(),
+        attn_metadata=local,
+    )
+    meta.prefill = None
+    meta.req_id_per_token = torch.tensor(
+        ([0] if num_decode else []) + [num_decode] * 3 + [num_decode + 1] * 3
+    )
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder, "build", lambda *_: meta
+    )
+    cam = SimpleNamespace(
+        num_reqs=2 + num_decode,
+        query_start_loc_cpu=torch.tensor([0, 1, 4, 7] if num_decode else [0, 3, 6]),
+        seq_lens_cpu_upper_bound=torch.tensor(([1] if num_decode else []) + [10, 20]),
+    )
+    result = builder.build(0, cam)
+    ((n, lens, original, reqs, positions),) = plan_calls
+    assert result.shardq.attn_metadata.state is builder.shardq_state
+    assert n == 3 and lens.tolist() == [8, 10, 20]
+    assert original is cam and reqs is meta.req_id_per_token
+    assert torch.equal(positions, rows + num_decode)
+    assert len(builder.state.plan_calls) == num_decode
+    if num_decode:
+        assert builder.state.plan_calls[0][1].tolist() == [1]
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+def test_shardq_clamps_with_original_noncontiguous_query_rows():
+    """A strided subset across requests must match an exact FA3 plan."""
+    torch.manual_seed(124)
+    ctx, valid, cam, req_id, slots = _clamp_batch(
+        12, 8, 16, 2160, SM90_TOPK, SM90_KPOOL, SM90_WIDTH
+    )
+    picked = torch.tensor([3, 7, 8, 16, 39, 62, 79, 92])
+    rows = len(picked)
+    actual = _real_state(rows)
+    exact = _real_state(rows)
+    bounds = torch.clamp(ctx[picked] + 10, max=actual.max_valid)
+    device_rows = picked.cuda()
+    actual.plan(rows, bounds, cam, req_id, device_rows)
+    exact.plan(rows, valid[picked], None, None)
+    q = torch.randn(rows, SM90_HEADS, HEAD, dtype=torch.bfloat16, device="cuda")
+    kv = torch.randn(1 << 16, 1, HEAD, dtype=torch.bfloat16, device="cuda")
+    local_slots = slots[device_rows]
+    outputs = []
+    for state in (actual, exact):
+        state.pack_indices(local_slots)
+        outputs.append(state.wrapper.run(q, q[..., :0], kv, kv[..., :0]))
+    torch.testing.assert_close(outputs[0], outputs[1], atol=1e-2, rtol=1e-2)
