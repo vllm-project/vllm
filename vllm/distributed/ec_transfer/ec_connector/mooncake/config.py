@@ -73,6 +73,7 @@ class MooncakeECConfig:
     store_max_pending_items: int = 32
     store_max_pending_bytes: int = 2 * 1024**3
     store_read_buffer_bytes: int = 128 * 1024**2
+    store_disk_staging_budget_bytes: int | None = None
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> MooncakeECConfig:
@@ -149,5 +150,13 @@ class MooncakeECConfig:
             ),
             store_read_buffer_bytes=_positive_int(
                 "store_read_buffer_bytes", get("store_read_buffer_bytes", 128 * 1024**2)
+            ),
+            store_disk_staging_budget_bytes=(
+                _positive_int(
+                    "store_disk_staging_budget_bytes",
+                    get("store_disk_staging_budget_bytes", None),
+                )
+                if get("store_disk_staging_budget_bytes", None) is not None
+                else None
             ),
         )
