@@ -56,6 +56,13 @@ vllm serve gpt2 \
      --pipeline-parallel-size 2
 ```
 
+For DeepSeek-V4.1, the default safetensors loader requires vision tower weights,
+including `image_start`, `image_newline`, and `image_end`, only on the first
+pipeline stage and only when images are enabled. With a checkpoint per stage,
+you can omit these weights on later stages, or on every stage with
+`--limit-mm-per-prompt '{"image": 0}'`. A full checkpoint can still be used on
+every stage.
+
 ## Multi-node deployment
 
 If a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. Ensure that every node provides an identical execution environment, including the model path and Python packages. Using container images is recommended because they provide a convenient way to keep environments consistent and to hide host heterogeneity.
