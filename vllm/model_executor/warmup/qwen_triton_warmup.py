@@ -51,6 +51,8 @@ class _QwenGDNWarmupConfig:
     fused_spec_decode: bool = False
     # The FlashInfer prefill takes exp(g) straight from fused_post_conv_prep.
     post_conv_g_exp: bool = False
+    # The layer passes z to the gated norm in place (ROCm Qwen3.5).
+    strided_z_gated_norm: bool = False
 
     @property
     def conv_dim(self) -> int:
@@ -144,6 +146,9 @@ def _qwen_gdn_warmup_config(
                 getattr(layer, "enable_fused_gdn_spec_decode", False)
             ),
             post_conv_g_exp=getattr(layer, "gdn_prefill_backend", None) == "flashinfer",
+            strided_z_gated_norm=getattr(layer, "_fused_gdn_gated_rms_norm", None)
+            is not None
+            and current_platform.is_rocm(),
         )
 
     if found_layer:
@@ -177,6 +182,22 @@ def _warm_gated_rms_norm_kernel(
         is_rms_norm=True,
         activation=config.norm_activation,
     )
+    if config.strided_z_gated_norm:
+        from vllm.models.qwen3_5.amd.ops.fused_gdn_gated_norm import (
+            warmup_fused_gdn_gated_rms_norm,
+        )
+
+        warmup_fused_gdn_gated_rms_norm(
+            max_num_tokens=max_num_tokens,
+            num_v_heads=config.hv,
+            head_v_dim=config.v,
+            z_token_stride=2 * config.h * config.k + 2 * config.hv * config.v,
+            z_offset=2 * config.h * config.k + config.hv * config.v,
+            x_dtype=x_dtype,
+            weight_dtype=config.norm_weight_dtype,
+            device=device,
+            activation=config.norm_activation,
+        )
 
 
 def _warm_causal_conv1d_fwd_kernel(

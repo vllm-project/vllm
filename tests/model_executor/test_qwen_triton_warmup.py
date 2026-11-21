@@ -64,6 +64,38 @@ def test_qwen_gdn_prefill_warmup_kernels_compile_on_gpu() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only Triton kernel")
+@pytest.mark.parametrize("max_num_tokens", [1, 16, 8192])
+def test_qwen_gdn_strided_z_norm_warmup_covers_reachable_tile_sizes(
+    max_num_tokens: int,
+) -> None:
+    """The strided-z gated norm warmup compiles every ROWS_PER_BLOCK the
+    wrapper can pick for up to max_num_tokens tokens."""
+    import vllm.models.qwen3_5.amd.ops.fused_gdn_gated_norm as norm_ops
+    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+        calc_rows_per_block,
+    )
+
+    config = replace(_cuda_gdn_config(), strided_z_gated_norm=True)
+    device = torch.device("cuda")
+    kernel = norm_ops.fused_gdn_gated_rms_norm
+    with patch.object(norm_ops, "fused_gdn_gated_rms_norm", wraps=kernel) as wrapped:
+        _warm_gated_rms_norm_kernel(
+            device, config, max_num_tokens=max_num_tokens, x_dtype=torch.bfloat16
+        )
+    torch.accelerator.synchronize(device)
+
+    warmed = {
+        calc_rows_per_block(call.args[0].shape[0] * config.hv, device)
+        for call in wrapped.call_args_list
+    }
+    reachable = {
+        calc_rows_per_block(tokens * config.hv, device)
+        for tokens in range(1, max_num_tokens + 1)
+    }
+    assert warmed == reachable
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only Triton kernel")
 @pytest.mark.parametrize("max_num_reqs", [1, 1024])
 def test_qwen_gdn_fused_mtp_warmup_covers_reachable_tile_sizes(
     max_num_reqs: int,
