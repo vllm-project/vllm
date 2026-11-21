@@ -1562,11 +1562,16 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
 
 
 def _make_csa_linear_ple_worker(
-    scratch_aliases: str = "compressed", ple_page_size: int = 256
+    scratch_aliases: str = "compressed",
+    ple_page_size: int = 256,
+    ple_region: int = 0,
+    ple_in_ssm_group: bool = False,
 ):
     """`scratch_aliases` selects which pages the compressor ring overlays;
     `ple_page_size` widens the PLE page beyond the page it shares a region
-    with (block-outer layout: both start at byte 0 of the block)."""
+    with (block-outer layout: both start at byte 0 of the block).
+    `ple_region` is the tensor region holding the PLE page, and
+    `ple_in_ssm_group` puts it in the SSM state's cache group (Qwen4Exp)."""
     from unittest.mock import MagicMock
 
     from vllm.config import set_current_vllm_config
@@ -1641,7 +1646,7 @@ def _make_csa_linear_ple_worker(
     tensor_regions: tuple[tuple[str, ...], ...]
     if scratch_aliases == "compressed":
         tensor_regions = (
-            ("main_kv.0", "mamba.sharded", "mamba.ple"),
+            ("main_kv.0", "mamba.sharded"),
             ("main_kv.1",),
             ("compressed.0", "compressor_state.0"),
             ("compressed.1", "compressor_state.1"),
@@ -1649,16 +1654,21 @@ def _make_csa_linear_ple_worker(
     else:
         assert scratch_aliases == "main_kv"
         tensor_regions = (
-            ("main_kv.0", "mamba.sharded", "mamba.ple", "compressor_state.0"),
+            ("main_kv.0", "mamba.sharded", "compressor_state.0"),
             ("main_kv.1", "compressor_state.1"),
             ("compressed.0",),
             ("compressed.1",),
         )
-    page_size = 256
-    # Region 0 hosts the PLE page: its blocks are as wide as the widest page.
-    block_strides = [max(page_size, ple_page_size)] + [page_size] * (
-        len(tensor_regions) - 1
+    tensor_regions = tuple(
+        (*layers, "mamba.ple") if index == ple_region else layers
+        for index, layers in enumerate(tensor_regions)
     )
+    page_size = 256
+    # The PLE page's region has blocks as wide as the widest page.
+    block_strides = [
+        max(page_size, ple_page_size) if index == ple_region else page_size
+        for index in range(len(tensor_regions))
+    ]
     region_sizes = [2 * stride for stride in block_strides]
     region_offsets = [sum(region_sizes[:index]) for index in range(len(region_sizes))]
     kv_cache_config = KVCacheConfig(
@@ -1677,8 +1687,14 @@ def _make_csa_linear_ple_worker(
         kv_cache_groups=[
             group(compressed_sparse_specs),
             group(compressor_state_specs, CircularBufferManager),
-            make_kv_cache_group(["mamba.sharded"], sharded_mamba_spec),
-            make_kv_cache_group(["mamba.ple"], ple_spec),
+            *(
+                [group({"mamba.sharded": sharded_mamba_spec, "mamba.ple": ple_spec})]
+                if ple_in_ssm_group
+                else [
+                    make_kv_cache_group(["mamba.sharded"], sharded_mamba_spec),
+                    make_kv_cache_group(["mamba.ple"], ple_spec),
+                ]
+            ),
         ],
     )
 
@@ -1825,6 +1841,36 @@ def test_csa_linear_ple_descriptor_is_not_split():
         # SSM run right before it is halved per source.
         assert split[-1].tolist() == mamba[-1].tolist()
         assert split[-2, 1] * 2 == mamba[-2, 1]
+
+
+@pytest.mark.cpu_test
+def test_csa_linear_ple_state_shares_the_ssm_group():
+    """Qwen4Exp keeps its PLE state in a GDN cache group: NIXL finds it by
+    region and reads the same descriptors as for a PLE group of its own."""
+
+    def desc_ids(worker, block_ids):
+        pairs = _own_region_pairs(worker)
+        assert pairs.remote_ssm_regions == [0]
+        assert pairs.remote_ple_region == 1
+        return sorted(
+            worker._compute_desc_ids(
+                block_ids=block_ids,
+                dst_num_blocks=2,
+                block_size_ratio=None,
+                physical_blocks_per_logical=1,
+                pairs=(pairs.remote, pairs.group),
+                ssm_regions=pairs.remote_ssm_regions,
+                ple_region=pairs.remote_ple_region,
+            ).tolist()
+        )
+
+    alone = _make_csa_linear_ple_worker(ple_region=1)
+    shared = _make_csa_linear_ple_worker(ple_region=1, ple_in_ssm_group=True)
+    for worker, ple_group in ((alone, 3), (shared, 2)):
+        assert worker._ssm_region_indices == [0]
+        assert worker._ple_group_index == ple_group
+        assert worker._ple_region_index == 1
+    assert desc_ids(shared, ([1], [0], [1])) == desc_ids(alone, ([1], [0], [1], [1]))
 
 
 @pytest.mark.cpu_test

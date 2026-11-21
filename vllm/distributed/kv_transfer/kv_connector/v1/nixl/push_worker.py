@@ -793,6 +793,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             region_num_blocks=stage.region_num_blocks,
             pairs=(pairs.remote, pairs.group),
             ssm_regions=pairs.remote_ssm_regions,
+            ple_region=pairs.remote_ple_region,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
