@@ -106,6 +106,7 @@ steps:
       tests/v1/worker/test_eagle3_aux_hidden_states_pp.py \
       tests/v1/worker/test_spec_decode_embed_sharing_pp.py \
       tests/v1/spec_decode/test_adaptive_verification.py \
+      tests/v1/spec_decode/test_adaptive_verification_cost_table.py \
       tests/v1/spec_decode/test_dflash2.py \
       tests/v1/spec_decode/test_dflash_causality.py \
       tests/v1/spec_decode/test_eagle_draft_attn_metadata.py \

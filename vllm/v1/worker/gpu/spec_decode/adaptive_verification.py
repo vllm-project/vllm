@@ -23,6 +23,10 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
     get_varlen_cudagraph_unsupported_backend,
 )
+from vllm.v1.worker.gpu.spec_decode.adaptive_verification_cost_table import (
+    check_cost_table_envs,
+    dump_or_load_cost_curves,
+)
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
@@ -234,6 +238,7 @@ class AdaptiveVerificationManager:
         copy_admitted_drafts_to_host: bool = False,
         max_concurrent_batches: int = 2,
     ):
+        check_cost_table_envs()
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
@@ -360,6 +365,14 @@ class AdaptiveVerificationManager:
         draft_curve: list[tuple[int, float]],
         verify_curve: list[tuple[int, float]],
     ) -> None:
+        if (
+            envs.VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_DUMP
+            or envs.VLLM_ADAPTIVE_VERIFICATION_COST_TABLE_LOAD
+        ) and get_tp_group().rank_in_group == 0:
+            # Only rank 0's curves are used: the broadcast below overwrites the rest.
+            profiled = {"draft": draft_curve, "verify": verify_curve}
+            curves = dump_or_load_cost_curves(self, profiled)
+            draft_curve, verify_curve = curves["draft"] or [], curves["verify"] or []
         draft_curve, verify_curve = get_tp_group().broadcast_object(
             (draft_curve, verify_curve), src=0
         )
