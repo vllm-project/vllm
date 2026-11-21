@@ -231,7 +231,7 @@ def test_model_specialization_with_evaluate_guards(
             use_vllm_config(vllm_config),
             tempfile.TemporaryDirectory() as tmpdirname,
         ):
-            monkeypatch.setenv("VLLM_CACHE_ROOT", tmpdirname)
+            monkeypatch.setenv("VLLM_COMPILE_CACHE_ROOT", tmpdirname)
 
             model = model_class(vllm_config=vllm_config).cuda()
 

@@ -1776,6 +1776,7 @@ def test_snapshot_manifest_records_external_cache_files(tmp_path: Path):
 def _pin_generated_cache_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Keep the resolver off whatever cache roots the host running this has."""
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
+    monkeypatch.delenv("VLLM_COMPILE_CACHE_ROOT", raising=False)
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton_cache_default"))
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "inductor_cache"))
     monkeypatch.setenv("FLASHINFER_CACHE_DIR", str(tmp_path / "flashinfer_cache"))
