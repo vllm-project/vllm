@@ -632,6 +632,95 @@ def test_custom_quick_allreduce_bf16_cast(monkeypatch: pytest.MonkeyPatch):
     multi_process_parallel(monkeypatch, 2, 1, bf16_cast_quickreduce)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def reduce_scatterv_quickreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+        group = get_tp_group()
+        qr = QuickAllReduce(group=group.cpu_group, device=device, coll_only=True)
+        assert not qr.disabled and qr.coll_max_size == 8 * MB
+        hidden = 1024
+
+        def check(sizes: list[int], dtype: torch.dtype) -> None:
+            # Integer rows sum exactly, so the FP codec must match bit for bit.
+            rows = torch.arange(sum(sizes), device=device)[:, None]
+            cols = torch.arange(hidden, device=device)[None, :]
+            inp = ((rows * 7 + cols + rank) % 23).to(dtype)
+            assert qr.should_quick_reduce_scatter(inp)
+            out = qr.quick_reduce_scatterv(inp, sizes)
+            assert out is not None and out.shape == (sizes[rank], hidden)
+            start = sum(sizes[:rank])
+            expected = sum(
+                (rows * 7 + cols + r) % 23 for r in range(tp_size)
+            ).to(dtype)[start : start + sizes[rank]]
+            if qr.qr_quant_level == QuickReduceRegime.FP:
+                torch.testing.assert_close(out, expected, atol=0, rtol=0)
+            else:
+                torch.testing.assert_close(
+                    out, expected, **_quickreduce_tolerance(qr.qr_quant_level)
+                )
+
+        uneven = [37 * (r + 1) for r in range(tp_size)]
+        for dtype in (torch.float16, torch.bfloat16):
+            for sizes in (
+                [256] * tp_size,
+                uneven,
+                [0] + uneven[1:],
+                [1] * tp_size,
+            ):
+                check(sizes, dtype)
+
+        # Back-to-back calls of changing sizes reuse the two slot regions.
+        inps, sizes_list = [], []
+        for i in range(8):
+            sizes = [64 * ((i + r) % 3) for r in range(tp_size)]
+            inps.append(torch.full((sum(sizes), hidden), rank + 1.0, device=device))
+            sizes_list.append(sizes)
+        outs = [
+            qr.quick_reduce_scatterv(x.to(torch.bfloat16), s)
+            for x, s in zip(inps, sizes_list)
+        ]
+        total = tp_size * (tp_size + 1) / 2
+        for out in outs:
+            assert out is not None
+            torch.testing.assert_close(out, torch.full_like(out, total))
+
+        # A chunk larger than the region falls back on every rank, and the
+        # next call still runs.
+        rows = 8 * MB // (2 * hidden) + 16
+        too_big = torch.ones(tp_size * rows, hidden, dtype=torch.half, device=device)
+        assert qr.quick_reduce_scatterv(too_big, [rows] * tp_size) is None
+        check([256] * tp_size, torch.bfloat16)
+        qr.close()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
+)
+@pytest.mark.parametrize("quant_mode", ["FP", "INT4"])
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_custom_quick_reduce_scatterv(
+    monkeypatch: pytest.MonkeyPatch, tp_size, quant_mode
+):
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", quant_mode)
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_COLL_MAX_SIZE_MB", "8")
+    multi_process_parallel(monkeypatch, tp_size, 1, reduce_scatterv_quickreduce)
+
+
 def qr_variable_input(rank, world_size):
     """When the tensor parallelism is set to 4 or 8, frequent changes
     in the input shape can cause QuickReduce to hang (this issue

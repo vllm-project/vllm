@@ -10,12 +10,16 @@
 // Defined in custom_quickreduce.cu.
 using fptr_t = int64_t;
 fptr_t init_custom_qr(int64_t rank, int64_t world_size,
-                      std::optional<int64_t> qr_max_size = std::nullopt);
+                      std::optional<int64_t> qr_max_size = std::nullopt,
+                      std::optional<int64_t> coll_max_size = std::nullopt);
 void qr_destroy(fptr_t _fa);
 torch::Tensor qr_get_handle(fptr_t _fa);
 void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
+bool qr_reduce_scatterv(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                        std::vector<int64_t> lens, int64_t quant_level,
+                        bool cast_bf2half);
 int64_t qr_max_size();
 #endif
 
@@ -36,6 +40,10 @@ TORCH_LIBRARY_FRAGMENT(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
       "qr_all_reduce(int fa, Tensor inp, Tensor out, int quant_level, bool "
       "cast_bf2half) -> ()");
   custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
+  custom_ar.def(
+      "qr_reduce_scatterv(int fa, Tensor inp, Tensor! out, int[] lens, int "
+      "quant_level, bool cast_bf2half) -> bool");
+  custom_ar.impl("qr_reduce_scatterv", torch::kCUDA, &qr_reduce_scatterv);
 
   custom_ar.def("init_custom_qr", &init_custom_qr);
   custom_ar.def("qr_destroy", &qr_destroy);

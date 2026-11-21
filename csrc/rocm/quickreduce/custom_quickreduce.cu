@@ -8,7 +8,8 @@
   #include "rocm/quickreduce/quick_reduce.h"
 
 quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size,
-                                   std::optional<int64_t> qr_max_size) {
+                                   std::optional<int64_t> qr_max_size,
+                                   std::optional<int64_t> coll_max_size) {
   if (world_size > 8)
     throw std::invalid_argument("world size > 8 is not supported");
   if (world_size == 6)
@@ -18,7 +19,7 @@ quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size,
   if (rank < 0 || rank >= world_size)
     throw std::invalid_argument("invalid rank passed in");
   quickreduce::DeviceComms* fptr = new quickreduce::DeviceComms();
-  fptr->init(world_size, rank, qr_max_size);
+  fptr->init(world_size, rank, qr_max_size, coll_max_size);
   return (quickreduce::fptr_t)fptr;
 }
 
@@ -83,6 +84,38 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
     throw std::runtime_error(
         "quick allreduce only supports float16 and bfloat16");
   }
+}
+
+bool qr_reduce_scatterv(quickreduce::fptr_t _fa, torch::Tensor& inp,
+                        torch::Tensor& out, std::vector<int64_t> lens,
+                        int64_t quant_level, bool cast_bf2half) {
+  auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
+  auto stream = at::cuda::getCurrentHIPStreamMasqueradingAsCUDA();
+
+  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
+  TORCH_CHECK(inp.is_contiguous() && out.is_contiguous());
+  int64_t total = 0;
+  for (auto len : lens) total += len;
+  TORCH_CHECK_EQ(inp.numel(), total);
+  TORCH_CHECK_EQ(out.numel(), lens.at(fa->rank));
+  if (out.scalar_type() == at::ScalarType::Half) {
+    return fa->reduce_scatterv<half, false>(
+        reinterpret_cast<half*>(inp.data_ptr()),
+        reinterpret_cast<half*>(out.data_ptr()), lens, quant_level, stream);
+  } else if (out.scalar_type() == at::ScalarType::BFloat16) {
+    if (cast_bf2half) {
+      return fa->reduce_scatterv<half, true>(
+          reinterpret_cast<half*>(inp.data_ptr()),
+          reinterpret_cast<half*>(out.data_ptr()), lens, quant_level, stream);
+    }
+    return fa->reduce_scatterv<quickreduce::nv_bfloat16, false>(
+        reinterpret_cast<quickreduce::nv_bfloat16*>(inp.data_ptr()),
+        reinterpret_cast<quickreduce::nv_bfloat16*>(out.data_ptr()), lens,
+        quant_level, stream);
+  }
+  throw std::runtime_error(
+      "quick reduce-scatter only supports float16 and bfloat16");
 }
 
 int64_t qr_max_size() {
