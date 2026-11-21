@@ -2868,15 +2868,23 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
+        row = self.scheduler.dp_row()
+        if (
+            row is None
+            and self.step_counter != 1
+            and self.step_counter % self.dp_sync_interval != 0
+        ):
             return True
 
         parallel_config = self.vllm_config.parallel_config
-        has_unfinished, pause_consensus = parallel_config.sync_dp_state(
+        has_unfinished, pause_consensus, rows = parallel_config.sync_dp_state(
             self.dp_group,
             has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,
+            row=row,
         )
+        if rows is not None:
+            self.scheduler.update_from_dp_rows(rows, idle=not has_unfinished)
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

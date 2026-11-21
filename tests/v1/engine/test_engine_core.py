@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 import torch
@@ -719,11 +719,12 @@ def _cadenced_dp_engine_core(
     core.step_counter = 0
     core.pending_pause = False
     core.ignore_start_dp_wave = False
+    core.scheduler = MagicMock(**{"dp_row.return_value": None})
     synced: list[int] = []
 
-    def scripted_sync(dp_group, has_unfinished, pending_pause):
+    def scripted_sync(dp_group, has_unfinished, pending_pause, row=None):
         synced.append(core.step_counter)
-        return results.pop(0)
+        return *results.pop(0), None
 
     monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
     return core, synced
@@ -758,6 +759,28 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert synced == [1]
     assert core.ignore_start_dp_wave
     assert not core.pending_pause
+
+
+def test_dp_row_syncs_every_step(monkeypatch):
+    """A scheduler that shares a DP row forces the all-reduce every step and
+    gets every rank's row back each time; the wave's end reports idle."""
+    core, _ = _cadenced_dp_engine_core(monkeypatch, [], dp_sync_interval=32)
+    core.scheduler.dp_row.return_value = [1.0, 2.0, 3.0]
+    rows = [[4.0] * 3, [1.0, 2.0, 3.0]]
+    results = [True, True, False]
+
+    def scripted_sync(dp_group, has_unfinished, pending_pause, row=None):
+        assert row == [1.0, 2.0, 3.0]
+        return results.pop(0), False, rows
+
+    monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
+    for expected in (True, True, False):
+        assert DPEngineCoreProc._has_global_unfinished_reqs(core, True) is expected
+    assert core.scheduler.update_from_dp_rows.call_args_list == [
+        call(rows, idle=False),
+        call(rows, idle=False),
+        call(rows, idle=True),
+    ]
 
 
 @pytest.mark.parametrize(
