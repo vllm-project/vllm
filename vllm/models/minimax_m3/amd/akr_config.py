@@ -5,12 +5,12 @@ default on ROCm gfx950 with the package installed."""
 
 from typing import get_args
 
-from vllm.config.kernel import AmdKernelsRoute
+from vllm.config.kernel import MiniMaxM3AmdKernelsRoute
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-ROUTES: tuple[str, ...] = get_args(AmdKernelsRoute)
+ROUTES: tuple[str, ...] = get_args(MiniMaxM3AmdKernelsRoute)
 # prerequisites, each listed before the routes that need it
 _NEEDS = {
     "indexer": ("attention",),

@@ -613,12 +613,12 @@ def _layer(
     )
 
 
-def _fill_topk_rows(layer: _Layer, num_tokens: int) -> None:
+def _fill_topk_rows(layer: _Layer, num_tokens: int, skip_decode: bool) -> None:
     lengths = layer.metadata.decode_row_lens
     start = 0
     if layer.metadata.decode is not None and lengths is not None:
         rows = _decode_step_rows(layer.metadata, lengths.shape[0])
-        if _vllm_topk(rows, layer.topk_tokens):
+        if skip_decode or _vllm_topk(rows, layer.topk_tokens):
             start = rows
     if start < num_tokens:
         layer.topk_buffer[start:num_tokens] = -1
@@ -859,6 +859,7 @@ def rocm_mxfp4_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    skip_decode: bool = False,
 ) -> torch.Tensor:
     """Dense indexer: every layer that scores the whole context, the
     candidate source included. With `candidate_blocks` and not
@@ -891,11 +892,11 @@ def rocm_mxfp4_sparse_attn_indexer(
         candidate_block_size,
     )
     metadata = layer.metadata
-    _fill_topk_rows(layer, hidden_states.shape[0])
+    _fill_topk_rows(layer, hidden_states.shape[0], skip_decode)
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             _dense_prefill(layer, chunk, plan, candidate_write)
-    if metadata.decode is not None:
+    if metadata.decode is not None and not skip_decode:
         _dense_decode(_decode_rank_rows(layer), max_model_len, candidate_write)
         _exchange_decode_rows(layer)
     return topk_indices_buffer
@@ -917,6 +918,7 @@ def rocm_mxfp4_sparse_mqa_indexer(
     candidate_blocks: torch.Tensor,
     candidate_block_size: int,
     num_candidate_cols: int,
+    skip_decode: bool = False,
 ) -> torch.Tensor:
     """Candidate consumer: score only the source's pool where the builder's
     length gate says it pays, else the dense walk masked to the pool."""
@@ -942,14 +944,14 @@ def rocm_mxfp4_sparse_mqa_indexer(
         candidate_block_size,
     )
     metadata = layer.metadata
-    _fill_topk_rows(layer, hidden_states.shape[0])
+    _fill_topk_rows(layer, hidden_states.shape[0], skip_decode)
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             if not plan.use_gather:
                 _dense_prefill(layer, chunk, plan, candidate_write=False)
         for launch in metadata.gather_launches:
             _gather_prefill(layer, launch, num_candidate_cols)
-    if metadata.decode is not None:
+    if metadata.decode is not None and not skip_decode:
         decode = _decode_rank_rows(layer)
         # A FULL graph cannot follow the per-step gate; the gather is the side
         # that stays flat in the context length.

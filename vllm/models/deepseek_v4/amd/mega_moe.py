@@ -11,6 +11,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.online.base import (
     ONLINE_SHARED_EXPERT_QUANTIZERS,
 )
@@ -59,6 +60,8 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
     # MegaMoEV2 owns large symmetric-heap buffers, so every layer shares one
     # instance and passes its own weights per call.
     _runtime_cache: dict[tuple, Any] = {}
+    # DeepSeek-V4.1 amd_kernels fused EP8 route (akr_experts), set at load
+    akr: Any = None
 
     def __init__(
         self,
@@ -269,8 +272,13 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        x_quant: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         assert self._runtimes
+        if self.akr is not None:
+            out = self.akr.forward(hidden_states, topk_weights, topk_ids, x_quant)
+            if out is not None:
+                return out
         runtime = self.select_runtime(hidden_states.shape[0])
         if self.fuse_shared_expert:
             topk_weights, topk_ids = self.append_shared_expert(topk_weights, topk_ids)

@@ -24,6 +24,10 @@ class RocmSparseAttnIndexer(SparseAttnIndexer):
     aiter's kernel. A two-level indexer's source layer also publishes its
     candidate pool here."""
 
+    skip_decode = False
+    """This step's decode rows are already written (DeepSeek-V4.1 amd_kernels
+    indexer route); only prefill rows run here."""
+
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
@@ -51,6 +55,7 @@ class RocmSparseAttnIndexer(SparseAttnIndexer):
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
+            skip_decode=self.skip_decode,
         )
 
 
@@ -65,6 +70,9 @@ class RocmSparseMQAIndexer(nn.Module):
     weights_dtype = torch.float32
     """The scorer's weights and logits stay fp32: gfx950 has no packed bf16
     arithmetic, so its head reduce costs the same in either dtype."""
+
+    skip_decode = False
+    """See `RocmSparseAttnIndexer.skip_decode`."""
 
     def __init__(
         self,
@@ -113,4 +121,5 @@ class RocmSparseMQAIndexer(nn.Module):
             self.candidate_blocks,
             self.candidate_block_size,
             self.num_candidate_cols,
+            skip_decode=self.skip_decode,
         )
