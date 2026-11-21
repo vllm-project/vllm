@@ -40,6 +40,27 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
 
+### FP8 Draft Caches with TurboQuant Hybrid Targets
+
+When a TurboQuant target combines attention and Mamba/GDN layers, an FP8
+draft can need more bytes per token than the target. For supported draft
+backends, vLLM automatically reduces the draft token block size to fit the
+target's already-aligned cache pages. This prevents draft layers from
+enlarging the target pages; no model-specific block size is required.
+
+Automatic fitting currently supports the CUDA Triton attention backend with
+per-tensor FP8 caches and equal key/value head dimensions of 128 or 256.
+It requires the default pointer-based path: forcing
+`VLLM_TRITON_USE_TD=1` disables this adjustment. ROCm and other backends retain
+their existing page-sizing behavior. The target pages must already have a
+common size, and every oversized draft page must support fitting.
+
+For speculative verification, TurboQuant uses the actual device sequence
+lengths after draft rejection, including when the configured verification
+window exceeds the usual 128-token continuation threshold. CUDA graph
+capture includes attention over the cached prefix, so replay uses the
+request's history as well as its verification tokens.
+
 ### Skipping Specific Layers from KV-Cache Quantization
 
 Some attention layer types (e.g. sliding-window) are more sensitive to KV-cache quantization. The `--kv-cache-dtype-skip-layers` flag leaves the specified layers at the model's native dtype while keeping the rest of the layers under the chosen quantized dtype. The flag accepts either layer indices or layer-type names:
