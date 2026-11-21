@@ -159,6 +159,11 @@ is_nvidia_hopper = is_nvidia and (
     "NVIDIA H" in current_platform.get_device_name(0)
     or current_platform.get_device_capability(0).major >= 9
 )
+is_cdna3 = False
+if is_amd:
+    from vllm.platforms.rocm import get_cdna_version
+
+    is_cdna3 = get_cdna_version() == 3
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 is_gather_supported = hasattr(triton.language, "gather")
 is_tma_supported = (
@@ -169,6 +174,17 @@ is_tma_supported = (
         or hasattr(triton.language, "make_tensor_descriptor")
     )
 )
+
+
+def autotune_unless_cdna3(configs: list, key: list[str], **kwargs):
+    """triton.autotune; on gfx942 the caller picks the config per launch."""
+
+    def wrap(fn):
+        if is_cdna3:
+            return fn
+        return triton.autotune(configs=configs, key=key, **kwargs)(fn)
+
+    return wrap
 
 
 def get_all_max_shared_mem():
