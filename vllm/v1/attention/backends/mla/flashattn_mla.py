@@ -221,21 +221,18 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
 
-        # For Flash Attention MLA + full cudagraph
-        max_num_splits = 0
-        if (
-            self.use_full_cuda_graph
-            and self.max_cudagraph_size is not None
-            and num_decode_tokens <= self.max_cudagraph_size
-        ):
-            # NOTE(woosuk): Setting num_splits > 1 may increase the memory
-            # usage, because the intermediate buffers of size [num_splits,
-            # num_heads, num_tokens, head_size] are allocated. Therefore,
-            # we only set num_splits when using cuda graphs.
-            max_num_splits = self.max_num_splits
-
-        if envs.VLLM_BATCH_INVARIANT:
-            max_num_splits = 1
+        # NOTE(woosuk): Setting num_splits > 1 may increase the memory
+        # usage, because the intermediate buffers of size [num_splits,
+        # num_heads, num_tokens, head_size] are allocated. Therefore,
+        # batches beyond the captured sizes do not split; 0 would let FA3
+        # size those buffers as if one request held every query. Eager mode
+        # keeps FA3's choice, which small long-context decodes rely on.
+        max_num_splits = 1
+        if not envs.VLLM_BATCH_INVARIANT:
+            if not self.max_cudagraph_size:
+                max_num_splits = 0
+            elif num_decode_tokens <= self.max_cudagraph_size:
+                max_num_splits = self.max_num_splits
 
         scheduler_metadata = self._schedule_decode(
             num_reqs=seq_lens_device.shape[0],

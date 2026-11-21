@@ -54,15 +54,23 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+from vllm.renderers.chat_utils.types import ConversationMessage
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     parse_dec_only_prompt,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.renderers.params import ChatParams, TokenizeParams
+from vllm.renderers.params import (
+    ChatParams,
+    TokenizeParams,
+    apply_max_tokenize_tokens,
+    resolve_max_tokenize_tokens,
+)
 
 logger = init_logger(__name__)
 
@@ -81,7 +89,10 @@ class _CountTokensChatRequest(ChatCompletionRequest):
     """Chat request rendered by count_tokens, which counts prompts longer than
     max_model_len instead of rejecting them, like /tokenize."""
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self,
+        model_config: ModelConfig,
+    ) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=None,
             max_output_tokens=0,
@@ -261,6 +272,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+        max_tokenize_tokens: int | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -284,6 +296,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
         self.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
             online_renderer, disabled_thinking_effort
+        )
+        self.max_tokenize_tokens = resolve_max_tokenize_tokens(
+            max_tokenize_tokens,
+            self.model_config.max_model_len,
         )
 
     @classmethod
@@ -1338,7 +1354,11 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
-        result = await self.render_chat_request(chat_req)
+        result = await self.render_chat_request(
+            chat_req,
+            enforce_max_tokenize_tokens=True,
+        )
+
         if isinstance(result, ErrorResponse):
             return result
 
@@ -1358,3 +1378,19 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
 
         return response
+
+    async def render_chat_request(
+        self,
+        request: ChatCompletionRequest,
+        tok_params: TokenizeParams | None = None,
+        enforce_max_tokenize_tokens: bool = False,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
+        if enforce_max_tokenize_tokens:
+            try:
+                tok_params = apply_max_tokenize_tokens(
+                    request.build_tok_params(self.model_config),
+                    self.max_tokenize_tokens,
+                )
+            except VLLMValidationError as e:
+                return self.create_error_response(str(e))
+        return await super().render_chat_request(request, tok_params=tok_params)
