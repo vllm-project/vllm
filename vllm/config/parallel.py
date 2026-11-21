@@ -614,8 +614,8 @@ class ParallelConfig:
     the graph beside the projections that follow the rows.
     Every rank keeps a whole-context replica of each indexer layer's K, appended
     from those rows, so the top-k reads its K locally; a layer without a replica
-    gathers its K serially, and so does a request whose earlier rows are not in the
-    replica (a prefix cache hit, a resumed request), for the rest of its prefill.
+    gathers its K serially. A request whose earlier rows are not in the replica (a
+    prefix cache hit, a resumed request) rebuilds it once from the sharded cache.
 
     The replica costs `(max_model_len + 4096) * (index_head_dim + 4)` bytes per
     indexer layer on every rank, taken from the KV cache capacity, and is not kept

@@ -7,10 +7,10 @@ values and scales of the batch's single request in token order, in a buffer of
 `max_model_len` rows that outlives the step. Each chunk's new K rows reach every rank
 through the gather of the new rows that precedes the cache write, so every rank
 quantizes them into its replica with the cache-write kernel, and the indexer reads its
-K from the replica: no K all-gather, de-interleave or host sync. The replica serves a
-request from its first chunk on: a request whose earlier rows are not in it (a prefix
-cache hit, a resumed request, rows computed while the replica was invalid) gathers its
-K serially for the rest of its prefill.
+K from the replica: no K all-gather, de-interleave or host sync. A request whose
+earlier rows are not in the replica (a prefix cache hit, a resumed request, rows
+computed while the replica was invalid) builds it once from the sharded cache with the
+serial gather.
 
 Cost: `(max_model_len + 4096) * (head_dim + 4)` bytes per indexer layer on every rank,
 whatever the DCP width. It is allocated while the model is built and held for the life
@@ -28,7 +28,7 @@ import torch
 import torch.distributed as dist
 
 from vllm import _custom_ops as ops
-from vllm.distributed.parallel_state import get_world_group
+from vllm.distributed.parallel_state import get_dcp_group, get_world_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -127,12 +127,13 @@ def replica_bytes(rows: int, head_dim: int, layers: int) -> int:
     return rows * (head_dim + SCALE_BYTES) * layers
 
 
-def replica_appends(
+def replica_mode(
     req_id: str, start: int, held_req_id: str | None, held_rows: int
-) -> bool:
-    """Whether the chunk of `req_id` from row `start` continues what the replica
-    holds: a request's first chunk, or the next rows of the request it holds."""
-    return start == 0 or (req_id == held_req_id and held_rows == start)
+) -> str:
+    """`append` the chunk to the replica, or `build` it from the cache first."""
+    if start == 0 or (req_id == held_req_id and held_rows == start):
+        return "append"
+    return "build"
 
 
 @dataclass
@@ -170,6 +171,7 @@ class LayerReplica:
 @dataclass
 class ReplicaDecision:
     chunk: Any
+    mode: str
     req_id: str
     start: int
     end: int
@@ -314,8 +316,8 @@ class KReplica:
                 assert end is not None
                 req_id = manager.global_batch.req_ids[0]
                 start = end - new_rows
-                if replica_appends(req_id, start, replica.req_id, replica.rows):
-                    decision = ReplicaDecision(chunk, req_id, start, end, restore_idx)
+                mode = replica_mode(req_id, start, replica.req_id, replica.rows)
+                decision = ReplicaDecision(chunk, mode, req_id, start, end, restore_idx)
         # Valid again only once this step's rows are in.
         replica.invalidate()
         self._decisions[layer] = decision
@@ -341,13 +343,16 @@ class KReplica:
         ):
             return None
         replica = self.layers[layer]
-        ops.indexer_k_quant_and_cache(
-            gathered_k,
-            replica.cache,
-            self._slots_of(decision),
-            quant_block_size,
-            scale_fmt,
-        )
+        if decision.mode == "append":
+            ops.indexer_k_quant_and_cache(
+                gathered_k,
+                replica.cache,
+                self._slots_of(decision),
+                quant_block_size,
+                scale_fmt,
+            )
+        else:
+            self._build(layer, replica, chunk)
         replica.req_id, replica.rows = decision.req_id, decision.end
         rows = chunk.pcp_deinterleave_idx.shape[0]
         return replica.values[:rows], replica.scales[:rows]
@@ -374,6 +379,29 @@ class KReplica:
             )(stream, -(-rows // SLOT_BLOCK))
             self._slots = slots
         return self._slots
+
+    def _build(self, layer: int, replica: LayerReplica, chunk: Any) -> None:
+        """The serial gather of the cache, de-interleaved into the replica."""
+        kv_cache = self._indexers[layer].k_cache.kv_cache
+        rows = chunk.max_local_total_seq_lens
+        values = torch.empty(
+            (rows, replica.head_dim), dtype=replica.values.dtype, device=kv_cache.device
+        )
+        scales = torch.empty(
+            (rows, SCALE_BYTES), dtype=torch.uint8, device=kv_cache.device
+        )
+        ops.cp_gather_indexer_k_quant_cache(
+            kv_cache, values, scales, chunk.block_table, chunk.local_cu_seq_lens
+        )
+        idx = chunk.pcp_deinterleave_idx
+        group = get_dcp_group()
+        for shard, out in ((values, replica.values), (scales, replica.scales)):
+            shard = shard[: chunk.local_total_seq_lens]
+            gathered = shard.new_empty(
+                (group.world_size * shard.shape[0], *shard.shape[1:])
+            )
+            dist.all_gather_into_tensor(gathered, shard, group=group.device_group)
+            torch.index_select(gathered, 0, idx, out=out[: idx.shape[0]])
 
 
 def k_replica_supported() -> bool:

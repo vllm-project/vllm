@@ -25,8 +25,8 @@ from vllm.v1.attention.ops.pcp_dcp_k_replica import (
     KReplica,
     LayerReplica,
     k_replica_chunk,
-    replica_appends,
     replica_bytes,
+    replica_mode,
 )
 from vllm.v1.attention.ops.pcp_dcp_overlap import (
     K_CAPACITY_SLACK_ROWS,
@@ -795,21 +795,21 @@ def test_replica_memory_per_rank():
 
 
 @pytest.mark.parametrize(
-    "req_id, start, held_req_id, held_rows, appends",
+    "req_id, start, held_req_id, held_rows, mode",
     [
-        ("a", 0, None, -1, True),
-        ("a", 0, "b", 4096, True),
-        ("a", 4096, "a", 4096, True),
-        ("a", 4096, None, -1, False),
-        ("a", 4096, "b", 4096, False),
-        ("a", 4096, "a", 8192, False),
-        ("a", 8192, "a", 4096, False),
+        ("a", 0, None, -1, "append"),
+        ("a", 0, "b", 4096, "append"),
+        ("a", 4096, "a", 4096, "append"),
+        ("a", 4096, None, -1, "build"),
+        ("a", 4096, "b", 4096, "build"),
+        ("a", 4096, "a", 8192, "build"),
+        ("a", 8192, "a", 4096, "build"),
     ],
 )
 def test_replica_appends_only_the_next_rows_of_the_request_it_holds(
-    req_id, start, held_req_id, held_rows, appends
+    req_id, start, held_req_id, held_rows, mode
 ):
-    assert replica_appends(req_id, start, held_req_id, held_rows) is appends
+    assert replica_mode(req_id, start, held_req_id, held_rows) == mode
 
 
 def test_replica_values_and_scales_are_the_rows_of_a_one_block_cache():
@@ -908,19 +908,32 @@ def test_the_replica_serves_a_scheduled_step_under_a_piecewise_graph(monkeypatch
     replica, layer, chunk = _replica_step(monkeypatch, scheduled=True)
     decision = replica.decide(3, LOCAL_ROWS)
     assert decision is not None and decision.chunk is chunk
-    assert (decision.start, decision.end) == (1_007_616, 1_024_000)
+    assert (decision.mode, decision.start, decision.end) == (
+        "append",
+        1_007_616,
+        1_024_000,
+    )
     # Decided once per step.
     assert replica.decide(3, LOCAL_ROWS) is decision
 
 
-def test_rows_the_replica_does_not_hold_gather_the_k_serially(monkeypatch):
+def test_a_replica_without_the_earlier_rows_is_rebuilt_from_the_cache(monkeypatch):
     """A chunk that does not continue the replica's rows (a prefix cache hit, a
-    resumed request, a step the replica missed) takes the serial gather, and the
-    replica stays invalid for the rest of the request."""
-    replica, layer, _ = _replica_step(monkeypatch, scheduled=True)
+    resumed request, a step the replica missed) rebuilds the replica from the
+    sharded cache once; the next chunk appends to it again."""
+    replica, layer, chunk = _replica_step(monkeypatch, scheduled=True)
     layer.rows = 1_003_520
-    assert replica.decide(3, LOCAL_ROWS) is None
+    decision = replica.decide(3, LOCAL_ROWS)
+    assert decision is not None and decision.mode == "build"
     assert layer.req_id is None and layer.rows == -1
+    built: list[int] = []
+    monkeypatch.setattr(
+        replica, "_build", lambda layer_id, layer_replica, c: built.append(layer_id)
+    )
+    gathered_k = torch.zeros(NEW_ROWS, 8)
+    assert replica.take(3, chunk, gathered_k, 128, "ue8m0") is not None
+    assert built == [3]
+    assert (layer.req_id, layer.rows) == ("r", 1_024_000)
 
 
 def test_a_dummy_batch_invalidates_the_replica(monkeypatch):

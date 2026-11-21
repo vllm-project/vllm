@@ -64,10 +64,10 @@ every rank keeps a whole-context replica of each indexer layer's K, appended fro
 those rows, so the top-k reads its K locally. The replica costs
 `(max_model_len + 4096) * (index_head_dim + 4)` bytes per indexer layer on every
 rank, taken from the KV cache capacity. A request whose earlier rows are not in
-the replica (a prefix cache hit, a resumed request) gathers its indexer K serially
-for the rest of its prefill. It applies when the PCP and DCP groups span the same
-ranks in the same order (for example `-tp 1 -pcp 4 -dcp 4`) and falls back to the
-serial gathers otherwise.
+the replica (a prefix cache hit, a resumed request) rebuilds it once from the
+sharded cache with the serial gather. It applies when the PCP and DCP groups span
+the same ranks in the same order (for example `-tp 1 -pcp 4 -dcp 4`) and falls
+back to the serial gathers otherwise.
 
 Both options act in eager mode (`--enforce-eager`) and under the default breakable
 CUDA graph, where the indexer and the attention run eagerly between the captured
