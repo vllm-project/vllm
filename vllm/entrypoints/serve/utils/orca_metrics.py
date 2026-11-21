@@ -33,7 +33,7 @@ def create_orca_header(
     if metrics_format.lower() not in ["text", "json"]:
         logger.warning(
             "Warning: `%s` format is not supported in the ORCA response header",
-            format,
+            metrics_format,
         )
         return None
 
