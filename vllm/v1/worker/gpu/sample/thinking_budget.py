@@ -78,6 +78,15 @@ class ThinkingBudgetState:
         self.reasoning_end_token_ids = torch.tensor(
             end_ids, dtype=torch.int32, device=self.device
         )
+        implicit_sequences = getattr(
+            reasoning_config, "implicit_reasoning_end_token_sequences", []
+        )
+        self.implicit_reasoning_end_lengths = tuple(map(len, implicit_sequences))
+        self.implicit_reasoning_end_token_ids = torch.tensor(
+            [token_id for sequence in implicit_sequences for token_id in sequence],
+            dtype=torch.int32,
+            device=self.device,
+        )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         if not self.enabled:
@@ -130,6 +139,8 @@ class ThinkingBudgetState:
             self.reasoning_start_token_ids,
             self.natural_reasoning_end_token_ids,
             self.reasoning_end_token_ids,
+            self.implicit_reasoning_end_token_ids,
+            self.implicit_reasoning_end_lengths,
         )
 
 
@@ -153,6 +164,124 @@ def _load_effective_token(
 
 
 @triton.jit
+def _effective_sequence_matches(
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    input_ids_ptr,
+    cur_req_first_pos,
+    req_state_idx,
+    total_len,
+    sequence_ptr,
+    sequence_offset,
+    sequence_start,
+    SEQUENCE_LEN: tl.constexpr,
+):
+    matches = True
+    for j in tl.static_range(SEQUENCE_LEN):
+        expected = tl.load(sequence_ptr + sequence_offset + j)
+        actual = _load_effective_token(
+            all_token_ids_ptr,
+            all_token_ids_stride,
+            input_ids_ptr,
+            cur_req_first_pos,
+            req_state_idx,
+            total_len,
+            sequence_start + j,
+        )
+        matches = matches & (actual == expected)
+    return matches
+
+
+@triton.jit
+def _active_reasoning_start_before(
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    input_ids_ptr,
+    cur_req_first_pos,
+    req_state_idx,
+    total_len,
+    limit,
+    reasoning_start_token_ids_ptr,
+    natural_reasoning_end_token_ids_ptr,
+    reasoning_end_token_ids_ptr,
+    implicit_reasoning_end_token_ids_ptr,
+    START_LEN: tl.constexpr,
+    NATURAL_END_LEN: tl.constexpr,
+    END_LEN: tl.constexpr,
+    IMPLICIT_END_LENS: tl.constexpr,
+):
+    # Only needed for matching forced tails: markers inside that tail must not
+    # hide whether forcing began in thinking or in an already open tool call.
+    active_start = -1
+    found = False
+    i = limit - 1
+    while i >= 0 and not found:
+        start_match = False
+        if i + 1 >= START_LEN:
+            start_match = _effective_sequence_matches(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                input_ids_ptr,
+                cur_req_first_pos,
+                req_state_idx,
+                total_len,
+                reasoning_start_token_ids_ptr,
+                0,
+                i + 1 - START_LEN,
+                START_LEN,
+            )
+        end_match = False
+        if i + 1 >= NATURAL_END_LEN:
+            end_match = _effective_sequence_matches(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                input_ids_ptr,
+                cur_req_first_pos,
+                req_state_idx,
+                total_len,
+                natural_reasoning_end_token_ids_ptr,
+                0,
+                i + 1 - NATURAL_END_LEN,
+                NATURAL_END_LEN,
+            )
+        if i + 1 >= END_LEN:
+            end_match = end_match | _effective_sequence_matches(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                input_ids_ptr,
+                cur_req_first_pos,
+                req_state_idx,
+                total_len,
+                reasoning_end_token_ids_ptr,
+                0,
+                i + 1 - END_LEN,
+                END_LEN,
+            )
+        offset = 0
+        for marker in tl.static_range(len(IMPLICIT_END_LENS)):
+            marker_len = IMPLICIT_END_LENS[marker]
+            if i + 1 >= marker_len:
+                end_match = end_match | _effective_sequence_matches(
+                    all_token_ids_ptr,
+                    all_token_ids_stride,
+                    input_ids_ptr,
+                    cur_req_first_pos,
+                    req_state_idx,
+                    total_len,
+                    implicit_reasoning_end_token_ids_ptr,
+                    offset,
+                    i + 1 - marker_len,
+                    IMPLICIT_END_LENS[marker],
+                )
+            offset += marker_len
+        if start_match and not end_match:
+            active_start = i + 1 - START_LEN
+        found = start_match | end_match
+        i -= 1
+    return active_start
+
+
+@triton.jit
 def _update_committed_marker_cache_kernel(
     req_ids_ptr,
     thinking_token_budget_ptr,
@@ -164,8 +293,12 @@ def _update_committed_marker_cache_kernel(
     cached_scan_pos_ptr,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
+    implicit_reasoning_end_token_ids_ptr,
+    reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
+    IMPLICIT_END_LENS: tl.constexpr,
+    END_LEN: tl.constexpr,
     MAX_LEN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -215,8 +348,45 @@ def _update_committed_marker_cache_kernel(
                 )
                 end_match = end_match & (actual == expected)
 
+            implicit_offset = 0
+            for marker in tl.static_range(len(IMPLICIT_END_LENS)):
+                implicit_len = IMPLICIT_END_LENS[marker]
+                implicit_match = (offs < block_hi) & (offs + implicit_len <= total_len)
+                for j in tl.static_range(IMPLICIT_END_LENS[marker]):
+                    expected = tl.load(
+                        implicit_reasoning_end_token_ids_ptr + implicit_offset + j
+                    )
+                    actual = tl.load(
+                        all_token_ids_ptr
+                        + req_state_idx * all_token_ids_stride
+                        + offs
+                        + j,
+                        mask=offs + j < total_len,
+                        other=-1,
+                    )
+                    implicit_match = implicit_match & (actual == expected)
+                end_match = end_match | implicit_match
+                implicit_offset += implicit_len
+
             last_start = tl.max(tl.where(start_match, offs, -1), axis=0)
             last_end = tl.max(tl.where(end_match, offs, -1), axis=0)
+            if len(IMPLICIT_END_LENS):
+                force_start = offs - END_LEN + 1
+                force_match = (offs < block_hi) & (force_start >= 0)
+                for j in tl.static_range(END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr
+                        + req_state_idx * all_token_ids_stride
+                        + force_start
+                        + j,
+                        mask=(force_start + j >= 0) & (force_start + j < total_len),
+                        other=-1,
+                    )
+                    force_match = force_match & (actual == expected)
+                last_end = tl.maximum(
+                    last_end, tl.max(tl.where(force_match, offs, -1), 0)
+                )
             block_hi = block_lo
     else:
         for i in tl.range(scan_pos, total_len):
@@ -240,7 +410,38 @@ def _update_committed_marker_cache_kernel(
                     )
                     end_match = end_match & (actual == expected)
                 if end_match:
-                    last_end = i
+                    last_end = tl.maximum(last_end, i)
+
+            implicit_offset = 0
+            for marker in tl.static_range(len(IMPLICIT_END_LENS)):
+                implicit_len = IMPLICIT_END_LENS[marker]
+                if i + implicit_len <= total_len:
+                    implicit_match = True
+                    for j in tl.static_range(IMPLICIT_END_LENS[marker]):
+                        expected = tl.load(
+                            implicit_reasoning_end_token_ids_ptr + implicit_offset + j
+                        )
+                        actual = tl.load(
+                            all_token_ids_ptr
+                            + req_state_idx * all_token_ids_stride
+                            + i
+                            + j
+                        )
+                        implicit_match = implicit_match & (actual == expected)
+                    if implicit_match:
+                        last_end = tl.maximum(last_end, i)
+                implicit_offset += implicit_len
+
+            if len(IMPLICIT_END_LENS) and i + END_LEN <= total_len:
+                force_match = True
+                for j in tl.static_range(END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
+                    )
+                    force_match = force_match & (actual == expected)
+                if force_match:
+                    last_end = tl.maximum(last_end, i + END_LEN - 1)
 
     tl.store(cached_last_start_ptr + req_state_idx, last_start)
     tl.store(cached_last_end_ptr + req_state_idx, last_end)
@@ -266,9 +467,11 @@ def _thinking_budget_kernel(
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
+    implicit_reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
     END_LEN: tl.constexpr,
+    IMPLICIT_END_LENS: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -322,7 +525,99 @@ def _thinking_budget_kernel(
             )
             end_match = end_match & (actual == expected)
         if end_match:
-            last_end = i
+            last_end = tl.maximum(last_end, i)
+
+    # Draft-prefix boundaries affect only this verification row. Persistent
+    # marker caches are updated exclusively from committed tokens above.
+    implicit_offset = 0
+    for marker in tl.static_range(len(IMPLICIT_END_LENS)):
+        implicit_len = IMPLICIT_END_LENS[marker]
+        implicit_lo = tl.maximum(0, total_len - implicit_len + 1)
+        for i in tl.range(implicit_lo, effective_len - implicit_len + 1):
+            implicit_match = True
+            for j in tl.static_range(IMPLICIT_END_LENS[marker]):
+                expected = tl.load(
+                    implicit_reasoning_end_token_ids_ptr + implicit_offset + j
+                )
+                actual = _load_effective_token(
+                    all_token_ids_ptr,
+                    all_token_ids_stride,
+                    input_ids_ptr,
+                    cur_req_first_pos,
+                    req_state_idx,
+                    total_len,
+                    i + j,
+                )
+                implicit_match = implicit_match & (actual == expected)
+            if implicit_match:
+                last_end = tl.maximum(last_end, i)
+        implicit_offset += implicit_len
+
+    if len(IMPLICIT_END_LENS):
+        # Include completed forced ends that overlap a possible suffix prefix.
+        # Otherwise self-overlapping markers could restart forcing indefinitely.
+        force_lo = tl.maximum(0, total_len - 2 * END_LEN + 2)
+        latest_forced_end = -1
+        for i in tl.range(force_lo, effective_len - END_LEN + 1):
+            force_match = _effective_sequence_matches(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                input_ids_ptr,
+                cur_req_first_pos,
+                req_state_idx,
+                total_len,
+                reasoning_end_token_ids_ptr,
+                0,
+                i,
+                END_LEN,
+            )
+            if force_match:
+                last_end = tl.maximum(last_end, i + END_LEN - 1)
+                latest_forced_end = i + END_LEN - 1
+
+        forced_prefix_len = 0
+        for prefix_len in tl.static_range(1, END_LEN):
+            if effective_len >= prefix_len:
+                suffix_start = effective_len - prefix_len
+                prefix_match = _effective_sequence_matches(
+                    all_token_ids_ptr,
+                    all_token_ids_stride,
+                    input_ids_ptr,
+                    cur_req_first_pos,
+                    req_state_idx,
+                    total_len,
+                    reasoning_end_token_ids_ptr,
+                    0,
+                    suffix_start,
+                    prefix_len,
+                )
+                if prefix_match and suffix_start > latest_forced_end:
+                    active_start = _active_reasoning_start_before(
+                        all_token_ids_ptr,
+                        all_token_ids_stride,
+                        input_ids_ptr,
+                        cur_req_first_pos,
+                        req_state_idx,
+                        total_len,
+                        suffix_start,
+                        reasoning_start_token_ids_ptr,
+                        natural_reasoning_end_token_ids_ptr,
+                        reasoning_end_token_ids_ptr,
+                        implicit_reasoning_end_token_ids_ptr,
+                        START_LEN,
+                        NATURAL_END_LEN,
+                        END_LEN,
+                        IMPLICIT_END_LENS,
+                    )
+                    if (
+                        active_start >= 0
+                        and suffix_start >= active_start + START_LEN + budget
+                    ):
+                        forced_prefix_len = prefix_len
+        if forced_prefix_len:
+            force_token_id = tl.load(reasoning_end_token_ids_ptr + forced_prefix_len)
+            tl.store(logits_ptr + token_idx * logits_stride + force_token_id, 1.0e9)
+            return
 
     if last_start < 0 or last_start <= last_end:
         return
@@ -333,6 +628,32 @@ def _thinking_budget_kernel(
     num_reasoning_tokens = effective_len - reasoning_start
     if num_reasoning_tokens < budget:
         return
+
+    implicit_offset = 0
+    budget_end = reasoning_start + budget
+    for marker in tl.static_range(len(IMPLICIT_END_LENS)):
+        for prefix_len in tl.static_range(1, IMPLICIT_END_LENS[marker]):
+            suffix_start = effective_len - prefix_len
+            if (
+                suffix_start >= reasoning_start
+                and suffix_start < budget_end
+                and effective_len < budget_end + IMPLICIT_END_LENS[marker] - 1
+            ):
+                prefix_match = _effective_sequence_matches(
+                    all_token_ids_ptr,
+                    all_token_ids_stride,
+                    input_ids_ptr,
+                    cur_req_first_pos,
+                    req_state_idx,
+                    total_len,
+                    implicit_reasoning_end_token_ids_ptr,
+                    implicit_offset,
+                    suffix_start,
+                    prefix_len,
+                )
+                if prefix_match:
+                    return
+        implicit_offset += IMPLICIT_END_LENS[marker]
 
     # If the tail already ends with a prefix of the forced end sequence
     # (even from a resumed prompt), continue from the next marker token.
@@ -380,11 +701,21 @@ def apply_thinking_budget(
     reasoning_start_token_ids: torch.Tensor,
     natural_reasoning_end_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
+    implicit_reasoning_end_token_ids: torch.Tensor | None = None,
+    implicit_reasoning_end_lengths: tuple[int, ...] | None = None,
 ) -> None:
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
     natural_end_len = natural_reasoning_end_token_ids.shape[0]
     end_len = reasoning_end_token_ids.shape[0]
+    if implicit_reasoning_end_lengths is None:
+        implicit_reasoning_end_lengths = (
+            ()
+            if implicit_reasoning_end_token_ids is None
+            else (1,) * implicit_reasoning_end_token_ids.shape[0]
+        )
+    if implicit_reasoning_end_token_ids is None:
+        implicit_reasoning_end_token_ids = natural_reasoning_end_token_ids
 
     _update_committed_marker_cache_kernel[(req_ids.shape[0],)](
         req_ids,
@@ -397,9 +728,18 @@ def apply_thinking_budget(
         cached_scan_pos,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
+        implicit_reasoning_end_token_ids,
+        reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
-        MAX_LEN=max(start_len, natural_end_len),
+        IMPLICIT_END_LENS=implicit_reasoning_end_lengths,
+        END_LEN=end_len,
+        MAX_LEN=max(
+            start_len,
+            natural_end_len,
+            end_len if implicit_reasoning_end_lengths else 0,
+            *implicit_reasoning_end_lengths,
+        ),
         BLOCK=_COLD_SCAN_BLOCK,
     )
 
@@ -418,7 +758,9 @@ def apply_thinking_budget(
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
+        implicit_reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
         END_LEN=end_len,
+        IMPLICIT_END_LENS=implicit_reasoning_end_lengths,
     )
