@@ -154,9 +154,15 @@ def test_get_bytes_with_limit_streams_instead_of_materializing() -> None:
             "get_response",
             return_value=response,
         ) as get_response,
-        pytest.raises(HTTPResponseSizeExceededError, match="maximum size"),
+        pytest.raises(HTTPResponseSizeExceededError, match="maximum size") as exc_info,
     ):
-        connection.get_bytes("http://example.com/media", max_bytes=4)
+        connection.get_bytes(
+            "http://example.com/media",
+            max_bytes=4,
+            max_bytes_parameter="image_filesize_mb",
+        )
+
+    assert exc_info.value.parameter == "image_filesize_mb"
 
     get_response.assert_called_once_with(
         "http://example.com/media",

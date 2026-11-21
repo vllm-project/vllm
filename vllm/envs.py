@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
+    VLLM_MAX_IMAGE_FILESIZE_MB: int = 256
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
     VLLM_MAX_MEDIA_PREPROCESSING_BYTES: int = 715_827_880
@@ -1045,6 +1046,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # embedding at hidden_size 4096.
     "VLLM_MAX_EMBED_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_EMBED_DECODE_BYTES", "2147483648")
+    ),
+    # Maximum compressed image filesize in MB for HTTP, data URL, and local
+    # file inputs. Set to 0 to disable. Default is 256 MB.
+    "VLLM_MAX_IMAGE_FILESIZE_MB": lambda: int(
+        os.getenv("VLLM_MAX_IMAGE_FILESIZE_MB", "256")
     ),
     # Maximum number of worker threads used for STT preprocessing. The default
     # intentionally caps at 2 because that performed best in profiling.
@@ -2589,6 +2595,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_DECODE_BYTES",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_EMBED_DECODE_BYTES",
+        "VLLM_MAX_IMAGE_FILESIZE_MB",
         "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB",
         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",

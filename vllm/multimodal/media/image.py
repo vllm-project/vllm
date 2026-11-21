@@ -11,8 +11,10 @@ import torch
 from PIL import Image
 
 import vllm.envs as envs
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.import_utils import has_torchcodec_image_decoding
+from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
@@ -101,6 +103,24 @@ class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
             )
         self.rgba_background_color = rgba_bg
 
+    def get_max_bytes(self) -> int | None:
+        max_size_mb = envs.VLLM_MAX_IMAGE_FILESIZE_MB
+        return max_size_mb * MiB_bytes if max_size_mb > 0 else None
+
+    def get_max_bytes_parameter(self) -> str:
+        return "image_filesize_mb"
+
+    def _validate_encoded_size(self, size: int) -> None:
+        max_bytes = self.get_max_bytes()
+        if max_bytes is not None and size > max_bytes:
+            max_size_mb = max_bytes / MiB_bytes
+            raise VLLMValidationError(
+                "Maximum image file size exceeded: "
+                f"VLLM_MAX_IMAGE_FILESIZE_MB={max_size_mb:g}",
+                parameter=self.get_max_bytes_parameter(),
+                value=size / MiB_bytes,
+            )
+
     def _convert_image_mode(
         self, image: Image.Image | MediaWithBytes[Image.Image]
     ) -> Image.Image:
@@ -120,6 +140,7 @@ class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
         }
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image | torch.Tensor]:
+        self._validate_encoded_size(len(data))
         try:
             # Opening only parses the header, so the limits below are checked
             # before any pixel data is decoded.
@@ -163,9 +184,18 @@ class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
     def load_base64(
         self, media_type: str, data: str
     ) -> MediaWithBytes[Image.Image | torch.Tensor]:
+        max_bytes = self.get_max_bytes()
+        if max_bytes is not None:
+            encoded_size = (len(data) * 3) // 4
+            if data.endswith("=="):
+                encoded_size -= 2
+            elif data.endswith("="):
+                encoded_size -= 1
+            self._validate_encoded_size(encoded_size)
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image | torch.Tensor]:
+        self._validate_encoded_size(filepath.stat().st_size)
         return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(

@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from io import BytesIO
 
 import httpx
 import openai
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 from PIL import Image
@@ -167,6 +169,7 @@ def server():
 
     # ROCm: Allow more time to download videos from external sources.
     env_overrides = {
+        "VLLM_MAX_IMAGE_FILESIZE_MB": "16",
         **(
             {
                 "VLLM_VIDEO_FETCH_TIMEOUT": "120",
@@ -178,6 +181,22 @@ def server():
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_rejects_oversized_image_data_url(client: openai.AsyncOpenAI):
+    image_buffer = BytesIO()
+    Image.new("RGB", (336, 336), color="red").save(image_buffer, format="PNG")
+    image_bytes = image_buffer.getvalue() + bytes(17 * 1024 * 1024)
+    image_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}"
+
+    with pytest.raises(openai.BadRequestError, match="VLLM_MAX_IMAGE_FILESIZE_MB"):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=dummy_messages_from_image_url(image_url),
+            max_completion_tokens=1,
+            temperature=0.0,
+        )
 
 
 @pytest_asyncio.fixture
