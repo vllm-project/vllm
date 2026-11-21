@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is used for /tests and /benchmarks."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple
@@ -365,13 +365,15 @@ def check_activation_quant_fallback(
     kernel: str,
     requested_key: QuantKey | None,
     executed_key: QuantKey | None,
+    skipped: Sequence[str] = (),
 ) -> str | None:
     """Check a kernel that runs `executed_key` activations for a layer that
     requests `requested_key`.
 
     Running a requested activation quantization as a different one (e.g.
     Marlin running W8A8 as W8A16) is a fallback. Adding activation
-    quantization to an unquantized request is not.
+    quantization to an unquantized request is not. The fallback warning lists
+    `skipped`, why each kernel ahead of `kernel` was passed over.
 
     Returns:
         Why VLLM_STRICT_QUANT_SCHEME rejects the fallback, or None if the kernel
@@ -385,6 +387,9 @@ def check_activation_quant_fallback(
     msg = f"{kernel} runs {requested_key} activations as {executed}"
     if envs.VLLM_STRICT_QUANT_SCHEME:
         return f"{msg}, which VLLM_STRICT_QUANT_SCHEME=1 forbids"
+    if skipped:
+        msg += " (higher-priority kernels were skipped:\n - "
+        msg += "\n - ".join(skipped) + "\n)"
     logger.warning_once(
         "%s. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.", msg
     )

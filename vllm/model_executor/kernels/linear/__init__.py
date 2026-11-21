@@ -12,7 +12,7 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 import torch
@@ -678,12 +678,15 @@ _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
 def _check_activation_fallback(
-    kernel: type[LinearKernel], activation_quant_key: QuantKey | None
+    kernel: type[LinearKernel],
+    activation_quant_key: QuantKey | None,
+    skipped: Sequence[str] = (),
 ) -> str | None:
     return check_activation_quant_fallback(
         kernel.__name__,
         activation_quant_key,
         kernel.executed_activation_key(activation_quant_key),
+        skipped,
     )
 
 
@@ -728,7 +731,9 @@ def _first_usable_kernel(
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
-        if reason := _check_activation_fallback(kernel_cls, activation_quant_key):
+        if reason := _check_activation_fallback(
+            kernel_cls, activation_quant_key, failure_reasons
+        ):
             failure_reasons.append(reason)
             continue
 
@@ -801,7 +806,7 @@ def choose_scaled_mm_linear_kernel(
         _KernelT: Chosen kernel.
 
     """
-    failure_reason_list = []
+    failure_reason_list: list[str] = []
 
     if force_kernel is not None:
         can_implement, failure_reason = is_supported_and_can_implement_kernel(
@@ -836,7 +841,9 @@ def choose_scaled_mm_linear_kernel(
             is_supported_and_can_implement_kernel(kernel, config, compute_capability)
         )
         if is_supported_and_can_implement:
-            fallback_reason = _check_activation_fallback(kernel, activation_quant_key)
+            fallback_reason = _check_activation_fallback(
+                kernel, activation_quant_key, failure_reason_list
+            )
             if fallback_reason is None:
                 return kernel
             failure_reason = fallback_reason
