@@ -244,6 +244,21 @@ steps:
       models/inkling2/test_model.py
       -k 'humming or sm12x or loop_norm or conv_mix'
 
+- label: ":nvidia: (L4) Inkling 2 SM89"
+  key: inkling2-sm89-tests
+  automatic_shard: true
+  timeout_in_minutes: 30
+  device: l4
+  optional: true
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/inkling2/
+  - vllm/utils/humming.py
+  - tests/models/inkling2/
+  commands:
+    # Ada runs the Triton paths without PDL, TMA or the csrc conv/mix kernels.
+    - pytest -v -s models/inkling2
+
 # Disabled until the gguf installation is locked.
 # - label: ":nvidia: (B200) Flint"
 #   key: flint-unit-tests-b200
