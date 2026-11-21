@@ -83,6 +83,7 @@ def init_scale_out_state(
         enable_log_outputs=args.enable_log_outputs,
         enable_force_include_usage=args.enable_force_include_usage,
         force_no_detokenize=args.tokens_only,
+        enable_force_include_usage=getattr(args, "enable_force_include_usage", False),
     )
 
 
