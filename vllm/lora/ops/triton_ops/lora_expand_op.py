@@ -182,7 +182,11 @@ def _lora_expand(
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(0) == len(lora_b_weights)
-    assert output_tensor.is_contiguous()
+    assert output_tensor.is_contiguous() or (
+        output_tensor.ndim == 2
+        and output_tensor.stride(1) == 1
+        and output_tensor.stride(0) >= output_tensor.size(1)
+    )
 
     # metadata sanity check.
     M = inputs.size(1)
