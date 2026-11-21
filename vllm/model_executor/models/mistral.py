@@ -106,6 +106,17 @@ class MistralAttention(LlamaAttention):
         llama_4_scaling_config: dict[str, int | float | str] | None = getattr(
             config, "llama_4_scaling", None
         )
+        if llama_4_scaling_config is None:
+            rope_parameters = getattr(config, "rope_parameters", None) or {}
+            beta = rope_parameters.get("llama_4_scaling_beta")
+            original_max_position = rope_parameters.get(
+                "original_max_position_embeddings"
+            )
+            if beta is not None and original_max_position is not None:
+                llama_4_scaling_config = {
+                    "beta": beta,
+                    "original_max_position_embeddings": original_max_position,
+                }
         self.do_llama_4_scaling = llama_4_scaling_config is not None
         if self.do_llama_4_scaling:
             assert llama_4_scaling_config is not None
