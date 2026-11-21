@@ -8,6 +8,7 @@
 
 from packaging import version
 
+from vllm.model_executor.kernel_packages import kernel_site
 from vllm.model_executor.layers.mamba.ops.triton_helpers import (
     fast_exp,
     launch_autotuned,
@@ -538,6 +539,7 @@ def _chunk_scan_fwd_kernel(
         )
 
 
+@kernel_site
 def _chunk_scan_fwd(
     cb,
     x,
