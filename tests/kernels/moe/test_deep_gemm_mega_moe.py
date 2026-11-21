@@ -1597,9 +1597,11 @@ def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
 def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
     dist_init, act_name, fuse_shared
 ):
-    """A 128x128 block-FP8 checkpoint loaded through the GLM experts matches
+    """A 128x128 block-FP8 checkpoint loaded through the block-FP8 experts matches
     the dequantized reference."""
-    from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
+    from vllm.model_executor.layers.fused_moe.block_fp8_mega_moe import (
+        BlockFp8MegaMoEExperts,
+    )
 
     fmt, act = MEGA_MOE_FP8_BLOCK_SM90, ACTIVATIONS[act_name]
     torch.manual_seed(0)
@@ -1609,7 +1611,7 @@ def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     with torch.device(device):
-        experts = Glm5NextMegaMoEExperts(
+        experts = BlockFp8MegaMoEExperts(
             vllm_config,  # type: ignore[arg-type]
             weight_block_size=(128, 128),
             num_shared_experts=int(fuse_shared),

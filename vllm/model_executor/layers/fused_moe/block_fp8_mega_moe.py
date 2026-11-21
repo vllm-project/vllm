@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash adapter for the DeepGEMM MegaMoE kernel."""
+"""DeepGEMM MegaMoE loading for BF16 and block-FP8 checkpoints."""
 
 import torch
 from torch import nn
@@ -26,12 +26,12 @@ logger = init_logger(__name__)
 Shard = tuple[int | None, str]
 
 
-class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
-    """MegaMoE experts loaded from a GLM-5.3 checkpoint.
+class BlockFp8MegaMoEExperts(DeepGemmMegaMoEExperts):
+    """MegaMoE experts loaded from BF16 or block-FP8 checkpoints.
 
     A BF16 checkpoint (`weight_block_size` None) runs the BF16 kernel and loads
-    as is. GLM-5.3-Flash's block-FP8 checkpoint stores E4M3 weights with one
-    float32 scale per `weight_block_size` block. Loading writes each weight
+    as is. A block-FP8 checkpoint stores E4M3 weights with one
+    scale per `weight_block_size` block. Loading writes each weight
     shard straight into the kernel layout and stages its block scale in
     `*_weight_scale_inv`. Once a load is complete, the model's
     `process_weights_after_loading` calls `finalize_block_fp8_weights`. On SM90
@@ -59,7 +59,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         elif current_platform.is_device_capability(90):
             if weight_block_size != (128, 128):
                 raise NotImplementedError(
-                    "GLM-5.3 MegaMoE on SM90 takes 128x128 block-FP8 weights, "
+                    "MegaMoE on SM90 takes 128x128 block-FP8 weights, "
                     f"not {weight_block_size} blocks."
                 )
             weight_format = MEGA_MOE_FP8_BLOCK_SM90
@@ -262,7 +262,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         if not torch.equal(block_scale, block_scale.log2().round().exp2()):
             assert self.weight_block_size is not None
             logger.warning_once(
-                "GLM-5.3-Flash on the deep_gemm_mega_moe backend: the checkpoint's "
+                "The deep_gemm_mega_moe backend: the checkpoint's "
                 "%dx%d block-FP8 MoE scales are not all powers of two, so "
                 "requantizing them to MXFP8 (UE8M0 scales per 1x32) changes the "
                 "expert weights. Use another moe_backend to run the block-FP8 "
@@ -275,4 +275,4 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
             self._load_weight(dst_scale, s, shard_id, True)
 
 
-Glm5NextMegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
+BlockFp8MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
