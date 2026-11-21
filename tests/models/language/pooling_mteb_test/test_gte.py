@@ -49,6 +49,7 @@ MODELS = [
     # So only test one (the most widely used) model
     EmbedModelInfo(
         "Alibaba-NLP/gte-multilingual-base",
+        trust_remote_code=True,
         architecture="GteNewModel",
         mteb_score=0.775074696,
         mteb_tol=2e-3,
@@ -61,12 +62,14 @@ MODELS = [
     ),
     EmbedModelInfo(
         "Alibaba-NLP/gte-base-en-v1.5",
+        trust_remote_code=True,
         architecture="GteNewModel",
         hf_overrides={"architectures": ["GteNewModel"]},
         enable_test=False,
     ),
     EmbedModelInfo(
         "Alibaba-NLP/gte-large-en-v1.5",
+        trust_remote_code=True,
         architecture="GteNewModel",
         hf_overrides={"architectures": ["GteNewModel"]},
         enable_test=False,
@@ -129,6 +132,7 @@ RERANK_MODELS = [
     ),
     RerankModelInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
+        trust_remote_code=True,
         mteb_score=0.33062,
         mteb_tol=1e-2,
         architecture="GteNewForSequenceClassification",
