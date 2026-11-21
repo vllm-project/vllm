@@ -85,6 +85,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._attn_group_is_state: list[bool] = [False]
+        self._has_state_attn_groups: bool = False
         self._num_ssm_scratch_blocks = 0
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
@@ -926,7 +927,10 @@ def test_loaded_kv_cache_groups_are_every_transfer_group():
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
-def test_scheduler_rejects_circular_buffer_without_mamba():
+def test_scheduler_accepts_circular_buffer_without_mamba_in_read():
+    # A ring group owns one non-prefix-cacheable block per request. READ pulls
+    # it like any other state group, so it needs no accompanying mamba group
+    # (e.g. DeepSeek-V4.1's KV compressor, which has no recurrent state).
     tail = KVCacheGroup.from_layers(
         {"tail": CircularBufferManager.layer_config(_tail_spec(block_size=8))}
     )
@@ -938,8 +942,15 @@ def test_scheduler_rejects_circular_buffer_without_mamba():
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
 
-    with pytest.raises(NotImplementedError, match="CircularBufferManager"):
-        moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(), "engine", config
+    )
+
+    # The ring lands in the attention half and is flagged as state, so a full
+    # local prefix hit still pulls it.
+    assert sched._has_mamba is False
+    assert sched._has_state_attn_groups is True
+    assert sched._attn_group_is_state == [False, True]
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
@@ -967,6 +978,30 @@ def test_split_block_groups_rejects_non_hybrid_use():
 
     with pytest.raises(moriio_common.MoRIIOError, match="non-hybrid"):
         sched.split_block_groups(([5, 6, 7],))
+
+
+def test_split_block_groups_handles_ring_group_without_mamba():
+    # Attention group 0 plus a ring group 1: no mamba, so the mamba half is
+    # empty and the ring keeps its single block (rings carry no sliding
+    # window, so get_exchange_clipped_blocks leaves them alone).
+    sched = _FakeScheduler(
+        _has_mamba=False,
+        _has_state_attn_groups=True,
+        _attn_group_ids=[0, 1],
+        _attn_group_is_state=[False, True],
+        _is_hma_required=True,
+        blocks_per_sw=[0, 0],
+    )
+    sched.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[None, None],
+        select_transfer_block_ids=lambda block_ids: tuple(block_ids),
+        hash_block_size=16,
+    )
+
+    attn, mamba = sched.split_block_groups(([5, 6, 7], [42]))
+
+    assert attn == [[5, 6, 7], [42]]
+    assert mamba == []
 
 
 def test_split_block_groups_accepts_empty_abort_payload():
@@ -1198,6 +1233,48 @@ def test_update_state_preserves_each_mamba_group():
         [90],
         [80],
     ]
+
+
+def _make_ring_read_scheduler():
+    """DeepSeek-V4.1 shape: attention group 0 plus a ring group 1, no mamba."""
+    sched = _make_read_scheduler()
+    sched._has_mamba = False
+    sched._attn_group_ids = [0, 1]
+    sched._mamba_group_ids = []
+    sched._attn_group_is_state = [False, True]
+    sched._has_state_attn_groups = True
+    sched._is_hma_required = True
+    sched.blocks_per_sw = [0, 0]
+    return sched
+
+
+def test_update_state_ring_block_survives_partial_hit_alignment():
+    # The ring owns one block on both sides, so the suffix alignment that
+    # trims the attention group's locally recomputed tail must leave it whole.
+    sched = _make_ring_read_scheduler()
+    request = _make_read_request([[10, 11], [90]])
+
+    sched.update_state_after_alloc(
+        request,
+        _FakeBlocks(all_groups=([100, 101, 102], [200])),
+        num_external_tokens=256,
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200]]
+    assert sched._req_kv_params["req"]["remote_block_ids"] == [[10, 11], [90]]
+
+
+def test_update_state_full_attention_hit_still_carries_ring_block():
+    sched = _make_ring_read_scheduler()
+    request = _make_read_request([[10, 11], [90]])
+
+    sched.update_state_after_alloc(
+        request,
+        _FakeBlocks(all_groups=([100, 101], [200])),
+        num_external_tokens=0,
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[], [200]]
 
 
 def test_align_read_blocks_allows_configured_lookahead_tail():

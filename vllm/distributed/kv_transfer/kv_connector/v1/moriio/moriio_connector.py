@@ -629,14 +629,14 @@ class MoRIIOConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         attn_block_size = self.block_size
         max_decode_tail_tokens = 1 + vllm_config.num_lookahead_tokens
+        attn_groups = [
+            kv_cache_config.transfer_groups[group_id]
+            for group_id in self._attn_group_ids
+        ]
         # Per attention group: not prefix-cacheable, so read even on a full hit.
-        self._attn_group_is_state: list[bool] = []
+        self._attn_group_is_state = [not g.prefix_cacheable for g in attn_groups]
+        self._has_state_attn_groups = any(self._attn_group_is_state)
         if self._has_mamba:
-            attn_groups = [
-                kv_cache_config.transfer_groups[group_id]
-                for group_id in self._attn_group_ids
-            ]
-            self._attn_group_is_state = [not g.prefix_cacheable for g in attn_groups]
             dcp_size = vllm_config.parallel_config.decode_context_parallel_size
             # The smallest attention block bounds every group's local tail.
             attn_block_size = min(
@@ -656,10 +656,8 @@ class MoRIIOConnectorScheduler:
             )
         )
         if self._is_hma_required:
-            # MoRIIO handles sliding-window and mamba/KDA groups in READ mode, and
-            # circular-buffer groups only alongside mamba/KDA in READ mode. Other
-            # hybrid cache specs still fail closed.
-            allow_circular_buffer = self._has_mamba and self.mode == MoRIIOMode.READ
+            # Circular buffer support only implemented for READ mode.
+            allow_circular_buffer = self.mode == MoRIIOMode.READ
             unsupported = [
                 g.manager_cls.__name__
                 for g in kv_cache_config.transfer_groups
@@ -681,7 +679,7 @@ class MoRIIOConnectorScheduler:
                     f"cache group manager(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-            # Sliding-window MLA slots are MLA latents — WRITE handles them.
+            # SWA not supported in WRITE mode, unless it's SWA MLA
             if self.mode == MoRIIOMode.WRITE and any(
                 issubclass(g.manager_cls, SlidingWindowManager)
                 and not any(
@@ -1127,6 +1125,8 @@ class MoRIIOConnectorScheduler:
                     if "remote_engine_id" in params:
                         adjusted_remote_block_ids = remote_block_ids
                         if num_external_tokens > 0:
+                            # Not a full local prefix cache hit. Need to pull blocks
+                            # from remote prefill
                             if self._has_mamba:
                                 # READ is synchronous, so allocate_slots may hash
                                 # destination blocks before this hook runs. Pair
@@ -1216,9 +1216,9 @@ class MoRIIOConnectorScheduler:
                                     adjusted_remote_block_ids.append(aligned_remote)
                                 local_block_ids = aligned_local_block_ids
                         else:
-                            if self._has_mamba:
-                                # Attention can be a complete local hit, but the
-                                # recurrent state is never prefix-cacheable.
+                            # Attention was a full local cache hit, but any non-cached
+                            # groups still need to be pulled (recurrent state, ring).
+                            if self._has_mamba or self._has_state_attn_groups:
                                 attn_block_groups, mamba_block_groups = (
                                     self.split_block_groups(blocks.get_block_ids())
                                 )
@@ -1586,14 +1586,18 @@ class MoRIIOConnectorScheduler:
     ) -> tuple[list[list[int]], list[list[int]]]:
         """Select transferable attention and Mamba block groups.
 
-        The wire payload stores every attention group first, followed by every
-        Mamba group, each in transfer-group order. Sliding-window groups keep
-        only their window; Mamba groups only their running-state slot.
+        - The wire payload stores every attention group first, followed by every
+        Mamba group, each in transfer-group order.
+        - Sliding-window groups keep only their window
+        - Mamba groups keep only their running-state slot.
+        - Circular buffer groups sit in the attention half and keep their single block
+
+        Returns: attention groups (incl circular buffers), mamba groups
         """
         if not block_ids:
             return [], []
-        if not self._has_mamba:
-            raise MoRIIOError("Mamba block groups requested for a non-hybrid model")
+        if not (self._has_mamba or self._has_state_attn_groups):
+            raise MoRIIOError("Hybrid block groups requested for a non-hybrid model")
         # Also window-clips sliding-window attention groups.
         transfer_block_ids = self.get_exchange_clipped_blocks(block_ids)
         attn = [list(transfer_block_ids[group_id]) for group_id in self._attn_group_ids]
