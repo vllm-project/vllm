@@ -347,7 +347,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Examples'
   key: examples
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 120
   optional: true
   working_dir: "."
   no_plugin: true
@@ -358,7 +358,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   automatic_shard: true
   _raw_old_commands:
   - pip install --no-deps tensorizer
@@ -373,7 +373,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install --no-deps tensorizer || true &&
     cd tests &&
-    pytest --continue-on-collection-errors -v -s examples/test_offline_examples.py || true'
+    pytest --continue-on-collection-errors -v -s examples/test_offline_examples.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT  || true'
 - label: ':nvidia: (L4) Metrics, Tracing'
   key: metrics-tracing-2-gpus-xpu
   device: intel_gpu

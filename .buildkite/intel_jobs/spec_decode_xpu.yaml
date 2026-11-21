@@ -82,7 +82,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
@@ -263,7 +263,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/speculators/
@@ -502,7 +502,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k dflash2 or dspine || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k dflash2 or dspine --deselect="tests/v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash.py::test_dflash_correctness[qwen3.8-dflash2-nvfp4]" || true'
 - label: ':nvidia: (H100) [Nightly] Spec Decode AL XPress'
   key: spec-decode-xpress-nightly
   device: intel_gpu

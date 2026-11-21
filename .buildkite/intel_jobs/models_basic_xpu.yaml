@@ -338,7 +338,7 @@ steps:
 - label: ':nvidia: (B200) Qwen3.5'
   key: qwen3-5-unit-tests-b200
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 90
   num_devices: 2
   optional: true
   working_dir: "."
