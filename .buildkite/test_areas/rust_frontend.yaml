@@ -335,6 +335,51 @@ steps:
       - tests/entrypoints/openai/responses
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 18GB) Rust Frontend Multimodal"
+  key: rust-frontend-multimodal
+  automatic_shard: true
+  device: h200_18gb
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - vllm/entrypoints/serve/
+  - vllm/entrypoints/scale_out/
+  - vllm/multimodal/
+  - tests/utils.py
+  - tests/entrypoints/multimodal/conftest.py
+  - tests/entrypoints/multimodal/openai/chat_completion/test_vision.py
+  - tests/entrypoints/multimodal/openai/responses/test_image.py
+  - tests/entrypoints/scale_out/render/test_render_multimodal.py
+  - tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  # Deselected: beam search and --mm-processor-cache-gb (unsupported); image URLs on the local
+  # asset server (Rust refuses loopback media hosts, #65348); base64 image chats (Phi-3.5-vision
+  # prompts lack the BOS and newline around the image that HF adds); the ICNS error wording.
+  - >-
+    pytest -v -s
+    entrypoints/multimodal/openai/chat_completion/test_vision.py
+    -k "not beamsearch and not processor_only_cache and not test_single_chat_session_image
+    and not test_chat_streaming_image and not test_completions_with_image
+    and not (test_multi_image_input and image_urls0) and not icns"
+  # Image URLs on the local asset server need loopback media hosts (#65348).
+  - >-
+    pytest -v -s
+    entrypoints/multimodal/openai/responses/test_image.py
+    -k "not (test_single_chat_session_image and not base64encoded)
+    and not (test_multi_image_input and image_urls0)"
+  # The Rust frontend has no --allowed-local-media-path, so its error does not name the flag.
+  - pytest -v -s entrypoints/scale_out/render/test_render_multimodal.py -k "not rejects_local_file_when_disabled"
+  # Metadata-only (cached) features are not supported, and the misordered-input error is worded differently.
+  - >-
+    pytest -v -s
+    entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py
+    -k "not test_content_parts_before_features_is_rejected
+    and not (test_features_with_content_parts and True)"
+
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
   key: rust-frontend-distributed
   automatic_shard: true
