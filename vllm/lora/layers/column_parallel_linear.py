@@ -33,10 +33,9 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         == len(layer.output_slices)
     )
 
-    output = layer._get_quant_method().apply(layer.base_layer, x, bias)
-
+    out_orig_shape = (*x.shape[:-1], -1)
     x = x.view(-1, x.shape[-1])
-    output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+    output = layer._get_quant_method().apply(layer.base_layer, x, bias)
 
     # Since communication is needed, the buffer is directly initialized as a
     # tensor rather than a tuple of tensor.
@@ -202,7 +201,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             divide(output_size, self.tp_size) for output_size in self.output_sizes
         )
         self.n_slices = len(self.output_slices)
-        self.output_ids = (self.tp_rank,) * self.n_slices
+        replicated_shard_ids = getattr(self.base_layer, "replicated_shard_ids", ())
+        self.output_ids = tuple(
+            0 if i in replicated_shard_ids else self.tp_rank
+            for i in range(self.n_slices)
+        )
 
     def create_lora_weights(
         self,

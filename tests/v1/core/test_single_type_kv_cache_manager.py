@@ -20,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
+    DFlashSlidingWindowManager,
     FullAttentionManager,
     MambaManager,
     RSWAManager,
@@ -78,7 +79,7 @@ def test_external_computed_blocks_do_not_corrupt_free_pool():
 def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
     spec = MambaManager.layer_config(
         MambaSpec(block_size=4, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=1,
     )
     block_pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=4)
@@ -106,13 +107,13 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
 def test_mamba_retirement_crosses_null_gaps():
     spec = MambaManager.layer_config(
         MambaSpec(block_size=4, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
-    pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=4)
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=4)
     manager = MambaManager(
         new_kv_cache_group(["layer"], spec),
         block_pool=pool,
-        enable_caching=False,
+        enable_caching=True,
         kv_cache_group_id=0,
         scheduler_block_size=4,
     )
@@ -144,7 +145,7 @@ def test_mamba_retirement_crosses_null_gaps():
 def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
     spec = MambaManager.layer_config(
         MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=5,
     )
     pool = BlockPool(num_gpu_blocks=1000, enable_caching=True, hash_block_size=256)
@@ -184,7 +185,7 @@ def test_mamba_checkpoint_admission_matches_allocation(
     """Checkpoint admission must match the subsequent physical allocation."""
     spec = MambaManager.layer_config(
         MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=num_speculative_blocks,
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=64,
@@ -241,7 +242,7 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
     block_size = 128
     spec = MambaManager.layer_config(
         MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=num_speculative_blocks,
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=16,
@@ -254,8 +255,6 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
         kv_cache_group_id=0,
         scheduler_block_size=block_size,
     )
-    # MTP/EAGLE moves the checkpoint one block below the last full block.
-    manager.drop_eagle_checkpoint_block = True
     init_none_hash(sha256)
     prompt_tokens = 6 * block_size + 50
     request = Request(
@@ -275,7 +274,7 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
             request,
             end,
             retention_interval=retention_interval,
-            replay_boundaries=[5 * block_size],
+            replay_boundaries=(5 * block_size,),
         )
         request.num_computed_tokens = end
 
@@ -300,7 +299,7 @@ def get_sliding_window_manager(
     needs_kv_cache_zeroing=False,
 ):
     # Tests don't exercise admission gating; pass a large cap that is a no-op.
-    return SlidingWindowManager(
+    return sliding_window_spec.manager_cls(
         new_kv_cache_group(["layer"], sliding_window_spec),
         block_pool=block_pool,
         enable_caching=enable_caching,
@@ -309,6 +308,303 @@ def get_sliding_window_manager(
         needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def new_dflash_window_layer(num_speculative_tokens=2, **params):
+    # A 10-token tail by default: the 8-token window plus 2 drafts.
+    return DFlashSlidingWindowManager.layer_config(
+        AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        sliding_window=8,
+        num_speculative_tokens=num_speculative_tokens,
+        **params,
+    )
+
+
+def new_dflash_window_manager(layer, num_gpu_blocks, max_admission_blocks=10**9):
+    return layer.manager_cls(
+        new_kv_cache_group(["layer"], layer),
+        block_pool=BlockPool(
+            num_gpu_blocks=num_gpu_blocks, enable_caching=False, hash_block_size=4
+        ),
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        max_admission_blocks_per_request=max_admission_blocks,
+    )
+
+
+def test_dflash_window_backs_only_each_chunks_tail():
+    """Each chunk backs only its trailing tail, and freeing reaches the tails
+    that later chunks' null runs sit above."""
+    manager = new_dflash_window_manager(
+        new_dflash_window_layer(), num_gpu_blocks=32, max_admission_blocks=8
+    )
+    block_pool = manager.block_pool
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    # Two 40-token chunks plus a lookahead slot: blocks below
+    # (num_target_tokens - tail_tokens) // block_size stay null.
+    for num_computed, num_target_tokens in ((0, 40), (40, 80)):
+        num_tokens = num_target_tokens + 1
+        assert (
+            manager.get_num_blocks_to_allocate(
+                "r", num_tokens, [], num_computed, num_computed, num_target_tokens
+            )
+            == 4
+        )
+        manager.allocate_new_blocks("r", num_tokens, num_target_tokens)
+
+    def resident_blocks() -> list[int]:
+        return [i for i, b in enumerate(manager.req_to_blocks["r"]) if not b.is_null]
+
+    assert resident_blocks() == [7, 8, 9, 10, 17, 18, 19, 20]
+    assert block_pool.get_num_free_blocks() == num_free_blocks - 8
+
+    # Processed tokens have no drafts in flight, so 80 of them keep only the
+    # window from token 73 (block 18), like plain sliding window.
+    manager.remove_skipped_blocks("r", 80)
+    assert resident_blocks() == [18, 19, 20]
+    assert block_pool.get_num_free_blocks() == num_free_blocks - 3
+
+    # Admission subtracts the three held blocks from the eight-block cap.
+    assert manager.get_num_blocks_to_reserve("r", 81) == 5
+
+    # A later chunk adds four blocks, with another null run before its tail.
+    manager.allocate_new_blocks("r", 121, 120)
+    assert block_pool.get_num_free_blocks() == num_free_blocks - 7
+    assert manager.get_num_blocks_to_reserve("r", 121) == 1
+
+
+@pytest.mark.parametrize("max_in_flight_steps", [1, 2])
+def test_dflash_window_tail_covers_reads_after_rejected_drafts(max_in_flight_steps):
+    """An allocation's target tokens count the drafts of every step in flight.
+    If all of them are rejected, the next draft step reads the window below
+    the accepted tokens, which must still be backed."""
+    num_speculative_tokens = 3
+    layer = new_dflash_window_layer(
+        num_speculative_tokens=num_speculative_tokens,
+        max_in_flight_steps=max_in_flight_steps,
+    )
+    manager = new_dflash_window_manager(layer, num_gpu_blocks=128)
+    # Every alignment of the tail start within a block.
+    for num_target_tokens in range(40, 48):
+        req_id = str(num_target_tokens)
+        manager.allocate_new_blocks(req_id, num_target_tokens, num_target_tokens)
+        num_accepted_tokens = (
+            num_target_tokens - num_speculative_tokens * max_in_flight_steps
+        )
+        first_read = (
+            num_accepted_tokens - layer.manager_config.params.sliding_window + 1
+        )
+        blocks = manager.req_to_blocks[req_id]
+        assert blocks[0].is_null
+        assert not any(block.is_null for block in blocks[first_read // 4 :])
+
+
+def test_dflash_window_admission_cap_counts_in_flight_tails():
+    config = new_dflash_window_layer(
+        num_speculative_tokens=1, max_in_flight_steps=2
+    ).manager_config
+    # The processed prefix's window and two in-flight tails, 4 blocks each,
+    # below the plain sliding-window bound for 100 in-flight tokens.
+    assert DFlashSlidingWindowManager.max_admission_blocks(config, 4, 100, 1000) == 12
+    # The 7-token window below the processed tokens plus 4 in-flight tokens
+    # spans at most 4 blocks, as for plain sliding window.
+    assert DFlashSlidingWindowManager.max_admission_blocks(config, 4, 4, 1000) == 4
+
+
+@pytest.mark.parametrize(("num_tokens", "num_reserved_blocks"), [(5, 2), (200, 12)])
+def test_dflash_window_admission_reserves_at_most_the_request_span(
+    num_tokens, num_reserved_blocks
+):
+    """A short request never holds more drafter blocks than its tokens span, so
+    admission reserves the smaller of that span and the cap."""
+    manager = new_dflash_window_manager(
+        new_dflash_window_layer(), num_gpu_blocks=64, max_admission_blocks=12
+    )
+    assert manager.get_num_blocks_to_reserve("r", num_tokens) == num_reserved_blocks
+
+
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "num_lookahead_tokens", "chunks"),
+    [
+        (2, 3, [5] * 20),  # decode-sized steps: the window bound applies
+        (3, 3, [2] + [40] * 8),  # long chunks: the tail bound applies
+    ],
+)
+def test_dflash_window_admission_cap_covers_lookahead_slots(
+    num_speculative_tokens, num_lookahead_tokens, chunks
+):
+    """Each allocation also backs the drafts' lookahead slots past its target
+    tokens, so the cap that sizes the pool and gates admission counts them."""
+    layer = new_dflash_window_layer(
+        num_speculative_tokens=num_speculative_tokens,
+        num_lookahead_tokens=num_lookahead_tokens,
+    )
+    manager = new_dflash_window_manager(layer, num_gpu_blocks=64)
+
+    num_target_tokens = 0
+    max_held = 0
+    for chunk in chunks:
+        num_computed = num_target_tokens
+        manager.remove_skipped_blocks("r", num_computed)
+        num_target_tokens += chunk
+        num_tokens = num_target_tokens + num_lookahead_tokens
+        manager.get_num_blocks_to_allocate(
+            "r", num_tokens, [], num_computed, num_computed, num_target_tokens
+        )
+        manager.allocate_new_blocks("r", num_tokens, num_target_tokens)
+        held = sum(not block.is_null for block in manager.req_to_blocks["r"])
+        max_held = max(max_held, held)
+
+    # One step in flight, so at most one chunk of in-flight tokens.
+    config = layer.manager_config
+    cap = DFlashSlidingWindowManager.max_admission_blocks(config, 4, max(chunks), 1000)
+    cap_without_lookahead = DFlashSlidingWindowManager.max_admission_blocks(
+        config.replace_params(num_lookahead_tokens=0), 4, max(chunks), 1000
+    )
+    assert cap_without_lookahead < max_held <= cap
+
+
+@pytest.mark.parametrize(
+    ("cached", "max_length", "num_hit_blocks"),
+    [
+        ({8, 9}, 40, 10),  # the window before the request end is cached
+        ({8}, 40, 9),  # a missing block ends the hit there
+        ({7, 9}, 40, 8),  # the window's first block is missing: no drafter KV
+        (set(), 24, 6),  # the hit ends below the window: no drafter KV needed
+    ],
+)
+def test_dflash_window_hit_needs_only_the_window_before_request_end(
+    cached, max_length, num_hit_blocks
+):
+    block_size = 4
+    block_pool = BlockPool(
+        num_gpu_blocks=32, enable_caching=True, hash_block_size=block_size
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(10)]
+    for i in cached:
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[i], 0), block_pool.blocks[i + 10]
+        )
+
+    # The first draft of a 41-token request reads tokens 34..40, so the hit
+    # needs drafter blocks from block 8 on, not the 10-token tail's block 7.
+    (blocks,), hit_length = DFlashSlidingWindowManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=max_length,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        block_size=block_size,
+        manager_config=new_dflash_window_layer().manager_config,
+        alignment_tokens=block_size,
+        num_request_tokens=41,
+    )
+
+    assert hit_length == num_hit_blocks * block_size
+    assert [b.block_id for b in blocks] == [
+        i + 10 if i >= 8 else 0 for i in range(num_hit_blocks)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("retention_interval", "cached"), [(None, [2, 3, 4, 7, 8, 9]), (0, [8])]
+)
+def test_dflash_window_sparse_retention_caches_only_what_a_replay_reads(
+    retention_interval, cached
+):
+    """Sparse retention caches only the blocks a replay of the prompt reads,
+    not every chunk's tail, and the replay still hits."""
+    block_pool = BlockPool(num_gpu_blocks=32, enable_caching=True, hash_block_size=4)
+    layer = new_dflash_window_layer()
+    manager = get_sliding_window_manager(layer, block_pool)
+    init_none_hash(sha256)
+    request = Request(
+        request_id="r",
+        prompt_token_ids=list(range(40)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
+    for start, end in [(0, 20), (20, 40)]:
+        manager.remove_skipped_blocks("r", start)
+        manager.allocate_new_blocks("r", end, end)
+        manager.cache_blocks(
+            request, end, retention_interval=retention_interval, replay_boundaries=[39]
+        )
+
+    assert [
+        i
+        for i, block_hash in enumerate(request.block_hashes)
+        if block_pool.get_cached_block(block_hash, [0])
+    ] == cached
+    _, hit_length = DFlashSlidingWindowManager.find_longest_cache_hit(
+        block_hashes=request.block_hashes,
+        max_length=39,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        block_size=4,
+        manager_config=layer.manager_config,
+        alignment_tokens=4,
+        num_request_tokens=40,
+    )
+    assert hit_length == 36
+
+
+@pytest.mark.parametrize("num_external_tokens", [40, 41, 43])
+def test_dflash_window_load_holds_only_the_window(num_external_tokens):
+    """A KV-connector load has no drafts in flight, so it holds the same blocks
+    as plain sliding window: a connector moving the window fills all of them."""
+    layer = new_dflash_window_layer()
+
+    def held_after_load(layer) -> list[int]:
+        manager = new_dflash_window_manager(layer, num_gpu_blocks=32)
+        manager.add_local_computed_blocks("r", [], 0, num_external_tokens)
+        manager.allocate_external_computed_blocks("r", 0, num_external_tokens)
+        manager.allocate_new_blocks("r", num_external_tokens, num_external_tokens)
+        blocks = manager.req_to_blocks["r"]
+        return [i for i, b in enumerate(blocks) if not b.is_null]
+
+    held = held_after_load(layer)
+    assert held == held_after_load(
+        SlidingWindowManager.layer_config(layer.spec, sliding_window=8)
+    )
+    assert held[0] == (num_external_tokens - 8 + 1) // 4
+
+
+@pytest.mark.parametrize(
+    ("num_target_tokens", "resident_blocks"),
+    [
+        (40, [8, 9]),  # the load's window
+        (45, [8, 9, 10, 11]),
+        (52, [10, 11, 12]),  # the tail from token 42: no loaded block
+        (80, [17, 18, 19]),
+    ],
+)
+def test_dflash_window_chunk_after_load_backs_only_its_tail(
+    num_target_tokens, resident_blocks
+):
+    """A chunk past a KV-connector load leaves the loaded blocks below its tail
+    null, and reserves exactly the blocks it backs."""
+    block_pool = BlockPool(num_gpu_blocks=32, enable_caching=False, hash_block_size=4)
+    manager = get_sliding_window_manager(
+        new_dflash_window_layer(), block_pool, enable_caching=False
+    )
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    num_external_tokens = 40
+    num_blocks = manager.get_num_blocks_to_allocate(
+        "r", num_target_tokens, [], num_external_tokens, 0, num_target_tokens
+    )
+    manager.add_local_computed_blocks("r", [], 0, num_external_tokens)
+    manager.allocate_external_computed_blocks(
+        "r", 0, num_external_tokens, num_tokens_main_model=num_target_tokens
+    )
+    manager.allocate_new_blocks("r", num_target_tokens, num_target_tokens)
+
+    blocks = manager.req_to_blocks["r"]
+    assert [i for i, b in enumerate(blocks) if not b.is_null] == resident_blocks
+    assert num_free_blocks - block_pool.get_num_free_blocks() == num_blocks
 
 
 def get_chunked_local_attention_manager(
@@ -507,7 +803,6 @@ def test_chunked_local_attention_possible_cached_prefix():
             block_pool=block_pool,
             block_size=chunked_local_attention_spec.spec.block_size,
             manager_config=chunked_local_attention_spec.manager_config,
-            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
         assert len(computed_blocks) == expect_length
@@ -578,7 +873,6 @@ def test_sliding_window_possible_cached_prefix():
             block_pool=block_pool,
             block_size=sliding_window_spec.spec.block_size,
             manager_config=sliding_window_spec.manager_config,
-            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
         assert len(computed_blocks) == expect_length
@@ -644,7 +938,6 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
         block_pool=block_pool,
         block_size=sliding_window_spec.spec.block_size,
         manager_config=sliding_window_spec.manager_config,
-        drop_eagle_block=False,
         alignment_tokens=hash_block_size,
     )
 
