@@ -81,6 +81,9 @@ class RequestLogger:
             )
             return
 
+        if not logger.isEnabledFor(level):
+            return
+
         logger.log(
             level,
             "Request %s JSON body: %s",
