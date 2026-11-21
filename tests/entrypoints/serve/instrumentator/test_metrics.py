@@ -498,3 +498,75 @@ def test_metrics_exist_run_batch():
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def request_labels_server():
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "1024",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "128",
+        "--prometheus-request-labels",
+        '{"x-fairness-id": "fairness_id", "x-client-id": "client_id"}',
+    ]
+    with RemoteOpenAIServer(MODELS["text"], args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_prometheus_request_labels(request_labels_server):
+    """Allowlisted request headers must appear as label values on per-request
+    families; requests without them record empty values, and engine-wide
+    metrics must not gain the labels."""
+    server = request_labels_server
+    model_name = MODELS["text"]
+    async with server.get_async_client() as client:
+        await client.completions.create(
+            model=model_name,
+            prompt="Hello, my name is",
+            max_tokens=5,
+            temperature=0.0,
+            extra_headers={"x-fairness-id": "premium", "x-client-id": "client-a"},
+        )
+        await client.completions.create(
+            model=model_name,
+            prompt="Hello, my name is",
+            max_tokens=5,
+            temperature=0.0,
+        )
+
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+
+    labeled_success = empty_success = None
+    labeled_e2e_count = False
+    for family in text_string_to_metric_families(response.text):
+        if family.name == "vllm:request_success":
+            for sample in family.samples:
+                if sample.labels.get("fairness_id") == "premium":
+                    labeled_success = sample
+                elif sample.labels.get("fairness_id") == "":
+                    empty_success = sample
+        elif family.name == "vllm:e2e_request_latency_seconds":
+            for sample in family.samples:
+                if (
+                    sample.name == "vllm:e2e_request_latency_seconds_count"
+                    and sample.labels.get("fairness_id") == "premium"
+                    and sample.labels.get("client_id") == "client-a"
+                ):
+                    labeled_e2e_count = True
+        elif family.name == "vllm:num_requests_running":
+            for sample in family.samples:
+                assert "fairness_id" not in sample.labels
+                assert "client_id" not in sample.labels
+
+    assert labeled_success is not None
+    assert labeled_success.labels["client_id"] == "client-a"
+    assert labeled_success.value == 1
+    assert empty_success is not None
+    assert empty_success.labels["client_id"] == ""
+    assert labeled_e2e_count

@@ -2090,3 +2090,40 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     final = queue.get_nowait()
     assert final is not None and final.finished
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+
+
+def test_metrics_labels_reach_finished_and_ttft_stats():
+    """Header-derived labels on the EngineCoreRequest must land on the
+    finished-request stats and stay aligned with the TTFT list, so the
+    Prometheus logger can attribute per-request families."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    labels = {"fairness_id": "premium", "client_id": "client-a"}
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        metrics_labels=labels,
+    )
+    output_processor.add_request(request, None)
+
+    iteration_stats = IterationStats()
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput(request.request_id, [10]),
+            EngineCoreOutput(request.request_id, [11], finish_reason=FinishReason.STOP),
+        ],
+        time.monotonic(),
+        iteration_stats,
+    )
+
+    assert len(iteration_stats.finished_requests) == 1
+    assert iteration_stats.finished_requests[0].metrics_labels == labels
+    # Index-aligned with time_to_first_tokens_iter: one first token, once.
+    assert iteration_stats.time_to_first_token_labels == [labels]

@@ -205,6 +205,7 @@ class RequestState:
         temperature: float | None = None,
         stream_input: bool = False,
         remote_prefill_cached_tokens: int | None = None,
+        metrics_labels: dict[str, str] | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -232,6 +233,7 @@ class RequestState:
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
         self.remote_prefill_cached_tokens = remote_prefill_cached_tokens
+        self.metrics_labels = metrics_labels
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
@@ -348,6 +350,7 @@ class RequestState:
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
+            metrics_labels=request.metrics_labels,
         )
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
@@ -1022,6 +1025,7 @@ class OutputProcessor:
             req_state.stats,
             self.lora_states,
             req_state.lora_name,
+            metrics_labels=req_state.metrics_labels,
         )
 
     def _update_stats_from_finished(
@@ -1042,6 +1046,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
+            metrics_labels=req_state.metrics_labels,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 

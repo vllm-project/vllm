@@ -27,6 +27,9 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.tracing import contains_trace_headers, extract_trace_headers
 from vllm.utils import random_uuid
 
+METRICS_LABEL_VALUE_MAX_LEN = 128
+"""Truncation limit for header values exposed as Prometheus label values."""
+
 
 class BaseServing:
     def __init__(
@@ -45,6 +48,25 @@ class BaseServing:
         if not contains_trace_headers(headers):
             return None
         return extract_trace_headers(headers)
+
+    @staticmethod
+    def _get_metrics_labels(
+        headers: Mapping[str, str],
+        label_headers: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        """Extract allowlisted request headers into Prometheus label values.
+
+        Returns one entry per configured label, keyed by label name, so the
+        label set stays fixed even when a request is missing a header.
+        """
+        if not label_headers:
+            return None
+        return {
+            label: value[:METRICS_LABEL_VALUE_MAX_LEN]
+            if (value := headers.get(header))
+            else ""
+            for header, label in label_headers.items()
+        }
 
     async def _check_model(
         self,
