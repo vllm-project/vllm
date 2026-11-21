@@ -308,6 +308,7 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             sp_size=moe.moe_parallel_config.sp_size,
+            num_sms=all2all_manager.max_sms_used() or 0,
         )
 
     elif moe.use_moonep_kernels:
