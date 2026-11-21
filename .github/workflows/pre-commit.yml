@@ -57,7 +57,6 @@ jobs:
         python-version: "3.12"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
     # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -68,6 +67,7 @@ jobs:
         uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
       env:
         SKIP: pip-compile
+        TY_OUTPUT_FORMAT: github
     - name: pip-compile (only if its inputs changed)
       if: ${{ !cancelled() }}
       run: >-
