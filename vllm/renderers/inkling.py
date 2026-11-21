@@ -16,6 +16,7 @@ input-processing library (mistral-common style) later.
 import contextlib
 
 from vllm.config import VllmConfig
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -27,6 +28,12 @@ from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
+from .hf import (
+    HfTokensPrompt,
+    detokenize_prompt,
+    detokenize_prompt_async,
+    tokenize_prompt,
+)
 from .inkling_encoding import (
     CONTENT_MODEL_END_SAMPLING,
     DEFAULT_REASONING_EFFORT,
@@ -37,7 +44,7 @@ from .inkling_encoding import (
 )
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -134,6 +141,22 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
             self.get_tokenizer(), split_special_tokens=self._is_inkling2
         )
         self._render_async = make_async(self._render, executor=self._executor)
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> HfTokensPrompt:
+        return tokenize_prompt(
+            self.get_tokenizer(),
+            prompt,
+            params,
+            want_offsets=self._wants_offsets(prompt, params),
+        )
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        return detokenize_prompt(self.get_tokenizer(), prompt)
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
     def _render(
         self,

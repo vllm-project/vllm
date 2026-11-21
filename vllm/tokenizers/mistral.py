@@ -36,6 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
+from vllm.tokenizers.hf import HfTokenizerBase
 from vllm.tokenizers.protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -187,7 +188,7 @@ def tekken_convert_tokens_to_string(
     return "".join(cast(Sequence[str], tokens))
 
 
-class MistralTokenizer(TokenizerLike):
+class MistralTokenizer(HfTokenizerBase, TokenizerLike):
     IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
 
     @classmethod
@@ -324,6 +325,7 @@ class MistralTokenizer(TokenizerLike):
         add_special_tokens: bool = True,
         truncation: bool = False,
         max_length: int | None = None,
+        return_special_tokens_mask: bool = False,
     ) -> "BatchEncoding":
         if text_pair is not None:
             raise ValueError(
@@ -336,6 +338,7 @@ class MistralTokenizer(TokenizerLike):
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
+            return_special_tokens_mask=return_special_tokens_mask,
         )
 
     @property
