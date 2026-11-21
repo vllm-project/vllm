@@ -6,6 +6,7 @@
 mod config;
 mod error;
 mod fingerprint;
+mod forwarded;
 mod grpc;
 mod listener;
 mod lora;
@@ -40,6 +41,7 @@ pub use config::{
     OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
+pub use forwarded::TrustedProxies;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};

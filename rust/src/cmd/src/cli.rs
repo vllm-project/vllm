@@ -44,7 +44,7 @@ use vllm_server::{
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode,
     LlmSource, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
-    RenderConfig, RendererSelection, Server, ServerConfig,
+    RenderConfig, RendererSelection, Server, ServerConfig, TrustedProxies,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -743,6 +743,13 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub http_max_request_body_size: Option<usize>,
 
+    /// Comma-separated proxy addresses or networks, or `*`, whose
+    /// `X-Forwarded-For` gives the client in the access log (default
+    /// "127.0.0.1,::1"). Like uvicorn, it is set through `FORWARDED_ALLOW_IPS`.
+    #[arg(long, hide = true, env = "FORWARDED_ALLOW_IPS")]
+    #[serde(default)]
+    pub forwarded_allow_ips: Option<String>,
+
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter. Like Python, it is set only through
     /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
@@ -1296,6 +1303,9 @@ impl SharedRuntimeArgs {
                 .filter(|path| !path.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            trusted_proxies: TrustedProxies::parse(
+                (self.forwarded_allow_ips.as_deref()).unwrap_or(TrustedProxies::DEFAULT),
+            ),
         }
     }
 

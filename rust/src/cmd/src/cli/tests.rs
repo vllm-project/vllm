@@ -12,7 +12,7 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_server::{
     AdmissionLimits, DecisionsReadStrategy, EngineCoreConfig, FingerprintMode,
     GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
-    ParserSelection, ReasoningEffort, RendererSelection,
+    ParserSelection, ReasoningEffort, RendererSelection, TrustedProxies,
 };
 use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -326,6 +326,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         disable_request_id_randomization: false,
                         keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
+                        forwarded_allow_ips: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
@@ -1242,8 +1243,9 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
     // `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`,
     // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
-    // `VLLM_SERVER_DEV_MODE`, `VLLM_ALLOW_RUNTIME_LORA_UPDATING`, and
-    // `VLLM_MAX_N_SEQUENCES`, which bind these hidden flags.
+    // `VLLM_SERVER_DEV_MODE`, `VLLM_ALLOW_RUNTIME_LORA_UPDATING`,
+    // `VLLM_MAX_N_SEQUENCES` and `FORWARDED_ALLOW_IPS`, which bind these hidden
+    // flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
@@ -1261,6 +1263,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         " True ",
         "--max-n-sequences",
         " 8 ",
+        "--forwarded-allow-ips",
+        "*",
     ]);
     assert!(config.server.api_server_options.server_dev_mode);
     assert!(config.server.api_server_options.allow_runtime_lora_updating);
@@ -1275,6 +1279,10 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert_eq!(
         config.server.api_server_options.request_body_limit_bytes,
         Some(1024 * 1024)
+    );
+    assert_eq!(
+        config.server.access_log.trusted_proxies,
+        TrustedProxies::parse("*")
     );
     // Like Python, any value other than `1` or `true` leaves it off.
     let config = parse(&[
@@ -1324,12 +1332,17 @@ fn args_json_reads_env_only_settings() {
         args.api_server_options().request_body_limit_bytes,
         Some(32 * 1024 * 1024)
     );
+    assert_eq!(
+        args.access_log_config().trusted_proxies,
+        TrustedProxies::parse("127.0.0.1,::1")
+    );
 
     let args = parse(
         r#","log_stats_interval":0.5,"disable_request_id_randomization":true,
         "keep_alive_on_engine_death":true,"http_max_request_body_size":1048576,
         "skip_model_name_validation":true,"server_dev_mode":true,
-        "allow_runtime_lora_updating":true,"max_n_sequences":8"#,
+        "allow_runtime_lora_updating":true,"max_n_sequences":8,
+        "forwarded_allow_ips":"10.0.0.0/8""#,
     )
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
@@ -1342,6 +1355,10 @@ fn args_json_reads_env_only_settings() {
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
+    );
+    assert_eq!(
+        args.access_log_config().trusted_proxies,
+        TrustedProxies::parse("10.0.0.0/8")
     );
     let args = parse(r#","http_max_request_body_size":0"#).unwrap();
     assert_eq!(args.api_server_options().request_body_limit_bytes, None);
@@ -1930,6 +1947,9 @@ fn frontend_args_json_passes_access_log_flags_into_config() {
         AccessLogConfig {
             enabled: true,
             excluded_paths: [],
+            trusted_proxies: TrustedProxies(
+                "127.0.0.1,::1",
+            ),
         }
     "#]]
     .assert_debug_eq(&config_for(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
@@ -1941,6 +1961,9 @@ fn frontend_args_json_passes_access_log_flags_into_config() {
                 "/health",
                 "/metrics",
             ],
+            trusted_proxies: TrustedProxies(
+                "127.0.0.1,::1",
+            ),
         }
     "#]]
     .assert_debug_eq(&config_for(
@@ -2520,6 +2543,7 @@ fn frontend_args_accept_json() {
                         disable_request_id_randomization: false,
                         keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
+                        forwarded_allow_ips: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
@@ -3688,6 +3712,7 @@ fn serve_args_accept_handshake_aliases() {
                         disable_request_id_randomization: false,
                         keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
+                        forwarded_allow_ips: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
@@ -4000,6 +4025,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 access_log: AccessLogConfig {
                     enabled: true,
                     excluded_paths: [],
+                    trusted_proxies: TrustedProxies(
+                        "127.0.0.1,::1",
+                    ),
                 },
                 tls: None,
                 root_path: None,
@@ -4154,6 +4182,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 access_log: AccessLogConfig {
                     enabled: true,
                     excluded_paths: [],
+                    trusted_proxies: TrustedProxies(
+                        "127.0.0.1,::1",
+                    ),
                 },
                 tls: None,
                 root_path: None,
@@ -4414,6 +4445,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 access_log: AccessLogConfig {
                     enabled: true,
                     excluded_paths: [],
+                    trusted_proxies: TrustedProxies(
+                        "127.0.0.1,::1",
+                    ),
                 },
                 tls: None,
                 root_path: None,

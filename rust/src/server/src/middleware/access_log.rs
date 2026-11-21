@@ -31,10 +31,11 @@ pub async fn log_access(
     }
 
     // Absent for Unix-domain sockets.
-    let client = request
+    let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| *addr);
+    let client = (state.access_log.trusted_proxies).client(peer, request.headers());
     let method = request.method().clone();
     let uri = request
         .uri()

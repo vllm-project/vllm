@@ -70,6 +70,7 @@ use super::{
 use crate::config::{
     AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
 };
+use crate::forwarded::TrustedProxies;
 use crate::lora::LoadLoraError;
 use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
@@ -14462,6 +14463,7 @@ async fn access_log_records_each_response() {
     let access_log = AccessLogConfig {
         enabled: true,
         excluded_paths: vec!["/version".to_string()],
+        ..Default::default()
     };
 
     let lines = access_log_lines(
@@ -14484,6 +14486,41 @@ async fn access_log_records_each_response() {
     "#]].assert_debug_eq(&lines);
 }
 
+/// Behind a trusted proxy the access log names the `X-Forwarded-For` client,
+/// like uvicorn's `ProxyHeadersMiddleware`; an untrusted peer is named itself.
+#[tokio::test]
+#[serial]
+async fn access_log_names_forwarded_client_of_trusted_proxy() {
+    let from =
+        |peer: [u8; 4]| {
+            let mut request = Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("authorization", "Bearer secret")
+                .header("x-forwarded-for", "203.0.113.7, 10.0.0.2")
+                .body(Body::empty())
+                .expect("build request");
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                std::net::SocketAddr::from((peer, 52344)),
+            ));
+            request
+        };
+    let access_log = AccessLogConfig {
+        trusted_proxies: TrustedProxies::parse("127.0.0.1,10.0.0.0/8"),
+        ..Default::default()
+    };
+
+    let lines =
+        access_log_lines(access_log, vec![from([127, 0, 0, 1]), from([192, 0, 2, 9])]).await;
+
+    expect_test::expect![[r#"
+        [
+            "INFO message=HTTP response client=203.0.113.7 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "INFO message=HTTP response client=192.0.2.9:52344 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=200 latency=<elapsed>",
+        ]
+    "#]].assert_debug_eq(&lines);
+}
+
 /// `--disable-access-log` removes the access log.
 #[tokio::test]
 #[serial]
@@ -14491,7 +14528,7 @@ async fn access_log_disabled_logs_nothing() {
     let lines = access_log_lines(
         AccessLogConfig {
             enabled: false,
-            excluded_paths: Vec::new(),
+            ..Default::default()
         },
         vec![
             Request::builder()
