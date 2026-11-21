@@ -272,6 +272,25 @@ def test_decode_streaming(
     assert out_ids == all_input_ids[starting_index:]
 
 
+@pytest.mark.parametrize(
+    "tokenizer_name", ["google/gemma-3-1b-it", "tiiuae/Falcon3-1B-Instruct"]
+)
+def test_fast_decode_adjacent_non_special_added_tokens(tokenizer):
+    # Runs of spaces and newlines are non-special added tokens in these
+    # tokenizers, and their content is the pre-tokenized form, not the text.
+    truth = "def f(x):\n    return x\n\n\nclass A:\n    pass\n"
+    token_ids = tokenizer(truth, add_special_tokens=False).input_ids
+    decoded_text, _ = _run_incremental_decode(
+        tokenizer,
+        token_ids,
+        skip_special_tokens=False,
+        starting_index=0,
+        spaces_between_special_tokens=False,
+        fast=True,
+    )
+    assert decoded_text == truth
+
+
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("fast", (True, False))
 def test_oov_decode(tokenizer, fast):
