@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 
 cudaError_t = ctypes.c_int
 cudaMemcpyKind = ctypes.c_int
+cudaLimitStackSize = 0  # enum cudaLimit
 
 
 class cudaIpcMemHandle_t(ctypes.Structure):
@@ -175,6 +176,21 @@ class CudaRTLibrary:
         self.CUDART_CHECK(create(ctypes.byref(stream), flags))
         assert stream.value is not None
         return stream.value
+
+    def cudaDeviceGetLimit(self, limit: int) -> int:
+        """Resolved on use, as `cudaStreamCreateWithFlags` is."""
+        get_limit = self.lib.cudaDeviceGetLimit
+        get_limit.restype = cudaError_t
+        get_limit.argtypes = [ctypes.POINTER(ctypes.c_size_t), ctypes.c_int]
+        value = ctypes.c_size_t()
+        self.CUDART_CHECK(get_limit(ctypes.byref(value), limit))
+        return value.value
+
+    def cudaDeviceSetLimit(self, limit: int, value: int) -> None:
+        set_limit = self.lib.cudaDeviceSetLimit
+        set_limit.restype = cudaError_t
+        set_limit.argtypes = [ctypes.c_int, ctypes.c_size_t]
+        self.CUDART_CHECK(set_limit(limit, value))
 
     def cudaDeviceSynchronize(self) -> None:
         self.CUDART_CHECK(self.funcs["cudaDeviceSynchronize"]())
