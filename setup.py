@@ -1155,6 +1155,8 @@ class precompiled_wheel_utils:
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
                 tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
+                # Optional UCC process group (UCC_HOME builds); not abi3.
+                ucc_regex = re.compile(r"vllm/_ucc_C\.[^/]*\.so")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -1182,6 +1184,7 @@ class precompiled_wheel_utils:
                         or deep_gemm_regex.match(member.filename)
                         or tml_fa4_regex.match(member.filename)
                         or fmha_sm100_regex.match(member.filename)
+                        or ucc_regex.fullmatch(member.filename)
                     ):
                         file_members.append(member)
 
@@ -1566,6 +1569,12 @@ if _is_cuda() or _is_hip():
 if not _is_xpu():
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
+
+if os.getenv("UCC_HOME") and not torch.distributed.is_ucc_available():
+    # PyTorch's UCC process group for a torch built without it (see
+    # cmake/external_projects/torch_ucc.cmake); opt-in, since it needs a UCC
+    # install at build time.
+    ext_modules.append(CMakeExtension(name="vllm._ucc_C"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))

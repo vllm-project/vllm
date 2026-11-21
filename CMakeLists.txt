@@ -167,6 +167,55 @@ define_extension_target(
   WITH_SOABI)
 
 #
+# _ucc_C extension (pure CXX, optional): PyTorch's ProcessGroupUCC, fetched
+# from the installed torch's commit (cmake/external_projects/torch_ucc.cmake),
+# registered as a torch.distributed backend for CPU tensors. Built only when
+# UCC_HOME points at a UCC install and torch was built without UCC (otherwise
+# torch's own "ucc" backend is used). It uses pybind11 (to subclass
+# c10d::Backend), so it cannot use the stable ABI.
+#
+if(NOT UCC_HOME AND DEFINED ENV{UCC_HOME})
+  set(UCC_HOME "$ENV{UCC_HOME}")
+endif()
+if(UCC_HOME)
+  run_python(TORCH_HAS_UCC
+    "import torch.distributed as d; print(int(d.is_ucc_available()))"
+    "Failed to check torch for UCC")
+endif()
+if(UCC_HOME AND TORCH_HAS_UCC)
+  message(STATUS "torch is built with UCC; not building _ucc_C")
+elseif(UCC_HOME)
+  include(cmake/external_projects/torch_ucc.cmake)
+  find_path(UCC_INCLUDE_DIR ucc/api/ucc.h
+    PATHS "${UCC_HOME}/include" NO_DEFAULT_PATH)
+  find_library(UCC_LIBRARY ucc
+    PATHS "${UCC_HOME}/lib" "${UCC_HOME}/lib64" NO_DEFAULT_PATH)
+  find_library(TORCH_PYTHON_LIBRARY torch_python
+    PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH)
+  if(NOT UCC_INCLUDE_DIR OR NOT UCC_LIBRARY OR NOT TORCH_PYTHON_LIBRARY)
+    message(FATAL_ERROR "UCC_HOME=${UCC_HOME}: need ucc/api/ucc.h, libucc and "
+      "libtorch_python (found: ${UCC_INCLUDE_DIR} ${UCC_LIBRARY} "
+      "${TORCH_PYTHON_LIBRARY})")
+  endif()
+  message(STATUS "Enabling _ucc_C extension with UCC at ${UCC_HOME}")
+  define_extension_target(
+    _ucc_C
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES
+      csrc/ucc_bindings.cpp
+      ${TORCH_UCC_SOURCES}
+    INCLUDE_DIRECTORIES ${TORCH_UCC_INCLUDE_DIRS} ${UCC_INCLUDE_DIR}
+    LIBRARIES ${UCC_LIBRARY} ${TORCH_PYTHON_LIBRARY}
+    WITH_SOABI)
+  # libtorch links fmt statically with hidden symbols; UCCTracing.cpp uses
+  # fmt::format, so compile fmt header-only into the extension.
+  target_compile_definitions(_ucc_C PRIVATE USE_C10D_UCC FMT_HEADER_ONLY)
+  set_target_properties(_ucc_C PROPERTIES
+    BUILD_RPATH "${UCC_HOME}/lib" INSTALL_RPATH "${UCC_HOME}/lib")
+endif()
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND

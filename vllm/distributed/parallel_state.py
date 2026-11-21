@@ -53,6 +53,7 @@ from vllm.distributed.utils import (
     cpu_all_reduce_,
     create_tcp_store,
     get_cached_tcp_store_client,
+    get_or_register_ucc_backend,
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -461,6 +462,7 @@ class GroupCoordinator:
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
         use_all2all: bool = False,
+        cpu_backend: str = "gloo",
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -487,6 +489,7 @@ class GroupCoordinator:
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+            assert cpu_backend == "gloo", cpu_backend
             self_device_group, self_cpu_group = _create_subgroups_split_group(
                 group_ranks, group_name, torch_distributed_backend
             )
@@ -505,11 +508,12 @@ class GroupCoordinator:
                     backend=torch_distributed_backend,
                     timeout=device_timeout,
                 )
-                # a group with `gloo` backend, to allow direct coordination between
-                # processes through the CPU.
+                # A group on the CPU (`cpu_backend`, gloo unless the caller
+                # asks otherwise), to allow direct coordination between
+                # processes.
                 with suppress_stdout():
                     cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo", timeout=self.cpu_timeout
+                        ranks, backend=cpu_backend, timeout=self.cpu_timeout
                     )
                 if self.rank in ranks:
                     self.ranks = ranks
@@ -1544,6 +1548,7 @@ def init_model_parallel_group(
     group_name: str | None = None,
     use_device_communicator: bool = True,
     use_all2all: bool = False,
+    cpu_backend: str = "gloo",
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1553,6 +1558,7 @@ def init_model_parallel_group(
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
         use_all2all=use_all2all,
+        cpu_backend=cpu_backend,
     )
 
 
@@ -2390,8 +2396,16 @@ def initialize_model_parallel(
                 coord_store=coord_store,
             )
     else:
+        dp_cpu_backend = "gloo"
+        if parallel_config.dp_cpu_backend == "ucc" and data_parallel_size > 1:
+            dp_cpu_backend = get_or_register_ucc_backend()
+            logger.info("DP CPU group on UCC (%s)", dp_cpu_backend)
         _DP = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="dp"
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="dp",
+            cpu_backend=dp_cpu_backend,
         )
     if 1 < engram_dp_size == data_parallel_size:
         # Same ranks as the DP group: reuse its communicators.

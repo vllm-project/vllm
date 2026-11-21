@@ -56,6 +56,49 @@ def ensure_divisibility(numerator, denominator):
     )
 
 
+# ProcessGroupUCC class(es) in use, set by get_or_register_ucc_backend(). Empty
+# until then, so gloo-only processes skip the backend lookup in cpu_all_reduce_.
+_UCC_BACKEND_CLASSES: tuple[type, ...] = ()
+
+
+def get_or_register_ucc_backend() -> str:
+    """Return the torch.distributed backend name for UCC CPU groups,
+    registering vLLM's own UCC backend first if needed.
+
+    A torch built with UCC (e.g. NGC) has its own "ucc". PyPI torch does not,
+    so vLLM builds PyTorch's ProcessGroupUCC as vllm._ucc_C when UCC_HOME is
+    set at build time (cmake/external_projects/torch_ucc.cmake), and it is
+    registered here as "vllm_ucc".
+    """
+    global _UCC_BACKEND_CLASSES
+    if torch.distributed.is_ucc_available():
+        from torch._C._distributed_c10d import ProcessGroupUCC
+
+        _UCC_BACKEND_CLASSES = (ProcessGroupUCC,)
+        return "ucc"
+    from vllm import _ucc_C
+
+    if "vllm_ucc" not in torch.distributed.Backend.backend_list:
+        # Called as (store, group_rank, group_size, timeout).
+        torch.distributed.Backend.register_backend(
+            "vllm_ucc", _ucc_C.ProcessGroupUCC, devices=["cpu"]
+        )
+    _UCC_BACKEND_CLASSES = (_ucc_C.ProcessGroupUCC,)
+    return "vllm_ucc"
+
+
+def _is_ucc_group(group: ProcessGroup) -> bool:
+    """Whether `group`'s CPU backend is a ProcessGroupUCC (torch's own or
+    vllm._ucc_C's)."""
+    if not _UCC_BACKEND_CLASSES:
+        return False
+    try:
+        backend = group._get_backend(torch.device("cpu"))
+    except RuntimeError:
+        return False
+    return isinstance(backend, _UCC_BACKEND_CLASSES)
+
+
 # P2P tags [base, base + log2(group size) + 1] are reserved for cpu_all_reduce_.
 _CPU_ALL_REDUCE_TAG_BASE = 27100
 
@@ -77,13 +120,15 @@ def cpu_all_reduce_(
     group: ProcessGroup,
     timeout: timedelta | None = None,
 ) -> torch.Tensor:
-    """Low-latency in-place SUM all-reduce of a small CPU tensor over a gloo group.
+    """Low-latency in-place SUM all-reduce of a small CPU tensor.
 
-    Recursive doubling within power-of-two blocks, then one concurrent exchange
-    between blocks. Results are bitwise identical across ranks. Works with
-    stateless (unregistered) process groups.
+    On a gloo group: recursive doubling within power-of-two blocks, then one
+    concurrent exchange between blocks. Results are bitwise identical across
+    ranks. Works with stateless (unregistered) process groups. On a UCC group
+    (ParallelConfig.dp_cpu_backend="ucc"): UCC's own all-reduce.
 
-    `timeout` bounds each p2p wait; None means no timeout.
+    `timeout` bounds each p2p wait on gloo, and the single all-reduce wait on
+    UCC; None means no timeout.
     """
     world_size = group.size()
     if world_size == 1:
@@ -92,6 +137,13 @@ def cpu_all_reduce_(
     num_blocks = world_size // block_size
     if tensor.device.type != "cpu" or not tensor.is_contiguous():
         torch.distributed.all_reduce(tensor, group=group)
+        return tensor
+    if _is_ucc_group(group):
+        work = group.allreduce([tensor])
+        if timeout:
+            work.wait(timeout)
+        else:
+            work.wait()
         return tensor
 
     timeout = timeout or timedelta(0)

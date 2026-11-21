@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 import os
 import socket
 from collections.abc import Callable
@@ -417,6 +418,14 @@ class ParallelConfig:
 
     Defaults to True when async scheduling is enabled, False otherwise.
     """
+
+    dp_cpu_backend: Literal["gloo", "ucc"] = "gloo"
+    """Backend of the workers' DP CPU group. It carries every CPU collective on
+    the DP group, including the small per-step all-reduce that syncs DP state.
+    "ucc" needs vLLM built with UCC_HOME set to a UCC install (vllm._ucc_C), or
+    a torch built with UCC. The other CPU groups, and the engine core's DP
+    group, stay on gloo. Not supported with elastic EP or
+    VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1."""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -1188,6 +1197,25 @@ class ParallelConfig:
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")
             self.world_size *= self.data_parallel_size
+
+        if self.dp_cpu_backend == "ucc":
+            if not (
+                torch.distributed.is_ucc_available()
+                or importlib.util.find_spec("vllm._ucc_C")
+            ):
+                raise ValueError(
+                    "dp_cpu_backend=ucc needs a torch built with UCC, or vLLM "
+                    "built with UCC_HOME set to a UCC install."
+                )
+            if self.enable_elastic_ep:
+                raise ValueError(
+                    "dp_cpu_backend=ucc is not supported with elastic EP yet."
+                )
+            if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+                raise ValueError(
+                    "dp_cpu_backend=ucc is not supported with "
+                    "VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1 yet."
+                )
 
         if self.enable_elastic_ep:
             if not self.enable_eplb:
