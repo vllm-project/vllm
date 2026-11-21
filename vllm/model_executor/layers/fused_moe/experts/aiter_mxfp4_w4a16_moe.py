@@ -269,6 +269,17 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     # SILU: silu(gate) * up — same kernel, just no "+1" residual in swiglu.
     swiglu_add_residual = activation != MoEActivation.SILU
+    # SWIGLUOAI_UNINTERLEAVE is the SWIGLUOAI epilogue on a packed checkpoint:
+    # weight loading interleaves gate/up for this backend, so only the model's
+    # clamp and residual have to be ones the kernel can express.
+    if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        assert swiglu_limit is not None, (
+            "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
+        )
+        assert quant_config.gemm1_beta in (None, 1.0), (
+            "aiter's fused swiglu hardcodes the residual to (up + 1); "
+            f"gemm1_beta={quant_config.gemm1_beta} cannot be expressed"
+        )
 
     # Weight loading already swizzled the block scales on gfx950, so the kernel
     # has to be told; the load-time swizzle and this gate must agree or the
@@ -339,6 +350,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
             RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
         )
 
     @staticmethod
@@ -366,7 +378,11 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
+        return activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SILU,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -389,6 +405,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
             RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
         ]
 
     @staticmethod
@@ -428,13 +445,16 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routing_method = self.moe_config.routing_method
         if routing_method == RoutingMethodType.DeepseekV4:
             score_mode = "sqrtsoftplus"
-        elif routing_method == RoutingMethodType.DeepSeekV3:
-            # MiMo-V2.6: an ungrouped sigmoid router with a per-expert
-            # correction bias. aiter's flat top-k implements this natively
-            # (select on sigmoid(logits) + bias, return the unbiased sigmoid
-            # scores).
+        elif routing_method in (
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
+        ):
+            # MiMo-V2.6 and MiniMax-M3: an ungrouped sigmoid router with a
+            # per-expert correction bias. aiter's flat top-k implements this
+            # natively (select on sigmoid(logits) + bias, return the unbiased
+            # sigmoid scores).
             assert e_score_correction_bias is not None, (
-                "DeepSeekV3 routing requires e_score_correction_bias"
+                f"{routing_method.name} routing requires e_score_correction_bias"
             )
             score_mode = "sigmoid"
         else:
