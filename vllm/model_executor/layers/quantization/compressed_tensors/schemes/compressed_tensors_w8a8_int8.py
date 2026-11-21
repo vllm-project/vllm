@@ -13,12 +13,46 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kInt8DynamicTokenAsym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorAsym,
+    kInt8StaticTensorSym,
+)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+
+
+def _int8_quant_keys(
+    strategy: str, is_static_input_scheme: bool, input_symmetric: bool
+) -> tuple[QuantKey, QuantKey]:
+    """Map a compressed-tensors W8A8 int8 scheme to kernel QuantKeys.
+
+    Only static per-tensor and dynamic per-token activations occur here
+    (see `_is_static_tensor_w8a8`/`_is_dynamic_token_w8a8`), and weights
+    are always symmetric.
+    """
+    if strategy == QuantizationStrategy.CHANNEL:
+        weight_quant_key = kInt8StaticChannelSym
+    else:
+        assert strategy == QuantizationStrategy.TENSOR
+        weight_quant_key = kInt8StaticTensorSym
+    if is_static_input_scheme:
+        activation_quant_key = (
+            kInt8StaticTensorSym if input_symmetric else kInt8StaticTensorAsym
+        )
+    else:
+        activation_quant_key = (
+            kInt8DynamicTokenSym if input_symmetric else kInt8DynamicTokenAsym
+        )
+    return weight_quant_key, activation_quant_key
+
 
 logger = init_logger(__name__)
 
@@ -47,10 +81,12 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
+        weight_quant_key, activation_quant_key = _int8_quant_keys(
+            self.strategy, self.is_static_input_scheme, self.input_symmetric
+        )
         self.kernel = init_int8_linear_kernel(
-            is_channelwise=(self.strategy == QuantizationStrategy.CHANNEL),
-            is_static_input_scheme=self.is_static_input_scheme,
-            input_symmetric=self.input_symmetric,
+            weight_quant_key=weight_quant_key,
+            activation_quant_key=activation_quant_key,
             module_name=self.__class__.__name__,
             is_fused_module=len(output_partition_sizes) > 1,
         )
