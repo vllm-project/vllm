@@ -15,6 +15,9 @@ from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExpert
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
 
+# On SM100, batches of at most this many tokens use the Triton experts.
+_SM100_TRITON_MAX_M = 32
+
 
 class TritonOrCutlassExperts(FallbackExperts):
     """Cutlass with fallback to Triton for low latency shapes on SM100."""
@@ -49,7 +52,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Small batch fallback for sm100.
-        if self.is_sm100 and M <= 8:
+        if self.is_sm100 and M <= _SM100_TRITON_MAX_M:
             return self.fallback_experts.workspace_shapes(
                 M,
                 N,
@@ -79,7 +82,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         w2: torch.Tensor,
     ) -> mk.FusedMoEExpertsModular:
         # Small batch fallback for sm100.
-        if self.is_sm100 and hidden_states.shape[0] <= 8:
+        if self.is_sm100 and hidden_states.shape[0] <= _SM100_TRITON_MAX_M:
             return self.fallback_experts
         else:
             return self.experts
