@@ -4,6 +4,7 @@
 import pytest
 import pytest_asyncio
 import requests
+from transformers import AutoTokenizer
 
 from tests.utils import RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
@@ -267,9 +268,10 @@ async def test_tokenizer_info_basic(
     response = requests.get(server.url_for("tokenizer_info"))
     response.raise_for_status()
     result = response.json()
-    assert "tokenizer_class" in result
-    assert isinstance(result["tokenizer_class"], str)
-    assert result["tokenizer_class"]
+    # Must name a class transformers can load, not vLLM's wrapper subclass
+    # (e.g. `CachedGPT2Tokenizer`).
+    expected = type(AutoTokenizer.from_pretrained(tokenizer_name)).__name__
+    assert result["tokenizer_class"] == expected
 
 
 @pytest.mark.asyncio

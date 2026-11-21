@@ -27,6 +27,7 @@ from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import apply_max_tokenize_tokens, resolve_max_tokenize_tokens
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import get_tokenizer_class_name
 
 logger = init_logger(__name__)
 
@@ -216,7 +217,7 @@ class TokenizerInfo:
         config.pop("merges_file", None)
 
         config = self._make_json_serializable(config)
-        config["tokenizer_class"] = type(self.tokenizer).__name__
+        config["tokenizer_class"] = get_tokenizer_class_name(self.tokenizer)
         if self.chat_template:
             config["chat_template"] = self.chat_template
         return config
