@@ -56,6 +56,24 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+## Eagle3 Draft Bundled With the Target Checkpoint
+
+A target checkpoint can ship its EAGLE-3 draft in an `eagle3/` subfolder
+(the draft's own `config.json` and weights). Then `model` can be omitted from
+the speculative config, and vLLM downloads only that subfolder:
+
+```python
+llm = LLM(
+    model="ibm-granite/granite-for-docling-2b",
+    speculative_config={
+        "method": "eagle3",
+        "num_speculative_tokens": 5,
+    },
+)
+```
+
+A `model` given explicitly is used as before.
+
 ## Pipeline Parallelism
 
 EAGLE3, DFlash, and DSpark support pipeline parallelism on Model Runner V2
