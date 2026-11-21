@@ -9,6 +9,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.block_fp8_mega_moe import (
+    BlockFp8MegaMoEExperts,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_FP8_BLOCK_SM90,
     MegaMoEActivation,
@@ -23,7 +26,6 @@ from vllm.model_executor.model_loader.reload import (
     start_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import round_up
@@ -80,12 +82,12 @@ def test_requant_is_exact_for_power_of_two_block_scales():
     assert torch.equal(_dequant_ue8m0(requant, sf), _dequant_block(weight, scale))
 
 
-def _experts(weight_block_size=BLOCK) -> Glm5NextMegaMoEExperts:
+def _experts(weight_block_size=BLOCK) -> BlockFp8MegaMoEExperts:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
-    return Glm5NextMegaMoEExperts(
+    return BlockFp8MegaMoEExperts(
         vllm_config,  # type: ignore[arg-type]
         num_experts=NUM_EXPERTS,
         num_local_experts=2,

@@ -45,12 +45,18 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if TYPE_CHECKING:
     from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MoE
     from vllm.models.glm5next.common.model import Glm5NextMoE
+    from vllm.models.hy_v4_flash.nvidia.moe import HYV4FlashMoE
     from vllm.models.kimi_k3.nvidia.model import KimiMoE
     from vllm.models.minimax_m3.nvidia.model import MiniMaxM3MoE
     from vllm.models.qwen4_exp.nvidia.mega_moe import Qwen4ExpMegaMoeBlock
 
     MegaMoEModule: TypeAlias = (
-        DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock | Glm5NextMoE
+        DeepseekV4MoE
+        | KimiMoE
+        | MiniMaxM3MoE
+        | Qwen4ExpMegaMoeBlock
+        | Glm5NextMoE
+        | HYV4FlashMoE
     )
 
 
@@ -186,10 +192,12 @@ def _mega_moe_may_use_deep_gemm(
     kimi = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
     minimax = sys.modules.get("vllm.models.minimax_m3.nvidia.model")
     glm = sys.modules.get("vllm.models.glm5next.common.model")
+    hy4_flash = sys.modules.get("vllm.models.hy_v4_flash.nvidia.moe")
     return (
         (kimi is not None and isinstance(module, kimi.KimiMoE))
         or (minimax is not None and isinstance(module, minimax.MiniMaxM3MoE))
         or (glm is not None and isinstance(module, glm.Glm5NextMoE))
+        or (hy4_flash is not None and isinstance(module, hy4_flash.HYV4FlashMoE))
     ) and module.use_mega_moe
 
 

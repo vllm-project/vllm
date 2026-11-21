@@ -11,6 +11,10 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe.block_fp8_mega_moe import (
+    BlockFp8MegaMoEExperts,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
@@ -82,6 +86,16 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
         raise ValueError(
             "HYV4 Flash supports blockwise FP8 or compressed-tensors MXFP4"
         )
+    if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe":
+        parallel = vllm_config.parallel_config
+        if not current_platform.is_device_capability(90):
+            raise ValueError("HYV4 Flash MegaMoE currently requires SM90")
+        if quantization != "fp8":
+            raise ValueError("HYV4 Flash MegaMoE requires a block-FP8 checkpoint")
+        if parallel.tensor_parallel_size != 1 or not parallel.enable_expert_parallel:
+            raise ValueError("HYV4 Flash MegaMoE requires TP=1 and expert parallelism")
+        if parallel.eplb_config.num_redundant_experts:
+            raise ValueError("HYV4 Flash MegaMoE does not support redundant experts")
 
 
 class HYV4FlashDecoderLayer(HYV4DecoderLayer):
@@ -131,6 +145,9 @@ class HYV4FlashModel(HYV4Model):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        )
         self.loaded_parts: dict[str, set[Any]] = {}
         self.engram_hash = None
         if self.config.engram_layer_ids:
@@ -194,6 +211,18 @@ class HYV4FlashModel(HYV4Model):
             hidden, _ = layer(positions, hidden, None)
         return self.norm(self.hc_head(hidden))
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        if not self.use_mega_moe:
+            return super().get_expert_mapping()
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+            routed_experts_prefix="",
+        )
+
     def _record_part(self, name: str, part: Any) -> None:
         parts = self.loaded_parts.setdefault(name, set())
         if part in parts or (None in parts) or (part is None and parts):
@@ -236,7 +265,10 @@ class HYV4FlashModel(HYV4Model):
                 }[projection]
                 suffix = (suffix or "").removeprefix(".weight")
                 param_name = "w2_weight" if projection == "down_proj" else "w13_weight"
-                target = f"{prefix}.routed_experts.{param_name}{suffix}"
+                expert_prefix = (
+                    prefix if self.use_mega_moe else f"{prefix}.routed_experts"
+                )
+                target = f"{expert_prefix}.{param_name}{suffix}"
                 if target not in parameters:
                     raise ValueError(f"Unknown Flash expert weight: {name}")
                 parameter = parameters[target]
@@ -265,6 +297,9 @@ class HYV4FlashModel(HYV4Model):
                         if success:
                             self._record_part(target, (index, shard))
                             loaded.add(target)
+                            if self.use_mega_moe and target.endswith("_scale_inv"):
+                                # Kernel scales are derived from checkpoint scales.
+                                loaded.add(target.removesuffix("_inv"))
                 continue
             if name.endswith((".hc_fn", ".hc_head_fn")):
                 name += ".weight"
@@ -315,12 +350,15 @@ class HYV4FlashModel(HYV4Model):
             module = self.get_submodule(module_name)
             expected: set[Any]
             if leaf.startswith(("w13_weight", "w2_weight")):
-                expert_map = module.expert_map_manager.expert_map
-                local_ids = (
-                    range(self.config.num_experts)
-                    if expert_map is None
-                    else (expert_map >= 0).nonzero().flatten().tolist()
-                )
+                if isinstance(module, BlockFp8MegaMoEExperts):
+                    local_ids = range(module.experts_start_idx, module.experts_end_idx)
+                else:
+                    expert_map = module.expert_map_manager.expert_map
+                    local_ids = (
+                        range(self.config.num_experts)
+                        if expert_map is None
+                        else (expert_map >= 0).nonzero().flatten().tolist()
+                    )
                 shards = ("w1", "w3") if leaf.startswith("w13_") else ("w2",)
                 expected = {(i, s) for i in local_ids for s in shards}
             else:

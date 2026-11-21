@@ -372,10 +372,12 @@ class Glm5NextMoE(nn.Module):
         """DeepGEMM MegaMoE, BF16xBF16 for an unquantized checkpoint and
         FP8xFP8 for a block-FP8 one: the kernel dispatches, runs the routed and
         shared experts and combines across the EP group."""
+        from vllm.model_executor.layers.fused_moe.block_fp8_mega_moe import (
+            BlockFp8MegaMoEExperts,
+        )
         from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
             MegaMoEActivation,
         )
-        from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 
         if not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
@@ -404,7 +406,7 @@ class Glm5NextMoE(nn.Module):
                 f"by ep_size={self.ep_size}."
             )
         self.mega_renormalize = config.norm_topk_prob
-        self.experts = Glm5NextMegaMoEExperts(
+        self.experts = BlockFp8MegaMoEExperts(
             vllm_config,
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
