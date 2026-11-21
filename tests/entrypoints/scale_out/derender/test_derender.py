@@ -1681,6 +1681,61 @@ async def test_e2e_parser_uses_caller_prompt_token_ids(qwen3_client):
 
 
 # ---------------------------------------------------------------------------
+# E2E: DeepSeek V3.1 tool parser
+# ---------------------------------------------------------------------------
+
+DEEPSEEK_V31_MODEL = "deepseek-ai/DeepSeek-V3.1"
+
+
+@pytest.fixture(scope="module")
+def deepseek_v31_server():
+    args = ["--enable-auto-tool-choice", "--tool-call-parser", "deepseek_v31"]
+    with RemoteLaunchRenderServer(DEEPSEEK_V31_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def deepseek_v31_client(deepseek_v31_server):
+    async with httpx.AsyncClient(
+        base_url=deepseek_v31_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_deepseek_v31_unparsed_tool_calls_kept_as_content(
+    deepseek_v31_client,
+):
+    """A tool calls section with no parsable call is returned as content."""
+    messages = [{"role": "user", "content": "Weather in Paris?"}]
+    gen_req = await _e2e_render_chat(deepseek_v31_client, DEEPSEEK_V31_MODEL, messages)
+    output_text = (
+        "<｜tool▁calls▁begin｜>get_weather<｜tool▁sep｜>"
+        '{"city": "Paris"}<｜tool▁calls▁end｜>'
+    )
+    output_ids = _encode(get_tokenizer(DEEPSEEK_V31_MODEL), output_text)
+
+    resp = await deepseek_v31_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": DEEPSEEK_V31_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": DEEPSEEK_V31_MODEL,
+                "messages": messages,
+                "tools": _E2E_TOOLS,
+                "tool_choice": "auto",
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    message = resp.json()["choices"][0]["message"]
+    assert not message.get("tool_calls")
+    assert message["content"] == output_text
+
+
+# ---------------------------------------------------------------------------
 # E2E: HarmonyParser + GPT-OSS
 # ---------------------------------------------------------------------------
 

@@ -81,3 +81,15 @@ def test_extract_tool_calls_with_multiline_arguments(parser, streaming):
     assert [call.function.name for call in tool_calls] == ["foo", "bar"]
     assert json.loads(tool_calls[0].function.arguments) == args
     assert json.loads(tool_calls[1].function.arguments) == {"y": 2}
+
+
+def test_extract_tool_calls_keeps_unparsed_section_as_content(parser):
+    model_output = (
+        "<｜tool▁calls▁begin｜>get_weather<｜tool▁sep｜>"
+        '{"city": "Tokyo"}<｜tool▁calls▁end｜>'
+    )
+
+    content, tool_calls = run_tool_extraction(parser, model_output)
+
+    assert tool_calls == []
+    assert content == model_output
