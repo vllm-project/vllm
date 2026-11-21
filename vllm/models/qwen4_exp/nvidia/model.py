@@ -565,8 +565,9 @@ class Qwen4ExpModel(nn.Module):
                         forward_context.is_padding, hidden_states
                     )
                 hidden_states = sp_shard(hidden_states)
-            # Expand only the local token rows when SP is enabled.
-            hidden_states = hidden_states.repeat(1, self.config.hc_count)
+            # Expand only the local token rows when SP is enabled. cat hits a
+            # vectorized copy path; repeat lowers to a slow broadcast copy.
+            hidden_states = torch.cat([hidden_states] * self.config.hc_count, dim=-1)
         else:
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
