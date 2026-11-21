@@ -25,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
     nvfp4_gathered_bias,
@@ -67,6 +68,7 @@ class DSparkMarkovHead(nn.Module):
         prefix: str,
         quant_config: QuantizationConfig | None = None,
         retain_weight_for_gather: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ) -> None:
         super().__init__()
         self.markov_w1 = nn.Embedding(vocab_size, markov_rank)
@@ -77,6 +79,7 @@ class DSparkMarkovHead(nn.Module):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "markov_w2"),
             disable_tp=True,
+            quant_method=quant_method,
         )
         self.markov_w2._retain_weight_for_gather = retain_weight_for_gather
         self.markov_w2.is_w4a16_nvfp4 = False

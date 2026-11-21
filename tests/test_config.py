@@ -134,6 +134,38 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
+    ("architecture", "field", "value"),
+    [
+        ("MuseSparkDSparkModel", "draft_lm_head_quantization", "nvfp4"),
+        ("Qwen3DSparkModel", "draft_lm_head_quantization", "fp8"),
+        # Per-tensor FP8 is refused for the Muse Spark draft.
+        ("MuseSparkDSparkModel", "quantization", "fp8"),
+        ("MuseSparkDSparkModel", "quantization", "fp8_per_tensor"),
+    ],
+)
+def test_dspark_refuses_unsupported_draft_quantization(architecture, field, value):
+    """Draft quantizations no platform supports for the drafter fail at config
+    time instead of at load."""
+    hf_config = SimpleNamespace(model_type="dspark")
+    spec = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=hf_config,
+            architectures=[architecture],
+            dtype=torch.bfloat16,
+            head_dtype=torch.bfloat16,
+        ),
+        target_model_config=SimpleNamespace(hf_config=hf_config, architectures=[]),
+        dspark_draft_topk=None,
+        quantization=None,
+        draft_lm_head_quantization=None,
+        num_speculative_tokens=7,
+    )
+    setattr(spec, field, value)
+    with pytest.raises(ValueError, match=field):
+        DSparkSpeculatorConfig.apply_options(spec)
+
+
+@pytest.mark.parametrize(
     ("enable_prefix_caching", "input_dtype", "use_ubatching", "pp_size", "error"),
     [
         (True, torch.bfloat16, False, 1, None),
