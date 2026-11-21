@@ -45,3 +45,17 @@ class NTKScalingRotaryEmbedding(RotaryEmbedding):
             inv_freq = inv_freq / lambda_1_m
 
         return inv_freq
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        inv_freq = self._compute_inv_freq(self.base)
+        max_len = max(
+            self.max_position_embeddings,
+            int(self.max_position_embeddings * self.scaling_factor),
+        )
+        t = torch.arange(max_len, dtype=torch.float)
+
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache
