@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.utils import pickle
@@ -144,6 +145,65 @@ class CpuCommunicator(DeviceCommunicatorBase):
             + input_size[dim + 1 :]
         )
         return output_tensor
+
+    def all_gatherv(
+        self,
+        input_: torch.Tensor | list[torch.Tensor],
+        dim: int = 0,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor | list[torch.Tensor]:
+        if dim != 0:
+            raise NotImplementedError("only dim 0 all-gatherv is supported")
+        if sizes is not None:
+            if len(sizes) != self.world_size:
+                raise ValueError("sizes must have one entry per rank")
+            if any(size < 0 for size in sizes):
+                raise ValueError("sizes must be non-negative")
+        uniform_sizes = sizes is None or all(size == sizes[0] for size in sizes)
+
+        def gather_one(tensor: torch.Tensor) -> torch.Tensor:
+            local_size = tensor.shape[0]
+
+            if sizes is not None and local_size != sizes[self.rank_in_group]:
+                raise ValueError("local tensor size does not match sizes")
+
+            if uniform_sizes:
+                output_shape = (
+                    local_size * self.world_size,
+                    *tensor.shape[1:],
+                )
+
+                output = torch.empty(
+                    output_shape,
+                    dtype=tensor.dtype,
+                    device=tensor.device,
+                )
+
+                dist.all_gather_single(
+                    output, tensor.contiguous(), group=self.device_group
+                )
+
+                return output
+
+            max_size = max(sizes)
+            if max_size == 0:
+                return tensor.new_empty((0, *tensor.shape[1:]))
+            padded = tensor.new_zeros((max_size, *tensor.shape[1:]))
+            padded[:local_size] = tensor
+
+            gathered = tensor.new_empty((self.world_size * max_size, *tensor.shape[1:]))
+            dist.all_gather_single(gathered, padded, group=self.device_group)
+
+            gathered = gathered.reshape(self.world_size, max_size, *tensor.shape[1:])
+
+            return torch.cat(
+                [gathered[r, :size] for r, size in enumerate(sizes)],
+                dim=0,
+            )
+
+        if isinstance(input_, torch.Tensor):
+            return gather_one(input_)
+        return [gather_one(tensor) for tensor in input_]
 
     def send_tensor_dict(
         self,
