@@ -16,6 +16,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.local_argmax import pack_top, select_top
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
@@ -240,27 +241,14 @@ class LogitsProcessor(PluggableLayer):
 
         self._mask_outside_vocab(logits, lm_head)
 
-        local_max_vals, local_max_indices = logits.max(dim=-1)
-
-        # Convert shard-local indices to global vocab indices.
-        vocab_start = lm_head.shard_indices.org_vocab_start_index
-        global_indices = local_max_indices + vocab_start
+        local_pair = pack_top(logits, lm_head.shard_indices.org_vocab_start_index)
 
         if tp_size == 1:
-            return global_indices
+            return local_pair[:, 1].to(torch.int64)
 
-        # All-gather (value, index) pairs, then reduce to global argmax.
-        # Use float32 to avoid bf16 precision loss on large vocab indices.
-        local_pair = torch.stack(
-            [local_max_vals.float(), global_indices.float()], dim=-1
-        )
         # [batch, 2] -> [batch, 2 * tp_size]
         gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
-        # [batch, tp_size, 2] where [:, :, 0]=values, [:, :, 1]=indices
-        gathered = gathered.view(hidden_states.shape[0], tp_size, 2)
-        max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
-        top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
-        return top_tokens.squeeze(-1).to(torch.int64)
+        return select_top(gathered.view(hidden_states.shape[0], tp_size, 2), tp_size)
 
     def get_top_k_tokens(
         self,
