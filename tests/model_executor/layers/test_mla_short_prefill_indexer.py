@@ -874,6 +874,22 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(
     assert not end_buf[1 - end_offset :: 2].any()
 
 
+def test_prefill_top_k_backend():
+    """'auto' ranks prefill logits with DeepSelect wherever it runs (SM100/SM103)
+    and its extension loaded, except in batch-invariant mode; an explicit backend
+    keeps its choice."""
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        has_deep_select,
+    )
+    from vllm.model_executor.layers.indexer_topk import _HAS_DEEP_SELECT_C
+
+    choose = sparse_indexer._prefill_uses_deep_select
+    assert choose("auto", False) is (_HAS_DEEP_SELECT_C and has_deep_select())
+    assert choose("auto", True) is False
+    assert choose("deep_select", True) is True
+    assert choose("persistent", False) is False
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_sparse_topk_remap_bounds_nan_rows():
     """DeepSelect writes an out-of-range sentinel to slot 0 of NaN rows (the
@@ -905,6 +921,30 @@ def test_sparse_topk_remap_bounds_nan_rows():
         col_indices=cols,
     )
     assert (cols[1:, 0] >= width).all() and (out[1:, 0] == -1).all()
+    assert (out[0] >= 0).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_dense_prefill_deep_select_bounds_nan_rows():
+    """The dense prefill path turns DeepSelect's out-of-range sentinel in NaN
+    rows into -1, as `sparse_topk_remap` does."""
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        has_deep_select,
+    )
+
+    if not has_deep_select():
+        pytest.skip("DeepSelect extension (vllm._deepselect_C) required")
+    rows, width, topk = 4, 2048, 512
+    logits = torch.randn(rows, width, dtype=torch.bfloat16, device="cuda")
+    logits[1:, :16] = float("nan")
+    row_ends = torch.tensor(
+        [width, width, width // 2, topk + 1], dtype=torch.int32, device="cuda"
+    )
+    out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+
+    sparse_indexer._deep_select_prefill_topk(logits, topk, row_ends, out)
+    assert (out[1:, 0] == -1).all()
+    assert (out < row_ends.unsqueeze(1)).all()
     assert (out[0] >= 0).all()
 
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import functools
 import math
 from functools import partial
 from typing import TYPE_CHECKING
@@ -40,7 +41,9 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import has_deep_select
 from vllm.model_executor.layers.indexer_topk import (
+    _HAS_DEEP_SELECT_C,
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
     get_indexer_topk,
@@ -394,6 +397,32 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
         tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
 
 
+@functools.cache
+def _prefill_uses_deep_select(topk_backend: str, batch_invariant: bool) -> bool:
+    """Whether prefill chunks rank their BF16 logits with DeepSelect: always for
+    "deep_select", and for "auto" wherever DeepSelect runs (SM100/SM103) and its
+    extension loaded, unless batch-invariant mode is on. Cached:
+    `has_deep_select` calls `find_spec`."""
+    if topk_backend == "deep_select":
+        return True
+    return (
+        topk_backend == "auto"
+        and not batch_invariant
+        and _HAS_DEEP_SELECT_C
+        and has_deep_select()
+    )
+
+
+def _deep_select_prefill_topk(
+    logits: torch.Tensor, topk: int, row_ends: torch.Tensor, out: torch.Tensor
+) -> None:
+    """Rank prefill logits with DeepSelect into `out`. DeepSelect writes an
+    out-of-range sentinel to slot 0 of a row with NaN logits; it becomes -1, as
+    in `sparse_topk_remap`."""
+    deep_select_topk(logits, topk, end=row_ends, output_idx=out)
+    out.masked_fill_(out >= row_ends.unsqueeze(1), -1)
+
+
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
     """Upcast BF16 MQA logits for the FP32 top-k kernels.
 
@@ -633,6 +662,9 @@ def sparse_attn_indexer(
         full_context=use_pcp or dcp_world_size == 1,
         candidate_selection=candidate_blocks is not None,
     )
+    prefill_deep_select = _prefill_uses_deep_select(
+        topk_backend, envs.VLLM_BATCH_INVARIANT
+    )
 
     # DeepSelect ranks BF16 decode logits directly; other top-k backends and
     # the DCP merge read an FP32 copy.
@@ -687,8 +719,10 @@ def sparse_attn_indexer(
         # prefill chunk's, or the decode logits, which eager and piecewise
         # steps allocate outside the CUDA graph pools. DeepGEMM emits them in
         # `logits_dtype`, each row holding whole KV splits at a 1024-byte
-        # stride; an FP32 copy of BF16 logits keeps that stride. Prefill always
-        # reads FP32 logits, and the chunk splitter caps them at the budget.
+        # stride; an FP32 copy of BF16 logits keeps that stride. The chunk
+        # splitter caps prefill logits at the budget in FP32. DeepSelect ranks
+        # BF16 logits without the copy, but the bound keeps it for chunks that
+        # DeepSelect does not take (e.g. under DCP).
         split_kv = 384 if current_platform.is_device_capability_family(100) else 256
         row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
         copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
@@ -972,7 +1006,7 @@ def sparse_attn_indexer(
                         # DeepSelect ranks the bf16 logits in place of their exact
                         # fp32 copy; fp32 logits keep the per-row top-k.
                         use_deep_select = (
-                            topk_backend == "deep_select"
+                            prefill_deep_select
                             and logits.dtype == torch.bfloat16
                             and dcp_world_size == 1
                             and is_deep_select_supported(logits, topk_tokens)
@@ -1003,11 +1037,8 @@ def sparse_attn_indexer(
                                 candidate_block_size,
                             )
                     if use_deep_select:
-                        deep_select_topk(
-                            logits,
-                            topk_tokens,
-                            end=row_ends,
-                            output_idx=topk_indices[rows],
+                        _deep_select_prefill_topk(
+                            logits, topk_tokens, row_ends, topk_indices[rows]
                         )
                     else:
                         get_indexer_topk(topk_backend).forward_prefill(
