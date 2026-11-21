@@ -773,3 +773,62 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+class _CountingStr(str):
+    """A str that counts per-character reads made from Python code."""
+
+    reads = 0
+
+    def __getitem__(self, key):
+        _CountingStr.reads += 1
+        return str.__getitem__(self, key)
+
+    def __iter__(self):
+        for char in str.__iter__(self):
+            _CountingStr.reads += 1
+            yield char
+
+
+class TestPythonicHelpersSkipStringBodies:
+    """Streaming parsers call these helpers on the full text for every delta,
+    so they must not visit a long string argument one character at a time."""
+
+    # 4000 characters, 100 of them control characters.
+    BODY = ("x" * 39 + "\n" + "y" * 39 + "\t") * 50
+
+    @pytest.mark.parametrize(
+        "helper",
+        [
+            make_valid_python,
+            escape_ctrl_chars_in_strings,
+            rename_reserved_kwargs,
+            normalize_leading_zero_ints,
+            contains_broken_string_literal,
+        ],
+    )
+    @pytest.mark.parametrize("closed", [True, False])
+    def test_long_string_argument(self, helper, closed):
+        text = "[f(a='" + self.BODY + ("', b=7)]" if closed else "")
+        expected = helper(text)
+        _CountingStr.reads = 0
+        assert helper(_CountingStr(text)) == expected
+        # Each control character costs a few reads. The 3900 plain
+        # characters cost none.
+        assert _CountingStr.reads < 500
+
+    def test_results(self):
+        text = "[f(a='" + self.BODY + "\\'', from=07)]"
+        escaped = escape_ctrl_chars_in_strings(text)
+        assert escaped == text.replace("\n", "\\n").replace("\t", "\\t")
+        assert not contains_broken_string_literal(escaped)
+        normalized = normalize_leading_zero_ints(escaped)
+        assert normalized == escaped.replace("=07", "=7")
+        renamed, changed = rename_reserved_kwargs(normalized)
+        assert changed
+        assert renamed == normalized.replace("from=", "from_pyreservedkw_=")
+        assert make_valid_python(renamed[:-1]) == (renamed, "]")
+        calls = ast.parse(renamed, mode="eval").body
+        assert isinstance(calls, ast.List) and isinstance(calls.elts[0], ast.Call)
+        arguments = json.loads(handle_single_tool(calls.elts[0]).function.arguments)
+        assert arguments == {"a": self.BODY + "'", "from_pyreservedkw_": 7}
