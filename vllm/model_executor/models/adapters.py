@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -202,6 +202,12 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
             # so the "" / "model." scan can early-exit. Forwarded names stay
             # unmapped to avoid double-applying the mapper in the parent loader.
             hf_to_vllm_mapper = getattr(self, "hf_to_vllm_mapper", None)
+            # Mistral-format names only match after the parent loader's remap.
+            # Try raw names first so HF checkpoints keep their current prefix.
+            probe_name_fns: list[Callable[[str], str]] = [lambda name: name]
+            remap_mistral_name = getattr(self, "remap_mistral_name", None)
+            if remap_mistral_name is not None:
+                probe_name_fns.append(remap_mistral_name)
 
             # We support loading from both `*ForCausalLM` and `*Model`
             candidate_prefixes = ["", "model."]
@@ -227,8 +233,9 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
                 try:
                     target_prefix = next(
                         prefix
+                        for probe_name in probe_name_fns
                         for prefix in candidate_prefixes
-                        if prefix + lookup_name in params_dict
+                        if probe_name(prefix + lookup_name) in params_dict
                     )
                     break
                 except StopIteration:

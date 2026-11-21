@@ -11,6 +11,7 @@ from vllm.model_executor.models.adapters import (
     _create_pooling_model_cls,
     _resolve_num_labels,
 )
+from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     StageMissingLayer,
@@ -246,6 +247,65 @@ def test_pooling_prefix_probe_uses_hf_to_vllm_mapper(monkeypatch):
         "language_model.model.embed.weight",
         "language_model.model.layer0.weight",
     }
+
+
+class _MistralLikeLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = torch.nn.Module()
+        self.self_attn.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+
+class _MistralLikeInner(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = torch.nn.Linear(4, 8, bias=False)
+        self.layers = torch.nn.ModuleList([_MistralLikeLayer()])
+        self.norm = torch.nn.Linear(8, 4, bias=False)
+
+
+class MistralLikeModel(torch.nn.Module):
+    """Remaps names after the probe, like `MistralForCausalLM.load_weights`."""
+
+    mistral_mapping = MistralForCausalLM.mistral_mapping
+    remap_mistral_name = MistralForCausalLM.remap_mistral_name
+
+    def __init__(self):
+        super().__init__()
+        self.model = _MistralLikeInner()
+        self.lm_head = torch.nn.Linear(8, 16, bias=False)
+
+    def load_weights(self, weights):
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            (self.remap_mistral_name(name), w) for name, w in weights
+        )
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("layers.0.attention.wo.weight", "norm.weight", "tok_embeddings.weight"),
+        ("layers.0.self_attn.o_proj.weight", "norm.weight", "embed_tokens.weight"),
+    ],
+    ids=["mistral_format", "hf_headless"],
+)
+def test_pooling_prefix_probe_uses_remap_mistral_name(names):
+    """Mistral-format names resolve to `""`; headless HF names keep `model.`."""
+    shapes = [(8, 8), (4, 8), (8, 4)]
+    ref = {name: torch.randn(shape) for name, shape in zip(names, shapes)}
+    model = _make_pooling_model(MistralLikeModel)
+
+    model.load_weights(iter(ref.items()))
+
+    inner = model.model
+    params = [
+        inner.layers[0].self_attn.o_proj.weight,
+        inner.norm.weight,
+        inner.embed_tokens.weight,
+    ]
+    for name, param in zip(names, params):
+        assert torch.equal(param, ref[name]), name
 
 
 def test_pooling_load_weights_skips_clone_for_owned_tensor_formats(monkeypatch):
