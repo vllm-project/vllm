@@ -23,6 +23,9 @@ Batch invariance is supported on the following platforms:
 - AMD Instinct GPUs (gfx90a, gfx942, gfx950).
 - Intel XPUs with Triton support.
 
+!!! note "Errata for v0.20.0 through v0.22.0"
+    Ampere (SM 8.x) support landed in PR [#38427](https://github.com/vllm-project/vllm/pull/38427) and shipped in v0.20.0. The documentation for v0.20.0 through v0.22.0 incorrectly stated "9.0 or higher" for NVIDIA GPUs.
+
 ### Attention Backend Selection for XPU
 
 On XPU, Triton Attention backend is required for batch invariance.
