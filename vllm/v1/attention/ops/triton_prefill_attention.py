@@ -30,7 +30,7 @@ from functools import cache
 import torch
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import fp32_dot_precision, tl, triton
 from vllm.utils.math_utils import RCP_LN2
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 
@@ -83,6 +83,7 @@ def _fwd_kernel(
     SINKS_BIAS_KEY0: tl.constexpr,
     USE_SINKS: tl.constexpr,
     Lk: tl.constexpr,
+    IN_PRECISION: tl.constexpr,
     HEAD_STRIDE_ALIGNED_8: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
@@ -229,14 +230,14 @@ def _fwd_kernel(
             other=0.0,
         )
 
-        qk = tl.dot(q, k)
+        qk = tl.dot(q, k, input_precision=IN_PRECISION)
         if BLOCK_DMODEL_TAIL > 0:
             kt = tl.load(
                 kt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
                 mask=(pos_k < cur_batch_seq_len) & (mask_dt[:, None]),
                 other=0.0,
             )
-            qk = tl.dot(qt, kt, qk)
+            qk = tl.dot(qt, kt, qk, input_precision=IN_PRECISION)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         if USE_SINKS and SINKS_BIAS_KEY0:
             qk = tl.where(mask & (pos_k == 0), qk + sink, qk)
@@ -259,7 +260,7 @@ def _fwd_kernel(
             other=0.0,
         )
         p = p.to(v.dtype)
-        acc = tl.dot(p, v, acc)
+        acc = tl.dot(p, v, acc, input_precision=IN_PRECISION)
         if BLOCK_DMODEL_TAIL > 0:
             vt = tl.load(
                 vt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
@@ -267,7 +268,7 @@ def _fwd_kernel(
                 & (mask_dt[None, :]),
                 other=0.0,
             )
-            acc_t = tl.dot(p, vt, acc_t)
+            acc_t = tl.dot(p, vt, acc_t, input_precision=IN_PRECISION)
         # update m_i
         m_i = m_ij
 
@@ -428,5 +429,6 @@ def context_attention_fwd(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
+        IN_PRECISION=fp32_dot_precision(q.dtype),
         HEAD_STRIDE_ALIGNED_8=HEAD_STRIDE_ALIGNED_8,
     )
