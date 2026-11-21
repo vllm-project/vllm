@@ -242,6 +242,7 @@ def mteb_test_embed_models(
             revision=model_info.revision,
             is_sentence_transformer=True,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+            trust_remote_code=model_info.trust_remote_code,
         ) as hf_model:
             # e.g. setting default parameters for the encode method of hf_runner
             if hf_model_callback is not None:
