@@ -183,6 +183,37 @@ class _RemoteStage:
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
 
 
+class DeferredBlockRelease:
+    """Release the blocks of finished requests only after the GPU work that was
+    in flight when they finished has completed.
+
+    A zero-copy RDMA pull into recycled blocks (host-pinned KV cache) can
+    otherwise race with kernels of the step that finished the request, e.g. the
+    MTP drafter, which may still write into those blocks; the cuda_copy staging
+    used for device memory made that ordering implicit. The guard is an event
+    recorded when the release reaches the worker: by then the forward and the
+    drafter of every step that still held the request are already enqueued on
+    the current stream (post_forward runs before the drafter of its own step).
+    It only fences that stream, so a drafter moved to its own stream would need
+    its own guard. Nothing blocks: readiness is polled with Event.query()."""
+
+    def __init__(self) -> None:
+        self._pending: list[tuple[ReqId, torch.cuda.Event]] = []
+
+    def on_step(self, finished: list[ReqId]) -> None:
+        if not finished:
+            return
+        event = torch.cuda.Event()
+        event.record()
+        self._pending.extend((req_id, event) for req_id in finished)
+
+    def ready(self) -> set[ReqId]:
+        done = {req_id for req_id, event in self._pending if event.query()}
+        if done:
+            self._pending = [p for p in self._pending if p[0] not in done]
+        return done
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -995,7 +1026,22 @@ class NixlBaseConnectorWorker:
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported."
             )
+        if (
+            vllm_config.cache_config.kv_cache_host_pinned
+            and self.kv_buffer_device == "cuda"
+        ):
+            # CUDA tensors backed by host-pinned memory: register them as DRAM
+            # so UCX takes the plain ibv_reg_mr path, no GDR and no staging.
+            nixl_memory_type = "DRAM"
         self.nixl_memory_type = nixl_memory_type
+        # Zero-copy pulls land in freed blocks immediately: hold their release
+        # until the GPU work in flight has completed (see DeferredBlockRelease).
+        self.deferred_release = (
+            DeferredBlockRelease()
+            if vllm_config.cache_config.kv_cache_host_pinned
+            and self.kv_buffer_device == "cuda"
+            else None
+        )
 
         # Note: host xfer buffer ops when use_host_buffer is True
         self.copy_blocks: CopyBlocksOp | None = None
@@ -3578,6 +3624,9 @@ class NixlBaseConnectorWorker:
         self._reap_expired_send_leases(done_sending)
 
         self._cleanup_remote_engines()
+        if self.deferred_release is not None:
+            done_sending.update(self.deferred_release.ready())
+
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
