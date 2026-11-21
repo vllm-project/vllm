@@ -27,9 +27,12 @@ steps:
     - tests/tools/test_kernel_symbol_map.py
     - tools/ci/kernel_symbol_map.py
     - tools/ci/rocm_kernel_symbol_map.py
+    - tools/report_build_time_ninja.py
+    - tests/tools/test_report_build_time_ninja.py
   commands:
     - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py tools/test_amd_ci_fast_exit.py
     - pytest -v -s tools/test_kernel_symbol_map.py
+    - pytest -v -s tools/test_report_build_time_ninja.py
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
