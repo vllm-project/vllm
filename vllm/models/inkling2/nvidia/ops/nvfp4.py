@@ -14,8 +14,10 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-from . import use_sm100_kernels
+from . import use_pdl, use_sm100_kernels
 from .block_scales import _scale_offsets
+from .e4m3 import e4m3_arg, from_e4m3, to_e4m3
+from .pdl import gdc_wait
 
 FP32_MAX = tl.constexpr(3.4028234663852886e38)
 # Both Blackwell families have native e2m1 conversions; Hopper uses software.
@@ -100,8 +102,8 @@ def _block_scales(block_max, encoder_scale, decoder_scale):
     and their inverses."""
     scale6 = tl.minimum(block_max * (encoder_scale * (1.0 / 6.0)), 448.0)
     scale4 = tl.minimum(block_max * (encoder_scale * 0.25), 448.0)
-    scale6 = scale6.to(tl.float8e4nv).to(tl.float32)
-    scale4 = scale4.to(tl.float8e4nv).to(tl.float32)
+    scale6 = from_e4m3(to_e4m3(scale6))
+    scale4 = from_e4m3(to_e4m3(scale4))
     inverse6 = tl.minimum(tl.div_rn(1.0, scale6 * decoder_scale), FP32_MAX)
     inverse4 = tl.minimum(tl.div_rn(1.0, scale4 * decoder_scale), FP32_MAX)
     return scale6, scale4, inverse6, inverse4
@@ -125,7 +127,7 @@ def _quantize_block(x, encoder_scale, decoder_scale, outer_scale, BLOCK: tl.cons
     error4 = _block_error(x, reconstructed4 * outer_scale)
     choose4 = error4 < error6
     packed = tl.reshape(tl.where(choose4[:, None], packed4, packed6), (BLOCK // 2,))
-    scales = tl.where(choose4, scale4, scale6).to(tl.float8e4nv)
+    scales = to_e4m3(tl.where(choose4, scale4, scale6))
     return packed, scales
 
 
@@ -201,7 +203,7 @@ def _quantize_columns(x, encoder_scale, decoder_scale, outer_scale):
     choose4 = error4 < error6
     return (
         tl.where(choose4, packed4, packed6),
-        tl.where(choose4, scale4, scale6).to(tl.float8e4nv),
+        to_e4m3(tl.where(choose4, scale4, scale6)),
     )
 
 
@@ -251,7 +253,7 @@ def _quantize_row(X, Values, Scales, Amax, row, K: tl.constexpr, BLOCK: tl.const
 def _nvfp4_quantize_kernel(
     X, Values, Scales, Amax, M, K: tl.constexpr, BLOCK: tl.constexpr
 ):
-    tl.extra.cuda.gdc_wait()
+    gdc_wait()
     for row in range(tl.program_id(0), M, tl.num_programs(0)):
         _quantize_row(X, Values, Scales, Amax, row, K, BLOCK)
 
@@ -275,13 +277,13 @@ def nvfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.T
     _nvfp4_quantize_kernel[(min(num_rows, 8192),)](
         x,
         values,
-        scales,
+        e4m3_arg(scales),
         amax,
         num_rows,
         K=k,
         BLOCK=block,
         num_warps=num_warps,
         enable_fp_fusion=False,
-        launch_pdl=True,
+        launch_pdl=use_pdl(),
     )
     return values, scales, amax

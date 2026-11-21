@@ -15,8 +15,9 @@ if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
+    or current_platform.is_device_capability_family(80)
 ):
-    pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
+    pytest.skip("Inkling2 requires Ampere or newer", allow_module_level=True)
 
 from vllm.models.inkling2.nvidia.dspark import (  # noqa: E402
     Inkling2MarkovHead,
@@ -198,8 +199,12 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
 def test_all_reduce_add_rmsnorm_matches_unfused(world):
     """The fused all-reduce + residual add + RMSNorm keeps the unfused bf16
     residual bits and gives the same norm output on every rank."""
+    from vllm.config.compilation import PassConfig
+
     if torch.accelerator.device_count() < world:
         pytest.skip(f"needs {world} GPUs")
+    if not PassConfig.default_fi_allreduce_fusion_max_size_mb().get(world):
+        pytest.skip("no FlashInfer all-reduce fusion on this GPU")
     queue = mp.get_context("spawn").Queue()
     mp.spawn(_all_reduce_norm_worker, args=(world, 29620 + world, queue), nprocs=world)
     results = [queue.get() for _ in range(world)]

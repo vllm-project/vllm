@@ -44,9 +44,11 @@ class _SM120Linear(nn.Linear):
 
 
 def _linear(in_features: int, out_features: int, bias: bool = True) -> nn.Linear:
-    cls = (
-        _SM120Linear if current_platform.is_device_capability_family(120) else nn.Linear
+    # cuBLAS picks its kernels by row count on SM8x and SM12x.
+    padding_invariant = any(
+        current_platform.is_device_capability_family(f) for f in (80, 120)
     )
+    cls = _SM120Linear if padding_invariant else nn.Linear
     return cls(in_features, out_features, bias=bias, dtype=torch.bfloat16)
 
 
@@ -91,7 +93,7 @@ class Inkling2VisionAttention(nn.Module):
         else:
             from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-            version = 2 if current_platform.is_device_capability_family(120) else 3
+            version = 3 if current_platform.is_device_capability_family(90) else 2
             out = flash_attn_varlen_func(q, k, v, fa_version=version, **kwargs)
         return self.out_proj(out.view(hidden.shape))
 
