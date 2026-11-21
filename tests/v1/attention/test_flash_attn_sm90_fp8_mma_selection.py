@@ -96,14 +96,18 @@ def _impl(head_size, kv_cache_dtype):
     [
         (512, "fp8", 4, True),
         (512, "fp8_e4m3", 4, True),
-        # Gemma-4 sliding-window layers stay on FA3 FP8 with an FP8 query.
-        (256, "fp8", 3, False),
+        # Gemma-4 sliding-window layers run FA4 native FP8 with an FP8 query.
+        (256, "fp8", 4, False),
         (512, "auto", 4, False),
     ],
 )
 def test_sm90_routing(head_size, kv_cache_dtype, fa_version, sm90_fp8_mma):
     with _device(SM90, head_size=head_size, kv_cache_dtype=kv_cache_dtype):
-        assert get_flash_attn_version(head_size=head_size) == fa_version
+        fp8_kv_cache = kv_cache_dtype != "auto"
+        assert (
+            get_flash_attn_version(head_size=head_size, fp8_kv_cache=fp8_kv_cache)
+            == fa_version
+        )
         assert _supports_combination(SM90, head_size, kv_cache_dtype) is None
         impl = _impl(head_size, kv_cache_dtype)
     assert impl.vllm_flash_attn_version == fa_version
@@ -122,7 +126,7 @@ def test_sm90_fp8_mma_block_size():
 @pytest.mark.parametrize(
     "capability,head_size,fa_version",
     [
-        (SM90, 256, 4),  # forced FA4 with an FP8 KV cache needs head_size=512
+        (SM90, 80, 4),  # SM90 FA4 FP8 KV needs head_size 64, 96, 128, 192, 256 or 512
         (SM100, 512, None),  # FA4 on Blackwell does not support head_size=512
         (SM80, 512, None),  # FA2 has no FP8 KV cache
     ],
@@ -152,9 +156,7 @@ def test_sm90_fp8_mma_rejects_dcp(head_size, kv_cache_dtype, rejected):
 @pytest.mark.parametrize(
     "head_size,q_dtype,causal,match",
     [
-        # FA4 + FP8 KV below d512 raises; no silent switch to FA3.
-        (256, torch.float8_e4m3fn, True, "q=torch.float8_e4m3fn/256"),
-        (128, torch.float8_e4m3fn, False, "head_size=512"),
+        # FA4 + FP8 KV with a BF16 query below d512 raises; no silent switch to FA3.
         (256, torch.bfloat16, True, "q=torch.bfloat16/256"),
         (512, torch.bfloat16, False, "noncausal"),
     ],

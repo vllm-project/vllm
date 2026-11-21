@@ -321,18 +321,21 @@ def flash_attn_varlen_func(
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
 
+    # With FP8 E4M3 Q, SM90 FA4 runs its native FP8 forward instead.
     fa4_fp8_kv_dequant = False
     if (
         fa_version == 4
         and k.dtype == torch.float8_e4m3fn
+        and q.dtype != torch.float8_e4m3fn
         and torch.cuda.get_device_capability()[0] == 9
     ):
         fa4_fp8_kv_dequant = q.shape[-1] == k.shape[-1] == v.shape[-1] == 512
         if not fa4_fp8_kv_dequant:
-            # Unreachable in-tree: FA4 with an FP8 KV cache on SM90 is only
-            # selected for head_size=512 (see flash_attn_supports_kv_cache_dtype).
+            # Unreachable in-tree: on SM90, only head_size=512 keeps FP16/BF16 Q
+            # with an FP8 KV cache; smaller heads quantize Q (FlashAttentionImpl).
             raise NotImplementedError(
-                "FA4 on SM90 supports FP8 K/V only with q/k/v head_size=512, got "
+                "FA4 on SM90 supports FP8 K/V with FP16/BF16 Q only with q/k/v "
+                "head_size=512, got "
                 f"q={q.dtype}/{q.shape[-1]}, k={k.dtype}/{k.shape[-1]}, "
                 f"v={v.dtype}/{v.shape[-1]} (dtype/head_size); use fa_version=3."
             )
@@ -465,12 +468,17 @@ def flash_attn_varlen_func(
         # CuTe requires unit stride in the descales' head dimension.
         # contiguous() can be a no-op for scalar.expand(1, 1), whose
         # strides are (0, 0), so explicitly clone incompatible layouts.
-        q_descale, k_descale, v_descale = (
-            t.clone(memory_format=torch.contiguous_format)
-            if t is not None and t.ndim == 2 and t.stride(1) != 1
-            else t
-            for t in (q_descale, k_descale, v_descale)
-        )
+        # SM90 native FP8 (FP8 Q) reads broadcast descales without a copy.
+        if not (
+            torch.cuda.get_device_capability()[0] == 9
+            and q.dtype == torch.float8_e4m3fn
+        ):
+            q_descale, k_descale, v_descale = (
+                t.clone(memory_format=torch.contiguous_format)
+                if t is not None and t.ndim == 2 and t.stride(1) != 1
+                else t
+                for t in (q_descale, k_descale, v_descale)
+            )
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
