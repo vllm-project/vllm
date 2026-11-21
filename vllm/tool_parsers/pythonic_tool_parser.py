@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -25,6 +26,8 @@ from vllm.tool_parsers.utils import (
     compute_tool_delta,
     handle_single_tool,
     make_valid_python,
+    rename_reserved_kwargs,
+    restore_reserved_kwarg_names,
 )
 
 logger = init_logger(__name__)
@@ -65,6 +68,15 @@ class PythonicToolParser(ToolParser):
     def current_tool_index(self, value: int) -> None:
         self.current_tool_id = value
 
+    @staticmethod
+    def _restore_reserved(tool_call):
+        """Restore parameter names renamed by ``rename_reserved_kwargs``."""
+        arguments = json.loads(tool_call.function.arguments)
+        restored = restore_reserved_kwarg_names(arguments)
+        if restored != arguments:
+            tool_call.function.arguments = json.dumps(restored, ensure_ascii=False)
+        return tool_call
+
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
@@ -89,17 +101,21 @@ class PythonicToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(model_output)
+            renamed_output, kw_renamed = rename_reserved_kwargs(model_output)
+            module = ast.parse(renamed_output)
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
+                tool_calls = [
+                    handle_single_tool(e)  # type: ignore
+                    for e in parsed.elts
+                ]
+                if kw_renamed:
+                    tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
-                    ],
+                    tool_calls=tool_calls,
                     content=None,
                 )
             else:
@@ -125,7 +141,8 @@ class PythonicToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         try:
-            valid_and_added_text = make_valid_python(current_text)
+            renamed_text, kw_renamed = rename_reserved_kwargs(current_text)
+            valid_and_added_text = make_valid_python(renamed_text)
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text
@@ -140,7 +157,8 @@ class PythonicToolParser(ToolParser):
                 handle_single_tool(e)  # type: ignore
                 for e in parsed.elts
             ]
-
+            if kw_renamed:
+                tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
                 if index < self.current_tool_index:
