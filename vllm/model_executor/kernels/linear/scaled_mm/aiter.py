@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -331,6 +333,29 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    """Per-token FP8 activations x per-channel FP8 weights on AITER: the CK
+    `gemm_a8w8` for (N, K) with tuned CSV rows, else the Triton
+    `gemm_a8w8_per_token_scale` for (N, K) with tuned configs up to TRITON_MAX_M
+    (`torch._scaled_mm` above). Both take the weight as `[N, K]`."""
+
+    # Largest batch sent to the Triton GEMM. Above it, row-wise torch._scaled_mm
+    # was as fast or faster on the tuned shapes measured, so larger batches run there.
+    TRITON_MAX_M = 256
+
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+        assert c.weight_shape is not None
+        n, k = c.weight_shape
+        self.use_triton = not self._ck_tuned(n, k)
+        logger.info_once(
+            "AITER per-token FP8 GEMM for N=%d K=%d: %s",
+            n,
+            k,
+            "Triton gemm_a8w8_per_token_scale" if self.use_triton else "CK gemm_a8w8",
+        )
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -341,6 +366,23 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     def input_quant_key(self) -> QuantKey | None:
         return kFp8DynamicTokenSym
+
+    @staticmethod
+    def _ck_tuned(n: int, k: int) -> bool:
+        return rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(
+            n, k, current_platform.fp8_dtype()
+        )
+
+    @classmethod
+    def _triton_tuned(cls, c: FP8ScaledMMLinearLayerConfig, n: int, k: int) -> bool:
+        return (
+            not current_platform.is_fp8_fnuz()
+            and c.out_dtype is torch.bfloat16
+            and not c.activation_quant_key.scale.static
+            and rocm_aiter_ops.is_triton_gemm_a8w8_per_token_tuned(
+                n, k, cls.TRITON_MAX_M
+            )
+        )
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -359,9 +401,10 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "requires per token activation scales and per channel weight scales.",
             )
 
-        # Aiter's per-token Gemm performs better than torch oonly when its
-        # tuned.
-        if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
+        # Aiter's per-token Gemms perform better than torch only when tuned: CK
+        # for (N, K), or Triton (OCP FP8, dynamic activation scales, bfloat16
+        # output) for (N, K) at every M up to TRITON_MAX_M.
+        if not (cls._ck_tuned(N, K) or cls._triton_tuned(c, N, K)):
             return (
                 False,
                 (
@@ -392,6 +435,11 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
+        if self.use_triton:
+            output_shape[-1] = B.shape[0]
+            return rocm_aiter_ops.triton_per_token_fp8_gemm(
+                A, B, out_dtype, As, Bs, bias, self.TRITON_MAX_M
+            ).view(*output_shape)
         return rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype)
 
 
