@@ -109,6 +109,18 @@ Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
 
+With torchcodec, enabling the byte limit adds a frame-by-frame validation pass
+before the final native-rate decode. This pass counts all native PCM, including
+preroll and padding, against the byte and duration limits. The byte check does
+not depend on the file's declared duration, timestamps, or sample rate. A
+requested sample-rate conversion uses PyAV after checking its projected output
+size, including short-input padding, against the same byte limit. Both the
+native and converted PCM must fit, even when downsampling. Resampling after
+native trimming can change boundary samples or output length compared with
+torchcodec's integrated resampling. Oversized audio is rejected rather than
+truncated. Native codec buffers, resampler buffers, and concatenation can add
+memory overhead beyond the decoded PCM budget.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
