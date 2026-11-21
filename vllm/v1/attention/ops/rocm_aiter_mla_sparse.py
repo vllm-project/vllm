@@ -30,6 +30,7 @@ if current_platform.is_rocm():
         _ON_GFX942,
         _ON_GFX950,
         _ON_GFX1151,
+        _ON_GFX1250,
         _ON_RDNA,
         get_cdna_version,
     )
@@ -37,6 +38,7 @@ else:
     _ON_GFX942 = False
     _ON_GFX950 = False
     _ON_GFX1151 = False
+    _ON_GFX1250 = False
     _ON_RDNA = False
 
     def get_cdna_version() -> int:
@@ -101,6 +103,22 @@ def _can_use_aiter_pa_prefill_sparse(q: torch.Tensor, kv: torch.Tensor) -> bool:
 def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
     """V4.0 C4A is block-flat (NORMAL). Ratio 1 and 2 are 16×16 SHUFFLE."""
     return compress_ratio == 4
+
+
+def _use_fused_paged_mqa_logits(
+    compress_ratio: int = 1, cache_layout: str | None = None
+) -> bool:
+    """Whether decode uses the SHUFFLE-aware fused paged-MQA logits.
+
+    gfx1250's stage1 reader assumes flat rows, so only block-flat caches use it.
+    """
+    if _USE_FUSED_PAGED_MQA_LOGITS:
+        return True
+    return (
+        _ON_GFX1250
+        and cache_layout != "NORMAL"
+        and not _indexer_k_is_c4a_block_flat(compress_ratio)
+    )
 
 
 def indexer_k_cache_is_shuffled(block_size: int) -> bool:
@@ -787,27 +805,28 @@ def paged_mqa_logits_module():
                 str(error),
             )
             return None
-        if _USE_FUSED_PAGED_MQA_LOGITS:
-            function_name = "deepgemm_fp8_paged_mqa_logits"
-            required_parameters = {
-                "Preshuffle",
-                "KVBlockSize",
-                "ChunkK",
-                "WavePerEU",
-            }
-        else:
-            function_name = "deepgemm_fp8_paged_mqa_logits_stage1"
-            required_parameters = {"ChunkQ"}
-        function = getattr(module, function_name, None)
-        if not callable(function) or not _accepts_parameters(
-            function, required_parameters
-        ):
-            logger.warning_once(
-                "AITER paged-MQA logits module %s lacks a compatible %s API.",
-                paged_mqa_logits_module_path,
-                function_name,
+        # gfx1250 uses both readers (see _use_fused_paged_mqa_logits).
+        required_apis: list[tuple[str, set[str]]] = []
+        if _USE_FUSED_PAGED_MQA_LOGITS or _ON_GFX1250:
+            required_apis.append(
+                (
+                    "deepgemm_fp8_paged_mqa_logits",
+                    {"Preshuffle", "KVBlockSize", "ChunkK", "WavePerEU"},
+                )
             )
-            return None
+        if not _USE_FUSED_PAGED_MQA_LOGITS:
+            required_apis.append(("deepgemm_fp8_paged_mqa_logits_stage1", {"ChunkQ"}))
+        for function_name, required_parameters in required_apis:
+            function = getattr(module, function_name, None)
+            if not callable(function) or not _accepts_parameters(
+                function, required_parameters
+            ):
+                logger.warning_once(
+                    "AITER paged-MQA logits module %s lacks a compatible %s API.",
+                    paged_mqa_logits_module_path,
+                    function_name,
+                )
+                return None
         return module
     return None
 
@@ -886,7 +905,7 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        if _USE_FUSED_PAGED_MQA_LOGITS:
+        if _use_fused_paged_mqa_logits(compress_ratio, cache_layout):
             logger.info_once(
                 "Using AITER paged-MQA logits from %s.",
                 aiter_paged_mqa_logits_module.__name__,
@@ -1443,7 +1462,7 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
-        if _USE_FUSED_PAGED_MQA_LOGITS:
+        if _use_fused_paged_mqa_logits(compress_ratio, cache_layout):
             _decode_logits_workspace(decode_rows, decode_max_model_len)
         else:
             workspace_manager.get_simultaneous(
