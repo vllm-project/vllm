@@ -6,11 +6,13 @@ import asyncio
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 import torch
 from PIL import Image
+from pydantic import BaseModel, ConfigDict
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import (
     Mistral3Config,
@@ -23,12 +25,12 @@ from vllm import PoolingParams, TokensPrompt
 from vllm.config import ModelConfig, VllmConfig
 from vllm.connections import MediaRequestDownloadSizeExceededError
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.base.protocol import ChatRequestOptionsMixin
 from vllm.entrypoints.pooling.scoring.io_processor import (
     BiEncoderIOProcessor,
     CrossEncoderIOProcessor,
     JinaRankingIOProcessor,
     LateInteractionIOProcessor,
-    _apply_post_tokenization_to_token_type_ids,
 )
 from vllm.entrypoints.pooling.scoring.types import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
@@ -36,12 +38,14 @@ from vllm.entrypoints.pooling.types import (
     EncodeCMPLRenderParams,
     OfflineScoringInputsContext,
     PoolingEngineInput,
+    PoolingServeContext,
     ScoringRenderParams,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
-from vllm.renderers import TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import (
     AsyncMultiModalItemTracker,
     ChatTemplateConfig,
@@ -183,11 +187,16 @@ async def test_pooling_workers_share_only_their_request_media_budget(
 def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     llm_reranker_processor: CrossEncoderIOProcessor,
 ):
-    encode_kwargs = {"add_special_tokens": True}
+    tok_params = TokenizeParams(max_total_tokens=32).with_kwargs(
+        add_special_tokens=True
+    )
+    chat_params = ChatParams()
 
-    _, uncapped = llm_reranker_processor.get_score_prompt("a", "bc", encode_kwargs)
-    _, nonbinding = llm_reranker_processor.get_score_prompt(
-        "a", "bc", encode_kwargs, max_tokens_per_doc=10
+    _, uncapped = llm_reranker_processor._get_score_prompt(
+        "a", "bc", tok_params, chat_params
+    )
+    _, nonbinding = llm_reranker_processor._get_score_prompt(
+        "a", "bc", tok_params, chat_params, max_tokens_per_doc=10
     )
 
     expected = [1, 3, 5, 6, 2]
@@ -219,20 +228,17 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     )
     ctx = OfflineScoringInputsContext(
         pooling_task="classify",
-        tokenization_kwargs=None,
-        lora_request=None,
-        priorities=None,
         scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
         chat_template=request_template,
         pooling_params=PoolingParams(),
     )
     factory, _ = processor.get_request_factory_offline(ctx)
     (request,) = factory()
-    text, prompt = processor.get_score_prompt(
+    text, prompt = processor._get_score_prompt(
         request["data_1"],
         request["data_2"],
-        request["tok_params"].get_encode_kwargs(),
-        chat_template=request["chat_template"],
+        request["tok_params"],
+        request["chat_params"],
     )
 
     assert text == expected
@@ -253,14 +259,15 @@ def test_truncation_keeps_jinavl_score_token(
     processor = llm_reranker_processor
     processor.supports_score_template = True
     processor.model = JinaVLForSequenceClassification
-    processor.renderer = SimpleNamespace(process_for_engine=lambda prompt, _: prompt)
+    processor.renderer = SimpleNamespace(
+        process_for_engine=lambda prompt, _, **kw: prompt
+    )
 
     engine_input = processor.render(
         ScoringRenderParams(
             data_1="a",
             data_2="bc bc bc bc",
-            chat_template=None,
-            chat_template_content_format="string",
+            chat_params=ChatParams(chat_template_content_format="string"),
             max_tokens_per_query=0,
             max_tokens_per_doc=0,
             tok_params=TokenizeParams(
@@ -310,7 +317,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
         prompt,
     )
     assert "prompt_token_ids" in processed_prompt
-    token_type_ids = _apply_post_tokenization_to_token_type_ids(
+    token_type_ids = CrossEncoderIOProcessor._apply_post_tokenization_to_token_type_ids(
         tokenizer, tok_params, token_type_ids
     )
 
@@ -335,7 +342,7 @@ def test_token_type_padding_uses_the_tokenizer_pad_type():
         truncation_side="right",
     )
 
-    token_type_ids = _apply_post_tokenization_to_token_type_ids(
+    token_type_ids = CrossEncoderIOProcessor._apply_post_tokenization_to_token_type_ids(
         tokenizer, tok_params, [0, 0, 0, 1, 1]
     )
 
@@ -462,6 +469,10 @@ def multimodal_reranker_processor(tmp_path, request, scoring_tokenizer):
         renderer.shutdown()
 
 
+def _multimodal_tok_params() -> TokenizeParams:
+    return TokenizeParams(max_total_tokens=64)
+
+
 @pytest.mark.parametrize(
     "multimodal_reranker_processor", ["mistral3", "qwen3_vl"], indirect=True
 )
@@ -478,8 +489,12 @@ def test_scoring_template_keeps_images_distinct_from_literal_placeholder_text(
             "uuid": "document-image",
         },
     ]
-    prompt, inputs = processor.get_score_prompt(
-        "a", document, {}, chat_template=_BLOCK_TEMPLATE
+    chat_params = ChatParams(
+        chat_template=_BLOCK_TEMPLATE,
+        chat_template_content_format="openai",
+    )
+    prompt, inputs = processor._get_score_prompt(
+        "a", document, _multimodal_tok_params(), chat_params
     )
     expected = "query:adocument:literal [literal IMG][IMG]"
     assert prompt == expected
@@ -507,11 +522,15 @@ def test_scoring_text_limits_share_budget_across_blocks_and_keep_images(
         },
         last_text,
     ]
-    prompt, inputs = processor.get_score_prompt(
+    chat_params = ChatParams(
+        chat_template=_BLOCK_TEMPLATE,
+        chat_template_content_format="openai",
+    )
+    prompt, inputs = processor._get_score_prompt(
         "a bc",
         document,
-        {},
-        chat_template=_BLOCK_TEMPLATE,
+        _multimodal_tok_params(),
+        chat_params,
         max_tokens_per_query=1,
         max_tokens_per_doc=doc_limit,
     )
@@ -524,12 +543,20 @@ def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
     multimodal_reranker_processor,
 ):
     # This tokenizer splits "abc" into three tokens, but "a" and "bc" into one each.
+    chat_params = ChatParams(
+        chat_template=_BLOCK_TEMPLATE,
+        chat_template_content_format="openai",
+    )
     for document in (
         "abc",
         [{"type": "text", "text": "a"}, {"type": "text", "text": "bc"}],
     ):
-        prompt, _ = multimodal_reranker_processor.get_score_prompt(
-            "a", document, {}, chat_template=_BLOCK_TEMPLATE, max_tokens_per_doc=2
+        prompt, _ = multimodal_reranker_processor._get_score_prompt(
+            "a",
+            document,
+            _multimodal_tok_params(),
+            chat_params,
+            max_tokens_per_doc=2,
         )
         assert prompt == "query:adocument:ab"
 
@@ -539,7 +566,11 @@ def test_string_scoring_templates_keep_model_placeholders(
     multimodal_reranker_processor,
 ):
     processor = multimodal_reranker_processor
-    prompt, _ = processor.get_score_prompt(
+    chat_params = ChatParams(
+        chat_template="{{ messages[0].content + messages[1].content }}",
+        chat_template_content_format="string",
+    )
+    prompt, _ = processor._get_score_prompt(
         "a",
         [
             {
@@ -547,9 +578,8 @@ def test_string_scoring_templates_keep_model_placeholders(
                 "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2)))},
             }
         ],
-        {},
-        chat_template="{{ messages[0].content + messages[1].content }}",
-        chat_template_content_format="string",
+        _multimodal_tok_params(),
+        chat_params,
     )
     assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
 
@@ -557,7 +587,377 @@ def test_string_scoring_templates_keep_model_placeholders(
 def test_scoring_detects_structured_content_with_saved_template(
     multimodal_reranker_processor,
 ):
-    prompt, _ = multimodal_reranker_processor.get_score_prompt(
-        "a", "bc", {}, chat_template_content_format="auto"
+    processor = multimodal_reranker_processor
+    chat_params = processor._prepare_chat_params(
+        ChatParams(chat_template=processor.saved_chat_template)
+    )
+    assert chat_params.chat_template_content_format == "openai"
+
+    prompt, _ = processor._get_score_prompt(
+        "a", "bc", _multimodal_tok_params(), chat_params
     )
     assert prompt == "query:adocument:bc"
+
+
+# =============================================================================
+# Saved Sentence Transformers chat template kwargs tests
+# =============================================================================
+
+
+class _DummyOnlineScoreRequest(ChatRequestOptionsMixin, BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("model", "dummy-model")
+        kwargs.setdefault(
+            "messages",
+            [
+                {"role": "user", "content": "a"},
+                {"role": "user", "content": "bc"},
+            ],
+        )
+        kwargs.setdefault("skip_mm_cache", False)
+        super().__init__(**kwargs)
+
+    def build_tok_params(
+        self, model_config: Any, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
+        return default_tok_params
+
+
+def _make_processor(
+    base_processor: CrossEncoderIOProcessor,
+    *,
+    saved_template: str | None = "{{ messages[0].content }} {{ messages[1].content }}",
+    saved_kwargs: dict[str, Any] | None = None,
+    processor_template: str | None = None,
+) -> CrossEncoderIOProcessor:
+    base_processor.chat_template = processor_template
+    base_processor.saved_chat_template = saved_template
+    base_processor.saved_chat_template_kwargs = (
+        dict(saved_kwargs) if saved_kwargs is not None else {}
+    )
+    base_processor.trust_request_chat_template = True
+    base_processor.renderer = SimpleNamespace(
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32),
+        default_chat_tok_params=TokenizeParams(max_total_tokens=32),
+    )
+    return base_processor
+
+
+def _call_online_chat_params(
+    processor: CrossEncoderIOProcessor,
+    request: _DummyOnlineScoreRequest,
+) -> ChatParams:
+    serve_ctx = SimpleNamespace(
+        request=request,
+        pooling_params=PoolingParams(),
+        lora_request=None,
+        priorities=0,
+        prompt_extras=None,
+    )
+    with patch.object(
+        processor,
+        "valid_inputs_online",
+        return_value=ScoringData(data_1=["a"], data_2=["bc"]),
+    ):
+        render_params = processor.get_request_factory_online(
+            cast(PoolingServeContext, serve_ctx)
+        )
+    assert len(render_params) == 1
+    return cast(ScoringRenderParams, render_params[0])["chat_params"]
+
+
+def _call_offline_chat_params(
+    processor: CrossEncoderIOProcessor,
+    ctx: OfflineScoringInputsContext,
+) -> ChatParams:
+    factory, count = processor.get_request_factory_offline(ctx)
+    assert count == 1
+    (render_params,) = factory()
+    return cast(ScoringRenderParams, render_params)["chat_params"]
+
+
+class TestSavedChatTemplateKwargsDefaults:
+    """Saved ST kwargs override default False flags when no higher-precedence
+    override is supplied, while unset flags stay False."""
+
+    def test_offline_saved_true_overrides_default_false(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+        )
+
+        chat_params = _call_offline_chat_params(processor, ctx)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+        }
+
+    def test_online_saved_true_overrides_default_false(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        request = _DummyOnlineScoreRequest()
+
+        chat_params = _call_online_chat_params(processor, request)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+        }
+
+
+class TestSavedChatTemplateKwargsPrecedence:
+    """Precedence order: explicit flags > chat_template_kwargs > saved ST kwargs
+    > default False flags."""
+
+    @pytest.mark.parametrize(
+        ("req_kwargs", "explicit_flag", "expected_flag"),
+        [
+            ({"add_generation_prompt": False}, None, False),
+            ({"add_generation_prompt": True}, False, False),
+            (None, None, True),
+        ],
+    )
+    def test_offline_overrides_saved_kwargs(
+        self,
+        llm_reranker_processor: CrossEncoderIOProcessor,
+        req_kwargs: dict[str, Any] | None,
+        explicit_flag: bool | None,
+        expected_flag: bool,
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True, "saved_only": "kept"},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+            chat_template_kwargs=req_kwargs,
+            add_generation_prompt=explicit_flag,
+        )
+
+        chat_params = _call_offline_chat_params(processor, ctx)
+
+        assert (
+            chat_params.chat_template_kwargs["add_generation_prompt"] is expected_flag
+        )
+        assert chat_params.chat_template_kwargs["saved_only"] == "kept"
+
+    @pytest.mark.parametrize(
+        ("req_kwargs", "explicit_flag", "expected_flag"),
+        [
+            ({"add_generation_prompt": False}, None, False),
+            ({"add_generation_prompt": True}, False, False),
+            (None, None, True),
+        ],
+    )
+    def test_online_overrides_saved_kwargs(
+        self,
+        llm_reranker_processor: CrossEncoderIOProcessor,
+        req_kwargs: dict[str, Any] | None,
+        explicit_flag: bool | None,
+        expected_flag: bool,
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True, "saved_only": "kept"},
+        )
+        request = _DummyOnlineScoreRequest(
+            chat_template_kwargs=req_kwargs,
+            add_generation_prompt=explicit_flag,
+        )
+
+        chat_params = _call_online_chat_params(processor, request)
+
+        assert (
+            chat_params.chat_template_kwargs["add_generation_prompt"] is expected_flag
+        )
+        assert chat_params.chat_template_kwargs["saved_only"] == "kept"
+
+
+class TestSavedChatTemplateReplacementAndValidation:
+    """Replacement templates bypass saved ST kwargs; conflicting True flags
+    raise an error."""
+
+    def test_offline_replacement_template_skips_saved_kwargs(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+            chat_template="{{ messages[1].content }} {{ messages[0].content }}",
+        )
+
+        chat_params = _call_offline_chat_params(processor, ctx)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+
+    def test_online_replacement_template_skips_saved_kwargs(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        request = _DummyOnlineScoreRequest(
+            chat_template="{{ messages[1].content }} {{ messages[0].content }}"
+        )
+
+        chat_params = _call_online_chat_params(processor, request)
+
+        assert chat_params.chat_template_kwargs == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+
+    def test_conflicting_true_flags_raise_error(
+        self, llm_reranker_processor: CrossEncoderIOProcessor
+    ):
+        processor = _make_processor(
+            llm_reranker_processor,
+            saved_kwargs={"add_generation_prompt": True},
+        )
+        ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            pooling_params=PoolingParams(),
+            continue_final_message=True,
+        )
+
+        with pytest.raises(VLLMValidationError):
+            _call_offline_chat_params(processor, ctx)
+
+
+# =============================================================================
+# CrossEncoder tok_params selection tests (template vs completion vs chat input)
+# =============================================================================
+
+
+class TestCrossEncoderTokParamsSelection:
+    """Plain text pairs with an active chat template should use
+    `default_chat_tok_params` (avoiding double BOS on BOS-adding tokenizers),
+    while template-less plain text pairs use `default_cmpl_tok_params`."""
+
+    @staticmethod
+    def _configure_distinct_tok_params(
+        processor: CrossEncoderIOProcessor,
+    ) -> tuple[TokenizeParams, TokenizeParams]:
+        cmpl_tok = TokenizeParams(max_total_tokens=32).with_kwargs(
+            add_special_tokens=True
+        )
+        chat_tok = TokenizeParams(max_total_tokens=32).with_kwargs(
+            add_special_tokens=False
+        )
+        processor.renderer = SimpleNamespace(
+            default_cmpl_tok_params=cmpl_tok,
+            default_chat_tok_params=chat_tok,
+        )
+        return cmpl_tok, chat_tok
+
+    @pytest.mark.parametrize(
+        ("data_1", "data_2", "chat_template", "expect_chat_tok"),
+        [
+            # Plain text + active chat template -> chat_tok_params
+            (
+                ["a"],
+                ["bc", "a"],
+                "{{ messages[0].content }} {{ messages[1].content }}",
+                True,
+            ),
+            # Plain text + no chat template -> cmpl_tok_params
+            (["a"], ["bc", "a"], None, False),
+            # Chat messages list + no explicit template -> chat_tok_params
+            (
+                [[{"role": "user", "content": "a"}]],
+                [
+                    [{"role": "user", "content": "bc"}],
+                    [{"role": "user", "content": "a"}],
+                ],
+                None,
+                True,
+            ),
+            # Chat messages list + active template -> chat_tok_params
+            (
+                [[{"role": "user", "content": "a"}]],
+                [
+                    [{"role": "user", "content": "bc"}],
+                    [{"role": "user", "content": "a"}],
+                ],
+                "{{ messages[0].content }} {{ messages[1].content }}",
+                True,
+            ),
+        ],
+    )
+    def test_offline_and_online_tok_params_selection(
+        self,
+        llm_reranker_processor: CrossEncoderIOProcessor,
+        data_1: Any,
+        data_2: Any,
+        chat_template: str | None,
+        expect_chat_tok: bool,
+    ):
+        processor = llm_reranker_processor
+        processor.chat_template = None
+        processor.saved_chat_template = None
+        processor.saved_chat_template_kwargs = {}
+        processor.trust_request_chat_template = True
+        cmpl_tok, chat_tok = self._configure_distinct_tok_params(processor)
+        expected_tok = chat_tok if expect_chat_tok else cmpl_tok
+
+        # 1) Offline path
+        offline_ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=data_1, data_2=data_2),
+            pooling_params=PoolingParams(),
+            chat_template=chat_template,
+        )
+        factory, count = processor.get_request_factory_offline(offline_ctx)
+        assert count == len(data_2)
+        offline_items = [cast(ScoringRenderParams, p) for p in factory()]
+        assert len(offline_items) == len(data_2)
+        assert all(item["tok_params"] is expected_tok for item in offline_items)
+
+        # 2) Online path
+        request = _DummyOnlineScoreRequest(chat_template=chat_template)
+        serve_ctx = SimpleNamespace(
+            request=request,
+            pooling_params=PoolingParams(),
+            lora_request=None,
+            priorities=0,
+            prompt_extras=None,
+        )
+        with patch.object(
+            processor,
+            "valid_inputs_online",
+            return_value=ScoringData(data_1=data_1, data_2=data_2),
+        ):
+            online_items = [
+                cast(ScoringRenderParams, p)
+                for p in processor.get_request_factory_online(
+                    cast(PoolingServeContext, serve_ctx)
+                )
+            ]
+        assert len(online_items) == len(data_2)
+        assert all(item["tok_params"] is expected_tok for item in online_items)

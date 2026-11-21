@@ -301,9 +301,17 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        add_special_tokens: bool | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool | None = None,
+        continue_final_message: bool | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        skip_mm_cache: bool = False,
+        cache_salt: str | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -336,13 +344,29 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            add_special_tokens: Whether to add special tokens (e.g. BOS).
+                `None` (default) keeps the per-path default: `True` for
+                completion inputs, `False` for chat inputs. Explicit
+                `True`/`False` overrides both.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
             chat_template: The chat template to use for scoring. If None, use
                 the chat template passed to the LLM constructor.
-            chat_template_content_format: The format of message content passed
-                to the scoring template: "string" for plain text, "openai" for
-                structured content blocks, or "auto" to detect from the
-                template. Defaults to "auto".
-            tokenization_kwargs: Overrides for `tokenizer.encode`.
+            chat_template_content_format: How to render chat message content.
+            add_generation_prompt: If true, add the generation prompt to the
+                chat template.
+            continue_final_message: If true, leave the final chat message
+                open-ended so the model continues it. Mutually exclusive with
+                `add_generation_prompt`.
+            chat_template_kwargs: Extra keyword args forwarded to the chat
+                template renderer.
+            skip_mm_cache: If true, skip the multimodal processor cache for
+                this request.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
 
         Returns:
             A list of `ScoringRequestOutput` objects containing the
@@ -396,11 +420,19 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             pooling_task=pooling_task,
             scoring_data=scoring_data,
             pooling_params=pooling_params,
-            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
+            priorities=None,
+            add_special_tokens=add_special_tokens,
+            tokenization_kwargs=tokenization_kwargs,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
-            priorities=None,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            chat_template_kwargs=chat_template_kwargs,
+            skip_mm_cache=skip_mm_cache,
+            cache_salt=cache_salt,
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)

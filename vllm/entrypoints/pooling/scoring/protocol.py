@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -13,11 +13,17 @@ from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
-from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
+from ..base.protocol import (
+    ChatRequestOptionsMixin,
+    ClassifyRequestMixin,
+    PoolingBasicRequestMixin,
+)
 from .types import ScoreContentPartParam, ScoreInput
 
 
-class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
+class ScoringRequestMixin(
+    PoolingBasicRequestMixin, ChatRequestOptionsMixin, ClassifyRequestMixin
+):
     # --8<-- [start:scoring-common-params]
     max_tokens_per_query: int = Field(
         default=0,
@@ -42,24 +48,6 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             "Task instruction prepended to each scored pair via the chat "
             "template. Equivalent to passing "
             "chat_template_kwargs={'instruction': ...}."
-        ),
-    )
-    add_special_tokens: bool | None = Field(
-        default=None,
-        description=(
-            "If true, special tokens (e.g. BOS) will be added to the prompt "
-            "on top of what is added by the chat template. "
-            "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false. "
-            "If unset (`None`), the per-path default is used: `False` for the "
-            "chat path, and the model/tokenizer default for the completion path."
-        ),
-    )
-    chat_template_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Additional keyword args to pass to the chat template renderer. "
-            "Will be accessible by the score/rerank chat template."
         ),
     )
     # --8<-- [end:scoring-common-params]
@@ -102,6 +90,14 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             merged = dict(self.chat_template_kwargs or {})
             merged.setdefault("instruction", self.instruction)
             self.chat_template_kwargs = merged
+        return self
+
+    @model_validator(mode="after")
+    def set_default_add_special_tokens(self):
+        # ScoringRequestMixin supports both Chat-style and Completion-style
+        # requests as input. It overrides set_default_add_special_tokens from
+        # CompletionRequestMixin, passing add_special_tokens as None into the
+        # per-request handling logic.
         return self
 
     def build_tok_params(

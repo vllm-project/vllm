@@ -85,8 +85,6 @@ def _late_chunk_context(prompts="a b", **kwargs):
     return OfflineEncodeInputsContext(
         pooling_task="token_embed",
         tokenization_kwargs=kwargs or None,
-        lora_request=None,
-        priorities=None,
         prompts=prompts,
         pooling_params=PoolingParams(
             late_chunking_params=LateChunkingParams(chunk_size=2)
