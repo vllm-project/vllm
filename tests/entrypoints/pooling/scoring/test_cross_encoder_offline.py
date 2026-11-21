@@ -23,14 +23,14 @@ TEXTS_2 = [
 ]
 
 # Concatenates the content parts of every message, without any per-message
-# decoration. Used to compare scoring against the raw ``classify`` path.
+# decoration. Used to compare scoring against the raw `classify` path.
 PLAIN_CONCAT_TEMPLATE = (
     "{% for message in messages %}"
     "{% for part in message.content %}{{ part.text }}{% endfor %}"
     "{% endfor %}"
 )
 
-# Same as PLAIN_CONCAT_TEMPLATE but consumes an optional ``prefix`` kwarg.
+# Same as PLAIN_CONCAT_TEMPLATE but consumes an optional `prefix` kwarg.
 PREFIXED_CONCAT_TEMPLATE = (
     "{{ prefix | default('') }}"
     "{% for message in messages %}"
@@ -83,26 +83,26 @@ def hf_model(hf_runner):
 
 
 def _call_score(llm, data_1, data_2, **kwargs):
-    """Call ``llm.score`` with ``use_tqdm`` disabled by default."""
+    """Call `llm.score` with `use_tqdm` disabled by default."""
     kwargs.setdefault("use_tqdm", False)
     return llm.score(data_1, data_2, **kwargs)
 
 
 def _call_score_fresh(llm, data_1, data_2, **kwargs):
-    """Reset the prefix cache, then call ``llm.score``."""
+    """Reset the prefix cache, then call `llm.score`."""
     llm.reset_prefix_cache()
     return _call_score(llm, data_1, data_2, **kwargs)
 
 
 def _call_classify_fresh(llm, prompt, **kwargs):
-    """Reset the prefix cache, then call ``llm.classify``."""
+    """Reset the prefix cache, then call `llm.classify`."""
     llm.reset_prefix_cache()
     kwargs.setdefault("use_tqdm", False)
     return llm.classify(prompt, **kwargs)
 
 
 def _score_single(llm, data_1, data_2, **kwargs):
-    """Call ``llm.score`` and assert exactly one output is returned."""
+    """Call `llm.score` and assert exactly one output is returned."""
     (out,) = _call_score(llm, data_1, data_2, **kwargs)
     return out
 
@@ -121,7 +121,7 @@ def _prompt_token_ids(output):
 
 
 class TestPairingModes:
-    """Input pairing contract: ``1 -> 1``, ``1 -> N``, ``N -> N``."""
+    """Input pairing contract: `1 -> 1`, `1 -> N`, `N -> N`."""
 
     @pytest.mark.skip_global_cleanup
     def test_1_to_1_matches_hf(self, llm, hf_model):
@@ -168,7 +168,7 @@ class TestPairingModes:
 
 
 class TestContentFormat:
-    """``chat_template_content_format`` controls message-content rendering."""
+    """`chat_template_content_format` controls message-content rendering."""
 
     @pytest.mark.parametrize(
         "content_format",
@@ -238,7 +238,7 @@ class TestContentFormat:
 
 
 class TestAddSpecialTokens:
-    """``add_special_tokens=None`` follows the per-path default."""
+    """`add_special_tokens=None` follows the per-path default."""
 
     @pytest.mark.skip_global_cleanup
     def test_completion_none_matches_true(self, llm: LLM):
@@ -288,7 +288,7 @@ class TestAddSpecialTokens:
 
 
 class TestChatTemplateKwargs:
-    """``chat_template_kwargs`` is forwarded into the chat template renderer."""
+    """`chat_template_kwargs` is forwarded into the chat template renderer."""
 
     @pytest.mark.skip_global_cleanup
     def test_empty_kwargs_matches_default(self, llm: LLM):
@@ -346,7 +346,7 @@ class TestGenerationPromptOptions:
 
     @pytest.mark.skip_global_cleanup
     def test_continue_final_message_is_accepted(self, llm: LLM):
-        """``continue_final_message`` must be accepted on the scoring path."""
+        """`continue_final_message` must be accepted on the scoring path."""
         base = _score_single(llm, TEXTS_1[0], TEXTS_2[0], **self._KW)
         cont = _score_single(
             llm, TEXTS_1[0], TEXTS_2[0], continue_final_message=True, **self._KW
@@ -370,7 +370,7 @@ class TestGenerationPromptOptions:
 
     @pytest.mark.skip_global_cleanup
     def test_both_true_raises(self, llm: LLM):
-        """``add_generation_prompt`` and ``continue_final_message``
+        """`add_generation_prompt` and `continue_final_message`
         are mutually exclusive."""
         with pytest.raises(Exception, match="Cannot set both"):
             _call_score(
@@ -388,7 +388,7 @@ class TestGenerationPromptOptions:
 
 
 class TestPoolingParamsAndExtras:
-    """``pooling_params`` override the pooled activation; extras apply."""
+    """`pooling_params` override the pooled activation; extras apply."""
 
     @pytest.mark.skip_global_cleanup
     def test_default_matches_explicit_activation(self, llm: LLM):
@@ -448,8 +448,8 @@ class TestPoolingParamsAndExtras:
 
     @pytest.mark.skip_global_cleanup
     def test_conflicting_pooling_task_raises(self, llm: LLM):
-        # The IO processor for this model exposes a fixed ``pooling_task``
-        # (typically ``"score"``); overriding it with a different task must
+        # The IO processor for this model exposes a fixed `pooling_task`
+        # (typically `"score"`); overriding it with a different task must
         # raise rather than silently change semantics.
         with pytest.raises(ValueError, match="overwrite"):
             _call_score(
@@ -466,7 +466,7 @@ class TestPoolingParamsAndExtras:
 
 
 class TestClassifyInterface:
-    """Cross encoder models expose a classification interface alongside ``score``."""
+    """Cross encoder models expose a classification interface alongside `score`."""
 
     @pytest.mark.skip_global_cleanup
     def test_encode_with_classify_task_returns_single_label(self, llm: LLM):
