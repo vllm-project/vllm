@@ -16,7 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SharedTopkIndicesBuffer,
 )
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -32,7 +32,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -219,6 +219,12 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata], SharedTopkIndices
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
         self.init_topk_indices_buffer(indexer, topk_indices_buffer)
+
+    def record_logical_topk_ready(self) -> None:
+        # Called unconditionally by MLAAttention.forward for sparse layers. This
+        # impl shares the top-k buffer via SharedTopkIndicesBuffer but does not
+        # participate in sparse-MLA index groups (same as ROCm).
+        pass
 
     def _forward_bf16_kv(
         self,

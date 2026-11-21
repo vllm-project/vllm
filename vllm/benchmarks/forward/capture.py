@@ -11,7 +11,7 @@ forward mutates in place (e.g. compressor state) is the same on every replay.
 """
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -19,9 +19,12 @@ import torch
 from vllm.benchmarks.forward.batch import BenchBatch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_world_group, graph_capture
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, override_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+if TYPE_CHECKING:
+    from vllm.benchmarks.forward.speculator import DraftBench
 
 
 def _first_tensor(output: Any) -> torch.Tensor:
@@ -38,6 +41,31 @@ def _compare(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
         "max_abs": delta.abs().max().item(),
         "relative_rms": (delta.square().mean().sqrt() / scale).item(),
     }
+
+
+def check_sampled(sampled: torch.Tensor, vocab_size: int) -> dict[str, Any]:
+    # Rejection sampling leaves rows past each request's accepted tokens unset.
+    first = sampled[:, 0]
+    return {"valid_token_ids": bool(((first >= 0) & (first < vocab_size)).all())}
+
+
+def write_input_ids(
+    batch: BenchBatch, input_batch: InputBatch, input_ids: torch.Tensor | None
+) -> None:
+    """Decode/verify inputs otherwise come from sampler state."""
+    if input_ids is None:
+        return
+    # PCP can split a request into two disjoint rows or replicate it.
+    segments = []
+    for i, req_id in enumerate(input_batch.req_ids):
+        start = int(input_batch.num_computed_tokens_np[i]) - batch.expected[req_id][1]
+        count = int(input_batch.num_scheduled_tokens[i])
+        tokens = batch.query_token_ids[req_id]
+        assert 0 <= start <= start + count <= len(tokens)
+        segments.append(tokens[start : start + count])
+    ids = np.concatenate(segments)
+    assert len(ids) == input_batch.num_tokens
+    input_ids[: len(ids)].copy_(torch.from_numpy(ids))
 
 
 class ForwardBench:
@@ -58,6 +86,9 @@ class ForwardBench:
         state_views: list[torch.Tensor],
         name: str,
         profile_prefix: str | None = None,
+        *,
+        include_drafter: bool = True,
+        include_sampler: bool = True,
     ):
         self.runner = runner
         self.batch = batch
@@ -69,6 +100,10 @@ class ForwardBench:
         self.profile_prefix = profile_prefix
         self.phase = "warmup"
         self.result: dict[str, Any] = {}
+        self.include_drafter = include_drafter
+        self.drafter: DraftBench | None = None
+        self.include_sampler = include_sampler
+        self.sampled: torch.Tensor | None = None
 
     def run(self) -> dict[str, Any]:
         runner, model = self.runner, self.runner.model
@@ -80,7 +115,13 @@ class ForwardBench:
 
         def prepare_and_check(*args, **kwargs) -> InputBatch:
             self._input_batch = prepare_inputs(*args, **kwargs)
-            self._check_batch(self._input_batch)
+            pcp = runner.pcp_manager
+            self._check_batch(pcp.global_batch if pcp else self._input_batch)
+            self.result["num_local_tokens"] = self._input_batch.num_tokens
+            self.result["num_tokens_after_padding"] = (
+                self._input_batch.num_tokens_after_padding
+            )
+            self.result["batch_order"] = self._input_batch.req_ids
             return self._input_batch
 
         # Instance attributes shadow the methods for these two steps only.
@@ -96,22 +137,79 @@ class ForwardBench:
         return self.result
 
     def _forward(self, **inputs) -> Any:
-        self._write_input_ids(self._input_batch, inputs["input_ids"])
+        write_input_ids(self.batch, self._input_batch, inputs["input_ids"])
+        self._run_model = self._make_forward(inputs)
+        if self.phase == "warmup":
+            return self._run_model()
+        return self._capture_and_time()
+
+    def _make_forward(self, inputs):
         # Models may update the forward context in place (e.g. sequence
         # parallelism shards is_padding); every call must start from the
         # context the runner built.
         context = get_forward_context()
         saved = dict(vars(context))
+        if self.include_drafter and self.runner.speculator is not None:
+            from vllm.benchmarks.forward.speculator import DraftBench
+
+            if self.drafter is None:
+                self.drafter = DraftBench(self.runner)
+                # Drafting reuses the target's slot mappings and PCP block tables.
+                self.state_views.extend(
+                    [self.runner.block_tables.slot_mappings]
+                    + self.runner.block_tables.input_block_tables
+                )
+            self.drafter.prepare(self._input_batch, context)
+        # Only the last PP rank samples.
+        sample = self.include_sampler and self.runner.is_last_pp_rank
+        self.result["timing_scope"] = {
+            (False, False): "target_only",
+            (True, False): "target_and_sampler",
+            (False, True): "target_and_drafter",
+            (True, True): "target_sampler_and_drafter",
+        }[(sample, self.drafter is not None)]
 
         def run_model() -> Any:
             for name, value in saved.items():
                 setattr(context, name, value)
-            return self._model_forward(**inputs)
+            with override_forward_context(context):
+                output = self._model_forward(**inputs)
+            handler = self.runner.pp_handler
+            if not self.runner.is_last_pp_rank:
+                # The pipeline bench sends this output to the next stage itself.
+                output = handler.relay_aux_hidden_states(
+                    inputs["intermediate_tensors"], output
+                )
+            else:
+                if sample:
+                    self._sample(output)
+                if self.drafter is not None:
+                    # The runner completes the returned output itself; only the
+                    # drafter needs the full aux hidden states here.
+                    draft_input = output
+                    if self.runner.use_aux_hidden_state_outputs and handler is not None:
+                        draft_input = handler.add_upstream_aux_hidden_states(
+                            inputs["intermediate_tensors"], output
+                        )
+                    self.drafter.propose(draft_input)
+            return output
 
-        self._run_model = run_model
-        if self.phase == "warmup":
-            return run_model()
-        return self._capture_and_time()
+        return run_model
+
+    def _sample(self, output: Any) -> None:
+        """Sample, or rejection-sample verify rows, as `sample_tokens` does.
+
+        The drafter keeps its fixed fully-accepted inputs, so the sampled
+        tokens feed nothing.
+        """
+        runner = self.runner
+        hidden = _first_tensor(output)
+        input_batch = self._input_batch
+        if runner.pcp_manager is not None:
+            hidden, _, input_batch = runner.pcp_manager.restore_for_sampling(
+                hidden, None
+            )
+        self.sampled = runner.sample(hidden, input_batch, None)[0].sampled_token_ids
 
     def _check_batch(self, input_batch: InputBatch) -> None:
         """Fail unless the runner built exactly the requested batch."""
@@ -128,19 +226,6 @@ class ForwardBench:
                 f"wanted {expected[req_id]}"
             )
         assert input_batch.num_tokens == self.batch.num_tokens
-        self.result["num_tokens_after_padding"] = input_batch.num_tokens_after_padding
-        self.result["batch_order"] = input_batch.req_ids
-
-    def _write_input_ids(
-        self, input_batch: InputBatch, input_ids: torch.Tensor | None
-    ) -> None:
-        """Decode/verify inputs otherwise come from sampler state."""
-        if input_ids is None:
-            return
-        ids = np.concatenate(
-            [self.batch.query_token_ids[req_id] for req_id in input_batch.req_ids]
-        )
-        input_ids[: len(ids)].copy_(torch.from_numpy(ids))
 
     def _capture_and_time(self) -> Any:
         world = get_world_group()
@@ -178,6 +263,7 @@ class ForwardBench:
             eager = _first_tensor(self._run_model()).clone()
             restore()
             reference = _first_tensor(self._run_model()).clone()
+            draft_reference = self.drafter.tokens.clone() if self.drafter else None
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
@@ -189,11 +275,19 @@ class ForwardBench:
                 self._events[1].record()
         hidden = _first_tensor(output)
 
+        sampled = self.sampled
         graph.replay()
         torch.accelerator.synchronize()
         first = hidden.clone()
+        first_sampled = sampled.clone() if sampled is not None else None
         graph.replay()
         torch.accelerator.synchronize()
+        if sampled is not None:
+            assert first_sampled is not None
+            self.result["sampler"] = {
+                **check_sampled(sampled, self.runner.model_config.get_vocab_size()),
+                "graph_deterministic": bool(torch.equal(first_sampled, sampled)),
+            }
         self.result.update(
             # Same step from the same restored state: should match exactly.
             eager_repeat=_compare(reference, eager),
@@ -204,6 +298,8 @@ class ForwardBench:
                 v.numel() * v.element_size() for v in self.state_views
             ),
         )
+        if self.drafter is not None:
+            self.result["drafter"] = self.drafter.check(draft_reference)
         self.result["latency_us"] = self._time(graph)
         from vllm.benchmarks.forward.profile import profile_graph
 

@@ -3,16 +3,25 @@
 """CPU tests for the kpool indexer's kernel block selection."""
 
 from types import SimpleNamespace
+from typing import Protocol
 
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
+if current_platform.is_xpu():
+    pytest.skip(
+        "GLM-5.3-Flash does not currently support XPU.", allow_module_level=True
+    )
+
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.models.glm5next.common.attention import Glm5NextIndexerCache
-from vllm.v1.attention.backend import AttentionBackend, MultipleOf
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla import indexer as indexer_mod
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import prepare_kernel_block_sizes, select_common_block_size
 
 pytestmark = pytest.mark.cpu_test
@@ -44,20 +53,35 @@ def _kpool_storage_spec(manager_block: int) -> MLAAttentionSpec:
             cache_config=SimpleNamespace(block_size=manager_block),
             index_kpool=INDEX_KPOOL,
         )
-        spec = cache.get_kv_cache_spec(VllmConfig())
+        spec = cache.get_kv_cache_config(VllmConfig()).spec
     assert isinstance(spec, MLAAttentionSpec)
     return spec
 
 
+class _KernelBlockSizeBackend(Protocol):
+    """The backend hooks `prepare_kernel_block_sizes` reads off each group."""
+
+    @staticmethod
+    def get_supported_kernel_block_sizes_for_layers(
+        kv_cache_spec: KVCacheSpec | None, layer_names: list[str]
+    ) -> list[int | MultipleOf]: ...
+
+    @staticmethod
+    def get_name() -> str: ...
+
+
 def _prepare(
-    spec: MLAAttentionSpec, backends: list[type[AttentionBackend]]
+    spec: MLAAttentionSpec, backends: list[type[_KernelBlockSizeBackend]]
 ) -> list[int]:
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[])],
+        kv_cache_groups=[new_kv_cache_group(["layer"], spec)],
         kv_cache_tensors=[],
     )
     attn_groups = [
-        [SimpleNamespace(backend=backend, kv_cache_spec=spec) for backend in backends]
+        [
+            SimpleNamespace(backend=backend, kv_cache_spec=spec, layer_names=[])
+            for backend in backends
+        ]
     ]
     return prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
@@ -79,7 +103,8 @@ def test_kpool_group_maps_pool_pages(
 
     # The kpool group's AttentionGroup selects its kernel block this way.
     selected = [
-        select_common_block_size(manager_block, [Glm5NextIndexerBackend], [spec])
+        # indexer backend has no impl class
+        select_common_block_size(manager_block, [Glm5NextIndexerBackend], [spec])  # type: ignore[type-abstract]
     ]
     assert selected == [expected]
     assert selected != [manager_block]
@@ -92,7 +117,7 @@ def test_prepare_uses_the_backend_vote():
 
     class Fixed64Backend:
         @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        def get_supported_kernel_block_sizes_for_layers(kv_cache_spec, layer_names):
             return [64]
 
         @staticmethod
@@ -111,7 +136,7 @@ def test_prepare_uses_the_backend_vote():
     # exactly as on main.
     class AcceptAllBackend:
         @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        def get_supported_kernel_block_sizes_for_layers(kv_cache_spec, layer_names):
             return [MultipleOf(1)]
 
         @staticmethod

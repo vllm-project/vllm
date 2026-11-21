@@ -4,7 +4,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Natively multimodal 276B-parameter MoE from Thinking Machines Lab — 12B active parameters, text/image/audio in, text out, and up to 1M context."
   date_added: 2026-07-30
-  date_updated: 2026-09-29
+  date_updated: 2026-11-17
   tasks:
     - multimodal
   performance_headline: "276B total / 12B active Inkling architecture for lower-cost, lower-latency deployment"
@@ -17,7 +17,6 @@ meta:
 model:
   model_id: "thinkingmachines/Inkling-Small-NVFP4"
   min_vllm_version: "0.26.0"
-  nightly_required: true
   install:
     docker:
     pip:
@@ -79,7 +78,7 @@ variants:
       h200: 2
     description: "NVFP4 checkpoint requiring at least 180 GB aggregated VRAM: W4A4 with TP1 on B300/GB300 or TP2 on B200/GB200, and W4A16 with TP4 on H100 or TP2 on H200."
     extra_args:
-      - "--kernel-config.enable_flashinfer_autotune=False"
+      - "--disable-flashinfer-autotune"
     extra_env:
       FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
   mxfp4:
@@ -105,8 +104,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.85"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"
@@ -118,8 +115,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.85"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"
@@ -131,8 +126,6 @@ variants:
           - "aiter"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.95"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"
@@ -163,7 +156,7 @@ variants:
     hardware_overrides:
       nvidia:
         extra_args:
-          - "--kernel-config.enable_flashinfer_autotune=False"
+          - "--disable-flashinfer-autotune"
         extra_env:
           FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
       mi300x:
@@ -173,8 +166,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -186,8 +177,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -199,8 +188,6 @@ variants:
           - "aiter"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -293,7 +280,7 @@ guide: |
   - **Hardware:** B300/GB300 TP1, B200/GB200/H200 TP2, or H100 TP4 for NVFP4;
     B300/GB200/GB300/MI300X/MI325X/MI355X TP4 or B200/H200 TP8 for BF16;
     MI355X TP1 or MI300X/MI325X TP2 for AMD MXFP4.
-  - **vLLM:** A nightly build with Inkling support.
+  - **vLLM:** 0.26.0 or newer.
   - **Audio:** Install the optional `vllm[audio]` extra only when serving audio inputs.
 
   ## Client Usage
@@ -309,7 +296,7 @@ guide: |
     --tool-call-parser inkling \
     --enable-auto-tool-choice \
     --tensor-parallel-size 1 \
-    --kernel-config.enable_flashinfer_autotune=False \
+    --disable-flashinfer-autotune \
     --trust-remote-code
   ```
 
