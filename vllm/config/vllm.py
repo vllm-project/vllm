@@ -1387,6 +1387,56 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_dsa_sequence_parallel(self) -> None:
+        parallel = self.parallel_config
+        if not current_platform.is_cuda() or self.model_config.architecture not in (
+            "DeepseekV32ForCausalLM",
+            "GlmMoeDsaForCausalLM",
+            "DeepseekV4ForCausalLM",
+        ):
+            raise ValueError(
+                "DSA sequence parallelism requires a CUDA V3.2/GLM DSA or V4 model."
+            )
+        if parallel.tensor_parallel_size < 2:
+            raise ValueError(
+                "DSA sequence parallelism requires tensor_parallel_size > 1."
+            )
+        if (
+            parallel.decode_context_parallel_size > 1
+            or parallel.prefill_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "DSA sequence parallelism cannot be combined with DCP or PCP."
+            )
+        if (
+            self.speculative_config
+            or self.lora_config
+            or self.attention_config.hisparse_config
+        ):
+            raise ValueError(
+                "DSA sequence parallelism does not support speculative decoding, "
+                "LoRA or HiSparse."
+            )
+        if self.aux_output_config.enable_return_routed_experts:
+            raise ValueError(
+                "DSA sequence parallelism cannot return routed expert IDs."
+            )
+        if self.cache_config.kv_sharing_fast_prefill:
+            raise ValueError(
+                "DSA sequence parallelism requires full prefill query rows."
+            )
+        if parallel.use_ubatching:
+            raise ValueError("DSA sequence parallelism does not support microbatching.")
+        if (
+            parallel.data_parallel_size == 1
+            and parallel.enable_expert_parallel
+            and parallel.all2all_backend != "allgather_reducescatter"
+        ):
+            raise ValueError(
+                "DSA sequence parallelism with DP=1 and EP requires "
+                "allgather_reducescatter."
+            )
+
     def _verify_sampling_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.return_sampling_mask:
@@ -1625,6 +1675,8 @@ class VllmConfig:
             )
 
             self.model_config.verify_with_parallel_config(self.parallel_config)
+            if self.attention_config.dsa_sequence_parallel is not None:
+                self._verify_dsa_sequence_parallel()
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 

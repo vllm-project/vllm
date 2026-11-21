@@ -294,9 +294,7 @@ class FlashInferMLASparseMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        num_q_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
+        num_q_heads = self.num_heads
         threshold = {8: 128, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
             num_q_heads, 1024
         )
@@ -345,9 +343,7 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
             or vllm_config.cache_config.cache_dtype
         )
         if not use_prims_ts(vllm_config, kv_cache_dtype):
-            num_q_heads = vllm_config.model_config.get_num_attention_heads(
-                vllm_config.parallel_config
-            )
+            num_q_heads = self.num_heads
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             if self.dcp_world_size > 1:
                 _get_workspace_buffer(

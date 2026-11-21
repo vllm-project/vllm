@@ -71,6 +71,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
+    sp_gather_global,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
@@ -221,6 +222,7 @@ class DeepseekV4MoE(nn.Module):
         *,
         num_hash_layers: int,
         reduce_results: bool = True,
+        tp_routed_sp: bool = False,
         n_routed_experts: int | None = None,
         n_activated_experts: int | None = None,
         image_sentinel_lo: int = IMAGE_SENTINEL_BASE_ID,
@@ -232,6 +234,7 @@ class DeepseekV4MoE(nn.Module):
         quant_config = vllm_config.quant_config
         self.prefix = prefix
         self.use_sequence_parallel = use_sequence_parallel
+        self.tp_routed_sp = tp_routed_sp
         self.reduce_results = reduce_results
         moe_backend = vllm_config.kernel_config.moe_backend
         self.use_native_mega_moe = moe_backend in NATIVE_MEGA_MOE_BACKENDS
@@ -434,7 +437,7 @@ class DeepseekV4MoE(nn.Module):
 
         self.experts = FusedMoEFactory(
             reduce_results=self.reduce_results,
-            shared_experts=self.shared_experts,
+            shared_experts=None if self.tp_routed_sp else self.shared_experts,
             gate=self.gate,
             num_experts=self.n_routed_experts,
             top_k=self.n_activated_experts,
@@ -454,7 +457,7 @@ class DeepseekV4MoE(nn.Module):
             router_logits_dtype=torch.float32,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=eplb_config.num_redundant_experts,
-            is_sequence_parallel=self.use_sequence_parallel,
+            is_sequence_parallel=self.use_sequence_parallel and not self.tp_routed_sp,
         )
 
     def forward(
@@ -536,11 +539,23 @@ class DeepseekV4MoE(nn.Module):
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
         org_shape = hidden_states.shape
+        if self.tp_routed_sp:
+            # Routed weights retain their TP slices. Rank-concatenated rows
+            # line up with the hash IDs prepared at model entry, so a plain
+            # reduce-scatter restores this rank's contiguous or zigzag shard.
+            local_states = hidden_states
+            hidden_states = sp_all_gather(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=hidden_states,
             input_ids=input_ids,
         )
+        if self.tp_routed_sp:
+            final_hidden_states = sp_reduce_scatter(final_hidden_states)
+            if self.shared_experts is not None:
+                final_hidden_states = final_hidden_states + self.shared_experts(
+                    local_states
+                )
 
         return final_hidden_states.view(org_shape)
 
@@ -601,12 +616,16 @@ class DeepseekV4DecoderLayer(nn.Module):
         prefix,
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
+        dsa_sequence_parallel: str | None = None,
     ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
-        self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        self.dsa_sequence_parallel = dsa_sequence_parallel
+        self.use_sequence_parallel = (
+            dsa_sequence_parallel is not None or _use_sequence_parallel(vllm_config)
+        )
 
         self.rms_norm_eps = config.rms_norm_eps
         self.attn = _select_dsv4_attn_cls(vllm_config)(
@@ -614,14 +633,20 @@ class DeepseekV4DecoderLayer(nn.Module):
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
+            dsa_sequence_parallel=dsa_sequence_parallel,
         )
         if self.use_sequence_parallel:
             self.attn.wo_b.reduce_results = False
+        tp_routed_sp = dsa_sequence_parallel is not None and (
+            not vllm_config.parallel_config.enable_expert_parallel
+        )
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
             num_hash_layers=config.mlp_layer_types.count("hash_moe"),
+            reduce_results=not tp_routed_sp,
+            tp_routed_sp=tp_routed_sp,
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -698,7 +723,8 @@ class DeepseekV4DecoderLayer(nn.Module):
                 if self.use_sequence_parallel:
                     # mHC runs on this rank's sp_shard of the step.
                     tp_size = vllm_config.parallel_config.tensor_parallel_size
-                    max_tokens = cdiv(max_tokens, tp_size)
+                    windows = 2 if self.dsa_sequence_parallel == "zigzag" else 1
+                    max_tokens = windows * cdiv(max_tokens, windows * tp_size)
                 hc_dim = self.hc_mult * self.hidden_size
                 for k in (hc_dim, self.hidden_size)[: 1 + include_broadcast_splits]:
                     HC_PRENORM_GEMM_KERNEL.register_warmup(
@@ -817,11 +843,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=attn_norm_eps,
             )
 
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and self.dsa_sequence_parallel is None:
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and self.dsa_sequence_parallel is None:
             x = sp_reduce_scatter(x)
 
         ffn_norm_weight = self.ffn_norm.weight.data
@@ -864,7 +890,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
         self.use_mega_gate = _use_mega_gate(vllm_config)
-        self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        self.dsa_sequence_parallel = vllm_config.attention_config.dsa_sequence_parallel
+        self.use_sequence_parallel = (
+            self.dsa_sequence_parallel is not None
+            or _use_sequence_parallel(vllm_config)
+        )
         if (
             self.use_native_mega_moe
             and not vllm_config.parallel_config.enable_expert_parallel
@@ -910,6 +940,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
                 aux_stream_list=aux_stream_list,
+                dsa_sequence_parallel=self.dsa_sequence_parallel,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -1006,7 +1037,25 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             input_ids = input_ids.to(torch.int64)
 
         full_num_tokens = positions.shape[0]
-        if self.use_sequence_parallel:
+        zigzag = self.dsa_sequence_parallel == "zigzag"
+        if self.dsa_sequence_parallel is not None:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                ctx = get_forward_context()
+                # The runner marks graph padding; the SP shard can add tail rows.
+                valid = (
+                    ~ctx.is_padding
+                    if ctx.is_padding is not None
+                    else torch.ones_like(positions, dtype=torch.bool)
+                )
+                padding = ~sp_shard(valid, zigzag)
+                if not self.parallel_config.enable_expert_parallel:
+                    padding = sp_all_gather(padding)
+                ctx.is_padding = padding
+            hidden_states = sp_shard(hidden_states, zigzag)
+            input_ids = sp_shard(input_ids, zigzag)
+            if not self.parallel_config.enable_expert_parallel:
+                input_ids = sp_all_gather(input_ids)
+        elif self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
@@ -1048,7 +1097,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     hidden_states, residual, post_mix, res_mix
                 )
                 aux_hidden_state = aux_recon.mean(dim=1)
-                if self.use_sequence_parallel:
+                if self.dsa_sequence_parallel is not None:
+                    aux_hidden_state = sp_gather_global(
+                        aux_hidden_state, full_num_tokens, zigzag
+                    )
+                elif self.use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
                 final_aux_recon = aux_recon
@@ -1061,7 +1114,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     hidden_states, residual, post_mix, res_mix
                 )
 
-        if self.use_sequence_parallel:
+        if self.dsa_sequence_parallel is not None:
+            hidden_states = sp_gather_global(hidden_states, full_num_tokens, zigzag)
+        elif self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         if not get_pp_group().is_last_rank:

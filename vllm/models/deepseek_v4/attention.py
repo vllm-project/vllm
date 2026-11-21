@@ -25,6 +25,7 @@ from vllm.models.common.ops.fused_qk_rmsnorm import (
     _FUSED_Q_KV_RMSNORM_KERNEL,
     fused_q_kv_rmsnorm,
 )
+from vllm.models.common.ops.sequence_parallel import sp_gather_global, sp_shard
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
 )
@@ -206,6 +207,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
+        dsa_sequence_parallel: str | None = None,
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -218,14 +220,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.hidden_size = config.hidden_size
         self.n_heads = config.num_attention_heads
         assert self.n_heads % tp_size == 0
-        self.n_local_heads = self.n_heads // tp_size
+        self.dsa_sequence_parallel = dsa_sequence_parallel
+        projection_tp_size = tp_size if dsa_sequence_parallel is None else 1
+        self.n_local_heads = self.n_heads // projection_tp_size
         self.q_lora_rank = config.q_lora_rank
         self.o_lora_rank = config.o_lora_rank
         self.head_dim = config.head_dim
         self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
-        self.n_local_groups = self.n_groups // tp_size
+        self.n_local_groups = self.n_groups // projection_tp_size
         self.window_size = config.sliding_window
         # Vision variant: image spans are visible bidirectionally, widening
         # prefill SWA index rows by up to max_image_tokens columns.
@@ -249,7 +253,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
         # Sink padded to the same head count, initialized to -inf (no sink
         # effect). Weight loading fills the first n_local_heads slots.
-        self.attn_sink = make_attention_sink(self.padded_heads, torch.float32)
+        self.attn_sink = make_attention_sink(
+            self.padded_heads,
+            torch.float32,
+            replicated=dsa_sequence_parallel is not None,
+        )
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
             self.hidden_size,
@@ -266,6 +274,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             bias=False,
             quant_config=quant_config,
             return_bias=False,
+            disable_tp=dsa_sequence_parallel is not None,
             prefix=f"{prefix}.wq_b",
         )
 
@@ -277,6 +286,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             bias=False,
             quant_config=quant_config,
             return_bias=False,
+            disable_tp=dsa_sequence_parallel is not None,
             prefix=f"{prefix}.wo_a",
         )
         self.wo_a.is_bmm = True
@@ -287,6 +297,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             bias=False,
             quant_config=quant_config,
             return_bias=False,
+            disable_tp=dsa_sequence_parallel is not None,
             prefix=f"{prefix}.wo_b",
         )
 
@@ -498,6 +509,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         if isinstance(attn_out, torch.Tensor):
             attn_out = attn_out[:, : self.n_local_heads, :]
+        if self.dsa_sequence_parallel is not None:
+            positions = sp_shard(positions, self.dsa_sequence_parallel == "zigzag")
         return self._o_proj(attn_out, positions)
 
     def _alloc_attn_out(
@@ -556,6 +569,39 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         compressor = self.compressor
         aux_streams = self.aux_stream_list
 
+        cache_positions = positions
+        if self.dsa_sequence_parallel is not None:
+            zigzag = self.dsa_sequence_parallel == "zigzag"
+            num_tokens = positions.shape[0]
+            positions = sp_shard(positions, zigzag)
+            # The compressor carries state across token shards. Gather its
+            # projected inputs, in natural order, before the streams fan out.
+            if compressor is not None:
+                kv_score = sp_gather_global(kv_score, num_tokens, zigzag)
+            if indexer is not None:
+                indexer_kv_score = sp_gather_global(
+                    indexer_kv_score, num_tokens, zigzag
+                )
+            cache_kv = sp_gather_global(kv, num_tokens, zigzag)
+            if isinstance(attn_metadata, dict):
+                swa = cast(
+                    "DeepseekSparseSWAMetadata",
+                    attn_metadata[self.swa_cache_layer.prefix],
+                )
+                assert swa.cache_slot_mapping is not None
+                cache = self.swa_cache_layer.kv_cache
+                torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                    cache_kv,
+                    cache,
+                    swa.cache_slot_mapping,
+                    cache_positions,
+                    self.rotary_emb.cos_sin_cache,
+                    swa.block_size,
+                    self._flashinfer_fp8_kv_scale
+                    if cache.dtype == torch.float8_e4m3fn
+                    else None,
+                )
+
         def project_query_and_cache_kv() -> torch.Tensor:
             q = self._wq_b_proj(qr, qr_scale).view(
                 -1, self.n_local_heads, self.head_dim
@@ -582,8 +628,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                         positions,
                         self.indexer_rotary_emb,
                         qr_scale,
+                        cache_positions=cache_positions,
                     ),
-                    lambda: compressor(kv_score, positions, self.rotary_emb),
+                    lambda: compressor(kv_score, cache_positions, self.rotary_emb),
                 ],
                 self.ln_events[0],
                 [self.ln_events[1], self.ln_events[2]],
@@ -595,7 +642,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             aux_stream = aux_streams[0] if aux_streams is not None else None
             q, _ = maybe_execute_in_parallel(
                 project_query_and_cache_kv,
-                lambda: compressor(kv_score, positions, self.rotary_emb),
+                lambda: compressor(kv_score, cache_positions, self.rotary_emb),
                 self.ln_events[0],
                 self.ln_events[1],
                 aux_stream,
@@ -744,6 +791,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         assert swa_metadata is not None
 
+        # SP already published the complete KV batch. Use the Q half of the
+        # same kernel on the local rows, with an empty write mapping.
+        slot_mapping = swa_metadata.slot_mapping
+        if self.dsa_sequence_parallel is not None:
+            slot_mapping = slot_mapping[:0]
         swa_kv_cache = self.swa_cache_layer.kv_cache
         # The fused insert ops require int64 position_ids; the runner's positions
         # buffer is already int64, so no cast is needed.
@@ -763,7 +815,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 q,
                 kv,
                 swa_kv_cache_2d,
-                swa_metadata.slot_mapping,
+                slot_mapping,
                 positions,
                 cos_sin_cache,
                 self.padded_heads,
@@ -783,7 +835,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 q,
                 kv,
                 swa_kv_cache_3d,
-                swa_metadata.slot_mapping,
+                slot_mapping,
                 positions,
                 cos_sin_cache,
                 self.eps,
@@ -798,7 +850,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv,
             q_fp8,
             swa_kv_cache_3d,
-            swa_metadata.slot_mapping,
+            slot_mapping,
             positions,
             cos_sin_cache,
             self._flashinfer_fp8_kv_scale,
@@ -1072,8 +1124,11 @@ class DeepseekV4Indexer(nn.Module):
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
         skip_compressor: bool = False,
+        cache_positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         compressor = self.compressor
+        if cache_positions is None:
+            cache_positions = positions
 
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
@@ -1085,7 +1140,7 @@ class DeepseekV4Indexer(nn.Module):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
                 if not skip_compressor:
-                    compressor(compressed_kv_score, positions, rotary_emb)
+                    compressor(compressed_kv_score, cache_positions, rotary_emb)
                 assert self.topk_indices_buffer is not None
                 num_tokens = (
                     indexer_metadata.num_decode_tokens
@@ -1112,7 +1167,7 @@ class DeepseekV4Indexer(nn.Module):
             # join orders that write before indexer_op (skip_k_cache_insert=True).
             (q_quant, weights), _ = maybe_execute_in_parallel(
                 wq_b_and_q_quant,
-                lambda: compressor(compressed_kv_score, positions, rotary_emb),
+                lambda: compressor(compressed_kv_score, cache_positions, rotary_emb),
                 self.ln_events[0],
                 self.ln_events[1],
                 self.aux_stream,

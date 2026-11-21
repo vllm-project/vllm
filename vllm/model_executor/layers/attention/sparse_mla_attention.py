@@ -46,6 +46,7 @@ from vllm.v1.attention.backends.mla.index_group import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     SparseMLAPrefillRoute,
     flat_kv_row_view,
+    max_local_query_requests,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -336,7 +337,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             device=device,
         )
         self._context_lens_cpu = torch.empty(
-            vllm_config.scheduler_config.max_num_seqs,
+            max_local_query_requests(vllm_config),
             dtype=torch.int32,
             device="cpu",
             pin_memory=PIN_MEMORY,
@@ -387,7 +388,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
-        layer_prefill_backend = attention_layer.prefill_backend
+        full_head_sp = getattr(attention_layer, "dsa_sp", None) is not None
+        self.num_heads = (
+            attention_layer.impl.num_heads
+            if full_head_sp
+            else self.model_config.get_num_attention_heads(parallel_config)
+        )
+        # With replicated B projections, all prefill and decode rows use
+        # forward_mqa on the local query shard and replicated paged cache.
+        layer_prefill_backend = (
+            None if full_head_sp else attention_layer.prefill_backend
+        )
         self._backend_name = attention_layer.get_attn_backend().get_name()
         # The workspace follows the global KV dtype; a layer group can differ
         # (e.g. an MTP draft with its own kv_cache_dtype).
@@ -958,6 +969,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.use_shardq = (
             self.supports_shardq
             and vllm_config.attention_config.sparse_mla_shard_q
+            and getattr(vllm_config.attention_config, "dsa_sequence_parallel", None)
+            is None
             and vllm_config.attention_config.hisparse_config is None
             and parallel_config.tensor_parallel_size > 1
             and parallel_config.decode_context_parallel_size == 1

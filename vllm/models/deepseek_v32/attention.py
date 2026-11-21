@@ -36,7 +36,11 @@ from vllm.model_executor.models.utils import (
     compute_skip_topk_layers,
     extract_layer_index,
 )
-from vllm.models.common.ops.sequence_parallel import sp_all_gather
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_gather_global,
+    sp_shard,
+)
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.pcp import (
@@ -148,7 +152,6 @@ class DeepseekV32Attention(MLAAttention):
 
         tp_size = get_tensor_model_parallel_world_size()
         assert num_heads % tp_size == 0
-        num_local_heads = num_heads // tp_size
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         scaling = qk_head_dim**-0.5
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -172,12 +175,18 @@ class DeepseekV32Attention(MLAAttention):
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
 
+        dsa_sp = vllm_config.attention_config.dsa_sequence_parallel
+        self.dsa_sp = dsa_sp if not is_mtp_layer else None
+        self.dsa_sp_zigzag = self.dsa_sp == "zigzag"
+        num_local_heads = num_heads if self.dsa_sp else num_heads // tp_size
+
         kv_b_proj = ColumnParallelLinear(
             kv_lora_rank,
             num_heads * (qk_nope_head_dim + v_head_dim),
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
+            disable_tp=bool(self.dsa_sp),
         )
         indexer = None
         if not skip_topk or is_mtp_layer:
@@ -211,7 +220,7 @@ class DeepseekV32Attention(MLAAttention):
             attn_backend=attn_backend,
             # MTP draft steps reuse each token slot's top-k, which ShardQ's
             # compact per-rank layout would break.
-            shardq_eligible=not is_mtp_layer,
+            shardq_eligible=not is_mtp_layer and not self.dsa_sp,
         )
 
         self.num_local_heads = num_local_heads
@@ -258,6 +267,7 @@ class DeepseekV32Attention(MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.q_b_proj",
+            disable_tp=bool(self.dsa_sp),
         )
         self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
 
@@ -316,7 +326,9 @@ class DeepseekV32Attention(MLAAttention):
             kw = None
 
         # SP-MoE also shards one-token batches, whose row counts are equal.
-        if self.sequence_parallel_moe or hidden_states.shape[0] < positions.shape[0]:
+        if not self.dsa_sp and (
+            self.sequence_parallel_moe or hidden_states.shape[0] < positions.shape[0]
+        ):
             # Gather the smaller replicated projections, keeping TP weights intact.
             projected = qkv_lora if kw is None else torch.cat((qkv_lora, kw), dim=-1)
             projected = sp_all_gather(projected.contiguous())[: positions.shape[0]]
@@ -337,6 +349,20 @@ class DeepseekV32Attention(MLAAttention):
         else:
             index_k = None
             index_weights = None
+
+        if self.dsa_sp:
+            # Q and indexer weights remain token-local. Both paged caches are
+            # replicated, so their inputs must match the global slot mappings.
+            kv_parts = [kv_c, k_pe]
+            if index_k is not None:
+                kv_parts.append(index_k)
+            packed = sp_gather_global(
+                torch.cat(kv_parts, dim=-1), positions.shape[0], self.dsa_sp_zigzag
+            )
+            cache_inputs = packed.split([part.shape[-1] for part in kv_parts], dim=-1)
+            kv_c, k_pe = cache_inputs[:2]
+            if index_k is not None:
+                index_k = cache_inputs[2]
 
         num_tokens = qkv_lora.shape[0]
         output = torch.empty(
@@ -393,8 +419,8 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
-        kv_c_out = torch.empty_like(kv_c)
-        k_pe_out = torch.empty_like(k_pe)
+        kv_c_out = None if self.dsa_sp else torch.empty_like(kv_c)
+        k_pe_out = None if self.dsa_sp else torch.empty_like(k_pe)
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -427,6 +453,7 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         if hisparse_cache is not None and mla_slot is not None:
+            assert kv_c_out is not None and k_pe_out is not None
             self.update_kv_cache(
                 kv_c_out,
                 k_pe_out,
@@ -436,6 +463,9 @@ class DeepseekV32Attention(MLAAttention):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+
+        if self.dsa_sp:
+            positions = sp_shard(positions, self.dsa_sp_zigzag)
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -480,6 +510,15 @@ class DeepseekV32Attention(MLAAttention):
             mqa_q,
             output,
         )
+        if self.dsa_sp:
+            # The row-parallel O projection consumes this rank's head columns
+            # for every token. Its caller reduce-scatters the partial sums back
+            # to the same rank-major token layout.
+            tp_group = get_tp_group()
+            heads = sp_all_gather(output).view(
+                -1, tp_group.world_size, output.shape[-1] // tp_group.world_size
+            )
+            output = heads[:, tp_group.rank_in_group].contiguous()
         return self.o_proj(output)[0]
 
     @eager_break_during_capture

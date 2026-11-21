@@ -42,6 +42,14 @@ class SparseMLAPrefillRoute(Enum):
     SPARSE_MQA = "sparse_mqa"
 
 
+def max_local_query_requests(vllm_config: VllmConfig) -> int:
+    """Two disjoint zigzag windows can split one paged request into two rows."""
+    max_requests = vllm_config.scheduler_config.max_num_seqs
+    if vllm_config.attention_config.dsa_sequence_parallel == "zigzag":
+        return max_requests + 1
+    return max_requests
+
+
 def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
     """Bounds of the runs of adjacent rows that belong to one request: run
     `r` is rows `[bounds[r], bounds[r + 1])`.

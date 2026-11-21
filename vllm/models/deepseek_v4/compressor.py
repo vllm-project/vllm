@@ -109,6 +109,9 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CompressorMetadata:
+        common_attn_metadata = (
+            common_attn_metadata.dsa_sp_global or common_attn_metadata
+        )
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
             self.token_to_req_indices
         )

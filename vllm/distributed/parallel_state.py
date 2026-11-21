@@ -2412,7 +2412,10 @@ def initialize_model_parallel(
             .unbind(0)
         )
         group_ranks = [x.tolist() for x in group_ranks]
-        use_all2all = parallel_config.use_all2all
+        use_all2all = parallel_config.use_all2all or (
+            config.attention_config.dsa_sequence_parallel is not None
+            and parallel_config.enable_expert_parallel
+        )
         if enable_elastic_ep:
             with _elastic_join_warmup_ctx():
                 _EP = _init_stateless_group(

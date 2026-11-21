@@ -300,6 +300,7 @@ class DeepseekV2MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
+        dsa_sequence_parallel: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -312,7 +313,12 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe or (
+            dsa_sequence_parallel and parallel_config.enable_expert_parallel
+        )
+        # TP-weight-sharded routed experts need all rows to form partial sums.
+        # The shared expert can consume the original token shard directly.
+        self.dsa_tp_experts = dsa_sequence_parallel and not self.is_sequence_parallel
 
         if config.hidden_act != "silu":
             raise ValueError(
@@ -346,7 +352,7 @@ class DeepseekV2MoE(nn.Module):
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         self.is_fused_shared_expert_enabled = False
-        if config.n_shared_experts is not None:
+        if config.n_shared_experts is not None and not self.dsa_tp_experts:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix
             )
@@ -369,13 +375,13 @@ class DeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                is_sequence_parallel=self.is_sequence_parallel,
+                is_sequence_parallel=self.is_sequence_parallel or self.dsa_tp_experts,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
 
         self.experts = FusedMoEFactory(
-            shared_experts=self.shared_experts,
+            shared_experts=None if self.dsa_tp_experts else self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -424,9 +430,22 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=hidden_states
+        routed_input = (
+            tensor_model_parallel_all_gather(hidden_states, dim=0)
+            if self.dsa_tp_experts
+            else hidden_states
         )
+        final_hidden_states = self.experts(
+            hidden_states=routed_input, router_logits=routed_input
+        )
+        if self.dsa_tp_experts:
+            final_hidden_states = tensor_model_parallel_reduce_scatter(
+                final_hidden_states, dim=0
+            )
+            if self.shared_experts is not None:
+                final_hidden_states = final_hidden_states + self.shared_experts(
+                    hidden_states
+                )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(

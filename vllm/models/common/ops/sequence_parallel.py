@@ -91,15 +91,38 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     return tensor_model_parallel_reduce_scatter(x, 0)
 
 
-def sp_shard(x: torch.Tensor) -> torch.Tensor:
+def shard_windows(
+    num_tokens: int, tp: int, rank: int, zigzag: bool
+) -> tuple[slice, ...]:
+    """Equal-sized windows in the padded global token stream, in local row order."""
+    chunks = 2 * tp if zigzag else tp
+    width = (num_tokens + chunks - 1) // chunks
+    ids = (rank, chunks - 1 - rank) if zigzag else (rank,)
+    return tuple(slice(i * width, (i + 1) * width) for i in ids)
+
+
+def sp_gather_global(x: torch.Tensor, num_tokens: int, zigzag: bool) -> torch.Tensor:
+    """Gather rank-local windows into the original, unpadded token order."""
+    gathered = sp_all_gather(x.contiguous())
+    if zigzag:
+        tp = get_tensor_model_parallel_world_size()
+        pairs = gathered.reshape(tp, 2, x.shape[0] // 2, *x.shape[1:])
+        gathered = torch.cat((pairs[:, 0], pairs[:, 1].flip((0,)))).flatten(0, 1)
+    return gathered[:num_tokens]
+
+
+def sp_shard(x: torch.Tensor, zigzag: bool = False) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
-    sp_pad = (-x.shape[0]) % tp_size
+    windows = shard_windows(x.shape[0], tp_size, tp_rank, zigzag)
+    multiple = 2 * tp_size if zigzag else tp_size
+    sp_pad = (-x.shape[0]) % multiple
     if sp_pad > 0:
         pad = (0, 0) * (x.ndim - 1) + (0, sp_pad)
         x = torch.nn.functional.pad(x, pad)
-    chunk = x.shape[0] // tp_size
-    return x[tp_rank * chunk : (tp_rank + 1) * chunk]
+    if zigzag:
+        return torch.cat((x[windows[0]], x[windows[1]]))
+    return x[windows[0]]
 
 
 def sp_padding_mask(

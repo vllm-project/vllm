@@ -5829,6 +5829,51 @@ class _SparseMLACommonBuilder(SparseMLACommonMetadataBuilder[SparseMLACommonMeta
     metadata_cls = SparseMLACommonMetadata
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA DSA backends")
+@pytest.mark.parametrize("backend", ["flashmla", "flashinfer", "flashattn"])
+def test_sparse_builders_handle_zigzag_split_at_max_requests(backend):
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseBackend,
+    )
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseSM120Backend,
+    )
+    from vllm.v1.worker.gpu.dsa_sequence_parallel import DSAQueryLayout
+
+    backend_cls = {
+        "flashmla": FlashMLASparseBackend,
+        "flashinfer": FlashInferMLASparseSM120Backend,
+        "flashattn": FlashAttnMLASparseBackend,
+    }[backend]
+    config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V3.2", max_num_seqs=1, block_size=64
+    )
+    config.attention_config.dsa_sequence_parallel = "zigzag"
+    config.compilation_config.static_forward_context["layer"] = SimpleNamespace(
+        dsa_sp="zigzag",
+        impl=SimpleNamespace(num_heads=128, masked_mha_available=False),
+        get_attn_backend=lambda: backend_cls,
+    )
+    device = torch.device(DEVICE_TYPE)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[260], query_lens=[4]), 64, device
+    )
+    layout = DSAQueryLayout.from_offsets(
+        common.query_start_loc_cpu.numpy(), 4, 2, 0, True, False
+    )
+    local = layout.local_metadata(common, buffers=None, capacity=0)
+    builder = backend_cls.get_builder_cls()(
+        create_standard_kv_cache_spec(config), ["layer"], config, device
+    )
+    md = builder.build(0, local)
+    assert md.num_reqs == md.num_decodes == 2
+    assert builder._context_lens_cpu.numel() >= md.num_reqs
+    assert md.req_id_per_token.tolist() == [0, 1]
+    assert md.seq_lens.tolist() == [257, 260]
+    if isinstance(builder, FlashMLASparseMetadataBuilder):
+        assert builder.dummy_block_table.shape[0] >= md.num_decodes
+
+
 def test_hisparse_prefill_staging_plan_without_dense_prefill_backend(
     default_vllm_config, dist_init, workspace_init, monkeypatch
 ):

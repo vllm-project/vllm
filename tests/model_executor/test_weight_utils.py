@@ -110,6 +110,15 @@ def test_make_attention_sink_registers_loader_and_padding(num_heads, dtype):
     assert sink.weight_loader is load_attention_sink
 
 
+def test_replicated_attention_sink_loads_all_heads_and_clears_padding():
+    sink = weight_utils.make_attention_sink(8, replicated=True)
+    checkpoint = torch.arange(5, dtype=sink.dtype)
+    sink.data.zero_()
+    sink.weight_loader(sink, checkpoint)
+    torch.testing.assert_close(sink[:5], checkpoint, rtol=0, atol=0)
+    assert torch.isneginf(sink[5:]).all()
+
+
 def test_download_weights_from_hf():
     with tempfile.TemporaryDirectory() as tmpdir:
         # assert LocalEntryNotFoundError error is thrown

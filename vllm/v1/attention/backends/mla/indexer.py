@@ -43,7 +43,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.mla.sparse_utils import request_row_bounds
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    max_local_query_requests,
+    request_row_bounds,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -1001,8 +1004,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # Whether a main MLA layer reads these indexers' top-k token-sharded.
         layers = self.vllm_config.compilation_config.static_forward_context
-        self.use_shardq = any(
-            getattr(layers.get(name), "use_shardq", False) for name in self.layer_names
+        self.use_shardq = (
+            self.vllm_config.attention_config.dsa_sequence_parallel is None
+            and any(
+                getattr(layers.get(name), "use_shardq", False)
+                for name in self.layer_names
+            )
         )
         if self.use_shardq:
             self.shardq_gather_indices = CpuGpuBuffer(
@@ -1118,7 +1125,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # Only decode tokens are expanded: at most next_n per request. Allocated
         # after the memory profile, so it must not scale with the token budget.
         max_decode_tokens = min(
-            scheduler_config.max_num_seqs * next_n,
+            max_local_query_requests(self.vllm_config) * next_n,
             scheduler_config.max_num_batched_tokens,
         )
         self.expanded_block_table_buffer = torch.zeros(
@@ -1500,7 +1507,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
-        slot_mapping = common_attn_metadata.slot_mapping
+        cache_cm = common_attn_metadata.dsa_sp_global or common_attn_metadata
+        slot_mapping = cache_cm.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
@@ -1517,11 +1525,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     * padded_num_tokens
                 ]
             compressed_slot_mapping = get_compressed_slot_mapping(
-                num_tokens,
+                cache_cm.num_actual_tokens,
                 local_slot_mapping,
-                query_start_loc,
-                seq_lens,
-                block_table,
+                cache_cm.query_start_loc,
+                cache_cm.seq_lens,
+                cache_cm.block_table_tensor,
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,

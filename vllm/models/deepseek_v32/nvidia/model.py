@@ -42,6 +42,7 @@ from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_
 from vllm.models.common.ops.sequence_parallel import (
     is_sequence_parallel_active,
     sp_all_gather,
+    sp_gather_global,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
@@ -77,14 +78,16 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.use_mha = False
-        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
-
         self.self_attn = DeepseekV32Attention(
             vllm_config=vllm_config,
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
+        )
+
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe or bool(
+            self.self_attn.dsa_sp
         )
 
         if (
@@ -101,6 +104,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
                 routed_scale_mode=RoutedScaleMode.ROUTER,
+                dsa_sequence_parallel=bool(self.self_attn.dsa_sp),
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -172,6 +176,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
 
 class DeepseekV32Model(torch.nn.Module):
     fall_back_to_pt_during_load = False
+    dsa_sp: str | None = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -185,13 +190,22 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
-        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.dsa_sp = vllm_config.attention_config.dsa_sequence_parallel
+        self.dsa_tp_experts = (
+            bool(self.dsa_sp) and not parallel_config.enable_expert_parallel
+        )
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe or bool(
+            self.dsa_sp
+        )
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
         # On the model, not a local: the MTP proposer shares it with the draft.
+        max_topk_rows = vllm_config.scheduler_config.max_num_batched_tokens
+        if self.dsa_sp == "zigzag":
+            max_topk_rows = max(2, max_topk_rows)
         self.topk_indices_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
+            max_topk_rows,
             config.index_topk,
             dtype=torch.int32,
             device=self.device,
@@ -292,11 +306,32 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
+            if self.dsa_sp:
+                for key, buffer in self.pp_buffers.items():
+                    shard = sp_shard(intermediate_tensors[key], self.dsa_sp == "zigzag")
+                    buffer[: shard.shape[0]].copy_(shard)
+            else:
+                copy_pp_buffers(intermediate_tensors, self.pp_buffers)
         # Later PP stages receive the TP-reduced residual stream, like an embedding.
         residual = None
 
-        if use_sequence_parallel:
+        if self.dsa_sp:
+            zigzag = self.dsa_sp == "zigzag"
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                ctx = get_forward_context()
+                valid = (
+                    ~ctx.is_padding
+                    if ctx.is_padding is not None
+                    else torch.ones_like(positions, dtype=torch.bool)
+                )
+                is_padding = ~sp_shard(valid, zigzag)
+                ctx.is_padding = (
+                    sp_all_gather(is_padding) if self.dsa_tp_experts else is_padding
+                )
+            hidden_states = sp_shard(hidden_states, zigzag)
+            if attn_in is not None:
+                attn_in = sp_shard(attn_in, zigzag)
+        elif use_sequence_parallel:
             if (
                 self.use_sequence_parallel
                 and envs.VLLM_MOE_SKIP_PADDING
@@ -324,19 +359,23 @@ class DeepseekV32Model(torch.nn.Module):
 
         if not get_pp_group().is_last_rank:
             # PP send/recv needs full-token, TP-replicated tensors.
+            pp_buffers = {k: v[:full_num_tokens] for k, v in self.pp_buffers.items()}
+            if self.dsa_sp:
+                # PP may scatter then gather tensors across TP, so shared top-k
+                # indices also need to be globally ordered before transport.
+                pp_buffers = {
+                    k: self._gather_output(v[: hidden_states.shape[0]], full_num_tokens)
+                    for k, v in self.pp_buffers.items()
+                }
             if self.use_sequence_parallel:
-                hidden_states = sp_all_gather(hidden_states + residual)
-                hidden_states = hidden_states[:full_num_tokens]
+                hidden_states = self._gather_output(
+                    hidden_states + residual, full_num_tokens
+                )
             else:
                 hidden_states = residual + tensor_model_parallel_all_reduce(
                     hidden_states
                 )
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    **{k: v[:full_num_tokens] for k, v in self.pp_buffers.items()},
-                }
-            )
+            return IntermediateTensors({"hidden_states": hidden_states, **pp_buffers})
 
         if use_sequence_parallel:
             hidden_states, _ = self.norm(hidden_states, residual)
@@ -345,13 +384,14 @@ class DeepseekV32Model(torch.nn.Module):
                 packed_hidden_states = torch.cat(
                     [hidden_states, *aux_hidden_states], dim=-1
                 )
-                packed_hidden_states = sp_all_gather(packed_hidden_states)
-                packed_hidden_states = packed_hidden_states[:full_num_tokens]
+                packed_hidden_states = self._gather_output(
+                    packed_hidden_states, full_num_tokens
+                )
                 hidden_states, *aux_hidden_states = packed_hidden_states.split(
                     hidden_size, dim=-1
                 )
             else:
-                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                hidden_states = self._gather_output(hidden_states, full_num_tokens)
         else:
             hidden_states, _ = fused_allreduce_rms_norm(
                 hidden_states, residual, self.norm
@@ -359,6 +399,11 @@ class DeepseekV32Model(torch.nn.Module):
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    def _gather_output(self, x: torch.Tensor, num_tokens: int) -> torch.Tensor:
+        if self.dsa_sp:
+            return sp_gather_global(x, num_tokens, self.dsa_sp == "zigzag")
+        return sp_all_gather(x)[:num_tokens]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # DSA-only: MLA (fused_qkv_a_proj) + routed experts. No MHA (qkv_proj)

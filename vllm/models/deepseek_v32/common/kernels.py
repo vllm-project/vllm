@@ -122,6 +122,9 @@ def _fp8_quant_and_cache_write(
 @triton.jit
 def _fused_norm_rope_kernel(
     pos_ptr,
+    num_q_rows,
+    num_kv_rows,
+    SPLIT_QUERY_ROWS: tl.constexpr,
     # Q RMS norm
     q_c_ptr,
     q_c_stride,
@@ -207,6 +210,10 @@ def _fused_norm_rope_kernel(
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
     fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
+    if SPLIT_QUERY_ROWS and (
+        (pid >= 2 and tok_idx >= num_q_rows) or (pid != 2 and tok_idx >= num_kv_rows)
+    ):
+        return
     if pid == 3:
         if not HAS_INDEXER:
             # Shared layer: reuse the previous indexer layer's top-k; do not
@@ -667,8 +674,12 @@ def fused_norm_rope(
     pdl_kwargs = (
         {"USE_PDL": use_pdl, "launch_pdl": True} if use_pdl else {"USE_PDL": use_pdl}
     )
-    _fused_norm_rope_kernel[(num_tokens, 4)](
+    num_q_rows = q_c.shape[0]
+    _fused_norm_rope_kernel[(max(num_tokens, num_q_rows), 4)](
         positions,
+        num_q_rows,
+        num_tokens,
+        num_q_rows != num_tokens,
         # Q RMS norm
         q_c,
         q_c.stride(0),
