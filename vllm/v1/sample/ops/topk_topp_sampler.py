@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -13,13 +14,10 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
-    from vllm.v1.sample.ops.topk_topp_triton import (
-        _topk_topp,
-        _topp_split_mask,
-        _topp_split_stats,
-        _topp_split_step,
-        apply_top_k_top_p_triton,
-    )
+    from vllm.v1.sample.ops import topk_topp_triton
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -27,11 +25,26 @@ logger = init_logger(__name__)
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
     if HAS_TRITON:
-        _topk_topp.register_warmup()
-        if current_platform.is_cuda_alike():
-            _topp_split_stats.register_warmup()
-            _topp_split_step.register_warmup()
-            _topp_split_mask.register_warmup()
+        topk_topp_triton.register_warmups()
+
+
+def maybe_reserve_topk_topp_workspace(
+    vllm_config: "VllmConfig", device: torch.device, vocab_size: int
+) -> None:
+    """Spec-decode verification filters 1 + K rows per request, more than the dummy
+    sampler run does, so allocate the Triton filter's workspace for them while
+    memory profiling counts it."""
+    if not HAS_TRITON:
+        return
+    if not topk_topp_triton.is_supported(vocab_size):
+        return
+    spec = vllm_config.speculative_config
+    if spec is None:
+        return
+    scheduler = vllm_config.scheduler_config
+    rows_per_req = 1 + spec.num_speculative_tokens
+    rows = min(scheduler.max_num_batched_tokens, scheduler.max_num_seqs * rows_per_req)
+    topk_topp_triton.reserve_workspace(device, rows, vocab_size)
 
 
 def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
@@ -199,20 +212,13 @@ def apply_top_k_top_p(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
-    has_topp_only_rows: bool = True,
 ) -> torch.Tensor:
-    """Apply top-k and/or top-p masking to logits.
-
-    has_topp_only_rows must be True if any row has p < 1 and
-    k >= logits.shape[-1] (no active top-k).
-    """
+    """Apply top-k and/or top-p masking to logits."""
     if p is None and k is None:
         return logits
 
-    if HAS_TRITON:
-        return apply_top_k_top_p_triton(
-            logits, k, p, has_topp_only_rows=has_topp_only_rows
-        )
+    if HAS_TRITON and topk_topp_triton.is_supported(logits.shape[-1]):
+        return topk_topp_triton.apply_top_k_top_p_triton(logits, k, p)
 
     if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
         CpuArchEnum.ARM,
