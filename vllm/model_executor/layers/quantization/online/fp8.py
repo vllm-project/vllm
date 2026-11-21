@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -112,6 +113,31 @@ def _fp8_quant_per_channel(weight: torch.Tensor, scale: torch.Tensor) -> torch.T
         rows = slice(start, start + chunk_rows)
         out[rows] = (weight[rows] / scale[rows]).clamp_(fp8_min, fp8_max).to(out.dtype)
     return out
+
+
+def _per_block_cast_to_fp8_pow2(
+    x: torch.Tensor, block_size: list[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Block-quantize a 2D weight to FP8 with power-of-two scales.
+
+    Values with power-of-two group scales, such as MXFP4, stay exact when the
+    exponents within a block span no more than the FP8 format.
+    """
+    fp8_dtype = current_platform.fp8_dtype()
+    _, fp8_max = get_fp8_min_max()
+    m, n = x.shape
+    block_m, block_n = block_size
+    padded = x.new_zeros(
+        round_up(m, block_m), round_up(n, block_n), dtype=torch.float32
+    )
+    padded[:m, :n] = x
+    blocks = padded.view(padded.shape[0] // block_m, block_m, -1, block_n)
+    amax = blocks.abs().amax(dim=(1, 3), keepdim=True)
+    # amax / scale = mantissa * fp8_max with mantissa in [0.5, 1).
+    _, exponent = torch.frexp(amax / fp8_max)
+    scale = torch.where(amax > 0, torch.ldexp(torch.ones_like(amax), exponent), 1.0)
+    quantized = (blocks / scale).to(fp8_dtype).view_as(padded)[:m, :n]
+    return quantized.contiguous(), scale.view(blocks.shape[0], blocks.shape[2])
 
 
 def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
@@ -832,17 +858,14 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             device=w2.device,
         )
 
+        cast = (
+            _per_block_cast_to_fp8_pow2
+            if getattr(self.requantization_source, "power_of_two_weight_scales", False)
+            else partial(per_block_cast_to_fp8, use_ue8m0=False)
+        )
         for expert in range(num_experts):
-            w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
-                w13_weight[expert],
-                block_size=block_size,
-                use_ue8m0=False,
-            )
-            w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
-                w2_weight[expert],
-                block_size=block_size,
-                use_ue8m0=False,
-            )
+            w13[expert], w13_scale[expert] = cast(w13_weight[expert], block_size)
+            w2[expert], w2_scale[expert] = cast(w2_weight[expert], block_size)
 
         layer.weight_block_size = block_size
 

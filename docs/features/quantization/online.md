@@ -177,6 +177,7 @@ Currently supported combinations are:
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized FP8 MoE with dynamic activation quantization (`fp8`, compressed-tensors, Quark; per-tensor, per-channel or block weight scales) | any online MoE method | Target-specific hardware requirements |
+| Serialized MXFP4 MoE (`Mxfp4MoEMethod`, e.g. DeepSeek-V4.1-Flash experts) | any online MoE method | Target-specific hardware requirements |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
@@ -208,6 +209,21 @@ vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
 Unconverted checkpoint-quantized layers require native support for their
 checkpoint format. NVFP4-to-MXFP4 conversion can reduce accuracy; validate it
 per model or consider MXFP8 for dense and attention linears.
+
+MXFP4 MoE checkpoints can be re-quantized to block FP8 in the same way, for
+example to run DeepSeek-V4.1-Flash on AITER's block-FP8 MoE kernels on ROCm
+gfx942:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 --tensor-parallel-size 8 \
+  --moe-backend aiter \
+  --quantization-config '{"targets":{"*ffn.experts*":"fp8_per_block"}}'
+```
+
+From an MXFP4 source, `fp8_per_block` keeps power-of-two block scales. The
+conversion is then exact whenever the largest and smallest E8M0 scales within
+each 128×128 block differ by at most 2^14, which holds for every routed expert
+of DeepSeek-V4.1-Flash-1017.
 
 !!! info
 

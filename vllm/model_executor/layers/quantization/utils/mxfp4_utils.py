@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -562,3 +563,63 @@ def mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     quant_tensor, scale, _ = downcast_to_mxfp(x, axis=-1)
 
     return quant_tensor, scale
+
+
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+_DEQUANT_CHUNK_BYTES = 1 << 30
+
+
+def dequant_mxfp4(
+    weight: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    """Dequantize OCP MXFP4 weights exactly.
+
+    Args:
+        weight: `[..., N, K // 2]` packed E2M1 values, low nibble first.
+        scale: `[..., N, K // 32]` E8M0 scales.
+        out_dtype: The dequantized dtype. bf16 and fp32 hold every value within
+            their range exactly.
+
+    Returns:
+        `[..., N, K]` values, with negative zero mapped to positive zero.
+
+    """
+    exponent = scale.view(torch.uint8)
+    if (exponent == 255).any():
+        raise ValueError("MXFP4 weights have NaN (0xFF) E8M0 scales.")
+    lut = torch.tensor(_E2M1_VALUES, dtype=torch.float32, device=weight.device)
+    lut = torch.cat((lut, -lut))
+    lut[8] = 0.0
+    raw = weight.view(torch.uint8)
+    codes = torch.stack((raw & 0xF, raw >> 4), dim=-1).flatten(-2)
+    values = lut[codes.long()].unflatten(-1, (-1, 32))
+    factor = torch.ldexp(
+        torch.ones_like(values[..., :1]), exponent.int().unsqueeze(-1) - 127
+    )
+    return (values * factor).flatten(-2).to(out_dtype)
+
+
+def dequantize_mxfp4_moe_weights(
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Yield `(experts, w13, w2)` dequantized MXFP4 experts in groups of experts,
+    bounding the staging memory, for online requantization."""
+    num_experts = w13_weight.shape[0]
+    # int64 codes, fp32 values and the `out_dtype` result per unpacked value.
+    expert_bytes = (
+        2
+        * (w13_weight[0].numel() + w2_weight[0].numel())
+        * (8 + 4 + out_dtype.itemsize)
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        yield (
+            experts,
+            dequant_mxfp4(w13_weight[experts], w13_scale[experts], out_dtype),
+            dequant_mxfp4(w2_weight[experts], w2_scale[experts], out_dtype),
+        )
