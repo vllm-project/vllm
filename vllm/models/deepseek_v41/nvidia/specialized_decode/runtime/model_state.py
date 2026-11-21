@@ -36,6 +36,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from ...model_state import DeepseekV41ModelState
 from .. import take_drafts
+from .autotune import preload_rank_flashinfer_autotune_cache
 from .draft import check_low_batch_graph
 from .metadata_graphs import AttnMetadataCudaGraphs, GraphKey
 from .warmup import warm_up
@@ -250,4 +251,8 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41MetadataGraphModelState)
         ]
         if drafts:
             check_low_batch_graph(vllm_config)
+        if self.decode.config.autotune:
+            self.flashinfer_autotune_preload = preload_rank_flashinfer_autotune_cache(
+                vllm_config, model
+            )
         warm_up(self.decode, vllm_config, drafts)

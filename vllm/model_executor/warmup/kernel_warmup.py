@@ -6,12 +6,10 @@ happen during model execution.
 """
 
 import gc
-import json
 import sys
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -26,6 +24,7 @@ from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     get_flashinfer_mm_encoder_autotune_config,
+    load_shared_autotune_cache,
     resolve_flashinfer_autotune_v2_root,
     resolve_rank_flashinfer_autotune_file,
     use_flashinfer_autotune_v2,
@@ -562,47 +561,6 @@ def _run_flashinfer_autotune_dummy_runs(
             autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
-def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
-    """Identify a saved autotune file by its FlashInfer metadata and size."""
-    try:
-        configs = json.loads(path.read_text())
-        metadata = configs.pop("_metadata", None)
-    except (OSError, ValueError, AttributeError):
-        return None
-    return json.dumps(metadata, sort_keys=True), len(configs)
-
-
-def _all_ranks_have_matching_cache(path: Path, group) -> bool:
-    """True iff every rank in `group` has its own, mutually consistent file."""
-    fingerprint = _autotune_cache_fingerprint(path)
-    if group.world_size == 1:
-        return fingerprint is not None
-    gathered: list[tuple[str, int] | None] = [None] * group.world_size
-    torch.distributed.all_gather_object(gathered, fingerprint, group=group.cpu_group)
-    return fingerprint is not None and all(f == fingerprint for f in gathered)
-
-
-def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
-    """Load the per-rank autotune cache into the tuner, group-wide.
-
-    Returns True only when every rank of the tune group had a matching file
-    and loaded it: the dummy-run sweep contains collectives, so skipping it
-    is safe only if the decision is unanimous.
-    """
-    if not _all_ranks_have_matching_cache(cache_path, tune_group):
-        return False
-    loaded = tuner.load_configs(str(cache_path))
-    if tune_group.world_size > 1:
-        loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
-        torch.distributed.all_gather_object(
-            loaded_by_rank, loaded, group=tune_group.cpu_group
-        )
-        loaded = all(loaded_by_rank)
-    if not loaded:
-        tuner.clear_cache()
-    return loaded
-
-
 def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
@@ -676,7 +634,12 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 cache_path,
             )
 
-        cache_hit = _load_shared_autotune_cache(cache_path, tuner, tune_group)
+        cache_hit = load_shared_autotune_cache(
+            cache_path,
+            tuner,
+            tune_group,
+            preloaded_path=runner.model_state.take_flashinfer_autotune_preload(),
+        )
         autotune_context = fi_utils.autotune(tune_mode=True, **autotune_kwargs)
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None

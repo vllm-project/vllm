@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, ClassVar, cast
 
 import torch
@@ -60,6 +61,7 @@ class ModelState(ABC):
         self.scheduler_config = vllm_config.scheduler_config
         self.model = model
         self.device = device
+        self.flashinfer_autotune_preload: Path | None = None
 
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
@@ -99,6 +101,12 @@ class ModelState(ABC):
                     and observability_config.enable_mm_processor_stats
                 ),
             )
+
+    def take_flashinfer_autotune_preload(self) -> Path | None:
+        """Transfer the rank-local preload from model init to kernel warmup."""
+        path = self.flashinfer_autotune_preload
+        self.flashinfer_autotune_preload = None
+        return path
 
     @property
     def max_model_len(self) -> int:
