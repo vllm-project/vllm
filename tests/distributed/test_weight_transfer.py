@@ -2210,16 +2210,28 @@ class TestTrainerEngineBase:
 )
 def test_ipc_trainer_send_weights_drives_client_in_order():
     """send_weights issues start -> update -> finish and ships per-round metadata;
-    the packed wire param rides the init info, not the per-round update_info."""
-    client = RecordingClient()
+    the packed wire param rides the init info, not the per-round update_info.
+    The trainer's queued writes land before the update is shipped."""
+    pending: list[bool] = []
+
+    class Client(RecordingClient):
+        def update_weights(self, update_info: dict) -> None:
+            pending.append(not torch.cuda.current_stream().query())
+            super().update_weights(update_info)
+
+    client = Client()
+    w = torch.ones(4, device="cuda")
     engine = IPCTrainerWeightTransferEngine(
         client=client,
-        source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
+        source=ModuleSource(_module_with(("w", w))),
         packed=False,
     )
+    torch.cuda._sleep(2_000_000_000)  # ~1 s, so the write is still queued
+    w.fill_(2)
 
     engine.send_weights()
 
+    assert pending == [False], "update shipped before the weights were written"
     assert client.order == ["start", "update", "finish"]
     assert client.last_update_info is not None
     assert client.last_update_info["names"] == ["w"]

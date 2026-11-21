@@ -342,7 +342,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
         torch.distributed.all_gather_object(gathered, handles)
         torch.distributed.barrier()
-        torch.accelerator.synchronize()
 
         if self.is_sender:
             merged: list[dict[str, tuple]] = []
@@ -396,6 +395,8 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             _, ipc_args = reduce_tensor(weight)
             ipc_handles.append({self.gpu_uuid: ipc_args})
 
+        # The worker reads over IPC, outside this stream's ordering.
+        torch.accelerator.synchronize()
         ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
         self._do_send(
             names=names,
