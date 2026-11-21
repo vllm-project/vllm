@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from tests.utils import RemoteOpenAIServer
 from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.config.parallel import DataParallelBackend
@@ -264,6 +265,55 @@ async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
             )
 
         assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.asyncio
+async def test_ep_chunked_prefill_progress_through_deferred_steps():
+    """Prefill-only EP ranks must progress through steps with no scheduled tokens."""
+    model = "vllm-project/tiny-random-DeepseekV2ForCausalLM"
+    args = [
+        "--enforce-eager",
+        "--data-parallel-size",
+        str(DP_SIZE),
+        "--enable-expert-parallel",
+        "--max-model-len",
+        "512",
+        "--max-num-batched-tokens",
+        "32",
+        "--max-num-seqs",
+        "4",
+        "--prefill-schedule-interval",
+        "16",
+        "--no-enable-prefix-caching",
+        "--gpu-memory-utilization",
+        "0.1",
+    ]
+    with RemoteOpenAIServer(model, args) as server:
+        async with server.get_async_client() as client:
+
+            async def complete(rank: int, prompt_len: int):
+                result = await client.completions.create(
+                    model=model,
+                    prompt=[42] * prompt_len,
+                    max_tokens=16,
+                    temperature=0,
+                    extra_body={"ignore_eos": True},
+                    extra_headers={"X-data-parallel-rank": str(rank)},
+                )
+                assert result.choices[0].finish_reason == "length"
+                assert result.usage.prompt_tokens == prompt_len
+                assert result.usage.completion_tokens == 16
+
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        complete(rank, length)
+                        for rank in range(DP_SIZE)
+                        for length in (96, 192)
+                    )
+                ),
+                timeout=120,
+            )
 
 
 # =============================================================================
