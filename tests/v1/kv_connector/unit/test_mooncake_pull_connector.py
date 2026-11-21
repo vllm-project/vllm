@@ -564,7 +564,7 @@ async def test_second_wave_landing_during_a_read_still_completes(pair):
     producer = pair.producer
     pair.fill()
     # Long enough that the prefiller's next response lands mid-read.
-    pair.decoder.engine.read_delay = 0.5
+    pair.decoder.transfer_backend.engine.read_delay = 0.5
 
     send_metas = [
         pair.ready(f"xfer-{index}", f"p-req-{index}", [[index]], ready=False)
@@ -733,7 +733,7 @@ async def test_pull_releases_the_producer_on_a_local_prefix_hit(pair):
         lambda: run_on(producer.sender_loop, has_read_done(producer, "xfer-hit"))
     )
     assert await fetch_recved(decoder) == set()
-    assert decoder.engine.reads == []
+    assert decoder.transfer_backend.engine.reads == []
 
     await run_on(
         producer.sender_loop,
@@ -758,7 +758,7 @@ async def test_slow_read_keeps_the_producer_blocks(pair):
     # The prefiller's own request is already over, so its expiry is due.
     send_meta.expire_time = time.perf_counter() - 100
     # The decoder performs the read, so its engine is the slow one.
-    pair.decoder.engine.read_delay = 2.5
+    pair.decoder.transfer_backend.engine.read_delay = 2.5
 
     pair.read({"d-req-slow": ("xfer-slow", [[10]])})
 
@@ -801,7 +801,7 @@ async def test_cancelled_read_reports_only_after_the_engine_returns(
             decoder.register_kv_caches({LAYER: decoder_kv})
 
             register_ready_transfer(producer, "xfer-cancel", "p-req-cancel", [[4]])
-            decoder.engine.read_delay = 1.5
+            decoder.transfer_backend.engine.read_delay = 1.5
 
             metas = {
                 "d-req-cancel": pull_meta(
@@ -914,7 +914,7 @@ async def test_failed_peer_waits_for_the_other_peer_read(monkeypatch, bootstrap_
 @pytest.mark.asyncio
 async def test_reader_failure_releases_the_producer(pair):
     """A failed read fails the request and still frees the producer's blocks."""
-    pair.decoder.engine.fail_reads = 1
+    pair.decoder.transfer_backend.engine.fail_reads = 1
 
     pair.ready("xfer-fail", "p-req-fail", [[2]])
     pair.read({"d-req-fail": ("xfer-fail", [[10]])})
@@ -1017,7 +1017,7 @@ async def test_decoder_rejects_an_incompatible_block_size(
 
             assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-size"}
             assert decoder.get_block_ids_with_load_errors() == {10}
-            assert decoder.engine.reads == []
+            assert decoder.transfer_backend.engine.reads == []
             assert not decoder._peer_layouts
             # Rejecting the layout has to release the blocks already handed out.
             assert await wait_for(lambda: fetch_sent(producer)) == {"p-req-size"}
@@ -1075,7 +1075,7 @@ async def test_producer_rejects_head_resharding_a_padded_cache(
 
         assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-pad"}
         assert decoder.get_block_ids_with_load_errors() == {10}
-        assert decoder.engine.reads == []
+        assert decoder.transfer_backend.engine.reads == []
         # The prefiller refuses before handing out block ids, so nothing is held.
         assert not producer._leases.holders("xfer-pad")
     finally:

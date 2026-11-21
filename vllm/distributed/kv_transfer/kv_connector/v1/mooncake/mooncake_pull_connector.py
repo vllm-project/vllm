@@ -23,6 +23,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import msgspec
+import numpy as np
 import zmq
 import zmq.asyncio
 
@@ -55,6 +56,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.pull_protocol import 
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.read_leases import (
     ReadLeases,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
+    TransferOp,
+    TransferState,
 )
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -890,9 +895,14 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         lengths: list[int],
     ) -> int:
         start_time = time.perf_counter()
-        ret_value = self.engine.batch_transfer_sync_read(
-            remote_session, local_ptrs, remote_ptrs, lengths
+        result = self.transfer_backend.transfer_sync_arrays(
+            remote_session,
+            TransferOp.READ,
+            np.asarray(local_ptrs, dtype=np.uint64),
+            np.asarray(remote_ptrs, dtype=np.uint64),
+            np.asarray(lengths, dtype=np.uint64),
         )
+        ret_value = 0 if result.state is TransferState.COMPLETED else -1
         duration = time.perf_counter() - start_time
         if ret_value == 0:
             self.xfer_stats.record_transfer(

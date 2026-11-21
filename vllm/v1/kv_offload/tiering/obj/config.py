@@ -29,7 +29,7 @@ def _to_nixl_param(value: Any) -> str:
     return str(value)
 
 
-@dataclass
+@dataclass(slots=True)
 class ObjStoreConfig:
     """Connection parameters for an object store backend.
 

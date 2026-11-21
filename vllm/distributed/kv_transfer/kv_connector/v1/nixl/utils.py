@@ -3,7 +3,7 @@
 """Shared constants, lazy imports and helpers for the NIXL connector."""
 
 import contextlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from typing import Any
 
 import regex as re
@@ -37,7 +37,7 @@ _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 # TODO: merge with vllm.utils.network_utils.zmq_socket_ctx
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Generator[zmq.Socket]:
     """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ):
         raise ValueError(f"Unexpected socket type: {socket_type}")
@@ -71,6 +71,11 @@ def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroup]) -> set[int]:
 # Trailing 8-hex randomization suffix appended by
 # ``input_processor.assign_request_id`` as ``-{random_uuid():.8}``.
 _RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
+
+
+def kv_lease_extension(kv_lease_duration: int) -> int:
+    """Seconds a heartbeat extends a KV lease by (P's renewal and D's model)."""
+    return kv_lease_duration * 2 // 3
 
 
 def get_base_request_id(request_id: str) -> str:

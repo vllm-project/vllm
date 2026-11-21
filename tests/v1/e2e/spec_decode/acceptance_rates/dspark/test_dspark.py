@@ -14,7 +14,7 @@ from ...utils import compute_acceptance_len, compute_acceptance_rate
 REGRESSION_TOLERANCE = 0.95
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DSparkCorrectnessConfig:
     model: str
     draft_model: str
@@ -106,7 +106,6 @@ def test_dspark_correctness_and_acceptance_rate(
 
     runner_config = {
         "block_size": None,
-        "trust_remote_code": True,
         "speculative_config": speculative_config,
         "max_model_len": config.max_model_len,
         "gpu_memory_utilization": config.gpu_memory_utilization,
