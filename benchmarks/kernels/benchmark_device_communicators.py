@@ -44,7 +44,7 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 )
 from vllm.distributed.device_communicators.pynccl import (
     PyNcclCommunicator,
-    register_nccl_symmetric_ops,
+    all_reduce_symmetric_with_copy,
 )
 from vllm.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
@@ -163,7 +163,6 @@ class CommunicatorBenchmark:
             )
             if not self.pynccl_comm.disabled:
                 logger.info("Rank %s: PyNcclCommunicator initialized", self.rank)
-                register_nccl_symmetric_ops(self.pynccl_comm)
             else:
                 logger.info("Rank %s: PyNcclCommunicator disabled", self.rank)
                 self.pynccl_comm = None
@@ -309,7 +308,7 @@ class CommunicatorBenchmark:
             communicators.append(
                 (
                     "pynccl-symm",
-                    lambda t: torch.ops.vllm.all_reduce_symmetric_with_copy(t),
+                    lambda t, c=comm: all_reduce_symmetric_with_copy(t, c),
                     lambda t: True,  # Always available if initialized
                     nullcontext(),
                     {},  # no env variable needed

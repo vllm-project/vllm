@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import random
 import typing
+from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +32,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
 torch.manual_seed(42)
@@ -110,7 +114,6 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
         cuda_communicator = typing.cast(
             CudaCommunicator, get_tp_group().device_communicator
         )
-        pynccl_comm = cuda_communicator.pynccl_comm
         if get_nccl_mem_pool() is None:
             pytest.skip(
                 "NCCL allocator compilation failed (probably missing NCCL headers)."
@@ -118,10 +121,12 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
         if not is_symmetric_memory_enabled():
             pytest.skip("NCCL symmetric memory allreduce is disabled.")
 
-        register_nccl_symmetric_ops(pynccl_comm)
+        register_nccl_symmetric_ops()
         input = torch.randint(1, 23, (test_size_elements,), dtype=dtype, device=device)
         input_clone = input.clone()
-        output = torch.ops.vllm.all_reduce_symmetric_with_copy(input)
+        output = torch.ops.vllm.all_reduce_symmetric_with_copy(
+            input, cuda_communicator.unique_name
+        )
         assert output is not None
 
         group = get_tp_group().device_group
@@ -146,6 +151,233 @@ def test_nccl_symm_mem_allreduce(monkeypatch: pytest.MonkeyPatch, world_size):
 
     mp.spawn(nccl_symm_mem_allreduce_worker, args=(world_size,), nprocs=world_size)
     cleanup_dist_env_and_memory()
+
+
+def _write_tiny_ple_checkpoint(path: Path) -> None:
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import (
+        Qwen4ExpForCausalLM,
+        Qwen4ExpTextConfig,
+        TokenizersBackend,
+    )
+
+    config = Qwen4ExpTextConfig(
+        vocab_size=512,
+        hidden_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        output_gate_type="silu",
+        linear_conv_kernel_dim=4,
+        linear_key_head_dim=64,
+        linear_value_head_dim=64,
+        linear_num_key_heads=4,
+        linear_num_value_heads=4,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts_per_tok=2,
+        num_experts=4,
+        hc_count=4,
+        hc_lowrank=28,
+        ple_layer_ids=[1],
+        layer_types=["linear_attention"],
+        ple_embed_dim=64,
+        ple_conv_kernel_size=4,
+        ngram_size=2,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=257,
+        make_ngram_vocab_size_divisible_by=128,
+        split_ngram_parts=4,
+        max_position_embeddings=128,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    with torch.device("cpu"), torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(20261106)
+        Qwen4ExpForCausalLM(config).save_pretrained(path)
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(
+            WordLevel({f"t{i}": i for i in range(512)}, unk_token="t0")
+        ),
+        unk_token="t0",
+        pad_token="t0",
+        bos_token="t1",
+        eos_token="t2",
+    )
+    tokenizer.chat_template = (
+        '{% for message in messages %}{{ message["content"] }}{% endfor %}'
+    )
+    tokenizer.save_pretrained(path)
+
+
+def _assert_etp_allreduce_observations(observations: list[list[int]]) -> None:
+    assert observations, "LLM.generate did not exercise ETP all-reduce"
+    assert not any(row[3] for row in observations), "Nonfinite ETP all-reduce"
+    assert any(row[0] for row in observations), "TP and ETP references agree"
+
+    mismatches = [row for row in observations if row[1]]
+    if not mismatches:
+        return
+
+    # Each flag is reduced with MAX across ETP, so a zero in the third
+    # column means the result matched its own TP reference on every rank.
+    wrong_group = all(row == [1, 1, 0, 0] for row in mismatches)
+    signature = (
+        "ETP_WRONG_GROUP_TP2" if wrong_group else "ETP_UNEXPECTED_NUMERICAL_MISMATCH"
+    )
+    raise AssertionError(
+        f"{signature}: {observations}; "
+        "columns are TP vs ETP, actual vs ETP, actual vs TP, nonfinite"
+    )
+
+
+def _llm_etp_allreduce_worker(rank: int, port: int, checkpoint: str) -> None:
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    from vllm import LLM, SamplingParams
+    from vllm.distributed.device_communicators.all_reduce_utils import (
+        should_nccl_symm_mem_allreduce,
+    )
+    from vllm.distributed.parallel_state import get_etp_group
+
+    update_environment_variables(
+        {
+            "RANK": str(rank),
+            "LOCAL_RANK": str(rank),
+            "WORLD_SIZE": "4",
+            "MASTER_ADDR": "127.0.0.1",
+            "MASTER_PORT": str(port),
+        }
+    )
+    torch.accelerator.set_device_index(rank)
+    llm = LLM(
+        model=checkpoint,
+        skip_tokenizer_init=True,
+        tensor_parallel_size=2,
+        data_parallel_size=2,
+        data_parallel_rank=rank // 2,
+        distributed_executor_backend="external_launcher",
+        engram_config=dict(
+            cpu_offload=False, dp_shared_memory=False, embedding_across_dp=True
+        ),
+        dtype="bfloat16",
+        enforce_eager=True,
+        disable_custom_all_reduce=True,
+        seed=20261106,
+        max_model_len=32,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        gpu_memory_utilization=0.3,
+    )
+    try:
+        tp, etp = get_tp_group(), get_etp_group()
+        assert tp.world_size == 2 and etp.world_size == 4
+        assert tp.unique_name != etp.unique_name
+        comm = etp.device_communicator
+        assert isinstance(comm, CudaCommunicator)
+        assert comm.pynccl_comm is not None and not comm.pynccl_comm.disabled
+        assert is_symmetric_memory_enabled() and get_nccl_mem_pool() is not None
+        all_reduce = torch.ops.vllm.all_reduce.default
+        observations: list[list[int]] = []
+
+        class ObserveETP(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                kwargs = kwargs or {}
+                if func is not all_reduce:
+                    return func(*args, **kwargs)
+                group_name = args[1] if len(args) > 1 else kwargs["group_name"]
+                if group_name != etp.unique_name:
+                    return func(*args, **kwargs)
+                x = args[0]
+                assert should_nccl_symm_mem_allreduce(etp.world_size, x)
+                assert not torch.cuda.is_current_stream_capturing()
+                fi_ar = comm.fi_ar_comm
+                assert fi_ar is None or fi_ar.disabled or not fi_ar.should_use_fi_ar(x)
+
+                # With at most one nonzero shard per row, the sum is exact.
+                owners = x.ne(0).any(dim=-1).to(torch.int32)
+                dist.all_reduce(owners, group=etp.device_group)
+                assert bool(owners.le(1).all())
+                expected, tp_result = x.clone(), x.clone()
+                dist.all_reduce(expected, group=etp.device_group)
+                dist.all_reduce(tp_result, group=tp.device_group)
+                # Observe the public group op without replacing its dispatch.
+                actual = func(*args, **kwargs)
+                assert isinstance(actual, torch.Tensor)
+                flags = torch.tensor(
+                    [
+                        int(not torch.equal(expected, tp_result)),
+                        int(not torch.equal(actual, expected)),
+                        int(not torch.equal(actual, tp_result)),
+                        int(
+                            not all(
+                                bool(t.isfinite().all())
+                                for t in (actual, expected, tp_result)
+                            )
+                        ),
+                    ],
+                    dtype=torch.int32,
+                    device=x.device,
+                )
+                dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=etp.device_group)
+                observations.append(flags.tolist())
+                return actual
+
+        # The external launcher executes the eager forward in this process.
+        with ObserveETP():
+            result = llm.generate(
+                [{"prompt_token_ids": [1, 17, 23, 41, 57, 69]}],
+                SamplingParams(temperature=0, max_tokens=1, detokenize=False),
+                use_tqdm=False,
+            )
+        assert len(result) == 1
+        _assert_etp_allreduce_observations(observations)
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+
+
+def test_llm_nccl_symm_mem_allreduce_uses_etp_group(monkeypatch, tmp_path):
+    """A TP2/DP2 PLE forward must reduce across ETP4, not the first TP2 group."""
+    if not current_platform.is_cuda():
+        pytest.skip("NCCL symmetric memory requires CUDA.")
+
+    cuda_devices = torch.accelerator.device_count()
+    if cuda_devices < 4:
+        reason = (
+            f"TP2/DP2 ETP regression requires four CUDA GPUs, found {cuda_devices}."
+        )
+        if os.environ.get("REQUIRE_ETP_CUDA_GPUS") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
+    if not __debug__:
+        pytest.fail("This regression requires worker assertions enabled.")
+
+    monkeypatch.setenv("VLLM_USE_NCCL_SYMM_MEM", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    monkeypatch.setenv("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+    checkpoint = tmp_path / "tiny-ple"
+    _write_tiny_ple_checkpoint(checkpoint)
+    workers = mp.spawn(
+        _llm_etp_allreduce_worker,
+        args=(get_open_port(), str(checkpoint)),
+        nprocs=4,
+        join=False,
+    )
+    deadline = monotonic() + 300
+    try:
+        while not workers.join(timeout=max(0.0, deadline - monotonic())):
+            if monotonic() >= deadline:
+                pytest.fail("TP2/DP2 ETP workers exceeded 300 seconds.")
+    finally:
+        for process in workers.processes:
+            if process.is_alive():
+                process.kill()
+        for process in workers.processes:
+            process.join(timeout=5)
 
 
 def nccl_symm_mem_allgather_worker(local_rank: int, world_size: int):
