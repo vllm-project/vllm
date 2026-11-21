@@ -155,8 +155,9 @@ When batch invariance is enabled, vLLM:
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism
 4. Under tensor parallelism, keeps custom all-reduce on with a fixed reduction order (both custom kernels sum the ranks in the same order, and large inputs are reduced in fixed-size chunks), and disables FlashInfer, AITER and QuickReduce all-reduce
-5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
-   runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
+5. On CUDA, bf16 unquantized forward linears use tuned matmul table entries where available (Ada, Hopper, Blackwell). On Hopper,
+   untuned shapes use a generic M-bucket config; tuned shapes keep their per-shape configs. These paths run without `torch.compile`
+   using breakable CUDA graphs so tile configs follow the runtime batch size. Set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 
 !!! warning
