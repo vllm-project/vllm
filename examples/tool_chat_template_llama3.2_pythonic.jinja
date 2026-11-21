@@ -76,7 +76,14 @@
             {{- tool_call.name + '(' -}}
             {%- for param in tool_call.arguments %}
                 {{- param + '=' -}}
-                {{- "%s" | format(tool_call.arguments[param]) -}}
+                {%- set value = tool_call.arguments[param] %}
+                {%- if value is none %}
+                    {{- 'None' -}}
+                {%- elif value is boolean %}
+                    {{- 'True' if value else 'False' -}}
+                {%- else %}
+                    {{- value | tojson -}}
+                {%- endif %}
                 {% if not loop.last %}, {% endif %}
             {%- endfor %}
             {{- ')' -}}
