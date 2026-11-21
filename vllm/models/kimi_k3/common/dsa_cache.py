@@ -13,7 +13,10 @@ from vllm.model_executor.layers.sparse_attn_indexer import MXFP4_BLOCK_SIZE
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import (
+    kv_cache_dtype_str_to_dtype,
+    nvfp4_mla_kv_cache_full_dim,
+)
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_compressed_slot_mapping,
@@ -188,14 +191,20 @@ def dense_mla_draft_bytes_per_token(vllm_config: VllmConfig) -> int:
     if kv_lora_rank is None:
         return 0
     cache_dtype = spec_config.kv_cache_dtype or vllm_config.cache_config.cache_dtype
+    head_size = kv_lora_rank + draft_config.qk_rope_head_dim
     page = MLAAttentionSpec(
         block_size=1,
         num_kv_heads=1,
-        head_size=kv_lora_rank + draft_config.qk_rope_head_dim,
+        head_size=head_size,
         dtype=kv_cache_dtype_str_to_dtype(cache_dtype, draft_model_config),
         cache_dtype_str=cache_dtype,
         kv_quant_mode=get_kv_quant_mode(cache_dtype),
-        state_content_bytes=DS_MLA_STATE_CONTENT_BYTES.get(cache_dtype),
+        # Dense nvfp4 packs as in FLASHINFER_MLA's `customize_spec`.
+        state_content_bytes=(
+            nvfp4_mla_kv_cache_full_dim(head_size)
+            if cache_dtype == "nvfp4"
+            else DS_MLA_STATE_CONTENT_BYTES.get(cache_dtype)
+        ),
     ).page_size_bytes
     return draft_config.num_hidden_layers * page
 
