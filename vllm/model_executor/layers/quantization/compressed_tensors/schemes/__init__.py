@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from .compressed_tensors_lut_b import CompressedTensorsLutB
 from .compressed_tensors_scheme import CompressedTensorsScheme
 from .compressed_tensors_w4a4_mxfp4 import CompressedTensorsW4A4Mxfp4
 from .compressed_tensors_w4a4_nvfp4 import CompressedTensorsW4A4Fp4
@@ -19,6 +20,7 @@ from .compressed_tensors_wNa16 import CompressedTensorsWNA16
 
 __all__ = [
     "CompressedTensorsScheme",
+    "CompressedTensorsLutB",
     "CompressedTensorsWNA16",
     "CompressedTensorsWNA8O8Int",
     "CompressedTensorsW8A16Fp8",
