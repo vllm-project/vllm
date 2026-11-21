@@ -407,3 +407,359 @@ def test_reasoning_end_matches_reference_over_marker_dense_sequences(seed):
             assert parser.is_reasoning_end_streaming(
                 full, delta
             ) == _reference_is_reasoning_end(full), (head, delta)
+
+
+class _FullRescanParser(KimiK3ReasoningParser):
+    """The streaming extraction as it was before it resumed its marker searches:
+    every call re-reads both accumulated texts from the start. The incremental
+    path has to reproduce it exactly, so it stays here as the reference."""
+
+    def _reasoning_text_ready_to_emit(self, text: str) -> str:
+        m_open = self._think_open_re.search(text)
+        if m_open is not None:
+            text = text[m_open.end() :]
+        overlap = 0
+        for marker in (self._think_open, self._think_close):
+            max_check = min(len(marker) - 1, len(text))
+            for n in range(max_check, 0, -1):
+                if text.endswith(marker[:n]):
+                    overlap = max(overlap, n)
+                    break
+        return text[:-overlap] if overlap else text
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+    ):
+        self._last_streaming_delta_token_ids = None
+        self._last_streaming_content_token_ids = None
+        if not self._thinking_enabled:
+            return DeltaMessage(content=delta_text)
+
+        if self._think_close_re.search(previous_text):
+            return DeltaMessage(content=delta_text)
+
+        m_close = self._think_close_re.search(current_text)
+        if m_close is not None:
+            self._last_streaming_delta_token_ids = tuple(delta_token_ids)
+            self._last_streaming_content_token_ids = self._extract_content_ids(
+                list(current_token_ids)
+            )
+            m_open = self._think_open_re.search(current_text)
+            r_start = m_open.end() if m_open is not None else 0
+            reasoning = current_text[r_start : m_close.start()]
+            already_sent = self._reasoning_text_ready_to_emit(previous_text)
+            if reasoning.startswith(already_sent):
+                reasoning_delta = reasoning[len(already_sent) :]
+            else:
+                reasoning_delta = reasoning
+            content = current_text[m_close.end() :]
+            return DeltaMessage(
+                reasoning=reasoning_delta or None,
+                content=content or None,
+            )
+
+        current_reasoning = self._reasoning_text_ready_to_emit(current_text)
+        previous_reasoning = self._reasoning_text_ready_to_emit(previous_text)
+        if current_reasoning.startswith(previous_reasoning):
+            reasoning_delta = current_reasoning[len(previous_reasoning) :]
+        else:
+            reasoning_delta = current_reasoning
+        if not reasoning_delta:
+            return None
+        return DeltaMessage(reasoning=reasoning_delta)
+
+    # The class-level alias would otherwise stay bound to the production method.
+    extract_reasoning_content_streaming = extract_reasoning_streaming
+
+
+# Marker pieces, their fragments, whitespace-tolerant spellings and near misses:
+# the streams below keep splitting, completing and abandoning markers.
+_STREAM_FRAGMENTS = [
+    "a",
+    "bc",
+    " ",
+    "  ",
+    "\n",
+    "x y",
+    "<",
+    "|",
+    "<|",
+    "|>",
+    "open",
+    "close",
+    "think",
+    "sep",
+    "response",
+    "<|open|>",
+    "<|close|>",
+    "<|sep|>",
+    THINK_OPEN,
+    THINK_CLOSE,
+    THINK_OPEN,
+    THINK_CLOSE,
+    f"{OPEN} think {SEP}",
+    f"{CLOSE}\nthink\n{SEP}",
+    f"{CLOSE}response{SEP}",
+    RESPONSE_OPEN,
+    "<|clo",
+    "se|>think<|se",
+    "p|>",
+    "<|open|>thin",
+]
+
+
+def _random_chunks(rnd) -> list[str]:
+    """One random stream split into deltas of 0-21 characters, so a marker is cut
+    at arbitrary points (empty deltas included)."""
+    text = "".join(rnd.choice(_STREAM_FRAGMENTS) for _ in range(rnd.randrange(1, 16)))
+    chunks, i = [], 0
+    while i < len(text):
+        size = rnd.choice([0, 1, 1, 2, 3, 5, 8, 21])
+        chunks.append(text[i : i + size])
+        i += size
+    return chunks
+
+
+def _delta_ids(chunk: str) -> list[int]:
+    return [ord(ch) % 5 + 1 for ch in chunk]
+
+
+def _stream_in_lockstep(chunks, *, copy_previous=False):
+    """Feed one stream to the parser and to the reference, call by call, the way
+    the serving layer does: each call hands back the previous call's text."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    reference = _FullRescanParser(DummyTokenizer())
+    previous = ""
+    previous_ids: list[int] = []
+    for chunk in chunks:
+        current = previous + chunk
+        delta_ids = _delta_ids(chunk)
+        current_ids = previous_ids + delta_ids
+        # An equal but distinct string: trusted by content, so it must agree too.
+        given = (previous + "x")[:-1] if copy_previous and previous else previous
+        args = (given, current, chunk, previous_ids, current_ids, delta_ids)
+        expected = reference.extract_reasoning_streaming(*args)
+        assert parser.extract_reasoning_streaming(*args) == expected, (
+            previous,
+            chunk,
+        )
+        assert parser.extract_content_ids(current_ids) == reference.extract_content_ids(
+            current_ids
+        )
+        previous, previous_ids = current, current_ids
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_streaming_matches_full_rescan_over_marker_dense_streams(seed):
+    import random
+
+    rnd = random.Random(seed)
+    for _ in range(150):
+        _stream_in_lockstep(_random_chunks(rnd))
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_streaming_matches_full_rescan_for_equal_but_distinct_previous_text(seed):
+    import random
+
+    rnd = random.Random(seed)
+    for _ in range(100):
+        _stream_in_lockstep(_random_chunks(rnd), copy_previous=True)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_streaming_matches_full_rescan_when_the_parser_is_reused(seed):
+    """A new stream starts from an empty previous text, and two streams may take
+    turns on one parser: neither may inherit the other's scan."""
+    import random
+
+    rnd = random.Random(seed)
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    reference = _FullRescanParser(DummyTokenizer())
+
+    for _ in range(100):
+        streams = [_random_chunks(rnd), _random_chunks(rnd)]
+        texts = ["", ""]
+        ids: list[list[int]] = [[], []]
+        for turn in range(2 * max(len(s) for s in streams)):
+            which = turn % 2
+            if turn // 2 >= len(streams[which]):
+                continue
+            chunk = streams[which][turn // 2]
+            current = texts[which] + chunk
+            delta_ids = _delta_ids(chunk)
+            current_ids = ids[which] + delta_ids
+            args = (texts[which], current, chunk, ids[which], current_ids, delta_ids)
+            assert parser.extract_reasoning_streaming(
+                *args
+            ) == reference.extract_reasoning_streaming(*args), (texts[which], chunk)
+            texts[which], ids[which] = current, current_ids
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_streaming_matches_full_rescan_for_calls_that_do_not_append(seed):
+    import random
+
+    rnd = random.Random(seed)
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    reference = _FullRescanParser(DummyTokenizer())
+
+    def text() -> str:
+        return "".join(rnd.choice(_STREAM_FRAGMENTS) for _ in range(rnd.randrange(8)))
+
+    for _ in range(500):
+        previous, current, delta = text(), text(), text()
+        args = (previous, current, delta, [1], [1, 2], [2])
+        assert parser.extract_reasoning_streaming(
+            *args
+        ) == reference.extract_reasoning_streaming(*args), args
+
+
+@pytest.mark.parametrize(
+    ("current", "delta"),
+    [
+        ("XYZWV", "qq"),  # right length, does not end with the delta
+        ("XYZWqq", "qq"),  # ends with the delta, longer than previous + delta
+        ("Xqq", "qq"),  # ends with the delta, shorter than previous + delta
+        ("XYZW", "qq"),  # wrong length, does not end with the delta
+        ("abcXY", "qq"),  # extends previous, does not end with the delta
+    ],
+)
+def test_streaming_falls_back_when_a_call_does_not_append_to_the_scanned_text(
+    current, delta
+):
+    """The scan is only valid for the text it was taken on. Handed that very
+    string back with a `current_text` that is not `previous_text +
+    delta_text`, the call must be answered from scratch, as before."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    reference = _FullRescanParser(DummyTokenizer())
+    previous = "abc"
+    for p in (parser, reference):
+        # Two appends, so the scan has resumed and its offsets are tight.
+        p.extract_reasoning_streaming("", "ab", "ab", [], [], [])
+        p.extract_reasoning_streaming("ab", previous, "c", [], [], [])
+
+    args = (previous, current, delta, [1], [1, 2], [2])
+    assert parser.extract_reasoning_streaming(
+        *args
+    ) == reference.extract_reasoning_streaming(*args)
+
+
+def test_streaming_releases_the_reasoning_text_when_the_think_block_closes():
+    """The scan keeps the text it was taken on alive between calls. Once the
+    think block closes the stream moves on to content, and the parser must not
+    keep the whole reasoning text for the rest of the request."""
+    import gc
+    import weakref
+
+    class Text(str):
+        """A str that can be weakly referenced."""
+
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    reasoning = Text("step " * 1000)
+    previous = parser.extract_reasoning_streaming("", reasoning, reasoning, [], [], [])
+    assert previous is not None and previous.reasoning == reasoning
+
+    closed = Text(reasoning + THINK_CLOSE + "answer")
+    delta = THINK_CLOSE + "answer"
+    message = parser.extract_reasoning_streaming(reasoning, closed, delta, [], [], [])
+    assert message is not None and message.content == "answer"
+
+    texts = [weakref.ref(reasoning), weakref.ref(closed)]
+    del reasoning, closed
+    gc.collect()
+    assert all(text() is None for text in texts)
+
+
+def test_delegating_parser_streaming_matches_full_rescan():
+    """Through `DelegatingParser.parse_delta`, the entry point that owns the
+    text it passes back as `previous_text`."""
+    import random
+
+    class ReferenceParser(KimiK3Parser):
+        reasoning_parser_cls = _FullRescanParser
+
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    rnd = random.Random(1234)
+    for _ in range(300):
+        chunks = _random_chunks(rnd)
+        parsers = [
+            ReasoningOnlyParser(_dummy_tokenizer()),
+            ReferenceParser(_dummy_tokenizer()),
+        ]
+        for i, chunk in enumerate(chunks):
+            messages = [
+                parser.parse_delta(
+                    chunk,
+                    _delta_ids(chunk),
+                    request,
+                    prompt_token_ids=[7],
+                    finished=i == len(chunks) - 1,
+                )
+                for parser in parsers
+            ]
+            assert messages[0] == messages[1], (chunks, i)
+
+
+@pytest.mark.parametrize("copy_previous", [False, True])
+def test_streaming_appends_resume_the_scan_instead_of_rescanning(copy_previous):
+    """Deltas that complete no marker, including half-written ones, are answered
+    from the resumed scan, also when the caller hands back an equal copy of the
+    previous text rather than the very string it was given."""
+    rescans = 0
+
+    class CountingParser(KimiK3ReasoningParser):
+        def _extract_reasoning_from_scratch(self, *args):
+            nonlocal rescans
+            rescans += 1
+            return super()._extract_reasoning_from_scratch(*args)
+
+    parser = CountingParser(DummyTokenizer())
+    previous = ""
+    for delta in ["reasoning step "] * 20 + ["<|clo", "se|>thin", "k step "]:
+        current = previous + delta
+        given = (previous + "x")[:-1] if copy_previous and previous else previous
+        parser.extract_reasoning_streaming(given, current, delta, [], [], [])
+        previous = current
+
+    assert rescans == 0
+
+
+def test_streaming_cost_does_not_grow_with_the_accumulated_text():
+    """Each call used to re-read the whole accumulated text, so the cost of one
+    delta grew with the length of the reasoning; the median over the last
+    calls of a long stream must stay close to that of a short one."""
+    import gc
+    import statistics
+    import time
+
+    def tail_median(num_chars: int) -> float:
+        parser = KimiK3ReasoningParser(DummyTokenizer())
+        text = "reasoning step " * (num_chars // 15)
+        deltas = [text[i : i + 4] for i in range(0, len(text), 4)]
+        previous, samples = "", []
+        for i, delta in enumerate(deltas):
+            current = previous + delta
+            start = time.perf_counter()
+            parser.extract_reasoning_streaming(previous, current, delta, [], [], [])
+            elapsed = time.perf_counter() - start
+            if i >= len(deltas) - 300:
+                samples.append(elapsed)
+            previous = current
+        return statistics.median(samples)
+
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        short, long = tail_median(3_000), tail_median(300_000)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+    assert long < 6 * short, (short, long)

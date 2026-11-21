@@ -33,6 +33,7 @@ a value that literally contains `<|close|>argument<|sep|>` or
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import regex as re
 from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
@@ -63,10 +64,34 @@ _TEXT_UNTIL_SEP = r"(?:(?!" + _S + r").)*?"
 
 def _partial_tag_overlap(text: str, tag: str) -> int:
     max_len = min(len(text), len(tag) - 1)
+    if "<" not in text[len(text) - max_len :]:
+        return 0
     for n in range(max_len, 0, -1):
         if text.endswith(tag[:n]):
             return n
     return 0
+
+
+@dataclass(slots=True)
+class _MarkerScan:
+    """Where the channel-marker searches of a stream stand after `text`.
+
+    The serving layer hands over the whole accumulated text on every delta;
+    resuming from these offsets keeps each call proportional to the delta. A
+    start or end of -1 means the marker has not been seen, and its search then
+    resumes at the matching `*_from`.
+    """
+
+    text: str
+    open_from: int = 0
+    open_end: int = -1  # end of the first response-open marker
+    tools_from: int = 0
+    tools_start: int = -1  # first tools-open marker of the text
+    tools_end: int = -1
+    body_tools_from: int = 0
+    body_tools_start: int = -1  # first tools-open marker at or after the body start
+    close_from: int = 0
+    close_start: int = -1  # first response-close marker at or after the body start
 
 
 class KimiK3ToolParser(ToolParser):
@@ -136,6 +161,7 @@ class KimiK3ToolParser(ToolParser):
         self._call_close_re = re.compile(_C + r"\s*call\s*" + _S)
 
         # streaming state
+        self._scan: _MarkerScan | None = None
         self._sent_content_idx = 0
         self._sent_tool_call_count = 0
         self._stream_call_close_idx = 0
@@ -275,7 +301,116 @@ class KimiK3ToolParser(ToolParser):
             return m["c"] or None
         return self._strip_response_content(before)
 
-    def _extract_response_content(self, current_text: str) -> str | None:
+    @staticmethod
+    def _first_marker(
+        pattern: re.Pattern[str], text: str, pos: int, *, tight: bool = True
+    ) -> tuple[int, int, int]:
+        """`(start, end, resume)` of the first match of `pattern` at or after
+        `pos`. Without a complete match, start and end are -1 and `resume` is
+        where the search has to restart once the text has grown: the start of a
+        marker the text ends in the middle of, else the end of the text. A plain
+        search is cheaper than a partial one but can only say `pos`."""
+        if not tight:
+            match = pattern.search(text, pos)
+            return (-1, -1, pos) if match is None else (match.start(), match.end(), pos)
+        match = pattern.search(text, pos, partial=True)
+        if match.partial:
+            return -1, -1, match.start()
+        return match.start(), match.end(), pos
+
+    def _scan_markers(
+        self, previous_text: str, current_text: str, delta_text: str
+    ) -> _MarkerScan:
+        """The channel markers of `current_text`, resuming the searches of the
+        previous call when this call appends `delta_text` to the text they were
+        taken on.
+
+        Streaming calls satisfy `current_text == previous_text + delta_text`;
+        the length and suffix checks reject calls that visibly do not, and the
+        prefix is trusted. `scan.text == previous_text` is a pointer comparison
+        when the serving layer hands back the string it was given.
+        """
+        scan: _MarkerScan | None = None
+        if len(current_text) == len(previous_text) + len(delta_text) and (
+            current_text.endswith(delta_text)
+        ):
+            if not previous_text:
+                scan = _MarkerScan("")
+            elif self._scan is not None and self._scan.text == previous_text:
+                scan = self._scan
+        if scan is None or not self._advance_scan(scan, current_text):
+            scan = self._scan_from_start(current_text)
+        self._scan = scan
+        return scan
+
+    def _advance_scan(self, scan: _MarkerScan, text: str) -> bool:
+        """Resume the searches of `scan` over `text`. False when the
+        response-open marker completed in it: that moves the start of the body,
+        which the other searches count from."""
+        open_from = scan.open_from
+        if scan.open_end < 0:
+            _, open_end, open_from = self._first_marker(
+                self._response_open_re, text, open_from
+            )
+            if open_end >= 0:
+                return False
+        tools = (scan.tools_start, scan.tools_end, scan.tools_from)
+        if scan.tools_start < 0:
+            tools = self._first_marker(self._tools_open_re, text, scan.tools_from)
+        if scan.open_end < 0:
+            body_tools = (tools[0], -1, tools[2])
+        else:
+            body_tools = (scan.body_tools_start, -1, scan.body_tools_from)
+            if scan.body_tools_start < 0:
+                body_tools = self._first_marker(
+                    self._tools_open_re, text, scan.body_tools_from
+                )
+        close = (scan.close_start, -1, scan.close_from)
+        if scan.close_start < 0:
+            close = self._first_marker(self._response_close_re, text, scan.close_from)
+
+        scan.text = text
+        scan.open_from = open_from
+        scan.tools_start, scan.tools_end, scan.tools_from = tools
+        scan.body_tools_start, _, scan.body_tools_from = body_tools
+        scan.close_start, _, scan.close_from = close
+        return True
+
+    def _scan_from_start(self, text: str) -> _MarkerScan:
+        """The scan of `text` from scratch, with plain searches over all of it. The
+        resume offsets of markers not seen are only the start of what was searched:
+        the first call that resumes from them tightens them."""
+        _, open_end, open_from = self._first_marker(
+            self._response_open_re, text, 0, tight=False
+        )
+        body_start = max(open_end, 0)
+        tools_start, tools_end, tools_from = self._first_marker(
+            self._tools_open_re, text, 0, tight=False
+        )
+        body_tools_start, _, body_tools_from = (
+            (tools_start, -1, tools_from)
+            if body_start == 0
+            else self._first_marker(self._tools_open_re, text, body_start, tight=False)
+        )
+        close_start, _, close_from = self._first_marker(
+            self._response_close_re, text, body_start, tight=False
+        )
+        return _MarkerScan(
+            text,
+            open_from=open_from,
+            open_end=open_end,
+            tools_from=tools_from,
+            tools_start=tools_start,
+            tools_end=tools_end,
+            body_tools_from=body_tools_from,
+            body_tools_start=body_tools_start,
+            close_from=close_from,
+            close_start=close_start,
+        )
+
+    def _extract_response_content(
+        self, current_text: str, scan: _MarkerScan
+    ) -> str | None:
         # Streaming response text is computed from the accumulated text. This is
         # what keeps split markers from leaking:
         #   <|open|> / response / <|sep|>Hi     -> emit only "Hi" after open closes
@@ -283,15 +418,12 @@ class KimiK3ToolParser(ToolParser):
         #   Hi<|close|> / response / <|sep|>... -> emit "Hi", hold the close marker
         # Tool calls are even simpler: they are not emitted until a full
         # <|close|>call<|sep|> is present in current_text.
-        m_open = self._response_open_re.search(current_text)
         # In the normal chat path, the response-open marker may be consumed as
         # the generation prefix. Then generated text starts directly with the
         # response body or with <|close|>response<|sep|> before a tools channel.
-        body_start = m_open.end() if m_open is not None else 0
-        m_tools = self._tools_open_re.search(current_text, body_start)
-        m_rclose = self._response_close_re.search(current_text, body_start)
-        tools_start = m_tools.start() if m_tools else -1
-        response_end = m_rclose.start() if m_rclose else -1
+        body_start = max(scan.open_end, 0)
+        tools_start = scan.body_tools_start
+        response_end = scan.close_start
 
         candidates = [i for i in (tools_start, response_end) if i != -1]
         if candidates:
@@ -368,13 +500,13 @@ class KimiK3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        content = self._extract_response_content(current_text)
-        m_tools = self._tools_open_re.search(current_text)
-        if m_tools is None:
+        scan = self._scan_markers(previous_text, current_text, delta_text)
+        content = self._extract_response_content(current_text, scan)
+        if scan.tools_start < 0:
             return DeltaMessage(content=content) if content else None
 
-        self._stream_call_parse_idx = max(self._stream_call_parse_idx, m_tools.end())
-        self._stream_call_close_idx = max(self._stream_call_close_idx, m_tools.end())
+        self._stream_call_parse_idx = max(self._stream_call_parse_idx, scan.tools_end)
+        self._stream_call_close_idx = max(self._stream_call_close_idx, scan.tools_end)
         new_calls: list[ToolCall] = []
         while True:
             m_close = self._call_close_re.search(
