@@ -316,7 +316,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         assert params is not None
 
         self.prompt_len = length_from_prompt_token_ids_or_embeds(
-            request.prompt_token_ids, request.prompt_embeds
+            request.prompt_token_ids, request.prompt_embeds, request.prompt_is_token_ids
         )
 
         # Metadata for incremental detokenization.

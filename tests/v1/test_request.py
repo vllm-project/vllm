@@ -6,6 +6,7 @@ from array import array
 
 import numpy as np
 import pytest
+import torch
 
 from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
@@ -21,7 +22,7 @@ from vllm.v1.token_buffer import (
 )
 
 
-def _engine_core_request(prompt_token_ids) -> EngineCoreRequest:
+def _engine_core_request(prompt_token_ids, **kwargs) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id="r",
         prompt_token_ids=prompt_token_ids,
@@ -32,6 +33,7 @@ def _engine_core_request(prompt_token_ids) -> EngineCoreRequest:
         lora_request=None,
         cache_salt=None,
         data_parallel_rank=None,
+        **kwargs,
     )
 
 
@@ -67,6 +69,55 @@ def test_mp_client_sends_prompt_as_int32_array():
     decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
     engine_request = Request.from_engine_core_request(decoded, block_hasher=None)
     assert engine_request.prompt_token_ids == ids
+
+
+def test_mixed_prompt_embeds_travel_compact_and_expand_in_the_engine():
+    """A mixed prompt's embeddings reach the engine core with rows only for its
+    embeds positions. The engine core expands them to one row per position,
+    with zero rows at the token-id positions, which the workers do not read."""
+    embeds = torch.randn(2, 4)
+    is_token_ids = [True, False, True, False]
+    frames = MsgpackEncoder().encode(
+        _engine_core_request(
+            np.array([1, 2, 3, 4], dtype=np.int32),
+            prompt_embeds=embeds,
+            prompt_is_token_ids=is_token_ids,
+        )
+    )
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
+    assert decoded.prompt_embeds is not None and len(decoded.prompt_embeds) == 2
+
+    request = Request.from_engine_core_request(decoded, block_hasher=None)
+
+    assert request.num_prompt_tokens == 4
+    assert request.prompt_embeds is not None
+    torch.testing.assert_close(request.prompt_embeds[[1, 3]], embeds)
+    assert not request.prompt_embeds[[0, 2]].any()
+
+
+def test_mixed_prompt_embeds_with_wrong_row_count_fail_clearly():
+    """Rows that match neither the positions nor the embeds positions fail with
+    the counts, not an indexing error in the engine core."""
+    with pytest.raises(ValueError, match="2 embeds positions of 4 has 3"):
+        Request.from_engine_core_request(
+            _engine_core_request(
+                np.array([1, 2, 3, 4], dtype=np.int32),
+                prompt_embeds=torch.randn(3, 4),
+                prompt_is_token_ids=[True, False, True, False],
+            ),
+            block_hasher=None,
+        )
+
+
+def test_prompt_embeds_without_mask_need_a_row_per_token_id():
+    """Only a mixed prompt's mask allows fewer rows than token ids."""
+    with pytest.raises(ValueError, match="different lengths"):
+        Request.from_engine_core_request(
+            _engine_core_request(
+                np.array([1, 2, 3], dtype=np.int32), prompt_embeds=torch.randn(2, 4)
+            ),
+            block_hasher=None,
+        )
 
 
 def test_request_stores_token_ids_as_int32_buffers():
