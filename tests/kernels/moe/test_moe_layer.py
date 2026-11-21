@@ -1157,7 +1157,7 @@ def make_fused_moe_layer(
                         unpadded.copy_(value)
                     continue
             layer.routed_experts.register_parameter(
-                name, torch.nn.Parameter(value, requires_grad=False)
+                name, torch.nn.Parameter(value.clone(), requires_grad=False)
             )
 
     layer._quant_method.process_weights_after_loading(layer.routed_experts)
