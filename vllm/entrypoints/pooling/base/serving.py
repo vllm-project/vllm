@@ -17,7 +17,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
-from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.serve.engine.types import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
@@ -25,7 +25,7 @@ from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 from ...serve.engine.protocol import ErrorResponse
-from ..typing import AnyPoolingRequest, PoolingServeContext
+from ..types import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
 
@@ -71,7 +71,8 @@ class PoolingBaseServing(ABC, BaseServing):
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
         await self._preprocessing(io_processor, ctx)
-        await self._prepare_generators(ctx)
+        generators = await self._prepare_generators(ctx)
+        ctx.result_generator = merge_async_iterators(*generators)
         await self._collect_batch(ctx)
         return await self._postprocessing_async(io_processor, ctx)
 
@@ -142,7 +143,7 @@ class PoolingBaseServing(ABC, BaseServing):
     async def _prepare_generators(
         self,
         ctx: PoolingServeContext,
-    ):
+    ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         if ctx.engine_inputs is None:
             raise ValueError("Engine inputs not available")
 
@@ -183,7 +184,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
             generators.append(generator)
 
-        ctx.result_generator = merge_async_iterators(*generators)
+        return generators
 
     async def _collect_batch(
         self,

@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+    scaled_dequantize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
 
@@ -164,6 +168,56 @@ def test_reshape_and_cache(
     else:
         torch.testing.assert_close(key_cache, cloned_key_cache)
         torch.testing.assert_close(value_cache, cloned_value_cache)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
+@torch.inference_mode()
+def test_rocm_attn_kv_cache_update_writes_all_heads() -> None:
+    """Regression test for https://github.com/vllm-project/vllm/issues/62697.
+
+    32 KV heads x 256 in fp16 needs more than the 512 chunks of x elements per
+    token that the native reshape_and_cache kernel writes.
+    """
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+    set_random_seed(0)
+    num_tokens, num_kv_heads, head_size, block_size, num_blocks = 42, 32, 256, 16, 8
+    device, dtype = CUDA_DEVICES[0], torch.float16
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype, device=device)
+    value = torch.randn_like(key)
+    slot_mapping = torch.randperm(num_blocks * block_size, device=device)[:num_tokens]
+    kv_cache = torch.zeros(
+        2, num_blocks, block_size, num_kv_heads * head_size, dtype=dtype, device=device
+    )
+    scale = torch.tensor(1.0, device=device)
+    impl = RocmAttentionImpl(
+        num_heads=num_kv_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+    )
+    impl.do_kv_cache_update(
+        SimpleNamespace(_k_scale=scale, _v_scale=scale),
+        key,
+        value,
+        kv_cache.transpose(0, 1),
+        slot_mapping,
+    )
+
+    key_cache, value_cache = PagedAttention.split_kv_cache(
+        kv_cache, num_kv_heads, head_size
+    )
+    block_idx, block_offset = slot_mapping // block_size, slot_mapping % block_size
+    torch.testing.assert_close(
+        key_cache[block_idx, :, :, block_offset].flatten(2), key, atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        value_cache[block_idx, :, :, block_offset], value, atol=0, rtol=0
+    )
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -1098,8 +1152,6 @@ def test_concat_and_cache_ds_mla(
     seed: int,
     device: str,
 ) -> None:
-    if current_platform.is_rocm():
-        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
     if kv_lora_rank != 512:
@@ -1129,6 +1181,7 @@ def test_concat_and_cache_ds_mla(
 
     ref_cache = torch.zeros_like(kv_cache, dtype=kv_cache.dtype)
     tile_data = torch.zeros(128, dtype=dtype, device=device)
+    _, fp8_max = get_fp8_min_max()
 
     for i in range(num_tokens):
         slot = slot_mapping[i].item()
@@ -1152,7 +1205,7 @@ def test_concat_and_cache_ds_mla(
             manual_max = abs(tile_data_float[0])
             for j in range(1, 128):
                 manual_max = max(manual_max, abs(tile_data_float[j]))
-            raw_scale = torch.clamp(manual_max / 448.0, min=1e-4)
+            raw_scale = torch.clamp(manual_max / fp8_max, min=1e-4)
             tile_scale = torch.exp2(torch.ceil(torch.log2(raw_scale)))
 
             ref_cache_32bit[kv_lora_rank // 4 + tile_idx] = tile_scale
@@ -1210,8 +1263,6 @@ def test_concat_and_cache_ds_mla_nope(
 ) -> None:
     """NoPE matches zero RoPE and preserves unused slots and stride padding."""
     dtype = torch.bfloat16
-    if current_platform.is_rocm():
-        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     num_tokens, num_blocks = 3, 2
     set_random_seed(0)
     torch.set_default_device(device)

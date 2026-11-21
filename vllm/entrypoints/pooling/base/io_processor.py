@@ -13,14 +13,12 @@ from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.chat_utils import (
-    ChatTemplateConfig,
-)
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     EncodeChatRenderParams,
@@ -101,7 +99,9 @@ class PoolingIOProcessor:
             )
 
             mm_config = self.model_config.multimodal_config
-            tok_params = request.build_tok_params(self.model_config)
+            chat_tok_params = request.build_tok_params(
+                self.model_config, self.renderer.default_chat_tok_params
+            )
             chat_params = request.build_chat_params(
                 self.chat_template, self.chat_template_content_format
             ).with_defaults(
@@ -121,7 +121,7 @@ class PoolingIOProcessor:
                 EncodeChatRenderParams(
                     conversations=request.messages,
                     chat_params=chat_params,
-                    tok_params=tok_params,
+                    tok_params=chat_tok_params,
                     prompt_extras=ctx.prompt_extras,
                     skip_mm_cache=False,
                     params=params_seq[i],
@@ -146,7 +146,9 @@ class PoolingIOProcessor:
                 )
                 for prompt in prompts_seq
             ]
-            tok_params = request.build_tok_params(model_config)
+            cmpl_tok_params = request.build_tok_params(
+                self.model_config, self.renderer.default_cmpl_tok_params
+            )
 
             params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
             seq_lora_requests = self._lora_request_to_seq(
@@ -157,7 +159,7 @@ class PoolingIOProcessor:
             requests = [
                 EncodeCMPLRenderParams(
                     prompts=parsed_prompts[i],
-                    tok_params=tok_params,
+                    tok_params=cmpl_tok_params,
                     prompt_extras=ctx.prompt_extras,
                     skip_mm_cache=False,
                     params=params_seq[i],
@@ -197,9 +199,8 @@ class PoolingIOProcessor:
             )
             for prompt in prompts_seq
         ]
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+
+        cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
 
         pooling_params: PoolingParams | Sequence[PoolingParams]
         if ctx.pooling_params is None:
@@ -230,7 +231,7 @@ class PoolingIOProcessor:
             for i in range(num_requests):
                 yield EncodeCMPLRenderParams(
                     prompts=parsed_prompts[i],
-                    tok_params=tok_params,
+                    tok_params=cmpl_tok_params,
                     prompt_extras=None,
                     skip_mm_cache=False,
                     params=params_seq[i],

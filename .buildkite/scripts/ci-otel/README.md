@@ -6,6 +6,9 @@ plugin. `ci_gpu.py` runs once per command, outside pytest workers, when
 `nvidia-smi` is available. It queries up to 16 container-visible NVIDIA devices
 once per second without importing PyTorch or creating a CUDA context.
 Set `CI_INFRA_GPU_SAMPLING=0` in the job environment to disable sampling.
+In a root shell the sampler drops privileges with `setpriv`: to the owner of
+`/workdir` on Docker agents, otherwise (Kubernetes pods) to `nobody`. Without
+`setpriv` it does not run.
 
 Samples contain device UUID, index, name, utilization percent, and used/total
 device memory in bytes. They are `ci.gpu.sample` OTLP events inside
@@ -22,6 +25,9 @@ Uploads can delay the next poll. The shell stops and joins the sampler before
 flushing traces, allows at most three seconds for shutdown, and preserves the
 original command exit status. Samples already uploaded survive an interrupted
 job; the last unflushed batch may be lost on forced termination.
+The job-end flush sends command spans before test spans, so a timeout never
+strands uploaded tests without their parent. It allows three seconds plus three
+per batch after the first, up to twenty seconds.
 
 These are device readings during each test's time interval, not process-level
 kernel attribution. Other processes and overlapping tests can contribute to

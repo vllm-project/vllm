@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import os
 from importlib.metadata import version
 
@@ -21,7 +22,10 @@ from vllm._aiter_ops import (
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
-from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP, ROTARY_OP
+from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP
+from vllm.compilation.passes.fusion.muse_glimmer_qk_rope_cache_fusion import (
+    MuseGlimmerQkRopeCacheFusionPass,
+)
 from vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion import (
     QkNormRopeKvCacheFusionPass,
 )
@@ -64,7 +68,6 @@ if not is_aiter_found_and_supported():
         allow_module_level=True,
     )
 
-INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
@@ -130,8 +133,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             is_neox_style=is_neox,
             dtype=self.dtype,
         )
-
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
         self.attn = Attention(
             num_heads=num_heads,
@@ -261,16 +262,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops: list[torch._ops.OpOverload] = []
-        # RoPE is not yet IR-migrated, so its custom op still surfaces
-        # directly in the graph based on `enable_rope_custom_op`.
-        if self.enable_rope_custom_op:
-            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
-            else:
-                ops.append(ROTARY_OP)
-        else:
-            ops.append(INDEX_SELECT_OP)
+        ops = [torch.ops.vllm_ir.rotary_embedding.default]
         ops.append(torch.ops.vllm.unified_kv_cache_update.default)
         return ops
 
@@ -297,7 +289,6 @@ class QKNormMRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
             mrope_section=list(mrope_section),
             mrope_interleaved=mrope_interleaved,
         )
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(
         self, qkv: torch.Tensor, positions: torch.Tensor
@@ -334,6 +325,117 @@ class QKNormMRoPEObservableKTestModel(QKNormMRoPEKVCacheTestModel):
         self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return QKNormRoPEKVCacheTestModel.forward(self, qkv, positions)
+
+
+class MuseQKNormRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
+    q_scale = 3.875
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.qk_norm = RMSNorm(
+            self.head_size, eps=self.q_norm.variance_epsilon, has_weight=False
+        )
+
+    def forward(
+        self, qkv: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(-1, self.head_size)
+        q = self.qk_norm(q).reshape(-1, self.q_size) * self.q_scale
+        k = k.reshape(-1, self.head_size)
+        k = self.qk_norm(k).reshape(-1, self.kv_size)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+        q, k = self.rotary_emb(positions, q, k)
+        q = q.view(-1, self.num_heads, self.head_size)
+        k = k.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size)
+        dummy = torch.ops.vllm.unified_kv_cache_update(
+            k, v, _encode_layer_name(self.layer_name)
+        )
+        return q, k, v, dummy
+
+
+@pytest.mark.parametrize("num_tokens", [5, 512])
+def test_muse_qk_norm_rope_cache_fuses_all_token_counts(
+    num_tokens: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch.manual_seed(0)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "0")
+    monkeypatch.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "0")
+    rocm_aiter_ops.refresh_env_variables()
+
+    device = torch.device(os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda"))
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+            dtype=torch.bfloat16,
+        ),
+        cache_config=CacheConfig(block_size=16, cache_dtype="auto"),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding"],
+            use_inductor_graph_partition=True,
+        ),
+    )
+    text_config = vllm_config.model_config.hf_text_config
+    text_config.head_dim = 128
+    text_config.layer_rope_theta = [10000.0]
+    text_config.rms_norm_eps = 1e-6
+    text_config.qk_scale_factor = MuseQKNormRoPEKVCacheTestModel.q_scale
+    with vllm.config.set_current_vllm_config(vllm_config):
+        model = MuseQKNormRoPEKVCacheTestModel(
+            vllm_config=vllm_config,
+            attn_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            num_heads=32,
+            num_kv_heads=8,
+            head_size=128,
+            is_neox=True,
+            rms_norm_eps=1e-6,
+            dtype=torch.bfloat16,
+            device=device,
+        ).to(device)
+        fusion_pass = MuseGlimmerQkRopeCacheFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            SplitCoalescingPass(vllm_config),
+            ScatterSplitReplacementPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        )
+        qkv = torch.randn(
+            num_tokens,
+            model.q_size + 2 * model.kv_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        positions = torch.arange(num_tokens, device=device)
+
+        with set_forward_context(None, vllm_config):
+            context = get_forward_context()
+            metadata = model.build_attn_metadata(num_tokens, KVCacheLayout.LBHNC)
+            context.slot_mapping = {model.layer_name: metadata.slot_mapping}
+            expected = model(qkv, positions)
+            expected_cache = model.attn.kv_cache.clone()
+
+        torch._dynamo.mark_dynamic(qkv, 0)
+        torch._dynamo.mark_dynamic(positions, 0)
+        with set_forward_context(None, vllm_config):
+            context = get_forward_context()
+            metadata = model.build_attn_metadata(num_tokens, KVCacheLayout.LBHNC)
+            context.slot_mapping = {model.layer_name: metadata.slot_mapping}
+            actual = torch.compile(model, backend=backend)(qkv, positions)
+            actual_cache = model.attn.kv_cache.clone()
+
+        assert fusion_pass.matched_count == 1
+        backend.check_before_ops([torch.ops.vllm.unified_kv_cache_update.default])
+        backend.check_after_ops([torch.ops.vllm.fused_muse_qk_rope_cache.default])
+        for expected_tensor, actual_tensor in zip(expected[:3], actual[:3]):
+            torch.testing.assert_close(
+                expected_tensor, actual_tensor, atol=4e-2, rtol=2e-2
+            )
+        torch.testing.assert_close(expected_cache, actual_cache, atol=4e-2, rtol=2e-2)
 
 
 def _run_qk_norm_rope_kvcache_fusion_test(
@@ -391,7 +493,11 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        monkeypatch.context() as m,
+        contextlib.ExitStack() as stack,
+    ):
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
         m.setenv(
@@ -400,6 +506,10 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         )
         m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
         rocm_aiter_ops.refresh_env_variables()
+        # Unfused reference uses the same RoPE kernel as a real run.
+        stack.enter_context(
+            current_platform.get_default_ir_op_priority(vllm_config).set_priority()
+        )
 
         expected_query_quant_group_shape = None
         if use_quark_scalar_query_scale:
@@ -696,6 +806,14 @@ def test_qk_norm_rope_kvcache_fusion(
         pytest.param(KVCacheLayout.LHBNC, id="block_major"),
     ],
 )
+@pytest.mark.parametrize(
+    "custom_op",
+    [
+        "+rotary_embedding",
+        # MRoPE fusion must not depend on the user enabling the RoPE custom op.
+        "+rms_norm",
+    ],
+)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.skipif(
     not IS_AITER_FOUND,
@@ -707,6 +825,7 @@ def test_qk_norm_mrope_kvcache_fusion(
     is_neox: bool,
     kv_layout: KVCacheLayout,
     kv_cache_dtype: CacheDType,
+    custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _run_qk_norm_rope_kvcache_fusion_test(
@@ -724,7 +843,7 @@ def test_qk_norm_mrope_kvcache_fusion(
         dtype=torch.bfloat16,
         kv_cache_dtype=kv_cache_dtype,
         rms_norm_eps=1e-6,
-        custom_op="+rotary_embedding",
+        custom_op=custom_op,
         monkeypatch=monkeypatch,
         mrope_section=mrope_section,
         mrope_interleaved=mrope_interleaved,
