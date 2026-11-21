@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from tests.tool_parsers.utils import run_tool_extraction
+from tests.tool_parsers.utils import run_tool_extraction, run_tool_extraction_streaming
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.deepseekv31_tool_parser import (
     DeepSeekV31ToolParser,
@@ -81,3 +81,34 @@ def test_extract_tool_calls_with_multiline_arguments(parser, streaming):
     assert [call.function.name for call in tool_calls] == ["foo", "bar"]
     assert json.loads(tool_calls[0].function.arguments) == args
     assert json.loads(tool_calls[1].function.arguments) == {"y": 2}
+
+
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        [
+            "normal",
+            " text<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>",
+            'foo<｜tool▁sep｜>{"x": ',
+            '"y"}',
+            "<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+        ],
+        [
+            "normal",
+            " text<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>foo<｜tool▁sep｜>",
+            '{"x": "y"}',
+            "<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+        ],
+    ],
+    ids=["text_and_start_tokens", "text_start_tokens_and_name"],
+)
+def test_streaming_keeps_text_in_delta_with_tool_call_start(parser, deltas):
+    # Multi-token deltas (--stream-interval, speculative decoding) can put
+    # text and the tool call start tokens in the same delta.
+    reconstructor = run_tool_extraction_streaming(parser, deltas)
+
+    assert reconstructor.other_content == "normal text"
+    assert [
+        (call.function.name, call.function.arguments)
+        for call in reconstructor.tool_calls
+    ] == [("foo", '{"x": "y"}')]
