@@ -33,7 +33,7 @@ TopLogprobsParam: TypeAlias = Annotated[
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
 
-MMPayload: TypeAlias = Literal["tensors", "none"]
+MMPayload: TypeAlias = Literal["tensors", "metadata", "none"]
 
 # Range of a request priority, in the body or the `X-Vllm-Priority` header:
 # int32, the type of `priority` in the Rust frontend.
