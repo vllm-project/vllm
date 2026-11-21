@@ -155,6 +155,10 @@ For example:
 --8<-- "vllm/model_executor/layers/quantization/input_quant_fp8.py:quant_fp8"
 ```
 
+For dynamic group FP8 quantization of batched tensors, see the shapes and
+scale-layout contract of
+[`per_token_group_quant_fp8`][vllm.model_executor.layers.quantization.utils.fp8_utils.per_token_group_quant_fp8].
+
 **11. Rope:**
 
 ```python
