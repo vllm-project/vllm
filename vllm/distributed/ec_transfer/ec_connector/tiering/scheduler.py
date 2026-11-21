@@ -7,11 +7,15 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from copy import copy
-from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from vllm.config.quantization import resolve_quantization_config
-from vllm.config.utils import hash_config, hash_factors, normalize_value
+from vllm.config.utils import (
+    get_compile_factors,
+    hash_config,
+    hash_factors,
+    normalize_value,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
     ECCPUWorkerMetadata,
@@ -123,7 +127,9 @@ class ECTieringScheduler(ECCPUScheduler):
             # Encoder cache identity also covers preprocessing, which is
             # intentionally excluded from the compilation hash.
             "multimodal_config": (
-                asdict(model_config.multimodal_config)
+                get_compile_factors(
+                    model_config.multimodal_config, {"mm_shm_cache_buffer_name"}
+                )
                 if model_config.multimodal_config is not None
                 else None
             ),
