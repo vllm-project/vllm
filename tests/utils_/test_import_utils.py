@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.utils import import_utils
 from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
 
 
@@ -105,22 +106,61 @@ class TestHasModule:
 
 
 class TestImportPlugin:
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_missing_dependency_keeps_the_original_import_error(
+        self, tmp_path, monkeypatch, nested
+    ):
+        name = "vllm_test_broken_named_plugin"
+        if nested:
+            package = tmp_path / name
+            package.mkdir()
+            (package / "__init__.py").write_text("")
+            plugin = package / "plugin.py"
+            requested = f"{name}.plugin"
+        else:
+            plugin = tmp_path / f"{name}.py"
+            requested = name
+        dependency = "vllm_test_missing_plugin_dependency"
+        plugin.write_text(f"import {dependency}\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        errors = []
+        monkeypatch.setattr(
+            import_utils.logger,
+            "exception",
+            lambda *args: errors.append(sys.exc_info()[1]),
+        )
+        try:
+            assert import_plugin(requested) is None
+            assert len(errors) == 1
+            assert isinstance(errors[0], ModuleNotFoundError)
+            assert errors[0].name == dependency
+            assert requested not in sys.modules
+        finally:
+            sys.modules.pop(requested, None)
+            sys.modules.pop(name, None)
+
     def test_importing_from_site_packages(self):
         import json
 
         result = import_plugin("json")
         assert result is json
 
-    def test_importing_from_file(self, tmp_path):
-        plugin_file = tmp_path / "my_test_plugin.py"
+    @pytest.mark.parametrize(
+        "filename, relative",
+        [("my_test_plugin.py", False), ("vllm_missing_parent.plugin.py", True)],
+    )
+    def test_importing_from_file(self, tmp_path, monkeypatch, filename, relative):
+        plugin_file = tmp_path / filename
         plugin_file.write_text("VALUE = 42\n")
+        if relative:
+            monkeypatch.chdir(tmp_path)
 
         try:
-            result = import_plugin(str(plugin_file))
+            result = import_plugin(filename if relative else str(plugin_file))
             assert result is not None
             assert result.VALUE == 42
         finally:
-            sys.modules.pop("my_test_plugin", None)
+            sys.modules.pop(plugin_file.stem, None)
 
     def test_returns_none_when_both_attempts_fail(self):
         with (
