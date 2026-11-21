@@ -312,17 +312,13 @@ class _FinishedProcess:
 
 
 def test_wait_for_engine_startup_reports_watched_process_exit():
-    """Update the startup test argument so it reaches frontend failure handling."""
+    """Report a watched frontend's exit while engines are still starting."""
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
     recv, send = connection.Pipe(duplex=False)
     send.close()
 
-    parallel_config = SimpleNamespace(
-        data_parallel_size_local=1,
-        data_parallel_hybrid_lb=False,
-        data_parallel_external_lb=False,
-    )
+    parallel_config = ParallelConfig()
 
     try:
         launch = CoreEngineLaunch(

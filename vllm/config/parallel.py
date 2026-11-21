@@ -385,6 +385,19 @@ class ParallelConfig:
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
+    elastic_ep_auto_bootstrap: bool = False
+    """Resolve initial or joining external EP startup through rank zero's
+    handshake. Requires `--elastic-ep-initial-dp-size` instead of
+    `--data-parallel-size`. Disabled by default."""
+    elastic_ep_initial_dp_size: int | None = Field(default=None, ge=2)
+    """Initial DP world size for automatic Elastic EP bootstrap. Leave unchanged
+    for append joiners; their live size is discovered before engine creation.
+    Cannot be combined with `--data-parallel-size`. Unset by default."""
+    elastic_ep_allocation_index: int | None = Field(default=None, ge=0)
+    """Zero-based allocation index for automatic Elastic EP bootstrap. The first
+    DP rank is this index times `--data-parallel-size-local` (default: one).
+    Initial and maximum DP sizes must be multiples of the local size. Cannot
+    be combined with explicit rank or load-balancer flags. Unset by default."""
     elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
     """Maximum data parallel size supported by elastic expert parallelism."""
 
@@ -545,6 +558,9 @@ class ParallelConfig:
     _coord_store_port: int = 0
     """Port of the coordination TCPStore. Can be set by the API server; workers
     connect as clients to exchange self-picked group ports at runtime."""
+
+    _external_elastic_ep_bootstrap: tuple[str, str] | None = None
+    """Automatic launch's handshake token and process identity, not membership."""
 
     decode_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that shard the decode KV cache. DCP does not expand
@@ -853,6 +869,12 @@ class ParallelConfig:
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
     @property
+    def uses_external_elastic_ep(self) -> bool:
+        return self.enable_elastic_ep and (
+            self.data_parallel_external_lb or self.elastic_ep_auto_bootstrap
+        )
+
+    @property
     def cpu_distributed_timeout(self) -> timedelta | None:
         seconds = self.cpu_distributed_timeout_seconds
         return timedelta(seconds=seconds) if seconds is not None else None
@@ -1144,6 +1166,10 @@ class ParallelConfig:
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
             "_coord_store_port",
+            "_external_elastic_ep_bootstrap",
+            "elastic_ep_auto_bootstrap",
+            "elastic_ep_initial_dp_size",
+            "elastic_ep_allocation_index",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -1197,7 +1223,7 @@ class ParallelConfig:
                     "Elastic EP is not supported with pipeline parallelism "
                     f"(pipeline_parallel_size={self.pipeline_parallel_size})."
                 )
-            if self.data_parallel_hybrid_lb:
+            if self.data_parallel_hybrid_lb and not self.elastic_ep_auto_bootstrap:
                 raise NotImplementedError(
                     "Elastic EP is not compatible with data_parallel_hybrid_lb. "
                     "Elastic EP supports a single API server/core client path "
