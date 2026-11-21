@@ -186,6 +186,7 @@ __device__ __forceinline__ Sum2 block_reduce_sum2_for(float x, float y,
     block_y = lane < kReduceWarps ? scratch[kReduceWarps + lane] : 0.0f;
     block_x = warp_reduce_sum(block_x);
     block_y = warp_reduce_sum(block_y);
+    __syncwarp();
     if (lane == 0) {
       scratch[0] = block_x;
       scratch[1] = block_y;
@@ -252,6 +253,7 @@ __device__ __forceinline__ Sum2 block_reduce_sum2_active_for(float x, float y,
     block_y = lane < kReduceWarps ? scratch[kReduceWarps + lane] : 0.0f;
     block_x = warp_reduce_sum(block_x);
     block_y = warp_reduce_sum(block_y);
+    __syncwarp();
     if (lane == 0) {
       scratch[0] = block_x;
       scratch[1] = block_y;

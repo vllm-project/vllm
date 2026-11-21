@@ -553,6 +553,7 @@ class EngineCoreReadyResponse:
     enable_expert_parallel: bool = False
     supports_prompt_logprobs: bool = True
     allow_missing_mm_embeddings: bool = False
+    max_mm_embeds_per_request: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -604,6 +605,7 @@ ready_response = EngineCoreReadyResponse(
     enable_expert_parallel=True,
     supports_prompt_logprobs=False,
     allow_missing_mm_embeddings=True,
+    max_mm_embeds_per_request=16384,
 )
 
 nixl_stats = {
@@ -626,7 +628,16 @@ mooncake_stats = {
             "status": "ok",
             "num_failed_keys": 0,
         }
-    ]
+    ],
+    "lookup_lease": [
+        {
+            "duration_seconds": 0.002,
+            "num_keys": 3,
+            "num_bytes": 0,
+            "status": "partial_failure",
+            "num_failed_keys": 1,
+        }
+    ],
 }
 mooncake_transfer_stats = {
     "transfer_duration": [0.01, 0.02],

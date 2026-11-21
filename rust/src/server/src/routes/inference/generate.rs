@@ -39,7 +39,9 @@ pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
-use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::routes::openai::utils::choices::{
+    ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
+};
 use crate::routes::openai::utils::logprobs::{clamp_logprob, decoded_logprobs_to_openai_chat};
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
@@ -186,22 +188,24 @@ pub async fn generate(
     Ok(Json(merge_choice_responses(responses)).into_response())
 }
 
-/// Merge the responses of a request's choices, in index order, like Python's
-/// non-streaming response for `n > 1`: the prompt-level fields come from the
-/// first choice, usage adds up per [`Usage::add_choice`], and per-request
-/// metrics, which describe a single sample, are reported only for `n = 1`.
-fn merge_choice_responses(responses: Vec<GenerateResponse>) -> GenerateResponse {
-    let mut responses = responses.into_iter();
-    let mut merged = responses.next().expect("a request has at least one choice");
-    for (index, response) in (1..).zip(responses) {
-        merged.metrics = None;
-        merged.usage.add_choice(&response.usage);
-        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+impl ChoiceResponse for GenerateResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
             choice.index = index;
-            choice
-        }));
+        }
     }
-    merged
+
+    fn usage_mut(&mut self) -> Option<&mut Usage> {
+        Some(&mut self.usage)
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
+
+    fn append_choices(&mut self, other: Self) {
+        self.choices.extend(other.choices);
+    }
 }
 
 impl ChoiceChunk for GenerateStreamResponse {
@@ -228,6 +232,7 @@ async fn generate_chunk_stream(
         enable_log_requests,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -242,6 +247,8 @@ async fn generate_chunk_stream(
     mut mm_info: Option<MmResponseInfo>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     pin_mut!(stream);
     let mut prompt_token_ids = None;
     // Like Python, continuous usage counts tokens only; the final usage chunk

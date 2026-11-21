@@ -120,7 +120,7 @@ impl RenderState {
     /// Served model names followed by LoRA adapter names.
     pub(crate) fn model_names(&self) -> ServedModelNames {
         (self.served_model_names.clone())
-            .with_names(self.lora_modules.iter().map(|module| module.name.clone()))
+            .with_adapter_names(self.lora_modules.iter().map(|module| module.name.clone()))
     }
 }
 
@@ -177,7 +177,7 @@ fn validate_lora_modules(
     let mut seen = HashSet::new();
     for module in lora_modules {
         let name = &module.name;
-        check_lora_module(served_model_names.names(), module)
+        check_lora_module(served_model_names.base_names(), module)
             .with_context(|| format!("invalid --lora-modules entry `{name}`"))?;
         if !seen.insert(name) {
             bail!("LoRA adapter `{name}` is given more than once");
