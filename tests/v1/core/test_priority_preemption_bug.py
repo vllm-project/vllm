@@ -33,7 +33,6 @@ EOS_TOKEN_ID = 50256
 def build_scheduler():
     model_config = ModelConfig(
         model="facebook/opt-350m",
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
         skip_tokenizer_init=True,

@@ -10,22 +10,11 @@
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
 from .utils import FLA_CHUNK_SIZE
-
-# On RDNA (gfx11xx/gfx12xx) WMMA only
-# accepts 16-bit/int inputs, so a widened (e.g. fp32) tl.dot is lowered to a
-# software matmul (~190x amdgcn-stage blowup). There we cast both operands down
-# to k's native storage dtype (bf16/fp16) so fast WMMA is used instead.
-_CAST_DOT_TO_K_DTYPE = False
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1x
-
-    _CAST_DOT_TO_K_DTYPE = on_gfx1x()
 
 
 @triton.heuristics(
@@ -59,7 +48,6 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
-    CAST_DOT_TO_K_DTYPE: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
@@ -91,19 +79,15 @@ def chunk_scaled_dot_kkt_fwd_kernel(
             + o_k[None, :]
         )
         b_k = tl.load(p_k, mask=m_t[:, None] & (o_k < K)[None, :], other=0.0)
-        b_kb = b_k * b_beta[:, None]
-        if CAST_DOT_TO_K_DTYPE:
-            # RDNA: force operands to k's native dtype so WMMA is used.
-            b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
-        else:
-            # Keep the promoted precision of the beta-scaled operand (WGMMA/MFMA).
-            b_A += tl.dot(b_kb, tl.trans(b_k).to(b_kb.dtype))
+        # Beta is applied after the loop, as in upstream FLA (see #65385).
+        b_A = tl.dot(b_k, tl.trans(b_k), b_A)
 
     if USE_G:
         p_g = g + bos * H + i_h + o_t * H
         b_g = tl.load(p_g, mask=m_t, other=0.0)
         b_g_diff = b_g[:, None] - b_g[None, :]
         b_A = b_A * exp(b_g_diff)
+    b_A = b_A * b_beta[:, None]
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
@@ -166,6 +150,5 @@ def chunk_scaled_dot_kkt_fwd(
         Hg=Hg,
         K=K,
         BT=BT,
-        CAST_DOT_TO_K_DTYPE=_CAST_DOT_TO_K_DTYPE,
     )
     return A
