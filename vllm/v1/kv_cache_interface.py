@@ -831,7 +831,7 @@ class KVCacheStage:
 
     bytes_per_block: int
     """Bytes one block takes in the device KV cache of each worker of the
-    stage."""
+    stage: the size the engine core plans that worker's `num_blocks` with."""
 
 
 @dataclass
