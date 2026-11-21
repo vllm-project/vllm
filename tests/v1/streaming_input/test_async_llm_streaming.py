@@ -12,7 +12,7 @@ from vllm.engine.protocol import StreamingInput
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import STREAM_FINISHED, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.v1.engine.async_llm import AsyncLLM, InputStreamError
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
 
 
@@ -282,46 +282,16 @@ async def test_handle_inputs_stops_after_session_finished(
     assert sent == ([reqs[1], reqs[2], reqs[0]] if session_live else [reqs[1]])
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "chunk_flags,num_sent",
-    [
-        ((False, False), 2),
-        ((None, False), 1),
-        ((False, None), 1),
-        ((False, True), 1),
-    ],
-    ids=["opt-out-throughout", "default-then-opt-out", "opt-out-then-default", "flip"],
+    "stream_flag,chunk_flag",
+    [(True, True), (False, False), (True, False), (False, True)],
+    ids=["records", "opts-out", "chunk-opts-out", "chunk-records"],
 )
-async def test_input_stream_keeps_first_chunk_return_aux_outputs(
-    chunk_flags: tuple[bool | None, ...],
-    num_sent: int,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    llm, reqs = _make_streaming_llm(monkeypatch, num_chunks=len(chunk_flags))
-
-    async def chunks():
-        for i, flag in enumerate(chunk_flags):
-            yield StreamingInput(
-                prompt=f"frame-{i}",
-                sampling_params=None
-                if flag is None
-                else SamplingParams(max_tokens=4, return_aux_outputs=flag),
-            )
-
-    with mock.patch(
-        "vllm.v1.engine.async_llm.extract_prompt_components",
-        return_value=("", None, None),
-    ):
-        queue = await llm._add_streaming_input_request(
-            "r1", chunks(), SamplingParams(max_tokens=4)
-        )
-        await queue._input_stream_task
-
-    sent = [call.args[0] for call in llm._add_request.await_args_list]
-    assert sent == [*reqs[1 : num_sent + 1], reqs[0]]
-    if num_sent == len(chunk_flags):
-        assert queue.output is None
+def test_input_chunk_matches_stream_return_aux_outputs(stream_flag, chunk_flag):
+    stream = SamplingParams(max_tokens=4, return_aux_outputs=stream_flag)
+    chunk = SamplingParams(max_tokens=4, return_aux_outputs=chunk_flag)
+    if stream_flag == chunk_flag:
+        AsyncLLM._validate_streaming_input_sampling_params(chunk, stream)
     else:
-        assert isinstance(queue.output, InputStreamError)
-        assert "return_aux_outputs cannot change" in str(queue.output.cause)
+        with pytest.raises(VLLMValidationError, match="return_aux_outputs"):
+            AsyncLLM._validate_streaming_input_sampling_params(chunk, stream)

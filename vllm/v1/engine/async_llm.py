@@ -652,7 +652,6 @@ class AsyncLLM(EngineClient):
             cancelled = False
             errored = False
             any_added = False
-            return_aux_outputs: bool | None = None
             try:
                 async for input_chunk in input_stream:
                     # Stop once the session has finished (aborted or errored).
@@ -664,14 +663,11 @@ class AsyncLLM(EngineClient):
                         break
                     sp = input_chunk.sampling_params
                     if sp:
-                        self._validate_streaming_input_sampling_params(sp)
+                        self._validate_streaming_input_sampling_params(
+                            sp, sampling_params
+                        )
                     else:
                         sp = sampling_params
-                    if any_added and sp.return_aux_outputs != return_aux_outputs:
-                        raise VLLMValidationError(
-                            "return_aux_outputs cannot change within an input stream."
-                        )
-                    return_aux_outputs = sp.return_aux_outputs
                     # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
@@ -725,6 +721,7 @@ class AsyncLLM(EngineClient):
     @staticmethod
     def _validate_streaming_input_sampling_params(
         params: SamplingParams | PoolingParams,
+        stream_params: SamplingParams | PoolingParams | None = None,
     ):
         if (
             not isinstance(params, SamplingParams)
@@ -736,6 +733,13 @@ class AsyncLLM(EngineClient):
                 "Input streaming not currently supported "
                 "for pooling models, n > 1, request_kind = FINAL_ONLY "
                 "or with stop strings."
+            )
+        if (
+            isinstance(stream_params, SamplingParams)
+            and params.return_aux_outputs != stream_params.return_aux_outputs
+        ):
+            raise VLLMValidationError(
+                "An input chunk's return_aux_outputs must match the input stream's."
             )
 
     # TODO: we should support multiple prompts in one call, as you
