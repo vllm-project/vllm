@@ -154,6 +154,24 @@ class TestTwoTokenBadWord:
                 self.neighbour_token_id2 in output_token_ids
             )
 
+    def test_bad_word_after_space(self, vllm_runner):
+        """The GPT-2 tokenizer encodes "founding" as two tokens but " founding"
+        as one, and both forms must be banned."""
+        prompt = "the founding of the founding of the founding of the"
+        num_prompt_tokens = len(self._encode(prompt))
+        # self.tokenizer adds the leading space (add_prefix_space=True).
+        founding_after_space = self._encode("founding", add_special_tokens=False)
+        assert len(founding_after_space) == 1
+
+        with vllm_runner(self.MODEL, dtype="half") as llm:
+            for bad_words in (None, ["founding"]):
+                output_token_ids = _generate(
+                    llm, prompt, num_prompt_tokens, bad_words=bad_words
+                )
+                assert (founding_after_space[0] in output_token_ids) == (
+                    bad_words is None
+                )
+
     def _generate(
         self, llm: VllmRunner, bad_words: list[str] | None = None
     ) -> list[int]:
