@@ -7,6 +7,56 @@ selected with `--kv-cache-dtype octave_k3v3_compact`, `octave_k3v3` or
 `--attention-backend ROCM_OCTAVE` also works). The name comes from the 3-bit
 codes: each one indexes an eight-level codebook.
 
+## RDNA4 serving
+
+`ROCM_OCTAVE` dispatches to independent RDNA4 kernels on `gfx1200`/`gfx1201`.
+Select an `octave_*` cache dtype, or also specify
+`--attention-backend ROCM_OCTAVE` explicitly.
+
+```bash
+HIP_VISIBLE_DEVICES=0,1 vllm serve Qwen/Qwen3.8-27B-FP8 \
+    --tensor-parallel-size 2 --dtype bfloat16 \
+    --attention-backend ROCM_OCTAVE --kv-cache-dtype octave_k3v4 \
+    --max-model-len 32768 --max-num-batched-tokens 8192 --max-num-seqs 4
+```
+
+The RDNA4 path is validated with ROCm 10. CMake compiles the HIP kernels
+for the selected `gfx1200` and/or `gfx1201` targets into vLLM's `_C` extension.
+Python calls cache writes, prefill, decode, and QSA via `torch.ops._C`, as on
+RDNA3. Native prefill takes the packed prefix and the current chunk's
+unquantized K/V as inputs.
+
+RDNA4 currently supports head size 256 with 64 rotary dimensions. This applies
+to dense attention and the QSA path. Other head-size/RoPE combinations are
+rejected during geometry validation. The specialized HIP kernels provide
+cache storage and a small fixed set of scalar and WMMA kernels for decode,
+verification, and prefill. This includes grouped-prefill fast paths for GQA
+groups 1 and 2 and GQA-6 reuse paths for all three cache formats. The geometry
+HIP kernels handle the remaining multi-query prefill cases and sparse QSA
+attention. Both use the existing Octave wire formats and causal
+metadata. QSA supports tagged exact K/V for selected tokens among the first
+four and last 64. A missing tag uses packed KV.
+
+To limit the number of compiled variants, scalar kernels also handle unsafe
+decode and matrix rows, and geometry prefill selects request tiling at runtime.
+The grouped-prefill guard remains separate to preserve ragged-request
+performance. These choices retain the tuned WMMA paths and numerical checks.
+
+The scheduler's host maximum sequence length guides prefill split selection
+within the 2 GiB split workspace budget. Native kernels resolve live lengths
+on the device.
+
+For sufficiently large GQA-6 prefill batches, one HIP kernel expands the prefix
+and lays out the new K/V in temporary FP16 buffers. A second HIP kernel uses
+WMMA with FP32 softmax and accumulation. The existing packed FP32 kernel
+recomputes unsafe output rows. The expansion uses the same reserved workspace
+as split attention. Prefill uses the packed path when the temporary buffers
+would exceed that reservation.
+
+Sliding windows, ALiBi, attention sinks, soft caps, unequal QK/V dimensions
+and fused output quantization are unsupported. Runtime validation was on
+`gfx1201`; `gfx1200` was build-tested.
+
 ## Why it exists
 
 Long-context serving on AMD GPUs is bounded by KV-cache memory long before it
@@ -20,13 +70,13 @@ is bounded by compute. The existing options on ROCm were:
 
 Octave KV targets the same bit budget as TurboQuant with HIP kernels written for
 the AMD matrix instructions (WMMA on RDNA3, MFMA on CDNA as a contract slot),
-reading the packed cache directly in both decode and prefill, and with
+reading the packed cache directly in decode, and with
 multi-token verification (MTP / speculative decoding) as a first-class case.
 
-## Supported models
+## Supported models on RDNA3/CDNA3
 
 The format exploits *partial rotary embeddings*: models whose attention heads
-apply RoPE to a fraction of the head dims. Today the kernels are built for
+apply RoPE to a fraction of the head dims. The RDNA3/CDNA3 kernels are built for
 head size 256 with 64 rotary dims (`partial_rotary_factor = 0.25`), the
 attention shape of the Qwen3-Next / Qwen3.5 / Qwen3.6 / Qwen3.8 family (dense
 and MoE, e.g. Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B). Like the MLA
@@ -34,7 +84,8 @@ backends, which serve only models with multi-head latent attention, Octave KV is
 tied to an attention shape, not to a model.
 
 Models with full RoPE (Llama, Qwen3, Mistral, ...) or other head sizes are
-rejected at startup with an explicit error. Sliding window, ALiBi, attention
+rejected by these tiers with an explicit error. RDNA4 currently has the same
+256/64 Octave attention shape. Sliding window, ALiBi, attention
 sinks, soft-capping and encoder attention are not supported.
 
 The decode kernels cover GQA groups of 1, 2, 4, 6 or 8 query heads per KV
@@ -127,11 +178,11 @@ naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
 (for example a CDNA prefill) must keep the same signature and semantics, pass
 the same tests, and report a clear error when `flydsl` is not installed.
 
-Octave is enabled only on RDNA3 and CDNA3, validated on gfx1100 and gfx942
-(MI300). The backend rejects any other family at selection
-(`supports_compute_capability`, via `get_rdna_version()` and
-`get_cdna_version()`), and the kernel tests skip elsewhere. CMake builds the
-Octave sources and registers the ops only when the target list includes
+`ROCM_OCTAVE` selects the native implementation for RDNA3, RDNA4 or CDNA3;
+other families are rejected at selection. The RDNA3/CDNA3 tiers are validated
+on gfx1100 and gfx942 (MI300). RDNA4 uses the separate HIP runtime described
+above. CMake builds the RDNA3/CDNA3 sources and registers their ops only when
+the target list includes
 gfx1100 or gfx942; other targets in the same build compile the
 architecture-specific kernels as empty stubs, and the kernel dispatch reports
 any other RDNA3 chip as not validated.

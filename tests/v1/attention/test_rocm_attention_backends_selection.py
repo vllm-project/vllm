@@ -301,6 +301,40 @@ def test_segmented_attention_rejects_mm_prefix_at_selection(monkeypatch):
         )
 
 
+def test_rdna4_octave_advertises_only_the_supported_head_size(monkeypatch):
+    from vllm.platforms import rocm
+    from vllm.v1.attention.backends.rocm_octave_attn import (
+        RocmOctaveAttentionBackend,
+    )
+
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: True)
+    assert RocmOctaveAttentionBackend.get_supported_head_sizes() == [256]
+
+
+@pytest.mark.parametrize("head_dim,rope_dim", [(128, 32), (256, 32), (256, 128)])
+def test_qsa_octave_spec_selection_rejects_unsupported_geometry(
+    monkeypatch, head_dim, rope_dim
+):
+    """QSA cache selection must reject an unsupported Octave D/R pair early."""
+    from vllm.models.qwen4_exp.amd import model as _qwen4_exp_model  # noqa: F401
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSABackend
+    from vllm.platforms import rocm
+    from vllm.v1.attention.ops import rocm_octave
+    from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
+
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: True)
+    monkeypatch.setattr(rocm_octave, "registered_rope_dim", lambda _: rope_dim)
+    spec = AttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=head_dim,
+        dtype=torch.uint8,
+        kv_quant_mode=get_kv_quant_mode("octave_k3v4"),
+    )
+    with pytest.raises(ValueError, match="only head dimension 256 with 64 RoPE"):
+        Qwen4ExpQSABackend.customize_spec(spec)
+
+
 def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     from vllm.config import KernelConfig
     from vllm.platforms import rocm
