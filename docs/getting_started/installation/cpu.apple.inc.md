@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD041 -->
 --8<-- [start:installation]
 
-vLLM has experimental support for macOS with Apple Silicon. For now, users must build from source to natively run on macOS.
+vLLM has experimental CPU support on macOS with Apple Silicon.
 
 Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 
@@ -25,7 +25,16 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
 
-Currently, there are no pre-built Apple silicon CPU wheels.
+Pre-built CPU wheels for Apple Silicon are available in the [GitHub release assets](https://github.com/vllm-project/vllm/releases).
+For the release you want, choose the wheel with `+cpu` in the filename and a `macosx` platform tag ending in `_arm64`.
+
+For example, to install vLLM v0.34.0 in your activated Python environment:
+
+```bash
+uv pip install \
+    'https://github.com/vllm-project/vllm/releases/download/v0.34.0/vllm-0.34.0%2Bcpu-cp38-abi3-macosx_11_0_arm64.whl'
+vllm --version
+```
 
 --8<-- [end:pre-built-wheels]
 --8<-- [start:build-wheel-from-source]
@@ -61,21 +70,16 @@ uv pip install -e .
 
     ---
 
-    If the build fails with C++11/C++17 compatibility errors like the following, the issue is that the build system is defaulting to an older C++ standard:
+    The vLLM source build requires C++20. If the compiler errors mention a C++20
+    feature such as `std::bit_cast`, check the active Apple Clang toolchain:
 
-    ```text
-    [...] error: 'constexpr' is not a type
-    [...] error: expected ';' before 'constexpr'
-    [...] error: 'constexpr' does not name a type
-    ```
-
-    **Solution**: Your compiler might be using an older C++ standard. Edit `cmake/cpu_extension.cmake` and add `set(CMAKE_CXX_STANDARD 17)` before `set(CMAKE_CXX_STANDARD_REQUIRED ON)`.
-
-    To check your compiler's C++ standard support:
     ```bash
-    clang++ -std=c++17 -pedantic -dM -E -x c++ /dev/null | grep __cplusplus
+    xcrun clang++ -std=c++20 -dM -E -x c++ /dev/null | grep '^#define __cplusplus '
     ```
-    On Apple Clang 16 you should see: `#define __cplusplus 201703L`
+
+    The command should print `#define __cplusplus 202002L`. If it fails, update
+    the active Xcode Command Line Tools and check that any `CC` or `CXX`
+    overrides select a compiler with C++20 support.
 
 --8<-- [end:build-wheel-from-source]
 --8<-- [start:pre-built-images]
