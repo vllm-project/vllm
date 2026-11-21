@@ -1141,16 +1141,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
-    _kv_view_cache: (
-        tuple[
-            torch.Tensor,
-            int,
-            tuple[torch.Tensor, torch.Tensor],
-            tuple[torch.Tensor, torch.Tensor],
-        ]
-        | None
-    ) = None
-
     def __init__(
         self,
         num_heads: int,
@@ -1835,13 +1825,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor, use_typed: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cache = self._kv_view_cache
-        if (
-            cache is not None
-            and cache[0] is kv_cache
-            and cache[1] == kv_cache.data_ptr()
-        ):
-            return cache[3] if use_typed else cache[2]
+        raw, typed = self._cached_kv_views(kv_cache, self._build_kv_views)
+        return typed if use_typed else raw
+
+    def _build_kv_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
             # (B, 2, N, H*hs) -> one (B, N, H, hs) per side, which is what the
             # shuffle read/write kernels reinterpret in place. The heads are
@@ -1859,8 +1848,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             fp8_dtype = current_platform.fp8_dtype()
             typed = (key_cache.view(fp8_dtype), value_cache.view(fp8_dtype))
-        self._kv_view_cache = (kv_cache, kv_cache.data_ptr(), raw, typed)
-        return typed if use_typed else raw
+        return raw, typed
 
     def do_kv_cache_update(
         self,

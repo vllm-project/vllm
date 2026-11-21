@@ -3250,6 +3250,17 @@ class FlashInferImpl(AttentionImpl):
                     output[:num_decode_tokens].copy_(out)
         return output_padded
 
+    def _build_kv_write_views(self, kv_cache: torch.Tensor) -> _KVPair:
+        if self.is_kvcache_nvfp4:
+            # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
+            #                            (B, N, H, full_dim));
+            # K heads first, then V heads.
+            k_cache, v_cache = kv_cache.transpose(1, 2).split(self.num_kv_heads, dim=-2)
+        else:
+            # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+            k_cache, v_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        return k_cache, v_cache
+
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -3279,18 +3290,9 @@ class FlashInferImpl(AttentionImpl):
                     kv_layout=kv_layout,
                 )
                 return
-            if self.is_kvcache_nvfp4:
-                # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
-                #                            (B, N, H, full_dim));
-                # K heads first, then V heads.
-                k_cache, v_cache = kv_cache.transpose(1, 2).split(
-                    self.num_kv_heads, dim=-2
-                )
-            else:
-                # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-                k_cache, v_cache = kv_cache.transpose(1, 2).split(
-                    self.head_size, dim=-1
-                )
+            k_cache, v_cache = self._cached_kv_views(
+                kv_cache, self._build_kv_write_views
+            )
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
