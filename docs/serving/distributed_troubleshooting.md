@@ -6,6 +6,13 @@ For general troubleshooting, see [Troubleshooting](../usage/troubleshooting.md).
 
 After you start the Ray cluster, verify GPU-to-GPU communication across nodes. Proper configuration can be non-trivial. For more information, see [troubleshooting script](../usage/troubleshooting.md#incorrect-hardwaredriver). If you need additional environment variables for communication configuration, append them to [examples/ray_serving/run_cluster.sh](../../examples/ray_serving/run_cluster.sh), for example `-e NCCL_SOCKET_IFNAME=eth0`. Setting environment variables during cluster creation is recommended because the variables propagate to all nodes. In contrast, setting environment variables in the shell affects only the local node. For more information, see <https://github.com/vllm-project/vllm/issues/6803>.
 
+## Incorrect output with NIXL prefill/decode disaggregation
+
+If P/D output is incorrect despite successful NIXL transfers, see
+[NixlConnector data-integrity troubleshooting](../features/nixl_connector_usage.md#incorrect-output-after-successful-kv-transfers)
+for local baselines, KV content comparisons, and reported GH200 workarounds.
+Transfer completion and byte counts alone do not verify KV contents.
+
 ## No available node types can fulfill resource request
 
 The error message `Error: No available node types can fulfill resource request` can appear even when the cluster has enough GPUs. The issue often occurs when nodes have multiple IP addresses and vLLM can't select the correct one. Ensure that vLLM and Ray use the same IP address by setting `VLLM_HOST_IP` in [examples/ray_serving/run_cluster.sh](../../examples/ray_serving/run_cluster.sh) (with a different value on each node). Use `ray status` and `ray list nodes` to verify the chosen IP address. For more information, see <https://github.com/vllm-project/vllm/issues/7815>.
