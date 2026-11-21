@@ -72,8 +72,21 @@ def set_weight_attrs(
 
 
 @functools.cache
-def _is_integrated_gpu(device: torch.device) -> bool:
-    return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)
+def _faults_pageable_copies(device: torch.device) -> bool:
+    """Whether host-to-`device` copies take the source's page faults on the
+    device side: on integrated GPUs, and on GPUs that read pageable memory
+    through the host page tables (e.g. Grace Hopper/Blackwell)."""
+    if device.type != "cuda":
+        return False
+    if current_platform.is_integrated_gpu(device.index):
+        return True
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError:
+        return False
+    attr = cudart.cudaDeviceAttr.cudaDevAttrPageableMemoryAccessUsesHostPageTables
+    err, value = cudart.cudaDeviceGetAttribute(attr, device.index)
+    return err == cudart.cudaError_t.cudaSuccess and bool(value)
 
 
 # 1-byte dtypes whose bytes are the value (raw bytes, MX scales, packed FP4)
@@ -86,14 +99,14 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     """`dst.copy_(src)` for weight loaders.
 
     Model-specific weight loaders should call this instead of `.copy_()` when
-    copying a checkpoint tensor to the device. Off integrated GPUs it is a
-    plain `copy_`, except that a copy between two byte containers (`uint8`,
-    `int8`, `float8_e8m0fnu`, `float4_e2m1fn_x2`) keeps the bytes, where
-    `copy_` would convert E8M0 scales by value. Float8 value formats still
-    convert by value.
+    copying a checkpoint tensor to the device. It is a plain `copy_`, except
+    that a copy between two byte containers (`uint8`, `int8`, `float8_e8m0fnu`,
+    `float4_e2m1fn_x2`) keeps the bytes, where `copy_` would convert E8M0
+    scales by value. Float8 value formats still convert by value.
 
-    On integrated GPUs, a host-to-device copy straight from a safetensors mmap
-    takes its page faults inside the driver copy, which is several times slower
+    On integrated GPUs and GPUs that read pageable memory through the host page
+    tables, a host-to-device copy straight from a safetensors mmap takes its
+    page faults inside the driver copy, which is several times slower
     than faulting them on the CPU, so touch one byte per page of `src` first.
     PyTorch already stages non-contiguous and dtype-converting copies through
     a CPU temporary. Sources with at most one element are skipped: they count
@@ -110,7 +123,7 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
         and src.dtype == dst.dtype
         and src.numel() > 1
         and src.is_contiguous()
-        and _is_integrated_gpu(dst.device)
+        and _faults_pageable_copies(dst.device)
     ):
         flat = src.reshape(-1).view(torch.uint8)
         flat[:: mmap.PAGESIZE].sum()

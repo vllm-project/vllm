@@ -3,6 +3,7 @@
 """Utilities for downloading and initializing model weights."""
 
 import asyncio
+import collections
 import concurrent.futures
 import fnmatch
 import glob
@@ -18,14 +19,14 @@ import time
 from collections.abc import Callable, Generator, Iterable
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import filelock
 import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors.torch import load, load_file, safe_open
+from safetensors.torch import _TYPES, load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -38,10 +39,12 @@ from vllm.config.load import (
 )
 from vllm.distributed import (
     get_node_count,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
     in_single_pp_stage,
+    model_parallel_is_initialized,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
@@ -955,44 +958,179 @@ def _get_fs_type(files: list[str]) -> str:
         return ""
 
 
+def _read_header(f: IO[bytes]) -> dict[str, dict[str, Any]]:
+    """Return the tensor entries of an open safetensors file, with absolute
+    data_offsets."""
+    header_len = int.from_bytes(f.read(8), "little")
+    header = json.loads(f.read(header_len))
+    header.pop("__metadata__", None)
+    for t in header.values():
+        t["data_offsets"] = [8 + header_len + o for o in t["data_offsets"]]
+    return header
+
+
+# safe_open also maps F8_E8M0, which older safetensors' _TYPES lacks.
+_SAFETENSORS_DTYPES = {**_TYPES, "F8_E8M0": torch.float8_e8m0fnu}
+
+
+def _read_safetensors_file(
+    path: str, local_expert_ids: set[int] | None, num_threads: int
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Yield the tensors of a safetensors file this rank keeps, in file order,
+    read into ordinary memory by num_threads threads at most 1 GiB ahead.
+
+    Faults on safe_open's mapping read the file a few pages at a time, and
+    copies from a file mapping to the GPU are slow even when it is cached."""
+
+    def read(name: str, t: dict[str, Any]) -> torch.Tensor:
+        dtype = _SAFETENSORS_DTYPES.get(t["dtype"])
+        pos, end = t["data_offsets"]
+        if (
+            dtype is None
+            or torch.Size(t["shape"]).numel() * dtype.itemsize != end - pos
+        ):
+            return st.get_tensor(name)  # e.g. packed sub-byte dtypes
+        param = torch.empty(t["shape"], dtype=dtype)
+        buf = memoryview(param.view(-1).view(torch.uint8).numpy())
+        while buf:
+            n = os.preadv(f.fileno(), [buf], pos)
+            if n == 0:
+                raise EOFError(f"{path} is truncated")
+            buf, pos = buf[n:], pos + n
+        return param
+
+    pending: collections.deque = collections.deque()
+    ahead = 0
+
+    def take(limit: int) -> Generator[tuple[str, torch.Tensor], None, None]:
+        nonlocal ahead
+        while pending and ahead > limit:
+            name, future, nbytes = pending.popleft()
+            ahead -= nbytes
+            yield name, future.result()
+
+    with (
+        open(path, "rb") as f,
+        safe_open(path, framework="pt") as st,
+        concurrent.futures.ThreadPoolExecutor(num_threads) as pool,
+    ):
+        for name, t in sorted(
+            _read_header(f).items(), key=lambda e: e[1]["data_offsets"]
+        ):
+            if should_skip_weight(name, local_expert_ids):
+                continue
+            nbytes = t["data_offsets"][1] - t["data_offsets"][0]
+            yield from take((1 << 30) - nbytes)
+            pending.append((name, pool.submit(read, name, t), nbytes))
+            ahead += nbytes
+        yield from take(-1)
+
+
+def _rank_reads_whole_tensors() -> bool:
+    """Whether this rank uses whole tensors: under TP or PP it keeps slices or
+    skips other stages' layers, and reading them whole would read TP x PP times
+    the bytes it uses."""
+    return not model_parallel_is_initialized() or (
+        get_tensor_model_parallel_world_size() == 1 and get_pp_group().world_size == 1
+    )
+
+
+def _node_local_rank() -> tuple[int, int]:
+    """Return this rank's index among the ranks of its node, and their count."""
+    if not torch.distributed.is_initialized():
+        return 0, 1
+    world = get_world_group()
+    local_world_size = max(world.world_size // get_node_count(), 1)
+    return world.local_rank % local_world_size, local_world_size
+
+
+def _node_prefetch_ranges(
+    files: list[str], local_expert_ids: set[int]
+) -> tuple[list[list[list[int]]], int]:
+    """Plan this rank's prefetch under EP up front, so the threads only read: the
+    shared tensors of its share of the files plus its experts from every file.
+
+    Returns the merged [offset, length] ranges per file and the node's bytes: the
+    shared tensors plus local_world_size times this rank's experts."""
+    local_rank, local_world_size = _node_local_rank()
+    shared_bytes = mine_bytes = 0
+    ranges = []
+    for i, path in enumerate(files):
+        shared, mine = [], []
+        with open(path, "rb") as f:
+            for name, t in _read_header(f).items():
+                if not should_skip_weight(name, set()):
+                    shared.append(t["data_offsets"])
+                elif not should_skip_weight(name, local_expert_ids):
+                    mine.append(t["data_offsets"])
+        shared_bytes += sum(end - start for start, end in shared)
+        mine_bytes += sum(end - start for start, end in mine)
+        merged: list[list[int]] = []
+        for start, end in sorted(
+            shared + mine if i % local_world_size == local_rank else mine
+        ):
+            if merged and sum(merged[-1]) == start:
+                merged[-1][1] += end - start
+            else:
+                merged.append([start, end - start])
+        ranges.append(merged)
+    return ranges, shared_bytes + local_world_size * mine_bytes
+
+
 def _prefetch_checkpoint(
     file_path: str,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    ranges: list[list[int]] | None = None,
 ) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
-    Reads the file in blocks so the kernel caches its pages before workers load
-    the same file.
+    Sends the file to /dev/null so the kernel caches its pages before workers
+    load the same file, without copying them to user space or taking the GIL
+    per block. If *ranges* is given, reads only those [offset, length] byte
+    ranges.
     """
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
-    with open(file_path, "rb") as f:
-        while f.read(block_size):
-            pass
+    with open(file_path, "rb") as f, open(os.devnull, "wb") as null:
+        if ranges is None:
+            ranges = [[0, os.fstat(f.fileno()).st_size]]
+        for pos, length in ranges:
+            end = pos + length
+            while pos < end:
+                try:
+                    n = os.sendfile(null.fileno(), f.fileno(), pos, end - pos)
+                except OSError:  # No sendfile from this file: read it instead.
+                    f.seek(pos)
+                    n = len(f.read(min(block_size, end - pos)))
+                if n == 0:
+                    break
+                pos += n
 
 
 def _prefetch_all_checkpoints(
     sorted_files: list[str],
     num_prefetch_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    ranges: list[list[list[int]]] | None = None,
 ) -> None:
-    """Start prefetching checkpoint files into page cache in a background thread."""
+    """Start prefetching checkpoint files into page cache in a background thread.
+
+    The ranks of each node split the files, or, given *ranges* from
+    _node_prefetch_ranges, each rank reads those byte ranges of every file.
+    """
     if num_prefetch_threads < 1:
         raise ValueError("safetensors prefetch num threads must be >= 1")
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
-    if torch.distributed.is_initialized():
-        # The page cache is per node and every rank reads every file, so split
-        # the files among the ranks of each node rather than across all ranks.
-        world = get_world_group()
-        local_world_size = max(world.world_size // get_node_count(), 1)
-        local_rank = world.local_rank % local_world_size
+    work: list[tuple[str, list[list[int]] | None]]
+    if ranges is None:
+        local_rank, local_world_size = _node_local_rank()
+        work = [(p, None) for p in sorted_files[local_rank::local_world_size]]
     else:
-        local_rank, local_world_size = 0, 1
-    paths_to_prefetch = sorted_files[local_rank::local_world_size]
-    total_for_rank = len(paths_to_prefetch)
+        work = [(p, r) for p, r in zip(sorted_files, ranges) if r]
+    total_for_rank = len(work)
 
     async def _prefetch_all() -> None:
         loop = asyncio.get_running_loop()
@@ -1001,12 +1139,13 @@ def _prefetch_all_checkpoints(
 
         async def prefetch_one(
             path: str,
+            ranges: list[list[int]] | None,
             executor: concurrent.futures.ThreadPoolExecutor,
         ) -> None:
             nonlocal completed, next_log_pct
             try:
                 await loop.run_in_executor(
-                    executor, _prefetch_checkpoint, path, block_size
+                    executor, _prefetch_checkpoint, path, block_size, ranges
                 )
                 completed += 1
                 if total_for_rank > 0 and next_log_pct <= 100:
@@ -1027,9 +1166,7 @@ def _prefetch_all_checkpoints(
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=num_prefetch_threads
         ) as executor:
-            await asyncio.gather(
-                *(prefetch_one(p, executor) for p in paths_to_prefetch)
-            )
+            await asyncio.gather(*(prefetch_one(p, r, executor) for p, r in work))
 
     def _run_prefetch() -> None:
         start = time.perf_counter()
@@ -1076,6 +1213,16 @@ def safetensors_weights_iterator(
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
     avail_bytes = get_available_memory()
     ram_threshold_pct = 90
+    # Whole shards stream fastest; only when they do not fit, read just the
+    # shared tensors and this node's experts.
+    prefetch_ranges = None
+    if (
+        local_expert_ids is not None
+        and total_bytes > ram_threshold_pct / 100.0 * avail_bytes
+    ):
+        prefetch_ranges, total_bytes = _node_prefetch_ranges(
+            sorted_files, local_expert_ids
+        )
     fits_in_ram = total_bytes <= (ram_threshold_pct / 100.0) * avail_bytes
     fs_name = fs_type.upper() if fs_type else "unknown"
 
@@ -1133,6 +1280,7 @@ def safetensors_weights_iterator(
             sorted_files,
             num_prefetch_threads=safetensors_prefetch_num_threads,
             block_size=safetensors_prefetch_block_size,
+            ranges=prefetch_ranges,
         )
 
     if shuffle_safetensors_files:
@@ -1181,6 +1329,12 @@ def safetensors_weights_iterator(
                     unflatten_tensor_state_dict(state_dict, metadata)
                 )
             yield from unflattened_state_dict.items()
+        elif not should_prefetch or _rank_reads_whole_tensors():
+            # Without prefetch, faulting cold pages of the mapping is slower
+            # than reading whole tensors even when the rank keeps only slices.
+            yield from _read_safetensors_file(
+                st_file, local_expert_ids, safetensors_prefetch_num_threads
+            )
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118

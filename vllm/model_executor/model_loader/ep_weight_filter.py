@@ -24,7 +24,7 @@ def parse_expert_id(weight_name: str) -> int | None:
     Returns `None` for dense weights (attention, layernorm, embedding),
     shared experts, and 3D fused-expert tensors where all experts are stored
     in a single tensor without a numeric expert id in the name."""
-    m = _EXPERT_ID_RE.search(weight_name)
+    m = _EXPERT_ID_RE.search(weight_name, concurrent=False)  # see WeightsMapper
     return int(m.group(1)) if m else None
 
 
