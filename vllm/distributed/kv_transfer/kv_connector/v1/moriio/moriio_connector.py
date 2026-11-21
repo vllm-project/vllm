@@ -2016,6 +2016,8 @@ class MoRIIOConnectorWorker:
         backend = (
             BackendType.XGMI
             if self.moriio_config.backend == "xgmi"
+            else BackendType.OFI
+            if self.moriio_config.backend == "ofi"
             else BackendType.RDMA
         )
         self.moriio_wrapper.set_backend_type(
@@ -2394,6 +2396,7 @@ class MoRIIOConnectorWorker:
             metadata_bytes = received_frame[1]
             decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
+            logger.info("Remote engine meta data %s", metadata)
             got_metadata_time = time.perf_counter()
             logger.info(
                 "MoRIIO handshake: get metadata took: %s",

@@ -57,6 +57,7 @@ try:
         EngineDesc,
         IOEngine,
         MemoryDesc,
+        OfiBackendConfig,
         PollCqMode,
         RdmaBackendConfig,
         XgmiBackendConfig,
@@ -821,6 +822,9 @@ class MoRIIOWrapper:
         if backend_type == BackendType.XGMI:
             logger.info("Using MoRIIO backend: XGMI")
             self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
+        elif backend_type == BackendType.OFI:
+            logger.info("Using MoRIIO backend: OFI")
+            self.moriio_engine.create_backend(backend_type, OfiBackendConfig("", 64))
         else:
             logger.info(
                 "Using MoRIIO backend: RDMA "
