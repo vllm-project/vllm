@@ -712,6 +712,45 @@ def test_triton_unified_attention_per_token_head_scale(
         v_scale_cache=v_scale_cache,
     )
 
+    # The engine interleaves K and V in one buffer with an inline fp32 scale
+    # after each, so a cell is not a multiple of 16 bytes and the kernel is
+    # told the alignment the cell does have.  That must not change the result.
+    hs = key_cache_q.shape[-1]
+    v_off = hs + 4
+    kv_packed = torch.zeros(
+        num_blocks, block_size, num_kv_heads, 2 * v_off, dtype=key_cache_q.dtype
+    )
+    kv_packed[..., :hs] = key_cache_q
+    kv_packed[..., v_off : v_off + hs] = value_cache_q
+    output_packed = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=kv_packed[..., :hs],
+        v=kv_packed[..., v_off : v_off + hs],
+        out=output_packed,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_t,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+        kv_quant_mode=qcfg.kv_quant_mode,
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+    )
+    assert torch.equal(output_packed, output_q)
+
     output_ref = torch.empty_like(query)
     unified_attention(
         q=query,

@@ -11,7 +11,13 @@ kernel (and any future consumer) share a single implementation.
 
 from __future__ import annotations
 
+import math
+from typing import TYPE_CHECKING
+
 from vllm.triton_utils import tl, triton
+
+if TYPE_CHECKING:
+    import torch
 
 # ===========================================================================
 # Scalar helpers (reused by every kernel + reduce_segments)
@@ -516,3 +522,73 @@ def softmax_step(S, M, L):
     # update constants
     L_new = L * alpha + l_j
     return m_j, L_new, P, alpha
+
+
+# ===========================================================================
+# Per-token-head KV cache addressing
+# ===========================================================================
+
+
+def kv_tile_alignment(k: torch.Tensor, v: torch.Tensor) -> tuple[int, int, int]:
+    """Alignment of per-token-head K/V tile loads that Triton cannot infer.
+
+    Triton only learns from an argument whether it is a multiple of 16. A
+    per-token-head cell (the data plus one inline fp32 scale per K/V side) is
+    a multiple of 8 or 4 bytes instead, so the tile loads compile to one load
+    per byte. Pass the result to `align_kv_strides` to let them vectorize.
+
+    Returns:
+        `(k_align, v_align, v_delta)`: the powers of two, up to 16, dividing
+        every K stride and every V stride and `v_delta`, and the element
+        offset of `v` from `k`. `v_align` is 1 unless `v` starts inside `k`.
+
+    """
+    if k.element_size() != 1:
+        return 1, 1, 0
+    k_align = math.gcd(16, k.stride(0), k.stride(1), k.stride(2))
+    v_delta = v.data_ptr() - k.data_ptr()
+    if not 0 < v_delta < k.stride(0) * k.shape[0]:
+        return k_align, 1, 0
+    v_align = math.gcd(16, v.stride(0), v.stride(1), v.stride(2), v_delta)
+    return k_align, v_align, v_delta
+
+
+@triton.jit
+def align_kv_strides(
+    key_cache_ptr,
+    value_cache_ptr,
+    v_cache_delta,
+    stride_k_cache_0,
+    stride_k_cache_1,
+    stride_k_cache_2,
+    stride_v_cache_0,
+    stride_v_cache_1,
+    stride_v_cache_2,
+    K_ALIGN: tl.constexpr,
+    V_ALIGN: tl.constexpr,
+):
+    """Rebuild the K/V strides as multiples of `K_ALIGN` / `V_ALIGN` (see
+    `kv_tile_alignment`) and address V from the K pointer, so the compiler
+    can prove the alignment of the tile loads.  1 leaves them as passed.
+
+    Returns `(value_cache_ptr, stride_k_cache_0, stride_k_cache_1,
+    stride_k_cache_2, stride_v_cache_0, stride_v_cache_1, stride_v_cache_2)`.
+    """
+    if K_ALIGN > 1:
+        stride_k_cache_0 = stride_k_cache_0 // K_ALIGN * K_ALIGN
+        stride_k_cache_1 = stride_k_cache_1 // K_ALIGN * K_ALIGN
+        stride_k_cache_2 = stride_k_cache_2 // K_ALIGN * K_ALIGN
+    if V_ALIGN > 1:
+        value_cache_ptr = key_cache_ptr + v_cache_delta // V_ALIGN * V_ALIGN
+        stride_v_cache_0 = stride_v_cache_0 // V_ALIGN * V_ALIGN
+        stride_v_cache_1 = stride_v_cache_1 // V_ALIGN * V_ALIGN
+        stride_v_cache_2 = stride_v_cache_2 // V_ALIGN * V_ALIGN
+    return (
+        value_cache_ptr,
+        stride_k_cache_0,
+        stride_k_cache_1,
+        stride_k_cache_2,
+        stride_v_cache_0,
+        stride_v_cache_1,
+        stride_v_cache_2,
+    )
