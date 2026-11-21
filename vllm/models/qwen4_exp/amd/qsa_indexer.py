@@ -382,6 +382,7 @@ class QSAIndexer(nn.Module):
         qkv: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         gate_out: torch.Tensor | None = None,
+        skip_scoring: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Return fixed-width request-relative token indices padded with `-1`.
 
@@ -390,6 +391,9 @@ class QSAIndexer(nn.Module):
         its Q and gate from `qkv`, returned as the second element (None
         otherwise). The gate is written into `gate_out` when given. `qkv`,
         `slot_mapping` and `gate_out` are only read in that mode.
+
+        `skip_scoring` keeps the cache updates and the prepare but leaves
+        `out` unwritten, for a step whose attention reads no selection.
         """
         metadata = self._metadata()
         if metadata is None:
@@ -434,9 +438,9 @@ class QSAIndexer(nn.Module):
                 raw_metadata,
                 compressed_metadata,
             )
-        if self.skip_topk:
+        if self.skip_topk or skip_scoring:
             if out is None:
-                raise RuntimeError("QSA top-k reuse requires an output buffer")
+                raise RuntimeError("Skipping QSA top-k requires an output buffer")
             return out, main_outputs
         return self._select(q, compressed_metadata, out), main_outputs
 
