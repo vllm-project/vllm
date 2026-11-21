@@ -436,6 +436,8 @@ class SingleDirectionOffloadingHandler:
                 self.cpu_tensors[t_idx],
                 skip_count=cpu_skip_count,
             )
+            if data_ref.byte_offset:
+                cpu_out[op_idx:end_idx] += data_ref.byte_offset
             all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
             num_bytes += group_size * data_ref.page_size_bytes
             op_idx = end_idx

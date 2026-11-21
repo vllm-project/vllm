@@ -81,7 +81,7 @@ def resolve_device_pointers(
         group_block_ids_u64 = group_block_ids.astype(np.uint64)
         for data_ref in data_refs:
             tensor = kv_caches.tensors[data_ref.tensor_idx].tensor
-            base_ptr = np.uint64(tensor.data_ptr())
+            base_ptr = np.uint64(tensor.data_ptr() + data_ref.byte_offset)
             row_stride = np.uint64(tensor.stride(0))
             end_idx = op_idx + group_size
             ptrs[op_idx:end_idx] = base_ptr + group_block_ids_u64 * row_stride
