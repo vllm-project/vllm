@@ -560,3 +560,62 @@ def test_moe_permute_invalid_expert_ids_without_expert_map(
         actual = permuted[lo:hi, 0].long().sort().values
         expected = (valid_ids == e).any(dim=1).nonzero().flatten()
         torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("n_expert", [384, 512, 4096])
+@pytest.mark.parametrize(
+    "n_token,topk,transpose",
+    [
+        (10, 1, False),
+        (127, 1, False),
+        (128, 1, False),
+        (129, 1, False),
+        (16, 8, True),
+        (21, 6, True),
+        (32, 8, True),
+    ],
+)
+@pytest.mark.parametrize("use_expert_map", [False, True])
+@pytest.mark.parametrize("all_invalid", [False, True])
+def test_moe_prepare_scatter_small_stable_routes(
+    n_expert: int,
+    n_token: int,
+    topk: int,
+    transpose: bool,
+    use_expert_map: bool,
+    all_invalid: bool,
+    workspace_init,
+) -> None:
+    """Scatter preserves stable routes and offsets for contiguous or strided IDs."""
+    expanded_rows = n_token * topk
+    generator = torch.Generator().manual_seed(n_expert + expanded_rows)
+    n_local = n_expert // 4 if use_expert_map else n_expert
+    local_ids = torch.randperm(n_expert, generator=generator)[:n_local]
+    expert_map = torch.full((n_expert,), -1, dtype=torch.int32)
+    expert_map[local_ids] = torch.arange(n_local, dtype=torch.int32)
+    ids = torch.randint(n_expert, (n_token, topk), generator=generator)
+    ids[:3] = local_ids[0]
+    if all_invalid:
+        ids.fill_(-1)
+    ids[-2:, 0] = torch.tensor([-1, n_expert])
+    valid = (ids.flatten() >= 0) & (ids.flatten() < n_expert)
+    keys = torch.full((expanded_rows,), n_expert, dtype=torch.int64)
+    keys[valid] = ids.flatten()[valid]
+    if use_expert_map:
+        local = expert_map[keys[valid]].long()
+        keys[valid] = torch.where(local == -1, keys[valid] + n_expert, local)
+    order = torch.argsort(keys, stable=True)
+    expected_inverse = torch.argsort(order).to(torch.int32).view_as(ids)
+    expected_offsets = torch.searchsorted(keys[order], torch.arange(n_local + 1))
+    scratch = MoEPermuteScratch(n_expert, n_local, torch.device("cuda:0"))
+
+    device_ids = ids.cuda()
+    if transpose:
+        device_ids = device_ids.to(torch.int32).t().contiguous().t()
+        assert not device_ids.is_contiguous()
+    offsets, inverse = moe_prepare_scatter(
+        device_ids, expert_map.cuda() if use_expert_map else None, scratch
+    )
+
+    torch.testing.assert_close(offsets.cpu(), expected_offsets, atol=0, rtol=0)
+    torch.testing.assert_close(inverse.cpu(), expected_inverse, atol=0, rtol=0)

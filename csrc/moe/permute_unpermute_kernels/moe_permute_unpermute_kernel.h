@@ -77,4 +77,11 @@ void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
                               const int* expert_map_ptr, int num_experts,
                               cudaStream_t stream);
 
+void smallSortAndScanExperts(const int* ids, const int* source_rows,
+                             const int* expert_map, int* keys_for_sort,
+                             int* sorted_experts, int* sorted_rows,
+                             int64_t* expert_offsets, int* inverse, int size,
+                             int num_experts, int num_local_experts,
+                             cudaStream_t stream);
+
 #include "moe_permute_unpermute_kernel.inl"
