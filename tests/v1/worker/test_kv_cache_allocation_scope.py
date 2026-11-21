@@ -4,6 +4,7 @@
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -102,6 +103,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     class Runner:
         def __init__(self) -> None:
             self.model = model
+            self.model_loader = Mock()
             self.layout_tensors = tuple(torch.tensor([i]) for i in range(5))
             self.recovery_calls = 0
 

@@ -7,6 +7,8 @@ touch CUDA - the `cumem` suspend/resume path is exercised end-to-end on GPU
 in `tests/basic_correctness/memory/`.
 """
 
+from unittest.mock import Mock
+
 import pytest
 
 from vllm.device_allocator.sleep_mode_backend import (
@@ -56,7 +58,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
-    worker.model_runner = SimpleNamespace(extensible_kv_cache=None)
+    worker.model_runner = SimpleNamespace(extensible_kv_cache=None, model_loader=Mock())
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(enable_nccl_comm_suspend=enable_nccl_comm_suspend)
     )
