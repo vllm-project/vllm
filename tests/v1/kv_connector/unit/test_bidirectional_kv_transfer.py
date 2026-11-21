@@ -27,7 +27,6 @@ external tokens > 0.
 
 import copy
 import time
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -36,7 +35,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnector,
     NixlConnectorMetadata,
+    NixlPushConnector,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.forward_context import ForwardContext
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -59,6 +60,32 @@ pytestmark = pytest.mark.cpu_test
 
 # Common extra config for all bi-directional KV transfer tests.
 BIDIR_KV_EXTRA_CONFIG = {"bidirectional_kv_xfer": True, "kv_recompute_threshold": 0}
+
+
+@pytest.mark.parametrize("connector_cls", [NixlConnector, NixlPushConnector])
+@pytest.mark.parametrize("connector_role", list(KVConnectorRole))
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_pp_producer_rejects_bidirectional_reads(
+    default_vllm_config, dist_init, connector_cls, connector_role
+):
+    """A PP producer cannot become a receiver on the second turn either."""
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(
+        kv_role="kv_producer",
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+        block_size=block_size,
+    )
+    config.parallel_config.pipeline_parallel_size = 2
+
+    with pytest.raises(NotImplementedError, match="NIXL connectors.*bidirectional"):
+        connector_cls(
+            config,
+            connector_role,
+            make_kv_cache_config(block_size=block_size),
+        )
 
 
 # Helpers
@@ -94,7 +121,7 @@ def _make_connector_with_fake_worker(
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG, block_size=block_size
     )
-    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=32)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,
@@ -388,88 +415,36 @@ def test_add_new_req_to_recv_populates_remote_meta():
     assert rm.local_block_ids == local_block_ids
 
 
-def test_add_new_req_to_recv_skips_incomplete_params():
-    """add_new_req_to_recv with missing required remote fields should not
-    raise KeyError and should not add the request to reqs_to_recv.
+@pytest.mark.parametrize("connector", ["NixlConnector", "NixlPushConnector"])
+def test_incomplete_peer_metadata_is_rejected_before_queueing(connector):
+    scheduler = create_scheduler(create_vllm_config(kv_connector=connector))
+    incomplete = create_request(do_remote_prefill=True)
+    assert incomplete.kv_transfer_params is not None
+    del incomplete.kv_transfer_params["remote_request_id"]
 
-    Regression test for GHSA-2xp9-2v3c-q6cg: a client-supplied
-    kv_transfer_params dict containing only {"do_remote_prefill": true}
-    (no remote_block_ids, remote_engine_id, etc.) previously crashed the
-    Decode EngineCore with an uncaught KeyError.
-    """
-    meta = NixlConnectorMetadata()
-    incomplete_params: dict[str, Any] = {"do_remote_prefill": True}
-    meta.add_new_req_to_recv(
-        request_id="malformed-req",
-        local_block_ids=([1, 2, 3],),
-        kv_transfer_params=incomplete_params,
-    )
-    assert "malformed-req" not in meta.reqs_to_recv
+    with pytest.raises(VLLMValidationError, match="remote_request_id"):
+        scheduler.add_request(incomplete)
 
+    assert not scheduler.has_request(incomplete.request_id)
+    assert scheduler.get_num_unfinished_requests() == 0
 
-def test_add_new_req_to_recv_skips_partially_complete_params():
-    """Even if some remote fields are present but not all, the request
-    should be skipped rather than crashing."""
-    meta = NixlConnectorMetadata()
-    partial_params: dict[str, Any] = {
-        "do_remote_prefill": True,
-        "remote_engine_id": "some-engine",
-        # missing: remote_block_ids, remote_request_id, remote_host, remote_port
-    }
-    meta.add_new_req_to_recv(
-        request_id="partial-req",
-        local_block_ids=([1, 2],),
-        kv_transfer_params=partial_params,
-    )
-    assert "partial-req" not in meta.reqs_to_recv
+    local = create_request()
+    scheduler.add_request(local)
+    assert scheduler.schedule().num_scheduled_tokens[local.request_id] > 0
 
 
-def _complete_params(**overrides: Any) -> dict[str, Any]:
-    """Return a valid kv_transfer_params dict, with optional overrides."""
-    base: dict[str, Any] = {
-        "do_remote_prefill": True,
-        "remote_block_ids": ([0, 1],),
-        "remote_engine_id": "engine-0",
-        "remote_request_id": "req-0",
-        "remote_host": "127.0.0.1",
-        "remote_port": 5678,
-    }
-    base.update(overrides)
-    return base
+def test_invalid_block_metadata_is_rejected_before_bidirectional_pull():
+    config = create_vllm_config(kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG)
+    scheduler = create_scheduler(config)
+    request = _make_p_node_turn2_request(1, config.cache_config.block_size, 64)
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["remote_block_ids"] = [None]
 
+    with pytest.raises(VLLMValidationError, match="remote block"):
+        scheduler.add_request(request)
 
-@pytest.mark.parametrize(
-    "bad_block_ids",
-    [
-        "not-a-list",
-        [[-1]],
-        [[None]],
-        [[2**31]],
-        123,
-        [[1, "two", 3]],
-        [[True]],
-    ],
-    ids=[
-        "string",
-        "negative",
-        "none-element",
-        "overflow-int32",
-        "bare-int",
-        "mixed-types",
-        "bool-element",
-    ],
-)
-def test_add_new_req_to_recv_rejects_hostile_block_ids(bad_block_ids):
-    """Hostile remote_block_ids values must be rejected at the metadata
-    layer instead of propagating to _compute_desc_ids."""
-    meta = NixlConnectorMetadata()
-    params = _complete_params(remote_block_ids=bad_block_ids)
-    meta.add_new_req_to_recv(
-        request_id="hostile-req",
-        local_block_ids=([0],),
-        kv_transfer_params=params,
-    )
-    assert "hostile-req" not in meta.reqs_to_recv
+    assert not scheduler.has_request(request.request_id)
+    assert scheduler.get_num_unfinished_requests() == 0
 
 
 def test_build_connector_meta_recv_entries():
@@ -1068,10 +1043,11 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
         kv_transfer_params=params,
     )
     _do_load_kv(connector, meta)
-    assert worker.xfer_stats.data["num_kv_expired_reqs"] == (
+    assert worker.xfer_stats.data["num_declined_expired_reads"] == (
         [1] if expect_declined else []
     )
-    # KV expiry must not pollute the transport failure counters.
+    # A declined read is neither a transport failure nor a P-side expiry.
+    assert worker.xfer_stats.data["num_kv_expired_reqs"] == []
     assert worker.xfer_stats.data["num_failed_transfers"] == []
     assert worker.xfer_stats.data["num_failed_handshakes"] == []
     _, done_recving = connector.get_finished(finished_req_ids=set())
@@ -1107,7 +1083,7 @@ def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
     )
     # Must not raise, and the gate must not fire for a no-read prefix hit.
     _do_load_kv(connector, meta)
-    assert worker.xfer_stats.data["num_kv_expired_reqs"] == []
+    assert worker.xfer_stats.data["num_declined_expired_reads"] == []
     assert worker.xfer_stats.data["num_failed_transfers"] == []
 
 
@@ -1134,6 +1110,8 @@ def test_d_node_request_finished_exports_blocks_expiry_time():
     assert kv["do_remote_decode"] is True
     assert isinstance(kv["remote_blocks_expiry_time"], float)
     assert kv["remote_blocks_expiry_time"] > time.perf_counter()
+    # Fixed TTL on D: heartbeats do not renew it, so no extension is exported.
+    assert kv["remote_lease_extension"] is None
 
 
 def test_handshake_listener_appends_perf_counter_frame():

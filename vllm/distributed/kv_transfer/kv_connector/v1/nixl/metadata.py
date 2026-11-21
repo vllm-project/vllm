@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -25,12 +26,13 @@ GET_META_MSG = b"get_meta_msg"
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 
-_REQUIRED_RECV_FIELDS = (
-    "remote_block_ids",
+# Lease renewal notification, D worker -> P worker.
+HB_NOTIF_PREFIX = "HB:"
+
+_REMOTE_STRING_FIELDS = (
     "remote_engine_id",
     "remote_request_id",
     "remote_host",
-    "remote_port",
 )
 
 # int32 bounds used by _compute_desc_ids (np.asarray(..., dtype=np.int32)).
@@ -56,6 +58,41 @@ def _valid_block_ids(block_ids: object) -> bool:
             if bid < 0 or bid > _I32_MAX:
                 return False
     return True
+
+
+def validate_recv_params(params: dict[str, Any], *, require_blocks: bool) -> None:
+    """Validate peer metadata before the scheduler can promise any remote KV."""
+    for key in _REMOTE_STRING_FIELDS:
+        value = params.get(key)
+        if not isinstance(value, str) or not value:
+            raise VLLMValidationError(
+                f"NIXL requires a nonempty {key}.", parameter="kv_transfer_params"
+            )
+    port = params.get("remote_port")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise VLLMValidationError(
+            "NIXL requires a valid remote port.", parameter="kv_transfer_params"
+        )
+    if require_blocks and not _valid_block_ids(params.get("remote_block_ids")):
+        raise VLLMValidationError(
+            "NIXL requires valid remote block IDs.", parameter="kv_transfer_params"
+        )
+    if not require_blocks and "tp_size" not in params:
+        raise VLLMValidationError(
+            "NIXL push requires tp_size.", parameter="kv_transfer_params"
+        )
+    for key in ("tp_size", "dcp_size", "pp_size"):
+        if key in params and (type(params[key]) is not int or params[key] <= 0):
+            raise VLLMValidationError(
+                f"NIXL requires a positive integer {key}.",
+                parameter="kv_transfer_params",
+            )
+    tokens = params.get("remote_num_tokens")
+    if tokens is not None and (type(tokens) is not int or tokens < 0):
+        raise VLLMValidationError(
+            "NIXL requires a nonnegative remote token count.",
+            parameter="kv_transfer_params",
+        )
 
 
 #
@@ -87,11 +124,13 @@ def _valid_block_ids(block_ids: object) -> bool:
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Export remote_blocks_expiry_time for P blocks too, plus
+#      remote_lease_extension; the consumer gates every remote read on it
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
-@dataclass
+@dataclass(slots=True)
 class NixlAgentMetadata:
     engine_id: str
     agent_metadata: bytes
@@ -253,7 +292,7 @@ def compute_nixl_compatibility_hash(
     return compat_hash
 
 
-@dataclass
+@dataclass(slots=True)
 class HeartbeatInfo:
     """Heartbeat data for a single remote engine, sent from D worker to P."""
 
@@ -263,9 +302,12 @@ class HeartbeatInfo:
     tp_size: int
     dcp_size: int = 1
     pp_size: int = 1
+    # remote req id -> (exported lease deadline, seconds per renewal), when the
+    # remote exports both; used to model the lease (`_record_heartbeat_sent`).
+    leases: dict[ReqId, tuple[float, int]] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class RemoteMeta:
     block_ids: BlockIds
     host: str
@@ -278,7 +320,7 @@ class RemoteMeta:
     registration_generation: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqMeta:
     local_block_ids: BlockIds
     # To be used when logical block size does not match the kernel block size
@@ -365,25 +407,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
     ):
-        missing = [f for f in _REQUIRED_RECV_FIELDS if f not in kv_transfer_params]
-        if missing:
-            logger.warning(
-                "Skipping recv registration for %s: "
-                "kv_transfer_params missing required fields %s",
-                request_id,
-                missing,
-            )
-            return
-
-        remote_block_ids = kv_transfer_params["remote_block_ids"]
-        if not _valid_block_ids(remote_block_ids):
-            logger.warning(
-                "Skipping recv registration for %s: "
-                "remote_block_ids failed shape/type validation",
-                request_id,
-            )
-            return
-
         req = self._add_new_req(
             local_block_ids,
             kv_transfer_params,

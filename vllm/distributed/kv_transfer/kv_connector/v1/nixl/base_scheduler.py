@@ -4,6 +4,7 @@
 
 import threading
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -26,17 +27,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
     NixlHandshakePayload,
     ReqId,
+    validate_recv_params,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
 )
 
 if TYPE_CHECKING:
@@ -96,14 +99,13 @@ class NixlBaseConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not issubclass(g.manager_cls, FullAttentionManager)
                 for g in kv_cache_config.transfer_groups
             )
         )
         self._has_mamba = kv_cache_config.has_mamba_layers
         self._bounded_replay = any(
-            g.kv_cache_spec.prefix_replay_tokens > 0
-            for g in kv_cache_config.kv_cache_groups
+            g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -137,12 +139,14 @@ class NixlBaseConnectorScheduler:
         # Reverse lookup: local req_id -> (engine_id, remote_req_id) for O(1) removal
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
+        # Requests tracked since the last heartbeat round, sent right away.
+        self._new_heartbeat_reqs: set[tuple[EngineId, ReqId]] = set()
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            (p.sliding_window, g.block_size)
+            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -156,8 +160,8 @@ class NixlBaseConnectorScheduler:
         # Trailing scratch slots that mamba managers co-allocate per request
         # for speculative decoding; None for non-SSM groups.
         self._ssm_spec_blocks = [
-            g.kv_cache_spec.num_speculative_blocks
-            if isinstance(g.kv_cache_spec, MambaSpec)
+            g.manager_config.params.num_speculative_blocks
+            if isinstance(g.manager_config.params, MambaManager.Params)
             else None
             for g in kv_cache_config.transfer_groups
         ]
@@ -199,6 +203,29 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
+    def validate_request(self, request: "Request") -> None:
+        """Validate a new request before recording any connector state."""
+        params = request.kv_transfer_params
+        if params is None:
+            return
+        if not isinstance(params, dict):
+            raise VLLMValidationError(
+                "NIXL transfer parameters must be an object.",
+                parameter="kv_transfer_params",
+            )
+        if params.get("do_remote_prefill"):
+            # Pre-admission aborts may arrive before the producer has any KV.
+            if not request.abort_immediately or params.get("remote_engine_id"):
+                validate_recv_params(
+                    params, require_blocks=self._TRANSFER_MODE == "pull"
+                )
+        elif (
+            self.is_bidirectional_kv_xfer_enabled
+            and params.get("do_remote_decode")
+            and params.get("remote_block_ids")
+        ):
+            validate_recv_params(params, require_blocks=True)
+
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
@@ -234,18 +261,26 @@ class NixlBaseConnectorScheduler:
                 dcp_size=dcp_size,
                 pp_size=pp_size,
             )
-        self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
+        info = self._heartbeat_by_engine[remote_engine_id]
+        info.req_ids.add(remote_request_id)
+        expiry = params.get("remote_blocks_expiry_time")
+        extension = params.get("remote_lease_extension")
+        if expiry is not None and extension:
+            info.leases[remote_request_id] = (expiry, extension)
         self._heartbeat_req_engine[request.request_id] = (
             remote_engine_id,
             remote_request_id,
         )
+        self._new_heartbeat_reqs.add((remote_engine_id, remote_request_id))
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""
         if key := self._heartbeat_req_engine.pop(req_id, None):
+            self._new_heartbeat_reqs.discard(key)
             engine_id, remote_id = key
             if info := self._heartbeat_by_engine.get(engine_id):
                 info.req_ids.discard(remote_id)
+                info.leases.pop(remote_id, None)
                 if not info.req_ids:
                     # Clean up empty engines so we don't leak a key when remote dies.
                     del self._heartbeat_by_engine[engine_id]
@@ -396,7 +431,7 @@ class NixlBaseConnectorScheduler:
         """
         return max(
             1 if self._has_mamba or self._bounded_replay else 0,
-            self.vllm_config.num_prefill_lookahead_tokens - 1,
+            self.vllm_config.num_reprefillable_tokens,
         )
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
@@ -521,6 +556,18 @@ class NixlBaseConnectorScheduler:
             if now - self._last_heartbeat_time >= self._heartbeat_interval:
                 self._last_heartbeat_time = now
                 meta.heartbeat_by_engine = self._heartbeat_by_engine
+            elif self._new_heartbeat_reqs:
+                # Renew new requests' leases now rather than at the next round:
+                # a router may have held the request for most of its lease.
+                for engine_id, remote_id in self._new_heartbeat_reqs:
+                    info = self._heartbeat_by_engine[engine_id]
+                    if (new := meta.heartbeat_by_engine.get(engine_id)) is None:
+                        new = replace(info, req_ids=set(), leases={})
+                        meta.heartbeat_by_engine[engine_id] = new
+                    new.req_ids.add(remote_id)
+                    if lease := info.leases.get(remote_id):
+                        new.leases[remote_id] = lease
+            self._new_heartbeat_reqs.clear()
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()

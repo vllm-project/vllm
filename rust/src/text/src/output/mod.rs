@@ -30,6 +30,9 @@ pub struct CollectedTextOutput {
     pub text: String,
     pub prompt_token_ids: Arc<[u32]>,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
+    /// Log probabilities of the request's `prompt_logprob_token_ids`, when
+    /// requested.
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub finish_reason: FinishReason,
@@ -60,6 +63,7 @@ impl<T: TextOutputStream> T {
             let stream = self;
             pin_mut!(stream);
             let mut prompt_logprobs = None;
+            let mut prompt_token_id_logprobs = None;
             let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
             let mut collected: Option<CollectedTextOutput> = None;
 
@@ -68,9 +72,10 @@ impl<T: TextOutputStream> T {
                     DecodedTextEvent::Start {
                         prompt_logprobs: start_prompt_logprobs,
                         prompt_token_ids: start_prompt_token_ids,
-                        ..
+                        prompt_token_id_logprobs: start_prompt_token_id_logprobs,
                     } => {
                         prompt_logprobs = start_prompt_logprobs;
+                        prompt_token_id_logprobs = start_prompt_token_id_logprobs;
                         prompt_token_ids = start_prompt_token_ids;
                     }
                     DecodedTextEvent::TextDelta {
@@ -79,6 +84,7 @@ impl<T: TextOutputStream> T {
                             SampledDelta {
                                 token_ids: delta_token_ids,
                                 logprobs: mut delta_logprobs,
+                                sampling_mask: delta_sampling_mask,
                             },
                         finished,
                     } => {
@@ -92,11 +98,15 @@ impl<T: TextOutputStream> T {
                                     c.logprobs = delta_logprobs;
                                 }
                             }
+                            if let Some(mut dsm) = delta_sampling_mask {
+                                c.sampling_mask.get_or_insert_default().rows.append(&mut dsm.rows);
+                            }
                         } else {
                             collected = Some(CollectedTextOutput {
                                 text: decoded.text,
                                 prompt_token_ids: Arc::clone(&prompt_token_ids),
                                 prompt_logprobs: prompt_logprobs.take(),
+                                prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
                                 finish_reason: FinishReason::Error(None),
@@ -104,7 +114,7 @@ impl<T: TextOutputStream> T {
                                 timestamps: vllm_llm::RequestTimestamps::default(),
                                 kv_transfer_params: None,
                                 ec_transfer_params: None,
-                                sampling_mask: None,
+                                sampling_mask: delta_sampling_mask,
                                 spec_decode_metrics: None,
                                 weight_versions: None,
                                 routed_experts: None,
@@ -120,7 +130,6 @@ impl<T: TextOutputStream> T {
                                 finished.kv_transfer_params.map(|value| *value);
                             collected.ec_transfer_params =
                                 finished.ec_transfer_params.map(|value| *value);
-                            collected.sampling_mask = finished.sampling_mask;
                             collected.spec_decode_metrics = finished.spec_decode_metrics;
                             collected.weight_versions = finished.weight_versions;
                             collected.routed_experts = finished.routed_experts.map(|rows| *rows);
@@ -163,6 +172,7 @@ mod tests {
                         }],
                     }],
                 }),
+                prompt_token_id_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
                 decoded: DecodedText::unattributed("bc"),
@@ -188,6 +198,7 @@ mod tests {
                             },
                         ],
                     }),
+                    sampling_mask: None,
                 },
                 finished: Some(Box::new(Finished {
                     usage: vllm_llm::TokenUsage {
@@ -198,7 +209,6 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -255,6 +265,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![10, 11].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
                 decoded: DecodedText::unattributed("he"),
@@ -280,6 +291,7 @@ mod tests {
                             },
                         ],
                     }),
+                    sampling_mask: None,
                 },
                 finished: None,
             }),
@@ -315,6 +327,7 @@ mod tests {
                             },
                         ],
                     }),
+                    sampling_mask: None,
                 },
                 finished: Some(Box::new(Finished {
                     usage: vllm_llm::TokenUsage {
@@ -325,7 +338,6 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
