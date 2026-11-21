@@ -311,20 +311,9 @@ def test_nemotron_nvfp4_per_token_moe_flashinfer_trtllm(
     )
 
 
-def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
-    """Dummy NVFP4 MoE weights load with valid scales and produce finite logits."""
-    import math
-
-    import torch
+def _save_tiny_nvfp4_qwen3_moe(path) -> None:
     from transformers import Qwen3MoeConfig
 
-    from vllm import SamplingParams
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4FusedMoE,
-    )
-
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = Qwen3MoeConfig(
         vocab_size=128,
         hidden_size=512,
@@ -346,7 +335,55 @@ def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
         "kv_cache_quant_algo": None,
         "exclude_modules": ["lm_head", "model.layers.*.self_attn.*"],
     }
-    config.save_pretrained(tmp_path)
+    config.save_pretrained(path)
+
+
+def _run_tiny_nvfp4_qwen3_moe(vllm_runner, path, moe_backend: str):
+    return vllm_runner(
+        str(path),
+        dtype="bfloat16",
+        load_format="dummy",
+        moe_backend=moe_backend,
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        enable_flashinfer_autotune=False,
+        max_model_len=32,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        kv_cache_memory_bytes=16 << 20,
+    )
+
+
+def _assert_generates_finite_logprobs(llm) -> None:
+    import math
+
+    from vllm import SamplingParams
+
+    outputs = llm.get_llm().generate(
+        [{"prompt_token_ids": [1, 2, 3]}],
+        SamplingParams(temperature=0, max_tokens=2, ignore_eos=True, logprobs=1),
+    )
+    completion = outputs[0].outputs[0]
+    assert len(completion.token_ids) == 2
+    assert len(completion.logprobs) == 2
+    assert all(
+        math.isfinite(value.logprob)
+        for step in completion.logprobs
+        for value in step.values()
+    )
+
+
+def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
+    """Dummy NVFP4 MoE weights load with valid scales and produce finite logits."""
+    import torch
+
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    _save_tiny_nvfp4_qwen3_moe(tmp_path)
 
     def check_scales(model):
         experts = [m for m in model.modules() if isinstance(m, RoutedExperts)]
@@ -360,32 +397,41 @@ def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
                 assert torch.isfinite(values).all(), name
                 assert (values > 0).all(), name
 
-    with vllm_runner(
-        str(tmp_path),
-        dtype="bfloat16",
-        load_format="dummy",
-        moe_backend="flashinfer_trtllm",
-        skip_tokenizer_init=True,
-        enforce_eager=True,
-        enable_flashinfer_autotune=False,
-        max_model_len=32,
-        max_num_seqs=1,
-        max_num_batched_tokens=32,
-        kv_cache_memory_bytes=16 << 20,
-    ) as llm:
+    with _run_tiny_nvfp4_qwen3_moe(vllm_runner, tmp_path, "flashinfer_trtllm") as llm:
         llm.apply_model(check_scales)
-        outputs = llm.get_llm().generate(
-            [{"prompt_token_ids": [1, 2, 3]}],
-            SamplingParams(temperature=0, max_tokens=2, ignore_eos=True, logprobs=1),
-        )
-        completion = outputs[0].outputs[0]
-        assert len(completion.token_ids) == 2
-        assert len(completion.logprobs) == 2
-        assert all(
-            math.isfinite(value.logprob)
-            for step in completion.logprobs
-            for value in step.values()
-        )
+        _assert_generates_finite_logprobs(llm)
+
+
+@pytest.mark.parametrize(
+    "moe_backend",
+    ["cutlass", "flashinfer_trtllm", "flashinfer_cutlass", "flashinfer_cutedsl"],
+)
+def test_modelopt_nvfp4_moe_reprocess_is_noop(
+    tmp_path, monkeypatch, vllm_runner, moe_backend
+):
+    """Re-running NVFP4 MoE post-load processing on processed weights (weight
+    cache restart, elastic EP scale-up) rebuilds state without changing it."""
+    import torch
+
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.utils import weights_already_processed
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    _save_tiny_nvfp4_qwen3_moe(tmp_path)
+
+    def reprocess(model):
+        (layer,) = [m for m in model.modules() if isinstance(m, RoutedExperts)]
+        names = [n for n, _ in layer.named_parameters()] + [
+            n for n in ("_a1_gscale", "_a2_gscale") if hasattr(layer, n)
+        ]
+        before = {n: getattr(layer, n).clone() for n in names}
+        with weights_already_processed():
+            layer.quant_method.process_weights_after_loading(layer)
+        return [n for n in names if not torch.equal(getattr(layer, n), before[n])]
+
+    with _run_tiny_nvfp4_qwen3_moe(vllm_runner, tmp_path, moe_backend) as llm:
+        assert llm.apply_model(reprocess) == [[]]
+        _assert_generates_finite_logprobs(llm)
 
 
 @pytest.mark.parametrize("nvfp4", [False, True])

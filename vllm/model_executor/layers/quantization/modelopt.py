@@ -909,7 +909,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     """
 
-    supports_pre_processed_weights = True
     accepts_quantized_input = True
 
     def __init__(
@@ -1116,16 +1115,27 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         ):
             set_weight_attrs(param, {"dummy_weight_value": value})
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        from vllm.distributed.localization import get_localized_resources
+
+        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+            # per-die shards are built only by the cold conversion
+            return get_localized_resources() is None
+        return self.nvfp4_backend in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.VLLM_CUTLASS,
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+        )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
-            if self.nvfp4_backend not in (
-                NvFp4MoeBackend.FLASHINFER_TRTLLM,
-                NvFp4MoeBackend.VLLM_CUTLASS,
-            ):
+            if not self.supports_pre_processed_weights:
                 raise RuntimeError(
-                    "pre-processed weights require FLASHINFER_TRTLLM or "
-                    f"VLLM_CUTLASS MoE backend, got {self.nvfp4_backend}"
+                    "pre-processed weights are not supported with the "
+                    f"{self.nvfp4_backend} MoE backend"
                 )
             self._restore_padded_moe_dims(layer)
             self._build_moe_kernel(layer)
