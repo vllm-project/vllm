@@ -16,6 +16,7 @@ from .utils import compute_meta, convert_mapping
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
+    from vllm.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta
 
 
 class PunicaWrapperABC(ABC):
@@ -159,6 +160,19 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+
+    def reserve_token_capacity(self, num_tokens: int) -> None:
+        """Grow per-token buffers for encoder forwards without CUDA graphs."""
+        if num_tokens <= self._token_lora_indices.numel():
+            return
+        token_mapping_meta: LoRAKernelMeta | None = getattr(
+            self, "token_mapping_meta", None
+        )
+        if token_mapping_meta is not None:
+            token_mapping_meta.token_lora_mapping.resize_(num_tokens)
+            token_mapping_meta.token_indices_sorted_by_lora_ids.resize_(num_tokens)
+        self._embeddings_indices.resize_(num_tokens)
+        self._token_lora_indices.resize_(num_tokens)
 
     def _update_base_metadata(
         self,

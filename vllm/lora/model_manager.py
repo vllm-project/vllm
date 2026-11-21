@@ -448,6 +448,12 @@ class LoRAModelManager:
         punica_wrapper = self._get_punica_wrapper(target_prefix)
         assert punica_wrapper is not None
 
+        if (
+            mapping.type != LoRAMappingType.LANGUAGE
+            and self.supports_tower_connector_lora
+            and getattr(self.model, "allow_mm_lora_buffer_growth", False)
+        ):
+            punica_wrapper.reserve_token_capacity(len(mapping.index_mapping))
         punica_wrapper.update_metadata(
             mapping,
             self.lora_index_to_id,
