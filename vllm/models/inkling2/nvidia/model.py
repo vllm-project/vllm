@@ -301,7 +301,7 @@ class Inkling2Model(nn.Module):
         self,
         config: Inkling2ModelConfig,
         layer_id: int,
-        quant_config: Inkling2QuantConfig | None,
+        quant_config: Inkling2QuantConfig | CompressedTensorsConfig | None,
         prefix: str,
     ) -> Inkling2DecoderLayer:
         return Inkling2DecoderLayer(config, layer_id, quant_config, prefix)
