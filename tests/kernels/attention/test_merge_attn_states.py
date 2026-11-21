@@ -11,6 +11,9 @@ from vllm._custom_ops import (
     scaled_fp8_quant,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.ops.merge_attn_states import (
+    merge_attn_states as merge_attn_states_dispatch,
+)
 from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
 )
@@ -109,6 +112,109 @@ def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
     merge_fn(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
 
     assert not output.isnan().any()
+
+
+def _head_sliced_tensor(token_values: tuple[float, float]) -> torch.Tensor:
+    storage = torch.full((2, 3, 128), 17, dtype=torch.bfloat16, device=DEVICE)
+    view = storage[:, 1:2, :]
+    view[0].fill_(token_values[0])
+    view[1].fill_(token_values[1])
+    return view
+
+
+@pytest.mark.parametrize(
+    ("strided_arg", "prefill_tokens_with_context"),
+    [
+        ("prefix", None),
+        ("suffix", None),
+        ("output", None),
+        ("suffix", 1),
+        ("output", 1),
+    ],
+)
+@pytest.mark.parametrize(
+    "merge_fn", [merge_attn_states_native, merge_attn_states_triton]
+)
+def test_merge_attn_states_head_sliced_views(
+    merge_fn, strided_arg: str, prefill_tokens_with_context: int | None
+) -> None:
+    """A head slice keeps the storage's wider token stride."""
+    prefix_output = _head_sliced_tensor((2, 6))
+    suffix_output = _head_sliced_tensor((4, 8))
+    output = _head_sliced_tensor((-31, -31))
+
+    if strided_arg != "prefix":
+        prefix_output = prefix_output.contiguous()
+    if strided_arg != "suffix":
+        suffix_output = suffix_output.contiguous()
+    if strided_arg != "output":
+        output = output.contiguous()
+
+    prefix_lse = torch.zeros((1, 2), dtype=torch.float32, device=DEVICE)
+    suffix_lse = torch.zeros_like(prefix_lse)
+    expected, _ = merge_attn_states_torch(
+        torch.empty((2, 1, 128), dtype=torch.bfloat16, device=DEVICE),
+        prefix_output,
+        prefix_lse.clone(),
+        suffix_output,
+        suffix_lse.clone(),
+        prefill_tokens_with_context=prefill_tokens_with_context,
+    )
+
+    merge_fn(
+        output,
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        prefill_tokens_with_context=prefill_tokens_with_context,
+    )
+
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("prefill_tokens_with_context", [None, 1])
+@pytest.mark.parametrize(
+    "merge_fn", [merge_attn_states_dispatch, merge_attn_states_triton]
+)
+def test_merge_attn_states_different_head_strides(
+    merge_fn, prefill_tokens_with_context: int | None
+) -> None:
+    """Prefix and suffix may use token-major and head-major layouts."""
+    prefix_output = torch.empty((2, 2, 128), dtype=torch.bfloat16, device=DEVICE)
+    prefix_output[0, 0].fill_(2)
+    prefix_output[0, 1].fill_(4)
+    prefix_output[1, 0].fill_(6)
+    prefix_output[1, 1].fill_(8)
+
+    suffix_storage = torch.full((2, 2, 128), 17, dtype=torch.bfloat16, device=DEVICE)
+    suffix_output = suffix_storage.transpose(0, 1)
+    suffix_output[0, 0].fill_(10)
+    suffix_output[0, 1].fill_(12)
+    suffix_output[1, 0].fill_(14)
+    suffix_output[1, 1].fill_(16)
+    prefix_lse = torch.zeros((2, 2), dtype=torch.float32, device=DEVICE)
+    suffix_lse = torch.zeros_like(prefix_lse)
+    output = torch.empty_like(prefix_output)
+    expected, _ = merge_attn_states_torch(
+        torch.empty_like(prefix_output),
+        prefix_output,
+        prefix_lse.clone(),
+        suffix_output,
+        suffix_lse.clone(),
+        prefill_tokens_with_context=prefill_tokens_with_context,
+    )
+
+    merge_fn(
+        output,
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        prefill_tokens_with_context=prefill_tokens_with_context,
+    )
+
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 def generate_markdown_table():

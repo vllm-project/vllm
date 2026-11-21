@@ -1,6 +1,7 @@
-#include <optional>
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <optional>
 
 #include "../torch_utils.h"
 #include "../dispatch_utils.h"
@@ -19,11 +20,13 @@ __global__ void merge_attn_states_kernel(
     output_t* output, float* output_lse, const scalar_t* prefix_output,
     const float* prefix_lse, const scalar_t* suffix_output,
     const float* suffix_lse, const uint num_tokens, const uint num_heads,
-    const uint head_size, const uint prefix_head_stride,
-    const uint output_head_stride, const uint prefix_lse_head_stride,
-    const uint prefix_lse_token_stride, const uint suffix_lse_head_stride,
-    const uint suffix_lse_token_stride, const uint output_lse_head_stride,
-    const uint output_lse_token_stride, const uint prefix_num_tokens,
+    const uint head_size, const int64_t output_token_stride,
+    const int64_t output_head_stride, const int64_t prefix_token_stride,
+    const int64_t prefix_head_stride, const int64_t suffix_token_stride,
+    const int64_t suffix_head_stride, const int64_t prefix_lse_head_stride,
+    const int64_t prefix_lse_token_stride, const int64_t suffix_lse_head_stride,
+    const int64_t suffix_lse_token_stride, const int64_t output_lse_head_stride,
+    const int64_t output_lse_token_stride, const uint prefix_num_tokens,
     const float* output_scale) {
   // Inputs always load 128-bit packs (pack_size elements of scalar_t).
   // Outputs store pack_size elements of output_t, which is smaller for FP8.
@@ -48,12 +51,14 @@ __global__ void merge_attn_states_kernel(
   const uint head_idx = token_head_idx % num_heads;
 
   const uint pack_offset = pack_idx * pack_size;  // (0~15)*8, etc.
-  const uint src_head_offset = token_idx * num_heads * prefix_head_stride +
-                               head_idx * prefix_head_stride;
-  const uint dst_head_offset = token_idx * num_heads * output_head_stride +
-                               head_idx * output_head_stride;
-  const scalar_t* prefix_head_ptr = prefix_output + src_head_offset;
-  const scalar_t* suffix_head_ptr = suffix_output + src_head_offset;
+  const int64_t prefix_head_offset =
+      token_idx * prefix_token_stride + head_idx * prefix_head_stride;
+  const int64_t suffix_head_offset =
+      token_idx * suffix_token_stride + head_idx * suffix_head_stride;
+  const int64_t dst_head_offset =
+      token_idx * output_token_stride + head_idx * output_head_stride;
+  const scalar_t* prefix_head_ptr = prefix_output + prefix_head_offset;
+  const scalar_t* suffix_head_ptr = suffix_output + suffix_head_offset;
   output_t* output_head_ptr = output + dst_head_offset;
 
   // Pre-invert scale: multiplication is faster than division
@@ -227,11 +232,12 @@ __global__ void merge_attn_states_kernel(
             reinterpret_cast<float*>(prefix_lse.data_ptr()),                \
             reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),          \
             reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,    \
-            num_heads, head_size, prefix_head_stride, output_head_stride,   \
-            prefix_lse_head_stride, prefix_lse_token_stride,                \
-            suffix_lse_head_stride, suffix_lse_token_stride,                \
-            output_lse_head_stride, output_lse_token_stride,                \
-            prefix_num_tokens, output_scale_ptr);                           \
+            num_heads, head_size, output_token_stride, output_head_stride,  \
+            prefix_token_stride, prefix_head_stride, suffix_token_stride,   \
+            suffix_head_stride, prefix_lse_head_stride,                     \
+            prefix_lse_token_stride, suffix_lse_head_stride,                \
+            suffix_lse_token_stride, output_lse_head_stride,                \
+            output_lse_token_stride, prefix_num_tokens, output_scale_ptr);  \
   }
 
 /*@brief Merges the attention states from prefix and suffix
@@ -267,17 +273,27 @@ void merge_attn_states_launcher(
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
   const uint head_size = output.size(2);
-  const uint prefix_head_stride = prefix_output.stride(1);
-  const uint output_head_stride = output.stride(1);
+  const int64_t output_token_stride = output.stride(0);
+  const int64_t output_head_stride = output.stride(1);
+  const int64_t prefix_token_stride = prefix_output.stride(0);
+  const int64_t prefix_head_stride = prefix_output.stride(1);
+  const int64_t suffix_token_stride = suffix_output.stride(0);
+  const int64_t suffix_head_stride = suffix_output.stride(1);
+  STD_TORCH_CHECK(output.stride(2) == 1,
+                  "output must be contiguous in the head dimension");
+  STD_TORCH_CHECK(prefix_output.stride(2) == 1,
+                  "prefix_output must be contiguous in the head dimension");
+  STD_TORCH_CHECK(suffix_output.stride(2) == 1,
+                  "suffix_output must be contiguous in the head dimension");
   // lse tensors are [NUM_HEADS, NUM_TOKENS] but may be non-contiguous views
   // (e.g. a transpose of a backend's [NUM_TOKENS, NUM_HEADS] output), so index
   // them by their actual strides rather than assuming a contiguous layout.
-  const uint prefix_lse_head_stride = prefix_lse.stride(0);
-  const uint prefix_lse_token_stride = prefix_lse.stride(1);
-  const uint suffix_lse_head_stride = suffix_lse.stride(0);
-  const uint suffix_lse_token_stride = suffix_lse.stride(1);
-  uint output_lse_head_stride = 0;
-  uint output_lse_token_stride = 0;
+  const int64_t prefix_lse_head_stride = prefix_lse.stride(0);
+  const int64_t prefix_lse_token_stride = prefix_lse.stride(1);
+  const int64_t suffix_lse_head_stride = suffix_lse.stride(0);
+  const int64_t suffix_lse_token_stride = suffix_lse.stride(1);
+  int64_t output_lse_head_stride = 0;
+  int64_t output_lse_token_stride = 0;
   if (output_lse.has_value()) {
     output_lse_head_stride = output_lse.value().stride(0);
     output_lse_token_stride = output_lse.value().stride(1);
