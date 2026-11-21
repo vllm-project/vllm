@@ -94,6 +94,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
         )
+        from vllm.distributed.device_communicators.flashinfer_pcie_ipc_ag_rs import (
+            FlashInferPcieIpcAgRs,
+        )
         from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (  # noqa: E501
             FlashInferPcieIpcAllReduce,
         )
@@ -117,6 +120,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
+        self.fi_pcie_ipc_ag_rs_comm: FlashInferPcieIpcAgRs | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
         self.use_aiter_tp_all_gather: bool = False
@@ -143,6 +147,27 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and self.device_group is not None
         ):
             self.fi_pcie_ipc_ar_comm = FlashInferPcieIpcAllReduce(
+                group=self.device_group,
+                tune_group=self.cpu_group,
+                device=self.device,
+            )
+
+        if (
+            (
+                self.use_all2all
+                or (
+                    unique_name.split(":")[0] == "dp"
+                    and config is not None
+                    and config.parallel_config.enable_expert_parallel
+                )
+            )
+            and self.all2all_backend == "allgather_reducescatter"
+            and envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
+            and not envs.VLLM_BATCH_INVARIANT
+            and self.world_size > 1
+            and self.device_group is not None
+        ):
+            self.fi_pcie_ipc_ag_rs_comm = FlashInferPcieIpcAgRs(
                 group=self.device_group,
                 tune_group=self.cpu_group,
                 device=self.device,
@@ -693,6 +718,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if use_symm_mem:
             output = self._reduce_scatter_symm_mem(input_tensor, output)
         else:
+            pcie_comm = self.fi_pcie_ipc_ag_rs_comm
+            if (
+                sizes is None
+                and pcie_comm is not None
+                and pcie_comm.should_use_rs(input_tensor)
+            ):
+                output = pcie_comm.reduce_scatter(input_tensor, output)
+                return output.movedim(0, dim).contiguous()
+
             if output is None:
                 output = torch.empty(
                     output_shape, dtype=input_tensor.dtype, device=input_tensor.device
@@ -876,6 +910,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.fi_pcie_ipc_ar_comm is not None:
             self.fi_pcie_ipc_ar_comm.destroy()
             self.fi_pcie_ipc_ar_comm = None
+        if self.fi_pcie_ipc_ag_rs_comm is not None:
+            self.fi_pcie_ipc_ag_rs_comm.destroy()
+            self.fi_pcie_ipc_ag_rs_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
@@ -978,6 +1015,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 return self._all_gather_symm_mem(input_)
             return self._all_gather_batched_symm_mem(input_)
 
+        pcie_comm = self.fi_pcie_ipc_ag_rs_comm
+        if (
+            sizes is None
+            and isinstance(input_, torch.Tensor)
+            and pcie_comm is not None
+            and pcie_comm.should_use_ag(input_)
+        ):
+            return pcie_comm.all_gather(input_)
+
         def _all_gather_single(input_: torch.Tensor, sizes: list[int] | None = None):
             input_size = input_.size()
             if sizes is not None:
@@ -1000,6 +1046,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         if isinstance(input_, torch.Tensor):
             return _all_gather_single(input_, sizes)
+        if sizes is None and pcie_comm is not None:
+            return [
+                pcie_comm.all_gather(inp)
+                if pcie_comm.should_use_ag(inp)
+                else _all_gather_single(inp)
+                for inp in input_
+            ]
 
         output_list = []
         pynccl_comm.group_start()
