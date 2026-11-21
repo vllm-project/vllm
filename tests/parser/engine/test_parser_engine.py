@@ -807,6 +807,72 @@ class TestFixArgTypes:
         parsed = json.loads(result)
         assert parsed["inner"]["count"] == 42
 
+    def test_declared_and_additional_object_properties(self):
+        schema = {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "additionalProperties": {"type": "array", "items": {"type": "integer"}},
+        }
+        engine = _make_engine(tools=[_make_tool("f", {"inventory": schema})])
+        args = '{"inventory":{"id":"002","parts":["2","3"]}}'
+        assert json.loads(engine._fix_arg_types(args, "f")) == {
+            "inventory": {"id": "002", "parts": [2, 3]}
+        }
+
+    @pytest.mark.parametrize(
+        "keywords",
+        [
+            {"additionalProperties": True},
+            {"additionalProperties": False},
+            {"additionalProperties": {}},
+            {"additionalProperties": {"$ref": "#/$defs/count"}},
+            {
+                "patternProperties": {"^id": {"type": "string"}},
+                "additionalProperties": {"type": "integer"},
+            },
+        ],
+    )
+    def test_no_unambiguous_additional_type(self, keywords):
+        schema = {"type": "object", **keywords}
+        engine = _make_engine(tools=[_make_tool("f", {"inventory": schema})])
+        args = '{"inventory":{"id1":"002","id2":3}}'
+        assert engine._fix_arg_types(args, "f") == args
+
+    def test_nullable_map_and_nullable_values(self):
+        integer = {"type": "integer"}
+        null = {"type": "null"}
+        counts = {"type": "object", "additionalProperties": integer}
+        nullable_map = {"anyOf": [null, counts]}
+        stock = {"type": "object", "additionalProperties": {"anyOf": [integer, null]}}
+        fields = {"counts": nullable_map, "missing": nullable_map, "stock": stock}
+        engine = _make_engine(tools=[_make_tool("f", fields)])
+        args = '{"counts":{"a":"7"},"missing":null,"stock":{"qty":"7","pending":null}}'
+        assert json.loads(engine._fix_arg_types(args, "f")) == {
+            "counts": {"a": 7},
+            "missing": None,
+            "stock": {"qty": 7, "pending": None},
+        }
+
+    def test_map_preserves_strings_in_dynamic_keys_and_their_values(self):
+        int_or_str = {"type": ["integer", "string"]}
+        item = {
+            "type": "object",
+            "properties": {"qty": int_or_str, "count": {"type": "integer"}},
+            "additionalProperties": int_or_str,
+        }
+        items = {"type": "object", "additionalProperties": item}
+        fields = {"qty": int_or_str, "order": item, "items": items}
+        engine = _make_engine(tools=[_make_tool("f", fields)])
+        args = (
+            '{"qty":"002","order":{"qty":"002","padded":"002","plain":"2","number":2},'
+            '"items":{"x":{"qty":"002","count":"7"}}}'
+        )
+        assert json.loads(engine._fix_arg_types(args, "f")) == {
+            "qty": 2,
+            "order": {"qty": 2, "padded": "002", "plain": "2", "number": 2},
+            "items": {"x": {"qty": "002", "count": 7}},
+        }
+
     def test_array_item_coercion(self):
         tool = _make_tool(
             "f",
