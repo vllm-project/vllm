@@ -12,8 +12,7 @@ too; what differs is the image geometry:
   through one 2x2 merge (downsample MLP) rather than two (ViT insert merger as
   well).
 * An image small enough not to be sliced may be resized to a target picked from
-  its own pixels (`adaptive_small_image_upsize`) or kept at its native
-  resolution (`disable_small_image_upsize`).
+  its own pixels or kept at its native resolution.
 
 The second point is why the image placeholder here is measured from the
 `target_sizes` the image processor actually returned rather than recomputed
@@ -48,24 +47,12 @@ from .minicpmv4_6 import (
 # `MiniCPMOcrVideoProcessorKwargs` deliberately declares none of them: in
 # transformers videos go through `MiniCPMOcrVideoProcessor`, which has no
 # small-image upsize logic at all.
-_OCR_IMAGE_UPSIZE_KWARGS = (
-    "disable_small_image_upsize",
-    "adaptive_small_image_upsize",
-    "adaptive_upsize_font_px",
-    "adaptive_upsize_dense_per_kpx",
-    "adaptive_upsize_tiny_pixels",
-    "adaptive_upsize_tiny_target_resolution",
-    "adaptive_tile_upsize",
-)
+_OCR_IMAGE_UPSIZE_KWARGS = ("small_image_upsize",)
 
 # Pinned for video frames: `_compute_visual_tokens` counts an unsliced frame as
 # upscaled to `scale_resolution` with uniform tiles, but `process_videos` runs
 # the image processor, whose own defaults are not visible to that count.
-_VIDEO_PINNED_UPSIZE_KWARGS = {
-    "disable_small_image_upsize": False,
-    "adaptive_small_image_upsize": False,
-    "adaptive_tile_upsize": False,
-}
+_VIDEO_PINNED_UPSIZE_KWARGS = {"small_image_upsize": "always"}
 
 
 class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
@@ -88,6 +75,8 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         return pinned
 
     def get_image_size_with_most_features(self) -> ImageSize:
+        if not self._has_size_hint("image"):
+            return super().get_image_size_with_most_features()
         # OCR-only override: source the dummy-input dimension from the image
         # processor's `scale_resolution` (the slice resize target) rather than the
         # top-level `config.image_size`. The top-level field is dropped from
@@ -100,6 +89,8 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         return ImageSize(width=image_size, height=image_size * max_slice_num)
 
     def get_video_frame_size_with_most_features(self) -> ImageSize:
+        if not self._has_size_hint("video"):
+            return super().get_video_frame_size_with_most_features()
         # See `get_image_size_with_most_features` for why OCR sources from
         # `scale_resolution` instead of the (now-removed) top-level `config.image_size`.
         image_size = self.get_image_processor().scale_resolution
@@ -120,7 +111,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         The unsliced branch upscales to `scale_resolution`, which is what
         `MiniCPMOcrImageProcessor._preprocess` does for the default options
         and what the video path does unconditionally. The remaining
-        `*_small_image_upsize` combinations depend on the pixels, so for
+        combinations depend on the pixels, so for
         images the placeholder is taken from `target_sizes` instead; see
         `MiniCPMOcrMultiModalProcessor._ocr_image_prompt_text`.
         """
@@ -257,9 +248,7 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
 
         `MiniCPMOcrProcessor.replace_image_token` counts
         `target_sizes.prod(-1) // token_divisor` per patch, row 0 being the
-        source image and row 1 a slice. Doing the same here keeps the count
-        correct for `adaptive_small_image_upsize`, whose resize target is
-        decided from the pixels and cannot be recovered from `image_size`.
+        source image and row 1 a slice.
 
         `target_sizes` is already in *patch* units -- the image processor
         stores `source_h // patch_size` -- so the divisor here is the bare
@@ -314,8 +303,6 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
         )
 
         if num_rows > 0 and num_cols > 0:
-            # `adaptive_tile_upsize` classifies each tile on its own crop, so
-            # slices in one grid can differ; emit one placeholder per tile.
             tile_tokens = [int(t) for t in patch_tokens_per_slice[1:]]
             if len(set(tile_tokens)) <= 1:
                 slice_tokens = tile_tokens[0] if tile_tokens else 0
