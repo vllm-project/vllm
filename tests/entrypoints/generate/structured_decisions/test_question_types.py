@@ -5,6 +5,11 @@ from typing import Any
 
 import pytest
 
+from vllm.entrypoints.generate.structured_decisions.box_contract import (
+    BoxOutputError,
+    BoxQuestion,
+    parse_box,
+)
 from vllm.entrypoints.openai.decisions.question_types import (
     QUESTION_TYPES,
     Option,
@@ -14,6 +19,9 @@ from vllm.entrypoints.openai.decisions.question_types import (
     build_question,
     register_question_type,
 )
+
+# These contracts allocate no accelerator state.
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
 def choice(qid="bucket", criteria=None, instructions="Which team?", max_options=128):
@@ -196,3 +204,74 @@ def test_registered_type_plugs_in():
             register_question_type(BinaryQuestion)
     finally:
         del QUESTION_TYPES["test_binary"]
+
+
+@pytest.mark.parametrize(
+    "coords",
+    [
+        "[100,200,600,800]",
+        "[0,0,1000,1000]",
+    ],
+)
+def test_generated_box_normalizes_full_image_coordinates(coords):
+    import json
+
+    values = json.loads(coords)
+    answer = parse_box('{"bbox_2d":' + coords + "}")
+    assert list(answer["box"].values()) == [v / 1000 for v in values]
+    assert answer["confidence"] is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"bbox_2d":[true,0,500,500]}',
+        '{"bbox_2d":[0.0,0,500,500]}',
+        '{"bbox_2d":[0,0,1001,500]}',
+        '{"bbox_2d":[-1,0,500,500]}',
+        '{"bbox_2d":[500,0,500,500]}',
+        '{"bbox_2d":[600,0,500,500]}',
+        '{"bbox_2d":[0,500,500,400]}',
+        '{"bbox_2d":[0,0,NaN,500]}',
+        '{"bbox_2d":[0,0,500,500],"extra":1}',
+        '{"bbox_2d":[0,0,500,500],"bbox_2d":[0,0,1000,1000]}',
+        '{"bbox_2d":[0,0,500',
+        '{"bbox_2d":[0,0,500]}',
+    ],
+)
+def test_generated_box_rejects_invalid_outputs_without_repair(text):
+    with pytest.raises(BoxOutputError):
+        parse_box(text)
+
+
+@pytest.mark.parametrize(
+    "instructions,criteria",
+    [
+        ("", None),
+        ("   ", None),
+        (None, None),
+        ({"description": "the suitcase"}, None),
+        ({"target": "suitcase", "exclude": 1}, None),
+        ({"target": "suitcase", "unknown": "x"}, None),
+        ("suitcase", []),
+    ],
+)
+def test_box_question_rejects_ambiguous_contract(instructions, criteria):
+    with pytest.raises(StructuredDecisionError):
+        BoxQuestion.parse("target", instructions, criteria)
+
+
+def test_box_prompt_preserves_target_exclusions_and_business_context():
+    question = BoxQuestion.parse(
+        "stamp",
+        {
+            "target": "stamp",
+            "description": "red company stamp",
+            "exclude": "table captions",
+        },
+        None,
+    )
+    prompt = question.prompt("Use the stamp beside the total amount.")
+    assert "red company stamp" in prompt
+    assert "Exclude the table captions" in prompt
+    assert "Context: Use the stamp beside the total amount." in prompt
