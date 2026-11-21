@@ -14,6 +14,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    kv_connector_may_load_foreign_kv,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
@@ -120,28 +123,29 @@ def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
 
 def _trust_dsv4_extra_cache_nan_free(
     kv_cache_dtype: str,
-    has_kv_transfer: bool,
+    may_load_foreign_kv: bool,
     has_extra_cache: bool,
 ) -> bool:
     return (
         _ON_GFX950
         and kv_cache_dtype == "fp8_ds_mla"
-        and not has_kv_transfer
+        and not may_load_foreign_kv
         and has_extra_cache
     )
 
 
-def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
+def _aiter_sparse_mla_enabled(may_load_foreign_kv: bool) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
         return False
     # The aiter kernel does not scrub NaNs, so like the trust check above it
     # needs a cache only the canonical writer has touched.
-    if has_kv_transfer:
+    if may_load_foreign_kv:
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with a KV "
-            "connector; DeepSeek V4 keeps the Triton sparse attention."
+            "connector that may load foreign KV; "
+            "DeepSeek V4 keeps the Triton sparse attention."
         )
         return False
     return True
@@ -155,9 +159,9 @@ _AITER_SPARSE_MLA_PREFILL_MAX_HEADS = 64
 
 
 def _aiter_sparse_mla_prefill_enabled(
-    num_heads: int, has_kv_transfer: bool, plain_fp8_kv: bool
+    num_heads: int, may_load_foreign_kv: bool, plain_fp8_kv: bool
 ) -> bool:
-    return _aiter_sparse_mla_enabled(has_kv_transfer) and (
+    return _aiter_sparse_mla_enabled(may_load_foreign_kv) and (
         plain_fp8_kv or num_heads <= _AITER_SPARSE_MLA_PREFILL_MAX_HEADS
     )
 
@@ -169,7 +173,7 @@ def _register_plain_fp8_kv_scales(layer: torch.nn.Module, use_aiter: bool) -> No
         raise ValueError(
             "--kv-cache-dtype fp8_e4m3 needs gfx950 and the aiter sparse MLA "
             "kernel (VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1), which is off "
-            "with a KV connector"
+            "with a connector that may load foreign KV"
         )
     for name in (
         "_flashinfer_fp8_q_scale",
@@ -839,7 +843,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             self.vllm_config.model_config.get_num_attention_heads(
                 self.vllm_config.parallel_config
             ),
-            self.vllm_config.kv_transfer_config is not None,
+            kv_connector_may_load_foreign_kv(self.vllm_config),
             self.vllm_config.cache_config.cache_dtype == "fp8_e4m3",
         )
 
@@ -936,7 +940,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
-        self._has_kv_transfer = vllm_config.kv_transfer_config is not None
+        self._may_load_foreign_kv = kv_connector_may_load_foreign_kv(vllm_config)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
@@ -958,11 +962,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
         self._use_aiter_sparse_mla_decode = _aiter_sparse_mla_enabled(
-            self._has_kv_transfer
+            self._may_load_foreign_kv
         )
         self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
         self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
-            self.n_local_heads, self._has_kv_transfer, self._plain_fp8_kv
+            self.n_local_heads, self._may_load_foreign_kv, self._plain_fp8_kv
         )
         if self._plain_fp8_kv:
             _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla_decode)
@@ -1695,7 +1699,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
-                self._has_kv_transfer,
+                self._may_load_foreign_kv,
                 not swa_only and kv_cache is not None,
             ),
         )
