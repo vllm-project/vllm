@@ -242,6 +242,10 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
     skip_warmup_audio_preprocessing = True
+    # The streaming processor skips chunk padding and builds placeholders from
+    # raw sample counts, so the chunk-derived counts in the inherited
+    # get_mm_lora_token_counts do not hold here.
+    supports_tower_connector_lora = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
