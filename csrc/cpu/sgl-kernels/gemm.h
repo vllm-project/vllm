@@ -110,7 +110,7 @@ inline CPUActMethod act_method_from_int(int64_t act_method) {
   return static_cast<CPUActMethod>(act_method);
 }
 
-enum class CPUQuantMethod : int64_t { BF16 = 0, INT8_W8A8 = 1, FP8_W8A16 = 2, INT4_W4A8 = 3, MXFP4 = 4, FP8_W8A8 = 5 };
+enum class CPUQuantMethod : int64_t { BF16 = 0, INT8_W8A8 = 1, FP8_W8A16 = 2, INT4_W4A8 = 3, MXFP4 = 4, FP8_W8A8 = 5, MXFP4_W4A8 = 6 };
 
 constexpr bool operator==(CPUQuantMethod a, int64_t b) {
   return static_cast<int64_t>(a) == b;
@@ -135,6 +135,7 @@ inline int64_t get_row_size(CPUQuantMethod quant, int64_t K) {
     case CPUQuantMethod::INT8_W8A8:
       return K + sizeof(int32_t);
     case CPUQuantMethod::MXFP4:
+    case CPUQuantMethod::MXFP4_W4A8:
       return K >> 1;
     default:
       return K;
@@ -213,8 +214,7 @@ void fused_experts_fp_kernel_impl(
     int64_t num_tokens_post_pad,
     float alpha,
     float limit,
-    CPUActMethod act_func,
-    bool with_bias);
+    CPUActMethod act_func);
 
 // shared expert implementation for int8 w8a8
 template <typename scalar_t>
@@ -356,11 +356,11 @@ void tinygemm_kernel(
     bool brg);
 
 // mxfp4
-template <typename scalar_t>
+template <typename scalar_t, typename output_t = scalar_t>
 void tinygemm_kernel(
     const scalar_t* __restrict__ A,
     const uint8_t* __restrict__ B,
-    scalar_t* __restrict__ C,
+    output_t* __restrict__ C,
     scalar_t* __restrict__ Btmp,
     float* __restrict__ Ctmp,
     const float* __restrict__ Bbias,
@@ -414,6 +414,15 @@ void tinygemm_kernel(
     int64_t block_size_K,
     bool do_unpack = true);
 
+void unpack_mxfp4_e4m3(
+    at::Float8_e4m3fn* out,
+    const uint8_t* weight,
+    const uint8_t* scales,
+    int64_t K,
+    int smax,
+    bool normal,
+    const float* channel_max = nullptr);
+
 // FP8 W8A8 tinygemm kernel (defined in gemm_fp8_w8a8.cpp)
 void tinygemm_kernel(
     float* C,
@@ -436,33 +445,27 @@ std::tuple<at::Tensor, at::Tensor> quantize_fp8e4m3_vec(
     bool channelwise,
     c10::optional<at::Tensor> scale_opt);
 
-// FP8 W8A8 fused MoE kernel (defined in moe_fp8_w8a8.cpp)
-template <typename scalar_t>
-void fused_experts_fp8_a8_kernel_impl(
-    scalar_t* __restrict__ output,
-    scalar_t* __restrict__ ic0,
-    scalar_t* __restrict__ ic1,
-    scalar_t* __restrict__ ic2,
-    at::Float8_e4m3fn* __restrict__ A_tmp,
-    scalar_t* __restrict__ B_tmp,
-    float* __restrict__ C_tmp,
-    float* __restrict__ Ukernel_tmp,
-    const at::Float8_e4m3fn* __restrict__ input,
-    const at::Float8_e4m3fn* __restrict__ packed_w1,
-    const at::Float8_e4m3fn* __restrict__ packed_w2,
-    const float* __restrict__ As,
-    const float* __restrict__ w1s,
-    const float* __restrict__ w2s,
-    int64_t block_size_N,
-    int64_t block_size_K,
-    const float* __restrict__ topk_weights,
-    const int32_t* __restrict__ sorted_ids,
-    const int32_t* __restrict__ expert_ids,
-    const int32_t* __restrict__ offsets,
-    int64_t M,
-    int64_t N,
-    int64_t K,
-    int64_t E,
-    int64_t topk,
-    int64_t num_tokens_post_pad,
-    CPUActMethod act_func);
+std::tuple<at::Tensor, at::Tensor> quantize_fp8e4m3_rows(
+    const at::Tensor& input);
+
+// Shared native FP8 MoE. Enum values select ordinary FP8 or compressed MXFP4 weights.
+void fused_experts_fp8_a8(
+    at::Tensor& output, const at::Tensor& input,
+    const at::Tensor& w1, const at::Tensor& w2,
+    const at::Tensor& activation_scales,
+    const at::Tensor& w1s, const at::Tensor& w2s,
+    const std::optional<at::Tensor>& w1_bias,
+    const std::optional<at::Tensor>& w2_bias,
+    const float* topk_weights, const int32_t* sorted_ids,
+    const int32_t* expert_ids, const int32_t* offsets,
+    int64_t N, int64_t topk, int64_t num_tokens_post_pad,
+    float alpha, float limit, CPUActMethod act_func,
+    const std::optional<at::Tensor>& w1_block_metadata,
+    const std::optional<at::Tensor>& w2_block_metadata,
+    const std::optional<at::Tensor>& w1_channel_metadata,
+    const std::optional<at::Tensor>& w2_channel_metadata);
+
+at::Tensor mxfp4_moe_scale_metadata(const at::Tensor& scales);
+at::Tensor mxfp4_moe_channel_metadata(const at::Tensor& scales);
+
+bool cpu_native_fp8_supported(at::ScalarType dtype);

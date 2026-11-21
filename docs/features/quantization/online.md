@@ -159,6 +159,34 @@ larger batches run the Triton WNA16 kernels with 16-bit activations:
 vllm serve <int4-moe-model> --quantization-config.moe.activation int8_per_group_32
 ```
 
+On CPUs with native AMX-FP8 and PyTorch FP8 support, GPT-OSS automatically
+uses MXFP4 weights with per-token E4M3 activations (W4A8) when no explicit
+activation override is supplied. To request this activation format explicitly:
+
+```bash
+vllm serve openai/gpt-oss-20b --quantization-config.moe.activation fp8_per_token
+```
+
+All incoming activations are quantized to E4M3. Experts with at most four
+routed rows use BF16 computation and keep intermediate activations
+unquantized; larger experts use FP8 in both projections.
+
+CPU W4A8 requires BF16 model inputs and supports tensor parallelism, but
+not expert parallelism. Without native FP8 support, supported configurations
+use W4A16. An incompatible requested FP8 activation format emits a warning
+and falls back to BF16 activations (W4A16); set `VLLM_STRICT_QUANT_SCHEME=1`
+to reject this fallback.
+
+CPU FP8 experts support SiLU, exact GELU, and GELU-tanh. CPU MXFP4 experts
+also support GPT-OSS SwiGLU.
+
+To explicitly select BF16 activations (W4A16), including on CPUs with native
+FP8, set `activation: null`:
+
+```bash
+vllm serve openai/gpt-oss-20b --quantization-config '{"moe":{"activation":null}}'
+```
+
 ### Re-quantizing layers to a different precision
 
 An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
