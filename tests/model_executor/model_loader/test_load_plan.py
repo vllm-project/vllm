@@ -620,6 +620,18 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
     assert plan.get_dest("layer.weight") is not None
 
 
+def test_one_tensor_into_two_shards_through_detach():
+    """As Gemma-4's K=V layers load k_proj into K and V: `detach` aliases,
+    and both shards are direct writes."""
+    make, shapes = _single(
+        lambda p, w: (p[0].copy_(w.detach()), p[1].copy_(torch.detach(w))),
+        shape=(4,),
+        param_shape=(2, 4),
+    )
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert len(plan.get_dest("layer.weight")) == 2
+
+
 @pytest.mark.parametrize(
     "loader,sent,held,cast",
     [
