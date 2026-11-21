@@ -322,6 +322,7 @@ def load_audio_torchcodec(
         sample rate in Hz.
 
     """
+    global AudioDecoder, _torchcodec_import_exc
     max_duration_s, max_decode_bytes = _normalize_decode_limits(
         max_duration_s, max_decode_bytes
     )
@@ -342,8 +343,12 @@ def load_audio_torchcodec(
     except RuntimeError as e:
         # torchcodec loads its ffmpeg-backed core lazily at construction, so
         # an ffmpeg-less (or ABI-incompatible) install can fail here rather
-        # than at import. Treat that as backend-unavailable, not bad input.
+        # than at import. Treat that as backend-unavailable, not bad input,
+        # and remember it: the missing libraries cannot appear without a
+        # restart, and retrying the load is costly on every call.
         if "Could not load libtorchcodec" in str(e):
+            AudioDecoder = None  # type: ignore[assignment]
+            _torchcodec_import_exc = e
             raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
         raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
 
@@ -512,8 +517,8 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
     except ImportError as exc:
-        logger.warning(
-            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
+        logger.warning_once(
+            "torchcodec unavailable (%s); falling back to soundfile/PyAV.", str(exc)
         )
     except _CorruptAudioError as exc:
         # libsndfile does not use FFmpeg, so it may still decode this input;
