@@ -165,9 +165,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             n = cdiv(n, self.sp_size)
         else:
             n = tokens.shape[0]
-        num_max_tokens_per_rank = min(
-            1 << max(n - 1, 0).bit_length(), self.buffer.num_max_tokens_per_rank
-        )
+        capacity = self.buffer.num_max_tokens_per_rank
+        if n > capacity:
+            raise ValueError(
+                f"DeepEP v2 dispatch of {n} tokens per rank exceeds the "
+                f"ElasticBuffer capacity ({capacity})."
+            )
+        num_max_tokens_per_rank = min(1 << max(n - 1, 0).bit_length(), capacity)
 
         (
             recv_x,
