@@ -4,15 +4,21 @@
 
 import asyncio
 import contextlib
+import subprocess
+import sys
 import threading
 import time
 
+import psutil
 import pytest
 
 grpc = pytest.importorskip("grpc")
 pytest.importorskip("smg_grpc_servicer")
 
+from grpc_health.v1 import health_pb2, health_pb2_grpc  # noqa: E402
+
 from vllm.entrypoints.launchers import grpc_server  # noqa: E402
+from vllm.utils.network_utils import get_open_port  # noqa: E402
 
 
 class FakeAsyncLLM:
@@ -217,3 +223,61 @@ async def test_zero_timeout_keeps_abort_behavior():
     # RPCs get the fixed grace and EngineCore its default join, as before.
     assert llm.timeout is None
     assert llm.outcome == "drained"
+
+
+def test_server_exits_when_engine_core_dies(tmp_path):
+    port = get_open_port()
+    log = tmp_path / "server.log"
+    with log.open("wb") as out:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "vllm.entrypoints.launchers.grpc_server",
+                "--model",
+                "vllm-project/tiny-random-LlamaForCausalLM",
+                "--max-model-len",
+                "128",
+                "--enforce-eager",
+                "--gpu-memory-utilization",
+                "0.05",
+                "--max-num-seqs",
+                "2",
+                "--port",
+                str(port),
+            ],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+        )
+    try:
+        health = health_pb2_grpc.HealthStub(grpc.insecure_channel(f"127.0.0.1:{port}"))
+        deadline = time.monotonic() + 240
+        while True:
+            assert proc.poll() is None, log.read_text(errors="replace")
+            assert time.monotonic() < deadline, "server did not start"
+            try:
+                status = health.Check(health_pb2.HealthCheckRequest(), timeout=1)
+                if status.status == health_pb2.HealthCheckResponse.SERVING:
+                    break
+            except grpc.RpcError:
+                pass
+            time.sleep(0.5)
+
+        engine_cores = [
+            p
+            for p in psutil.Process(proc.pid).children(recursive=True)
+            if "EngineCore" in p.name()
+        ]
+        assert engine_cores
+        for p in engine_cores:
+            p.kill()
+
+        try:
+            returncode = proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            pytest.fail("server kept running after EngineCore died")
+        assert returncode == 1, log.read_text(errors="replace")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

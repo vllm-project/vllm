@@ -67,6 +67,7 @@ _IDLE_POLL_S = 0.1
 # RPCs that stay open until the client or the server ends them. They carry no
 # request, so shutdown does not wait for them before stopping EngineCore.
 _SUBSCRIPTION_METHODS = frozenset({"SubscribeKvEvents"})
+_ENGINE_WATCHDOG_S = 5.0
 
 
 class _InflightRpcs(grpc.aio.ServerInterceptor):
@@ -98,6 +99,19 @@ class _InflightRpcs(grpc.aio.ServerInterceptor):
 
     def _done(self, task: asyncio.Task) -> None:
         self.count -= 1
+
+
+def _engine_died(async_llm: AsyncLLM) -> bool:
+    if envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH or async_llm.should_keep_api_server_alive:
+        return False
+    return async_llm.errored and not async_llm.is_running
+
+
+async def _watch_engine(async_llm: AsyncLLM, stop_event: asyncio.Event) -> None:
+    while not _engine_died(async_llm):
+        await asyncio.sleep(_ENGINE_WATCHDOG_S)
+    logger.error("EngineCore died, shutting down the gRPC server")
+    stop_event.set()
 
 
 async def _wait_for_requests(
@@ -234,6 +248,8 @@ async def serve_grpc(args: argparse.Namespace):
     address = f"{host}:{args.port}"
     server.add_insecure_port(address)
 
+    engine_died = False
+    watchdog = None
     try:
         # Start server
         await server.start()
@@ -269,21 +285,29 @@ async def serve_grpc(args: argparse.Namespace):
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, signal_handler)
+        watchdog = asyncio.create_task(_watch_engine(async_llm, stop_event))
 
         try:
             await stop_event.wait()
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
+        # Before shutdown, which stops EngineCore too.
+        engine_died = _engine_died(async_llm)
     finally:
         logger.info("Shutting down vLLM gRPC server...")
         if stats_task is not None:
             stats_task.cancel()
+        if watchdog is not None:
+            watchdog.cancel()
         try:
             health_servicer.set_not_serving()
         except Exception:  # broad: must not prevent server.stop() / shutdown()
             logger.warning("Failed to set health status to NOT_SERVING", exc_info=True)
-        await _drain_and_stop(server, async_llm, vllm_config.shutdown_timeout, inflight)
+        shutdown_timeout = 0 if engine_died else vllm_config.shutdown_timeout
+        await _drain_and_stop(server, async_llm, shutdown_timeout, inflight)
         logger.info("Shutdown complete")
+    if engine_died:
+        raise async_llm.dead_error
 
 
 def main():
