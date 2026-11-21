@@ -370,6 +370,9 @@ class QSAIndexer(nn.Module):
             single_row_decode=(
                 metadata.num_prefills == 0 and metadata.decode_query_len == 1
             ),
+            verify_rows_per_request=(
+                metadata.decode_query_len if metadata.num_prefills == 0 else 1
+            ),
         )
 
     def forward(

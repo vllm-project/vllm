@@ -13,6 +13,11 @@ from vllm.platforms import current_platform
 from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from .qsa_grouped_verify import (
+    grouped_verify_scorer_applies,
+    launch_qsa_mqa_paged_grouped,
+)
+
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 # Up to this many single-row decode requests, scoring row by row beats the
@@ -741,11 +746,16 @@ def qsa_mqa_paged(
     num_columns: int | None = None,
     score_scale: float | None = None,
     single_row_decode: bool = False,
+    rows_per_request: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute QSA scores directly from a paged compressed-key cache.
 
     `single_row_decode` marks a batch of decode requests with one query row
     each and no prefill. Small ones are scored row by row on gfx942.
+    `rows_per_request` > 1 marks decode rows that come in runs of that many
+    rows per request (MTP verify). They are scored by the grouped kernel
+    (`qsa_grouped_verify.py`), which reads each key tile once for the run.
+    Its scores differ from the tiled kernel only in the order of fp32 sums.
 
     Returns:
         `logits` `[rows, columns]` fp32 and `visible_blocks` `[rows]` int32.
@@ -785,6 +795,23 @@ def qsa_mqa_paged(
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
+        return logits, visible_blocks
+    if rows_per_request > 1 and grouped_verify_scorer_applies(
+        q, k_cache, rows_per_request
+    ):
+        launch_qsa_mqa_paged_grouped(
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            query_positions,
+            sequence_lengths,
+            compress_ratio,
+            logits,
+            visible_blocks,
+            float(score_divisor),
+            rows_per_request,
+        )
         return logits, visible_blocks
     if (
         single_row_decode
@@ -935,8 +962,15 @@ def qsa_select_paged_tokens(
     compress_ratio: int,
     out: torch.Tensor | None = None,
     single_row_decode: bool = False,
+    verify_rows_per_request: int = 1,
 ) -> torch.Tensor:
-    """Score, select, and expand QSA indices without host synchronization."""
+    """Score, select, and expand QSA indices without host synchronization.
+
+    `verify_rows_per_request` > 1 says that every row is a decode row and each
+    request has that many consecutive rows (MTP verify, no prefill in the
+    batch). Chunks then keep each request's rows together and take the grouped
+    verify scorer.
+    """
     rows = q.shape[0]
     output_width = token_topk + compress_ratio - 1
     if out is None:
@@ -949,6 +983,8 @@ def qsa_select_paged_tokens(
     columns = page_table.shape[1] * k_cache.shape[1]
     block_topk = token_topk // compress_ratio
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
+    if verify_rows_per_request > 1 and rows_per_chunk >= verify_rows_per_request:
+        rows_per_chunk -= rows_per_chunk % verify_rows_per_request
     chunk_rows = min(rows, rows_per_chunk)
     blocks_buffer = torch.empty(
         (chunk_rows, block_topk), dtype=torch.int32, device=q.device
@@ -968,6 +1004,7 @@ def qsa_select_paged_tokens(
             sequence_lengths,
             compress_ratio,
             single_row_decode=single_row_decode,
+            rows_per_request=verify_rows_per_request,
         )
         blocks = blocks_buffer[: row_end - row_start]
         use_cooperative_topk = (
