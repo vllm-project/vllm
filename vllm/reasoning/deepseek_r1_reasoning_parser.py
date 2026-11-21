@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.v1.token_buffer import rfind_tokens
 
 
 class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
@@ -13,6 +14,8 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
     The DeepSeek R1 model uses <think>...</think> tokens to denote reasoning
     text. This parser extracts the reasoning content from the model output.
     """
+
+    _prompt_opens_reasoning = False
 
     @property
     def start_token(self) -> str:
@@ -23,6 +26,27 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
     def end_token(self) -> str:
         """The token that ends reasoning content."""
         return "</think>"
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        last_marker = rfind_tokens(
+            prompt_token_ids, (self.start_token_id, self.end_token_id)
+        )
+        self._prompt_opens_reasoning = (
+            last_marker >= 0 and prompt_token_ids[last_marker] == self.start_token_id
+        )
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if not self._prompt_opens_reasoning:
+            return super().count_reasoning_tokens(token_ids)
+
+        # Count tokens before the first generated reasoning tag.
+        first_marker = len(token_ids)
+        for marker_id in (self.end_token_id, self.start_token_id):
+            try:
+                first_marker = token_ids.index(marker_id, 0, first_marker)
+            except ValueError:
+                continue
+        return first_marker + super().count_reasoning_tokens(token_ids[first_marker:])
 
     def extract_reasoning_streaming(
         self,
