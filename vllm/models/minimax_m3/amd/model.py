@@ -58,7 +58,6 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     RoutedExperts,
     RoutedScaleMode,
-    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
@@ -98,11 +97,11 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    extract_layer_index,
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_fuse_shared_experts,
     maybe_prefix,
     pp_splits_layer_sharing,
     spec_decode_needs_target_embed,
@@ -423,26 +422,6 @@ def _aiter_moe_fused_shared_experts_enabled(
         and is_fused_shared_expert_enabled
         and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
     )
-
-
-def _redirect_fused_shared_experts(
-    weights: Iterable[tuple[str, torch.Tensor]], model: nn.Module
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Load fused shared experts into the routed slot after the local experts."""
-    shared_id = model.config.num_local_experts
-    for name, weight in weights:
-        if (
-            ".shared_experts." in name
-            and extract_layer_index(name) in model.fused_shared_expert_layers
-        ):
-            name = name.replace(
-                ".shared_experts.gate_proj.", f".experts.{shared_id}.w1."
-            )
-            name = name.replace(".shared_experts.up_proj.", f".experts.{shared_id}.w3.")
-            name = name.replace(
-                ".shared_experts.down_proj.", f".experts.{shared_id}.w2."
-            )
-        yield name, weight
 
 
 class MiniMaxM3MoE(nn.Module):
@@ -2098,21 +2077,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Checkpoint experts use w1=gate, w2=down, w3=up. When fusing the shared
-        # expert, include the appended slot (id == num_local_experts).
-        # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
-        num_experts = self.config.num_local_experts
-        if self.fused_shared_expert_layers:
-            num_experts += 1
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=num_experts,
-        )
-
 
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
@@ -2161,7 +2125,21 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             self.model.fused_shared_expert_layers
             and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         ):
-            redirect = partial(_redirect_fused_shared_experts, model=self.model)
+            # Fused shared experts load into the routed slot after the local
+            # experts; the routed experts name them w1=gate, w2=down, w3=up.
+            redirect = partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=config.num_local_experts,
+                n_shared_experts=1,
+                fused_shared_expert_layers=self.model.fused_shared_expert_layers,
+                ckpt_prefix="block_sparse_moe.shared_experts",
+                experts_prefix="block_sparse_moe.experts",
+                ckpt_proj_names={
+                    "gate_proj": "w1",
+                    "up_proj": "w3",
+                    "down_proj": "w2",
+                },
+            )
             transforms = WeightsMapper(weights_transforms=[redirect])
             self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -2190,9 +2168,6 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -2406,9 +2381,6 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def get_model_state_cls(self):
         return self.language_model.get_model_state_cls()
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.language_model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

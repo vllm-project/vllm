@@ -1132,6 +1132,20 @@ def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     assert redirected("layers.29.mlp.shared_expert.down_proj.weight", dict_layers)
     assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_layers)
 
+    # A single shared expert is only renamed, including 0-D per-tensor scales.
+    scale = torch.tensor(2.0)
+    [(out_name, out_weight)] = list(
+        maybe_fuse_shared_experts(
+            [("layers.0.mlp.shared_expert.down_proj.weight_scale", scale)],
+            n_routed_experts=4,
+            n_shared_experts=1,
+            fused_shared_expert_layers=list_layers,
+            ckpt_prefix="mlp.shared_expert",
+        )
+    )
+    assert out_name == "layers.0.mlp.experts.4.down_proj.weight_scale"
+    assert out_weight is scale
+
 
 @pytest.mark.parametrize(
     ("enable_expert_parallel", "match"),
@@ -1335,7 +1349,16 @@ def _load_minimax_m3_weights(
     model: nn.Module, weights: list[tuple[str, torch.Tensor]]
 ) -> set[str]:
     """Load like `MiniMaxM3SparseForCausalLM`; the inner model has no loader."""
-    redirect = partial(minimax_m3_model._redirect_fused_shared_experts, model=model)
+    # As `MiniMaxM3SparseForCausalLM`'s weights mapper with fused shared experts.
+    redirect = partial(
+        maybe_fuse_shared_experts,
+        n_routed_experts=model.config.num_local_experts,
+        n_shared_experts=1,
+        fused_shared_expert_layers=model.fused_shared_expert_layers,
+        ckpt_prefix="block_sparse_moe.shared_experts",
+        experts_prefix="block_sparse_moe.experts",
+        ckpt_proj_names={"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"},
+    )
     mapper = minimax_m3_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
     mapper = mapper | WeightsMapper(weights_transforms=[redirect])
     return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
@@ -1678,6 +1701,22 @@ def test_models_fse_init(
             with set_current_vllm_config(vllm_config):
                 if model_type == "minimax_m3":
                     loaded = _load_minimax_m3_weights(model, checkpoint)
+                elif model_type in (
+                    "deepseek_v2",
+                    "AXK1",
+                    "glm4_moe_lite",
+                    "deepseek_v32",
+                    "glm5_next",
+                ):
+                    # As the transform of their `ForCausalLM`'s weights mapper.
+                    loaded = model.load_weights(
+                        maybe_fuse_shared_experts(
+                            checkpoint,
+                            n_routed_experts=config.n_routed_experts,
+                            n_shared_experts=config.n_shared_experts or 1,
+                            fused_shared_expert_layers=model.fused_shared_expert_layers,
+                        )
+                    )
                 else:
                     loaded = model.load_weights(checkpoint)
                 base = config.num_hidden_layers

@@ -6,7 +6,11 @@ import regex
 import torch
 
 from vllm.model_executor.models.deepseek_v2 import DeepseekV3ForCausalLM
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_fuse_shared_experts,
+)
 
 
 class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
@@ -88,5 +92,16 @@ class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
     # class's load_weights is a thin wrapper around AutoWeightsLoader, and
     # we must apply hf_to_vllm_mapper before the loader walks the tree.
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # The fused shared expert transform matches vLLM names, while a mapper
+        # runs its transforms before its renames: rename with the class mapper
+        # first (not the instance's, which also holds the transform; subclasses
+        # such as Eagle extend it), then fuse the shared experts.
+        weights = type(self).hf_to_vllm_mapper.apply(weights)
+        weights = maybe_fuse_shared_experts(
+            weights,
+            n_routed_experts=self.config.n_routed_experts,
+            n_shared_experts=self.config.n_shared_experts or 1,
+            fused_shared_expert_layers=self.model.fused_shared_expert_layers,
+        )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights)

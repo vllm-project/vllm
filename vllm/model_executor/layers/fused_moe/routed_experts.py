@@ -1188,7 +1188,9 @@ class RoutedExperts(PluggableLayer):
             lora_base_layer_prefix_on_param_name=prefix,
         )
 
-        # All MoE layers of a model share the same FSE and quantization setup.
+        # Takes the first layer's online staging redirect: only valid when all MoE
+        # layers share the same FSE and quantization setup (e.g. a single MoE
+        # layer, as in MTP). Otherwise, load through each `RoutedExperts`.
         routed_experts = next(
             (m for m in model.modules() if isinstance(m, RoutedExperts)), None
         )
