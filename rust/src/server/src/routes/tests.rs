@@ -8569,6 +8569,95 @@ async fn non_stream_completions_include_prompt_logprobs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_completions_echo_cuts_prompt_top_logprobs_to_logprobs() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-completion-echo-top-logprobs".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request = decode_add_request(&add);
+                // Like engine rows, each prompt token also shows up among its
+                // own top-k, followed by a candidate past the `logprobs` cut.
+                let mut prompt_logprobs = prompt_logprobs_for_hello();
+                for position in &mut prompt_logprobs.positions {
+                    position.entries.insert(1, position.entries[0].clone());
+                    position.entries.push(TokenLogprob {
+                        token_id: b'x' as u32,
+                        logprob: -2.0,
+                        rank: 3,
+                    });
+                }
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output_with_logprobs(
+                            &request.request_id,
+                            vec![b'h' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                            None,
+                            Some(sample_logprobs_for_token(b'h' as u32, b'H' as u32)),
+                            Some(prompt_logprobs),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    // `prompt_logprobs` asks the engine for more prompt candidates than
+    // `logprobs`; like Python, echoed rows still keep `logprobs + 1` distinct
+    // tokens, while the choice-level `prompt_logprobs` keeps them all.
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "echo": true,
+            "logprobs": 1,
+            "prompt_logprobs": 2,
+            "add_special_tokens": false
+        }),
+    )
+    .await;
+    engine_task.await.expect("mock engine task");
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let choice = &json["choices"][0];
+    expect_test::expect![[r#"
+        top_logprobs: [null,{"e":-0.3,"a":-0.5},{"l":-0.4,"r":-0.6},{"l":-0.45,"i":-0.65},{"o":-0.5,"u":-0.7},{"h":-0.1,"H":-0.2}]
+        prompt_logprobs[1]: {"101":{"logprob":-0.3,"rank":1,"decoded_token":"e"},"97":{"logprob":-0.5,"rank":2,"decoded_token":"a"},"120":{"logprob":-2.0,"rank":3,"decoded_token":"x"}}"#]].assert_eq(&format!(
+        "top_logprobs: {}\nprompt_logprobs[1]: {}",
+        choice["logprobs"]["top_logprobs"], choice["prompt_logprobs"][1]
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_completions_still_succeed() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();

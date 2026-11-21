@@ -242,6 +242,7 @@ async fn collect_completion(
         prompt_only,
         requested_logprobs,
         include_prompt_logprobs,
+        top_logprobs_limit,
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,
@@ -267,6 +268,7 @@ async fn collect_completion(
             prompt,
             collected.prompt_token_ids.as_ref(),
             return_tokens_as_token_ids,
+            top_logprobs_limit,
         )?)
     } else if requested_logprobs.is_some() {
         Some(collected_logprobs_to_openai(
@@ -274,6 +276,7 @@ async fn collect_completion(
             echo.is_some(),
             prompt_char_count,
             return_tokens_as_token_ids,
+            top_logprobs_limit,
         )?)
     } else {
         None
@@ -375,6 +378,7 @@ async fn completion_chunk_stream(
         requested_logprobs,
         // Ignored: streaming prompt logprobs are rejected for Python parity.
         include_prompt_logprobs: _,
+        top_logprobs_limit,
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,
@@ -439,6 +443,7 @@ async fn completion_chunk_stream(
                             prompt,
                             prompt_token_ids.as_ref(),
                             return_tokens_as_token_ids,
+                            top_logprobs_limit,
                         ) {
                             Ok(logprobs) => Some(logprobs),
                             // The update that follows may be the engine's error,
@@ -717,9 +722,15 @@ fn echoed_prompt_logprobs_to_openai(
     prompt: &str,
     prompt_token_ids: &[u32],
     return_tokens_as_token_ids: bool,
+    top_logprobs_limit: Option<usize>,
 ) -> Result<LogProbs, ApiError> {
     if let Some(prompt_logprobs) = prompt_logprobs {
-        return decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids);
+        return decoded_prompt_logprobs_to_openai(
+            prompt_logprobs,
+            0,
+            return_tokens_as_token_ids,
+            top_logprobs_limit,
+        );
     }
 
     if let [token_id] = prompt_token_ids {

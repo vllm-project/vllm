@@ -39,6 +39,7 @@ pub fn decoded_logprobs_to_openai(
         top_logprobs.push(Some(position_top_logprobs_map(
             position,
             return_tokens_as_token_ids,
+            None,
         )));
     }
 
@@ -51,7 +52,7 @@ pub fn decoded_logprobs_to_openai(
 }
 
 /// Convert decoded prompt logprobs into the OpenAI completions `logprobs`
-/// shape.
+/// shape, keeping the first `top_logprobs_limit` candidates per position.
 ///
 /// The first prompt token is included with `None` logprob metadata, matching
 /// Python vLLM's echoed completions behavior.
@@ -59,6 +60,7 @@ pub fn decoded_prompt_logprobs_to_openai(
     prompt_logprobs: &DecodedPromptLogprobs,
     initial_text_offset: u32,
     return_tokens_as_token_ids: bool,
+    top_logprobs_limit: Option<usize>,
 ) -> Result<LogProbs, ApiError> {
     let mut text_offset = Vec::with_capacity(prompt_logprobs.scored_positions.len() + 1);
     let mut token_logprobs = Vec::with_capacity(prompt_logprobs.scored_positions.len() + 1);
@@ -90,6 +92,7 @@ pub fn decoded_prompt_logprobs_to_openai(
         top_logprobs.push(Some(position_top_logprobs_map(
             position,
             return_tokens_as_token_ids,
+            top_logprobs_limit,
         )));
     }
 
@@ -193,6 +196,7 @@ pub fn collected_logprobs_to_openai(
     echoed_prompt: bool,
     initial_completion_offset: u32,
     return_tokens_as_token_ids: bool,
+    top_logprobs_limit: Option<usize>,
 ) -> Result<LogProbs, ApiError> {
     if echoed_prompt {
         let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
@@ -200,8 +204,12 @@ pub fn collected_logprobs_to_openai(
                 "echoed completion logprobs require prompt logprobs but generation returned none"
             )
         })?;
-        let prompt_logprobs =
-            decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids)?;
+        let prompt_logprobs = decoded_prompt_logprobs_to_openai(
+            prompt_logprobs,
+            0,
+            return_tokens_as_token_ids,
+            top_logprobs_limit,
+        )?;
         let completion_start = text_end_offset(&prompt_logprobs).unwrap_or(0);
         return match collected.logprobs.as_ref() {
             Some(completion_logprobs) => Ok(append_openai_logprobs(
@@ -235,16 +243,21 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
     }
 }
 
-/// Collecting keeps each key at its first position and the last value for it,
-/// like Python's dict, so a sampled token repeated among the top-k candidates,
-/// or two tokens decoding to the same string, yield one entry in Python's place.
+/// Keeps the first `limit` distinct token IDs, like Python slicing its dict
+/// keyed by token ID, so a sampled or prompt token repeated among the top-k
+/// candidates counts once. Collecting then keeps each string at its first
+/// position and the last value for it, like Python's dict, so two tokens
+/// decoding to the same string yield one entry.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
+    limit: Option<usize>,
 ) -> IndexMap<String, f32> {
     position
         .entries
         .iter()
+        .unique_by(|entry| entry.token_id)
+        .take(limit.unwrap_or(usize::MAX))
         .map(|entry| {
             (
                 format_token(entry, return_tokens_as_token_ids),
