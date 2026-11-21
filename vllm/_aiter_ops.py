@@ -1807,6 +1807,29 @@ def _rocm_aiter_group_fp8_quant_fake(
     return x_fp8, out_bs
 
 
+def _rocm_aiter_silu_and_mul_fp8_static_quant_impl(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    from aiter.ops.triton.quant.fused_fp8_quant import (
+        fused_silu_mul_fp8_per_tensor_static_quant,
+    )
+
+    out = fused_silu_mul_fp8_per_tensor_static_quant(
+        x.reshape(-1, x.shape[-1]), scale, dtype_quant=FP8_DTYPE
+    )
+    return out.view(*x.shape[:-1], x.shape[-1] // 2)
+
+
+def _rocm_aiter_silu_and_mul_fp8_static_quant_fake(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty(
+        (*x.shape[:-1], x.shape[-1] // 2), dtype=FP8_DTYPE, device=x.device
+    )
+
+
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -3603,6 +3626,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_silu_and_mul_fp8_static_quant",
+                op_func=_rocm_aiter_silu_and_mul_fp8_static_quant_impl,
+                fake_impl=_rocm_aiter_silu_and_mul_fp8_static_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_triton_add_rmsnorm_pad",
                 op_func=_rocm_aiter_triton_add_rmsnorm_pad_impl,
                 fake_impl=_rocm_aiter_triton_add_rmsnorm_pad_fake,
@@ -3747,6 +3776,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_act_mul_fused_fp8_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+    @staticmethod
+    def get_silu_mul_fused_fp8_static_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_silu_and_mul_fp8_static_quant.default
 
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:
