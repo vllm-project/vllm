@@ -22,6 +22,7 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
+    synthetic_argmax_verify,
 )
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
@@ -428,6 +429,71 @@ class RejectionSampler:
             else None
         )
         return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors
+
+    def can_skip_logits(self, input_batch: InputBatch) -> bool:
+        """Whether synthetic verification can run from the target argmax alone.
+
+        Requires that nothing reads the full logits (logprobs, NaN counts,
+        sampling masks, trace replay, watermarking, adaptive verification or
+        the FLy cost overlay) and that no request uses a logits processor
+        (penalties, logit bias, bad words, thinking budget, ...).
+        """
+        sampler = self.sampler
+        return (
+            self.synthetic_conditional_rates is not None
+            and self.fly_window_size == 0
+            and not self.enable_adaptive_verification
+            and self.watermark_key is None
+            and sampler.trace_replay_state is None
+            and not sampler.compute_nans
+            and not sampler.return_sampling_mask
+            and not np.any(sampler.uses_logits_processors[input_batch.idx_mapping_np])
+            and sampler.get_logprobs_dims(input_batch.idx_mapping_np) is None
+        )
+
+    def sample_synthetic(
+        self, top_tokens: torch.Tensor, input_batch: InputBatch
+    ) -> SamplerOutput:
+        """Synthetic verification from the target argmax of each logits row.
+
+        Accepts draft tokens with the same draws as `__call__`, so the
+        acceptance lengths are unchanged. The recovery or bonus token is the
+        target argmax from `top_tokens` (`[num_logits]` vocab ids), which is
+        what the greedy path samples; non-greedy requests are not resampled.
+        """
+        assert self.synthetic_conditional_rates is not None
+        draft_sampled, pos = gather_draft_sampled(
+            input_batch.input_ids,
+            input_batch.positions,
+            input_batch.logits_indices,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+        sampled, num_sampled = synthetic_argmax_verify(
+            top_tokens,
+            draft_sampled,
+            pos,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.sampling_states.seeds.gpu,
+            self.synthetic_conditional_rates,
+            self.num_speculative_steps,
+        )
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
 
     def __call__(
         self,

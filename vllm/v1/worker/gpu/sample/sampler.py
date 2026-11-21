@@ -86,6 +86,9 @@ class Sampler:
         # Whether processing may leave -inf in a request's logits (filters,
         # forcing, logits processors) rather than only scale them.
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
+        # Whether a logits processor or the thinking budget applies, i.e. the
+        # processed argmax can differ from the raw one.
+        self.uses_logits_processors = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -98,12 +101,13 @@ class Sampler:
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
-        may_mask = self.sampling_states.masks_logits(req_idx)
-        may_mask |= self.thinking_budget_state.add_request(req_idx, sampling_params)
+        processes = self.thinking_budget_state.add_request(req_idx, sampling_params)
         for processor in self.logits_processors:
-            may_mask |= processor.add_request(req_idx, sampling_params)
+            processes |= processor.add_request(req_idx, sampling_params)
+        may_mask = self.sampling_states.masks_logits(req_idx) or processes
         self.needs_logits_processing[req_idx] = needs_processing or may_mask
         self.may_mask_logits[req_idx] = may_mask
+        self.uses_logits_processors[req_idx] = processes
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:

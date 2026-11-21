@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
+    synthetic_argmax_verify,
 )
 
 VOCAB_SIZE = 4096
@@ -912,6 +913,56 @@ def test_synthetic_rejection_sample(
             f"Step {i}: observed rate {observed_rate:.4f} deviates from "
             f"expected rate {expected_rate:.4f} by more than {deviation_tol}."
         )
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_synthetic_argmax_verify_matches_rejection_sample(temperature: float):
+    """The logits-free synthetic path draws the same acceptance lengths as
+    `rejection_sample`, and the same tokens as its greedy branch."""
+    torch.manual_seed(0)
+    device = "cuda"
+    num_speculative_steps = 3
+    num_trials = 512
+    inputs = _build_rejection_sample_inputs(
+        torch.zeros(VOCAB_SIZE, device=device),
+        torch.zeros(VOCAB_SIZE, device=device),
+        num_speculative_steps,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    target_logits = torch.randn_like(inputs["target_logits"])
+    draft_sampled = inputs["draft_sampled"]
+    draft_sampled[torch.rand_like(draft_sampled, dtype=torch.float32) < 0.1] = -1
+    rates = torch.tensor(
+        unconditional_to_conditional_rates([0.9, 0.6, 0.3]),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    ref_sampled, ref_num_sampled = _rejection_sample(
+        **{**inputs, "target_logits": target_logits, "draft_logits": None},
+        num_speculative_steps=num_speculative_steps,
+        synthetic_conditional_rates=rates,
+    )
+    sampled, num_sampled = synthetic_argmax_verify(
+        target_logits.argmax(dim=-1),
+        draft_sampled,
+        inputs["pos"],
+        inputs["cu_num_logits"],
+        inputs["idx_mapping"],
+        inputs["seed"],
+        rates,
+        num_speculative_steps,
+    )
+
+    torch.testing.assert_close(num_sampled, ref_num_sampled)
+    assert 0 < (num_sampled - 1).float().mean() < num_speculative_steps
+    if temperature == 0.0:
+        valid = (
+            torch.arange(num_speculative_steps + 1, device=device)
+            < num_sampled[:, None]
+        )
+        torch.testing.assert_close(sampled[valid], ref_sampled[valid])
 
 
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
