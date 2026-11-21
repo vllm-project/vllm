@@ -5668,6 +5668,44 @@ async fn generate_text_output_mode_rejects_missing_tokenizer_and_detokenize_fals
     "#]].assert_debug_eq(&errors);
 }
 
+/// Stop strings are matched on decoded text, so a server without a tokenizer
+/// must reject them rather than silently never apply them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_stop_strings_without_tokenizer() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-rejects-stop-without-tokenizer",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::without_tokenizer()),
+    )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"stop": ["never"]},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("stop strings"),
+        "unexpected error: {json}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn chat_generation_config_overrides_reach_engine() {

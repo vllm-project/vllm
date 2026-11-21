@@ -332,9 +332,6 @@ class ModelConfig:
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
-    disable_cascade_attn: bool = True
-    """Deprecated: cascade attention has been removed, so this has no effect.
-    It will be removed in v0.33.0."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -461,6 +458,7 @@ class ModelConfig:
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_shm_cache_buffer_name: InitVar[str | None] = None
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
@@ -502,7 +500,6 @@ class ModelConfig:
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
-            "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
             "config_format",
@@ -518,6 +515,7 @@ class ModelConfig:
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
             "mm_shm_cache_max_object_size_mb",
+            "mm_shm_cache_buffer_name",
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
@@ -603,6 +601,7 @@ class ModelConfig:
         mm_processor_cache_type: MMCacheType | None,
         mm_hasher_algorithm: MMHasherAlgorithm | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_shm_cache_buffer_name: str | None,
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
@@ -904,6 +903,7 @@ class ModelConfig:
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_hasher_algorithm=mm_hasher_algorithm,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_shm_cache_buffer_name=mm_shm_cache_buffer_name,
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
