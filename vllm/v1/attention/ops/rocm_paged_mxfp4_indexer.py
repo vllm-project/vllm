@@ -10,29 +10,38 @@ candidate source takes its block maxima from the same walk that writes its
 logits, and the candidate consumers can walk the candidate pool instead of
 the whole context: the pool is resolved once per step and shared by all of
 them.
+
+With `VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK`, decode layers where aiter's
+fused FlyDSL op (`aiter.ops.flydsl.mxfp4_indexer_topk`) is faster score and
+select their top-512 in it instead of writing the logits; see
+`_fused_decode_topk`.
 """
 
 import functools
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
 )
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.metadata import _token_request
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
@@ -42,6 +51,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
+    from vllm.models.deepseek_v41.attention import DeepseekV4IndexerCache
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerPrefillChunkMetadata,
     )
@@ -51,6 +61,8 @@ if TYPE_CHECKING:
         RocmMxfp4NativeDecode,
         RocmMxfp4PrefillPlan,
     )
+
+logger = init_logger(__name__)
 
 MXFP4_BLOCK_SIZE = 32
 
@@ -70,6 +82,25 @@ def _aiter_topk() -> Callable[..., None]:
     from aiter.ops.topk import top_k_per_row_decode
 
     return top_k_per_row_decode
+
+
+@functools.cache
+def _aiter_fused_topk() -> ModuleType | None:
+    """The aiter module with the fused MXFP4 indexer top-512, or None when
+    `VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK` is off or aiter has no such op."""
+    if not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK):
+        return None
+    try:
+        from aiter.ops.flydsl import mxfp4_indexer_topk
+    except Exception as e:
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK is set, but "
+            "aiter.ops.flydsl.mxfp4_indexer_topk could not be imported (%s); "
+            "the indexer keeps the MQA logits + top-k path.",
+            e,
+        )
+        return None
+    return mxfp4_indexer_topk
 
 
 class RocmPagedMxfp4CacheLayout(NamedTuple):
@@ -415,11 +446,15 @@ def reserve_rocm_mxfp4_indexer_workspace(
     candidate_block_size: int = 0,
     gather_block_size: int = 0,
     num_candidate_cols: int = 0,
+    fused_kind: str | None = None,
 ) -> None:
     """Profiling run: claim the decode logits workspace and the peak prefill
     logits, block scores included when the layer writes them, candidate lists
-    when it gathers."""
+    when it gathers, and the fused top-k's scratch for a `fused_kind` layer."""
     rows = _max_decode_logits_rows(hidden_states.shape[0])
+    fused_bytes = _fused_topk_workspace_bytes(fused_kind, rows, logits_width)
+    if fused_bytes:
+        current_workspace_manager().get_simultaneous(((fused_bytes,), torch.uint8))
     specs = [((rows, logits_width), torch.float32)]
     budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     if candidate_block_size:
@@ -452,6 +487,7 @@ def _topk(
     out: torch.Tensor,
     k: int,
     step_rows: int | None = None,
+    stable: bool = False,
 ) -> None:
     """Top-k over each row's [0, lengths[row]); -1 pads rows shorter than k.
 
@@ -459,13 +495,15 @@ def _topk(
     that, a wide decode step is faster on vLLM's. Shape alone decides, so a FULL
     graph replays the same choice at every context length. `step_rows` is the
     decode step's row count when `logits` holds a TP rank's slice of it, so the
-    slice runs the kernel the whole step would.
+    slice runs the kernel the whole step would. `stable` returns the indices
+    in ascending order: aiter's kernel when it can run, else every row is at
+    most k wide, which vLLM's kernel writes in order.
     """
     rows, width = logits.shape
     if rows == 0:
         return
     kernel_rows = rows if step_rows is None else step_rows
-    if width >= k and not _vllm_topk(kernel_rows, k):
+    if width >= k and (stable or not _vllm_topk(kernel_rows, k)):
         _aiter_topk()(
             logits,
             1,
@@ -475,6 +513,7 @@ def _topk(
             logits.stride(0),
             logits.stride(1),
             k=k,
+            stable=stable,
         )
     else:
         torch.ops._C.top_k_per_row_decode(
@@ -675,12 +714,341 @@ def _dense_prefill(
     )
 
 
+# The candidate consumer's fused op beat the gather chain from this many
+# entries a row on; at 4096 it lost with few rows.
+_FUSED_CONSUMER_MIN_CTX = 16384
+# A captured consumer launch is bounded by the static bound, whatever the
+# rows' lengths. It beat the gather chain on 16K-128K-entry rows from this
+# bound up; at 128K and 256K bounds it mostly lost (to 0.54x) with over 160
+# rows of 8K-32K entries.
+_FUSED_CAPTURED_MIN_BOUND = 1 << 19
+# aiter's smallest launch tier, in entries a row; tiers double from it.
+_FUSED_MIN_TIER = 4096
+
+
+def _fused_topk_max_ctx(
+    mod: ModuleType,
+    kind: str,
+    rows: int,
+    step_bound: int,
+    static_bound: int,
+    captured: bool,
+) -> int | None:
+    """The fused op's `max_ctx` for a decode layer, or None to keep the chain.
+
+    `kind` is aiter's layer name: "dense", "source" (also writes the candidate
+    blocks) or "consumer" (selects among them). The bound sizes the launch, so
+    an eager step takes its own longest row. A captured launch replays at every
+    step: only the static bound fits them all, and there only the consumer was
+    measured ahead, from `_FUSED_CAPTURED_MIN_BOUND` up. Dense and source
+    layers follow aiter's measured crossover, `mxfp4_indexer_dense_preferred`.
+    """
+    if captured:
+        if kind != "consumer" or static_bound < _FUSED_CAPTURED_MIN_BOUND:
+            return None
+        max_ctx = static_bound
+    else:
+        max_ctx = max(1, min(step_bound, static_bound))
+    if kind == "consumer":
+        return max_ctx if max_ctx >= _FUSED_CONSUMER_MIN_CTX else None
+    source = kind == "source"
+    if mod.mxfp4_indexer_dense_preferred(max_ctx, rows, source=source):
+        return max_ctx
+    return None
+
+
+def _fused_topk_tiers(static_bound: int) -> list[int]:
+    """One `max_ctx` per launch tier a call bounded by `static_bound` can
+    take: aiter sizes its launches in power-of-two tiers of entries."""
+    tiers = {static_bound}
+    tier = _FUSED_MIN_TIER
+    while tier < static_bound:
+        tiers.add(tier)
+        tier *= 2
+    return sorted(tiers)
+
+
+@functools.cache
+def _fused_topk_workspace_bytes(
+    kind: str | None, max_rows: int, static_bound: int
+) -> int:
+    """The most scratch a `kind` layer's fused calls of up to `max_rows` rows
+    take; 0 when the op is off."""
+    mod = _aiter_fused_topk()
+    if mod is None or kind is None:
+        return 0
+    tiers = [
+        t for t in _fused_topk_tiers(static_bound) if t <= mod.MXFP4_INDEXER_MAX_ENTRIES
+    ]
+    return max(
+        (
+            mod.mxfp4_indexer_workspace_bytes(rows, t, kind)
+            for t in tiers
+            for rows in range(1, max_rows + 1)
+        ),
+        default=0,
+    )
+
+
+class RocmMxfp4FusedTopkKernel(VllmJitKernel["RocmMxfp4FusedTopkKernel.CompileKey"]):
+    """aiter's fused MXFP4 indexer top-512, which builds and loads a launch's
+    kernels on its first call. A graph captures only launches that already ran
+    (the rest keep the chain); the JIT warm-up runs every launch a decode step
+    can pick, so graphs get them and eager steps do not compile while serving.
+    """
+
+    @dataclass(frozen=True, slots=True)
+    class CompileKey:
+        kind: str
+        next_n: int
+        page_entries: int
+        max_ctx: int
+        rows: int
+
+    def get_warmup_keys(
+        self,
+        *,
+        kind: str,
+        k_cache: "DeepseekV4IndexerCache",
+        static_bound: int,
+        next_n: int,
+        max_rows: int,
+    ) -> list[CompileKey]:
+        mod = _aiter_fused_topk()
+        # The cache is bound after the layer registers.
+        kv = k_cache.kv_cache
+        if mod is None or kv.dim() != 3:
+            return []
+        page = kv.shape[1]
+        keys: dict[RocmMxfp4FusedTopkKernel.CompileKey, None] = {}
+        for rows in range(next_n, max_rows + 1, next_n):
+            for step_bound, captured in (
+                *((t, False) for t in _fused_topk_tiers(static_bound)),
+                (static_bound, True),
+            ):
+                max_ctx = _fused_topk_max_ctx(
+                    mod, kind, rows, step_bound, static_bound, captured
+                )
+                if max_ctx is not None and not mod.mxfp4_indexer_unsupported_reason(
+                    page, max_ctx, next_n
+                ):
+                    keys[self.CompileKey(kind, next_n, page, max_ctx, rows)] = None
+        return list(keys)
+
+    def compile(self, compile_key: CompileKey) -> None:
+        self.compile_many([compile_key])
+
+    def compile_many(self, compile_keys: Iterable[CompileKey]) -> None:
+        """Run each launch once on zero-length rows."""
+        mod = _aiter_fused_topk()
+        missing = [k for k in compile_keys if k not in self._compiled_cache]
+        if mod is None or not missing:
+            return
+        start = time.perf_counter()
+        rows = max(k.rows for k in missing)
+        heads, dim = mod.MXFP4_INDEXER_HEADS, mod.MXFP4_INDEXER_HEAD_DIM
+        width = dim // 2 + dim // MXFP4_BLOCK_SIZE
+
+        def zeros(*shape, dtype=torch.uint8):
+            return torch.zeros(shape, dtype=dtype, device=current_platform.device_type)
+
+        q = zeros(rows, heads, dim // 2)
+        q_scale = zeros(rows, heads, dim // MXFP4_BLOCK_SIZE)
+        weights = zeros(rows, heads, dtype=torch.float32)
+        block_table = zeros(rows, 1, dtype=torch.int32)
+        row_ends = zeros(rows, dtype=torch.int32)
+        out = zeros(rows, mod.MXFP4_INDEXER_TOPK, dtype=torch.int32)
+        candidates = zeros(rows, mod.MXFP4_INDEXER_CANDIDATES, dtype=torch.int32) - 1
+        for key in missing:
+            n = key.rows
+            self.launch(
+                mod,
+                key,
+                q[:n],
+                q_scale[:n],
+                weights[:n],
+                zeros(1, key.page_entries, 1, width),
+                block_table[: n // key.next_n],
+                row_ends[:n],
+                None if key.kind == "dense" else candidates[:n],
+                out[:n],
+            )
+        torch.accelerator.synchronize()
+        logger.info(
+            "Ran %d fused MXFP4 indexer top-k launches in %.1fs.",
+            len(missing),
+            time.perf_counter() - start,
+        )
+
+    def launch(
+        self,
+        mod: ModuleType,
+        key: CompileKey,
+        q: torch.Tensor,
+        q_scale: torch.Tensor,
+        weights: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        row_ends: torch.Tensor,
+        candidates: torch.Tensor | None,
+        out: torch.Tensor,
+    ) -> bool:
+        """Launch the fused op; False (nothing launched) when the launch never
+        ran before and the stream is capturing."""
+        if key not in self._compiled_cache and torch.cuda.is_current_stream_capturing():
+            return False
+        nbytes = mod.mxfp4_indexer_workspace_bytes(key.rows, key.max_ctx, key.kind)
+        workspace = None
+        if nbytes:
+            (workspace,) = current_workspace_manager().get_simultaneous(
+                ((nbytes,), torch.uint8)
+            )
+        args = (q, q_scale, weights, kv, block_table, row_ends)
+        if key.kind == "consumer":
+            assert candidates is not None
+            mod.flydsl_mxfp4_indexer_candidate_topk(
+                *args,
+                candidates,
+                out,
+                next_n=key.next_n,
+                max_ctx=key.max_ctx,
+                workspace=workspace,
+            )
+        else:
+            mod.flydsl_mxfp4_indexer_topk(
+                *args,
+                out,
+                next_n=key.next_n,
+                max_ctx=key.max_ctx,
+                candidates_out=candidates,
+                workspace=workspace,
+            )
+        self._compiled_cache[key] = True
+        return True
+
+
+_ROCM_MXFP4_FUSED_TOPK_KERNEL = RocmMxfp4FusedTopkKernel()
+
+
+def register_rocm_mxfp4_fused_topk_warmup(
+    kind: str | None, k_cache: "DeepseekV4IndexerCache", static_bound: int
+) -> None:
+    """Register a decode layer's fused top-k launches for the JIT warm-up. Call
+    from the layer's constructor; `static_bound` is its row bound in entries.
+
+    The warm-up runs outside any config context, so the decode row bound is
+    taken here, the one the profile run reserves the op's scratch for.
+    """
+    if kind is None or not envs.VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK:
+        return
+    vllm_config = get_current_vllm_config()
+    spec = vllm_config.speculative_config
+    # Steps without next_n-row requests (no speculation, adaptive
+    # verification) never take the fused op.
+    if (
+        not vllm_config.kernel_config.enable_jit_warmup
+        or spec is None
+        or spec.enable_adaptive_verification
+    ):
+        return
+    next_n = spec.num_speculative_tokens + 1
+    max_rows = _max_decode_logits_rows(
+        vllm_config.scheduler_config.max_num_batched_tokens, vllm_config
+    )
+    _ROCM_MXFP4_FUSED_TOPK_KERNEL.register_warmup(
+        kind=kind,
+        k_cache=k_cache,
+        static_bound=static_bound,
+        next_n=next_n,
+        max_rows=max_rows - max_rows % next_n,
+    )
+
+
+def _fused_decode_topk(layer: _Layer, kind: str, static_bound: int) -> bool:
+    """Score and select the decode rows' top-k with aiter's fused op if it
+    serves this step, writing `layer.topk_buffer` (and, for the source, the
+    candidate blocks). False leaves the step to the logits + top-k chain.
+
+    Host values decide, so a captured graph replays its choice. Only steps of
+    next_n-row requests (`decode_native`) are served, the case aiter measured.
+    """
+    mod = _aiter_fused_topk()
+    metadata = layer.metadata
+    native, lengths = metadata.decode_native, metadata.decode_row_lens
+    if mod is None or native is None or lengths is None or lengths.shape[0] == 0:
+        return False
+    rows = lengths.shape[0]
+    max_ctx = _fused_topk_max_ctx(
+        mod,
+        kind,
+        rows,
+        metadata.max_seq_len // layer.compress_ratio,
+        static_bound,
+        layer.full_graph or torch.cuda.is_current_stream_capturing(),
+    )
+    kv = layer.kv
+    if max_ctx is None or mod.mxfp4_indexer_unsupported_reason(
+        kv.shape[1],
+        max_ctx,
+        native.next_n,
+        layer.num_heads,
+        layer.head_dim,
+        layer.topk_tokens,
+    ):
+        return False
+    out = layer.topk_buffer[:rows]
+    candidates = None
+    if kind != "dense":
+        assert layer.candidates is not None
+        candidates = layer.candidates[:rows]
+        if (
+            layer.block != mod.MXFP4_INDEXER_CANDIDATE_BLOCK
+            or candidates.shape[1] != mod.MXFP4_INDEXER_CANDIDATES
+            or candidates.dtype != torch.int32
+            or not candidates.is_contiguous()
+        ):
+            return False
+    q, q_scale, weights = layer.q[:rows], layer.q_scale[:rows], layer.weights[:rows]
+    # aiter raises on any other layout; those steps keep the chain.
+    block_table = native.block_table
+    if (
+        out.shape[1] != layer.topk_tokens
+        or kv.stride(0) % 16
+        or q.dtype != torch.uint8
+        or q_scale.dtype not in (torch.uint8, torch.int32)
+        or weights.dtype != torch.float32
+        or any(t.dtype != torch.int32 for t in (lengths, out, block_table))
+        or block_table.stride(1) != 1
+        or not all(t.is_contiguous() for t in (out, q, q_scale, weights, lengths))
+    ):
+        return False
+    key = RocmMxfp4FusedTopkKernel.CompileKey(
+        kind, native.next_n, kv.shape[1], max_ctx, rows
+    )
+    return _ROCM_MXFP4_FUSED_TOPK_KERNEL.launch(
+        mod, key, q, q_scale, weights, kv, block_table, lengths, candidates, out
+    )
+
+
+def rocm_mxfp4_fused_topk_kind(
+    candidate_blocks: torch.Tensor | None, candidate_write: bool
+) -> str | None:
+    """A dense-indexer layer's kind for the fused op; None for a consumer
+    masked to the pool, which keeps the chain."""
+    if candidate_write:
+        return "source"
+    return "dense" if candidate_blocks is None else None
+
+
 def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> None:
     metadata = layer.metadata
     lengths = metadata.decode_row_lens
     assert metadata.decode is not None and lengths is not None
     rows = lengths.shape[0]
     if rows == 0:
+        return
+    kind = rocm_mxfp4_fused_topk_kind(layer.candidates, candidate_write)
+    if kind is not None and _fused_decode_topk(layer, kind, logits_width):
         return
     specs = [((rows, logits_width), torch.float32)]
     if candidate_write:
@@ -717,7 +1085,14 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
     candidates = None if layer.candidates is None else layer.candidates[:rows]
     if scores:
         assert candidates is not None and metadata.decode_block_ends is not None
-        _topk(scores[0], metadata.decode_block_ends, candidates, candidates.shape[1])
+        # The fused consumers take the candidate blocks in ascending order.
+        _topk(
+            scores[0],
+            metadata.decode_block_ends,
+            candidates,
+            candidates.shape[1],
+            stable=_aiter_fused_topk() is not None,
+        )
     elif candidates is not None:
         _apply_candidate_mask_strided(logits, None, lengths, candidates, layer.block)
     _topk(
@@ -875,6 +1250,7 @@ def rocm_mxfp4_sparse_attn_indexer(
             hidden_states,
             max_model_len,
             candidate_block_size if candidate_write else 0,
+            fused_kind=rocm_mxfp4_fused_topk_kind(candidate_blocks, candidate_write),
         )
         return topk_indices_buffer
     layer = _layer(
@@ -926,6 +1302,7 @@ def rocm_mxfp4_sparse_mqa_indexer(
             max(max_model_len, num_candidate_cols),
             gather_block_size=candidate_block_size,
             num_candidate_cols=num_candidate_cols,
+            fused_kind="consumer",
         )
         return topk_indices_buffer
     layer = _layer(
@@ -952,9 +1329,10 @@ def rocm_mxfp4_sparse_mqa_indexer(
     if metadata.decode is not None:
         decode = _decode_rank_rows(layer)
         # A FULL graph cannot follow the per-step gate; the gather is the side
-        # that stays flat in the context length.
+        # that stays flat in the context length, as is the fused op.
         if metadata.decode_use_gather or layer.full_graph:
-            _gather_decode(decode, num_candidate_cols)
+            if not _fused_decode_topk(decode, "consumer", max_model_len):
+                _gather_decode(decode, num_candidate_cols)
         else:
             _dense_decode(decode, max_model_len, candidate_write=False)
         _exchange_decode_rows(layer)
