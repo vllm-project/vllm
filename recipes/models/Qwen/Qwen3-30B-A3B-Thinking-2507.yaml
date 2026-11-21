@@ -1,0 +1,149 @@
+meta:
+  title: "Qwen3-30B-A3B-Thinking-2507"
+  slug: "qwen3-30b-a3b-thinking-2507"
+  provider: "Qwen"
+  description: "Thinking-only Qwen3 MoE model (30.5B total / 3.3B active) with a 262K context, with an AMD PTPC FP8 variant for Instinct GPUs"
+  date_added: 2026-11-09
+  date_updated: 2026-11-09
+  tasks:
+    - text
+  performance_headline: ""
+  related_recipes:
+    - "Qwen/Qwen3-30B-A3B"
+    - "Qwen/Qwen3-235B-A22B-Instruct-2507"
+  hardware: {}
+
+model:
+  model_id: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+  min_vllm_version: "0.10.0"
+  architecture: moe
+  parameter_count: "30.5B"
+  active_parameters: "3.3B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  reasoning:
+    description: "Separate the thinking trace from the answer with the Qwen3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 74
+    description: "Full precision BF16"
+  amd_ptpc_fp8:
+    model_id: "amd/Qwen3-30B-A3B-Thinking-2507-PTPC-FP8"
+    precision: fp8
+    label: "PTPC FP8 (AMD)"
+    # Weights are 31.2 GB on disk (lm_head, embeddings and router gates stay BF16): ceil(31.2 x 1.2).
+    vram_minimum_gb: 38
+    description: "AMD Quark FP8 with per-channel weight and per-token activation scales, for MI300X/MI325X/MI350X/MI355X"
+    supported_hardware: ["arch:gfx942", "arch:gfx950"]
+    # ROCM_AITER_FA keeps chunked and prefix-cached context only from #59098 (after v0.34.0).
+    min_vllm_version: "0.35.0"
+    tp: 1
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--block-size"
+      - "16"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+    hardware_overrides:
+      mi300x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+      mi325x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+      mi350x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+      mi355x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3-30B-A3B-Thinking-2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507)
+  is the July 2025 thinking-only update of Qwen3-30B-A3B: a mixture-of-experts model
+  with 30.5B total and 3.3B active parameters (128 experts, 8 active), 48 layers and
+  a native 262,144-token context. Unlike the hybrid
+  [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B), it always thinks: the
+  chat template opens the `<think>` block, so the output contains only the closing
+  `</think>`. The Qwen3 reasoning parser handles this and returns the trace in
+  `message.reasoning`.
+
+  ### AMD PTPC FP8 (MI300X / MI325X / MI350X / MI355X)
+
+  The PTPC FP8 (AMD) variant serves
+  [amd/Qwen3-30B-A3B-Thinking-2507-PTPC-FP8](https://huggingface.co/amd/Qwen3-30B-A3B-Thinking-2507-PTPC-FP8),
+  an AMD Quark checkpoint with per-channel FP8 weights and dynamic per-token FP8
+  activations. It runs on one GPU:
+
+  - The weights are 31.2 GB. With an FP8 KV cache a token takes 48 KiB
+    (48 layers x 4 KV heads x 128 x K and V), so a full 262,144-token sequence
+    needs 12 GiB. After the weights and warmup, one MI300X leaves at least
+    130 GiB of KV cache, about 2.9M tokens.
+  - `--attention-backend ROCM_AITER_FA` selects the AITER flash-attention backend,
+    and `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1` stores the KV cache in the layout
+    AITER's assembly paged-attention decode kernel reads.
+  - `--kv-cache-dtype fp8` stores the KV cache in FP8. The checkpoint has no KV
+    scales, so the scales default to 1.0.
+  - `--block-size 16` is required with the shuffle layout: the default of 64 fails
+    at startup, and AITER has no FP8 decode kernel for 32-token blocks.
+
+  The first AITER launch may take several minutes while ROCm kernels are compiled
+  and cached.
+
+  ## Client Usage
+
+  The model card recommends temperature 0.6, top-p 0.95 and top-k 20, and an output
+  budget of 32,768 tokens for most tasks (81,920 for competition math and code).
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+  response = client.chat.completions.create(
+      model="Qwen/Qwen3-30B-A3B-Thinking-2507",
+      messages=[{"role": "user", "content": "How many primes are there below 100?"}],
+      temperature=0.6,
+      top_p=0.95,
+      max_tokens=32768,
+      extra_body={"top_k": 20},
+  )
+  print(response.choices[0].message.reasoning)
+  print(response.choices[0].message.content)
+  ```
+
+  Use the served model id (for example `amd/Qwen3-30B-A3B-Thinking-2507-PTPC-FP8`)
+  as `model` when serving a variant.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507)
+  - [AMD PTPC FP8 checkpoint](https://huggingface.co/amd/Qwen3-30B-A3B-Thinking-2507-PTPC-FP8)
+  - [AMD Quark](https://quark.docs.amd.com/latest/index.html)
