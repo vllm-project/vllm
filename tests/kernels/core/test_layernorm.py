@@ -131,6 +131,36 @@ def test_rms_norm_weightless(
         )
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("add_residual", [False, True])
+@torch.inference_mode()
+def test_rms_norm_static_fp8_quant_empty_input(
+    dtype: torch.dtype, add_residual: bool
+) -> None:
+    x = torch.ones((1, 1024), dtype=dtype, device=CUDA_DEVICES[0])
+    out = torch.empty_like(x, dtype=FP8_DTYPE)
+    residual = torch.ones_like(x)
+    weight = torch.ones_like(x[0])
+    scale = torch.tensor(1.0, dtype=torch.float32, device=x.device)
+    expected_x = x.clone()
+    expected_out = out.clone()
+    expected_residual = residual.clone()
+
+    if add_residual:
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+            out[:0], x[:0], residual[:0], weight, scale, 1e-6
+        )
+    else:
+        torch.ops._C.rms_norm_static_fp8_quant(out[:0], x[:0], weight, scale, 1e-6)
+
+    probe = torch.ones(1, device=x.device)
+    torch.accelerator.synchronize()
+    assert probe.item() == 1.0
+    torch.testing.assert_close(x, expected_x, rtol=0, atol=0)
+    torch.testing.assert_close(out, expected_out, rtol=0, atol=0)
+    torch.testing.assert_close(residual, expected_residual, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)

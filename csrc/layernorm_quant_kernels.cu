@@ -216,6 +216,9 @@ void rms_norm_static_fp8_quant(
   int hidden_size = input.size(-1);
   int64_t input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
+  if (num_tokens == 0) {
+    return;
+  }
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
@@ -278,6 +281,9 @@ void fused_add_rms_norm_static_fp8_quant(
   int hidden_size = input.size(-1);
   int64_t input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
+  if (num_tokens == 0) {
+    return;
+  }
 
   dim3 grid(num_tokens);
   /* This kernel is memory-latency bound in many scenarios.
