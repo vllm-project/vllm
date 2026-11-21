@@ -139,6 +139,42 @@ class DeepSeekV3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        # Text before <｜tool▁calls▁begin｜> in the same delta is content.
+        content = ""
+        if self.tool_calls_start_token_id not in previous_token_ids:
+            content, start_token, rest = delta_text.partition(
+                self.tool_calls_start_token
+            )
+            if start_token:
+                delta_text = start_token + rest
+            else:
+                content = ""
+        delta = self._extract_tool_calls_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+            request,
+        )
+        if not content:
+            return delta
+        if delta is None:
+            return DeltaMessage(content=content)
+        delta.content = content + (delta.content or "")
+        return delta
+
+    def _extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+    ) -> DeltaMessage | None:
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
         # check to see if we should be streaming a tool call - is there a
