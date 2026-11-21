@@ -35,6 +35,14 @@ class HiSparseConfig:
     resident-only and evicted pages are copied to host at spill time. Prefill
     rows are always mirrored during the forward."""
 
+    host_pool_gib: float | None = Field(default=None, gt=0)
+    """Enable HiSparse with this host memory budget. vLLM adds
+    `HiSparseConnector` and, when prefix caching is enabled, an
+    `OffloadingConnector` for the indexer cache, and splits the budget so both
+    hold the same tokens: a prefix hit needs both. Any connector in
+    `--kv-transfer-config` (e.g. NIXL for P/D) is kept as written and composed
+    with them through `MultiConnector`."""
+
 
 @config
 class AttentionConfig:
@@ -167,9 +175,10 @@ class AttentionConfig:
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
-    Model Runner V2-only HiSparse DSA and QSA decode hot-buffering. It is inferred
-    with defaults when HiSparseConnector is configured (directly or via
-    MultiConnector); set it explicitly only to tune its fields."""
+    Model Runner V2-only HiSparse DSA and QSA decode hot-buffering. Set its
+    `host_pool_gib` to have vLLM configure HiSparse's KV connectors. It is
+    inferred with defaults when HiSparseConnector is configured (directly or via
+    MultiConnector)."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""

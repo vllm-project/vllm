@@ -95,3 +95,5 @@ class OffloadingConfig:
     canonical_layout: bool = False
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None
+    # Capacity in offloaded blocks to use when cpu_bytes_to_use is unset.
+    default_num_blocks: int | None = None

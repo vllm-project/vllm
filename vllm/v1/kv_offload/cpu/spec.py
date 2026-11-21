@@ -7,7 +7,7 @@ from typing_extensions import override
 from vllm.distributed.device_communicators.shm_broadcast import check_shm_free_space
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -45,6 +45,12 @@ def _all_workers_barrier() -> None:
     except AssertionError:
         group = get_world_group()
     group.barrier()
+
+
+def cpu_offload_uses_shared_region() -> bool:
+    return (
+        current_platform.is_cuda_alike() and not current_platform.is_rocm()
+    ) or current_platform.is_xpu()
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -115,8 +121,8 @@ class CPUOffloadingSpec(OffloadingSpec):
         if not 0 <= self.async_init_pin_pace < float("inf"):
             raise ValueError("async_init_pin_pace must be a finite number >= 0")
 
-        cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
-        if not cpu_bytes_to_use:
+        cpu_bytes_to_use = int(self.extra_config.get("cpu_bytes_to_use") or 0)
+        if not cpu_bytes_to_use and config.default_num_blocks is None:
             raise Exception(
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
@@ -148,6 +154,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
             self.num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            if not cpu_bytes_to_use:
+                assert config.default_num_blocks is not None
+                self.num_chunks = cdiv(config.default_num_blocks, self.blocks_per_chunk)
             if self.num_chunks < shared_row_chunks and config.parallel.rank == 0:
                 logger.info(
                     "Per-rank CPU offload regions page-align each rank's slot: "
@@ -211,9 +220,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
-        return (
-            current_platform.is_cuda_alike() and not current_platform.is_rocm()
-        ) or current_platform.is_xpu()
+        return cpu_offload_uses_shared_region()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None

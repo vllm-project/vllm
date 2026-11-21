@@ -37,6 +37,7 @@ def make_offloading_config(
     replicated_layout: bool = False,
     canonical_layout: bool = False,
     extra_config: dict[str, Any] | None = None,
+    default_num_blocks: int | None = None,
 ) -> OffloadingConfig:
     normalized_extra_config = dict(extra_config or {})
     if spec_name is not None:
@@ -77,4 +78,5 @@ def make_offloading_config(
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
+        default_num_blocks=default_num_blocks,
     )
