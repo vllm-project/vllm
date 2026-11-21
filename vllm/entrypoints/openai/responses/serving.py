@@ -30,6 +30,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_per_request_timing_metrics,
+    clamp_logprob,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -968,7 +969,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             out.append(
                 LogprobTopLogprob(
                     token=text,
-                    logprob=max(_logprob.logprob, -9999.0),
+                    logprob=clamp_logprob(_logprob.logprob),
                     bytes=self._token_bytes(token_id, text),
                 )
             )
@@ -998,7 +999,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             out.append(
                 Logprob(
                     token=text,
-                    logprob=max(token_logprob.logprob, -9999.0),
+                    logprob=clamp_logprob(token_logprob.logprob),
                     bytes=self._token_bytes(token_id, text),
                     top_logprobs=(
                         self._topk_logprobs(
