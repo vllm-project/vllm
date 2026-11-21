@@ -1952,3 +1952,22 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
+
+
+def register_model_config(
+    architecture: str, config_cls: type[VerifyAndUpdateConfig]
+) -> None:
+    """Register the config hook of an architecture (e.g. from a plugin), as
+    `MODELS_CONFIG_MAP` does for in-tree models. Like
+    `ModelRegistry.register_model`, a later registration overwrites an earlier
+    one; replacing a different hook logs a warning."""
+    existing = MODELS_CONFIG_MAP.get(architecture)
+    if existing is not None and existing is not config_cls:
+        logger.warning(
+            "Architecture %s already has the config hook %s, and it will be "
+            "overwritten by %s.",
+            architecture,
+            existing.__name__,
+            config_cls.__name__,
+        )
+    MODELS_CONFIG_MAP[architecture] = config_cls

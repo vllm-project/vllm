@@ -2092,7 +2092,13 @@ def _parse_range_ratio(value: str) -> RangeRatio:
 
 
 # Backends whose endpoint applies the chat template to the prompt it receives.
-CHAT_TEMPLATE_BACKENDS = ("openai-chat", "openai-responses", "vllm-chat")
+CHAT_TEMPLATE_BACKENDS = (
+    "openai-chat",
+    "openai-responses",
+    "vllm-chat",
+    "vllm-systemone",
+    "openai-decisions",
+)
 
 
 def get_samples(
