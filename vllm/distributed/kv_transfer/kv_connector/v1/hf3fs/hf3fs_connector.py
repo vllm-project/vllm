@@ -111,10 +111,11 @@ class AsyncOperationManager:
         self._numjobs = connector._numjobs
         self._max_device_buffer_count = connector._max_device_buffer_count
 
-        # Operation tracking. Each load future keeps the block ids submitted
-        # with it so a failed result can be reported with finished_recving.
+        # One request can submit several load batches. Each future keeps the
+        # block ids for that batch. The request is finished only when every
+        # batch has resolved, so an earlier failure is not overwritten.
         self._save_futures: dict[str, list[Future]] = {}
-        self._load_futures: dict[str, tuple[Future, list[int]]] = {}
+        self._load_futures: dict[str, list[tuple[Future, list[int]]]] = {}
         self._load_error_block_ids: set[int] = set()
         self._pending_finished_requests: set[str] = set()
 
@@ -188,8 +189,10 @@ class AsyncOperationManager:
         block_hashes = list(block_hashes)
         future: Future[Any] = Future()
         task = (request_id, block_ids, block_hashes, future)
+        # Track the batch before queueing it so a fast worker cannot finish
+        # the future before this request's batch list contains it.
+        self._load_futures.setdefault(request_id, []).append((future, block_ids))
         self._load_queue.put(task)
-        self._load_futures[request_id] = (future, block_ids)
         return future
 
     def get_finished_operations(
@@ -232,20 +235,22 @@ class AsyncOperationManager:
         return completed
 
     def _check_completed_loads(self) -> set[str]:
-        """Check for completed load operations.
+        """Return requests whose every load batch has finished.
 
-        A failed load is still completed: the request is returned to the
-        scheduler, and its block ids stay available until
-        `get_block_ids_with_load_errors` drains them in the same pass.
+        Failed batches still count as finished. Their block ids are latched
+        in this pass, which is the same pass that reports `finished_recving`.
+        A request with a batch still running stays out of both.
         """
         completed = set()
         for request_id in list(self._load_futures):
-            future, block_ids = self._load_futures[request_id]
-            if future.done():
+            entries = self._load_futures[request_id]
+            if not all(future.done() for future, _block_ids in entries):
+                continue
+            for future, block_ids in entries:
                 if not self._load_succeeded(future):
                     self._load_error_block_ids.update(block_ids)
-                completed.add(request_id)
-                self._load_futures.pop(request_id)
+            completed.add(request_id)
+            del self._load_futures[request_id]
         return completed
 
     def take_load_error_block_ids(self) -> set[int]:
@@ -701,9 +706,9 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Block ids whose load failed, latched by the latest `get_finished`.
 
-        The worker reads `get_transfer_results` before this method. Failures
-        are recorded while that call collects `finished_recving`, so the ids
-        are visible in the same pass and are not dropped with the future.
+        The worker reads `get_transfer_results` before this method. A request
+        with several batches is finished only after every batch resolves, and
+        each failed batch's block ids are recorded in that same pass.
         """
         manager = getattr(self, "_async_manager", None)
         if manager is None:

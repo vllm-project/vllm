@@ -451,6 +451,98 @@ class TestHF3FSLoadErrorBlockIds:
         assert finished == {"B"}
         assert errors == {5}
 
+    def test_earlier_failed_batch_is_kept_until_later_batch_finishes(self, open_loader):
+        """A later success must not drop an earlier batch's failed block ids.
+
+        `start_load_kv` submits one future per device-buffer batch under the
+        same request id. The request stays unfinished while any batch is
+        running, and the failed ids appear in the pass that finishes it.
+        """
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _locations(hashes: list) -> list:
+            if hashes == ["late"]:
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise TimeoutError("load gate was not released")
+                return [0]
+            return [None, None]
+
+        connector, services = open_loader(_locations)
+        manager = connector._async_manager
+        early = manager.submit_load_operation("B", [5, 6], ["early", "early2"])
+        late = manager.submit_load_operation("B", [7], ["late"])
+        try:
+            assert entered.wait(timeout=5)
+            assert early.result(timeout=10) is False
+            assert not late.done()
+            finished, errors = _poll_load(connector)
+            assert finished == set()
+            assert errors == set()
+        finally:
+            release.set()
+
+        assert late.result(timeout=10) is True
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == {5, 6}
+        assert connector.get_block_ids_with_load_errors() == set()
+        assert services.scattered == [[7]]
+
+    def test_every_failed_batch_is_reported(self, open_loader):
+        """Missing key and a later short read both contribute block ids."""
+
+        def _locations(hashes: list) -> list:
+            if hashes[0].startswith("late"):
+                return [0] * len(hashes)
+            return [None]
+
+        connector, services = open_loader(_locations, -1)
+        manager = connector._async_manager
+        early = manager.submit_load_operation("B", [5], ["early"])
+        late = manager.submit_load_operation("B", [8, 9], ["late0", "late1"])
+        assert early.result(timeout=10) is False
+        assert late.result(timeout=10) is False
+
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == {5, 8, 9}
+        assert services.scattered == []
+
+    def test_successful_batches_finish_together_without_errors(self, open_loader):
+        """Every successful batch scatters, and the request finishes once."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _locations(hashes: list) -> list:
+            if hashes == ["late"]:
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise TimeoutError("load gate was not released")
+                return [0]
+            return [0, 0]
+
+        connector, services = open_loader(_locations)
+        manager = connector._async_manager
+        early = manager.submit_load_operation("B", [1, 2], ["early", "early2"])
+        late = manager.submit_load_operation("B", [3], ["late"])
+        try:
+            assert entered.wait(timeout=5)
+            assert early.result(timeout=10) is True
+            finished, errors = _poll_load(connector)
+            assert finished == set()
+            assert errors == set()
+            assert services.scattered == [[1, 2]]
+        finally:
+            release.set()
+
+        assert late.result(timeout=10) is True
+        finished, errors = _poll_load(connector)
+        assert finished == {"B"}
+        assert errors == set()
+        assert services.scattered == [[1, 2], [3]]
+
     def test_connector_without_manager_returns_no_errors(self):
         """Scheduler-side construction has no async manager."""
 
