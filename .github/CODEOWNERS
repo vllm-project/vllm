@@ -14,6 +14,7 @@
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/determinism/ @yewentao256
 /vllm/model_executor/custom_op.py @shen-shanshan
+/vllm/model_executor/warmup @LopezCastroRoberto
 /vllm/ir @ProExpertProg
 /vllm/kernels/ @ProExpertProg @tjtanaa
 /vllm/kernels/helion @ProExpertProg @zou3519
@@ -196,7 +197,7 @@ mkdocs.yaml @hmellor
 
 # DeepseekV4-specific files
 /vllm/models/deepseek_v4 @zyongye
-/vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
+/vllm/model_executor/layers/sparse_attn_indexer.py @zyongye @LopezCastroRoberto
 
 # Kimi-K3-specific files
 /vllm/models/kimi_k3/nvidia/kda.py @gau-nernst
@@ -218,6 +219,9 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py @gau-nernst
 /vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py @gau-nernst
 /vllm/cute_utils @gau-nernst
+/vllm/model_executor/kernels/linear/cute_dsl @LopezCastroRoberto
+/csrc/quantization @LopezCastroRoberto
+/csrc/attention/dsa @LopezCastroRoberto
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa @dllehr-amd @shen-shanshan
