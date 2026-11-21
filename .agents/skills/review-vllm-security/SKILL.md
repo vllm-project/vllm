@@ -46,5 +46,5 @@ For a limit regression, use a small configured cap or a stubbed consumer.
 Check valid boundary behavior and rejection before expensive work. For
 shared-state changes, follow a failed or cancelled request with a valid one,
 or interleave two requests and verify their results and cleanup independently.
-See [Advisory evidence](references/advisory-evidence.md) for the review and
-published examples.
+See [Published advisory examples](references/advisory-evidence.md) for
+cases behind these checks.
