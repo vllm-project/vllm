@@ -21,6 +21,7 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (
     fused_post_conv_prep,
 )
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     rmsnorm_fn,
 )
@@ -37,6 +38,7 @@ def reference_post_conv(
     V: int,
     apply_l2norm: bool = True,
     output_g_exp: bool = False,
+    beta_scale: float = 1.0,
 ):
     """Reference implementation using individual ops."""
     L = conv_output.shape[0]
@@ -63,7 +65,7 @@ def reference_post_conv(
     if output_g_exp:
         g = torch.exp(g)
 
-    beta_out = torch.sigmoid(b.float())
+    beta_out = torch.sigmoid(b.float()) * beta_scale
 
     return q, k, v, g, beta_out
 
@@ -71,18 +73,21 @@ def reference_post_conv(
 # Qwen3.5-35B config: H=16, HV=32, K=128, V=128
 # Qwen3.5-397B config: H=16, HV=64, K=128, V=128
 @pytest.mark.parametrize(
-    "H, HV, K, V",
+    "H, HV, K, V, beta_scale",
     [
-        (16, 32, 128, 128),  # 35B
-        (16, 64, 128, 128),  # 397B
-        (4, 8, 64, 64),  # small
+        (16, 32, 128, 128, 1.0),  # 35B
+        (16, 64, 128, 128, 1.0),  # 397B
+        (4, 8, 64, 64, 1.0),  # small
+        (30, 30, 96, 192, 2.0),  # OLMo Hybrid
     ],
 )
 @pytest.mark.parametrize("L", [1, 16, 128, 512, 2048])
 @pytest.mark.parametrize("apply_l2norm", [True, False])
 @pytest.mark.parametrize("output_g_exp", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp, dtype):
+def test_fused_post_conv_correctness(
+    H, HV, K, V, beta_scale, L, apply_l2norm, output_g_exp, dtype
+):
     """Test fused kernel matches reference for all configs."""
     torch.manual_seed(42)
     device = "cuda"
@@ -106,6 +111,7 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
         V,
         apply_l2norm,
         output_g_exp,
+        beta_scale,
     )
 
     # Fused kernel
@@ -120,6 +126,8 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
         head_v_dim=V,
         apply_l2norm=apply_l2norm,
         output_g_exp=output_g_exp,
+        beta_scale=beta_scale,
+        use_unfused_math=beta_scale != 1.0,
     )
 
     # Check shapes
@@ -150,6 +158,13 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
     torch.testing.assert_close(fused_v, ref_v, atol=1e-3, rtol=1e-3)
     torch.testing.assert_close(fused_g, ref_g, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(fused_beta, ref_beta, atol=1e-4, rtol=1e-4)
+
+    if apply_l2norm and beta_scale != 1.0:
+        # Fusing preparation must preserve the unfused FLA normalization.
+        q_raw, k_raw, _ = conv_output.split([H * K, H * K, HV * V], dim=-1)
+        for actual, raw in ((fused_q, q_raw), (fused_k, k_raw)):
+            expected = l2norm_fwd(raw.reshape(L, H, K).contiguous())
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("L", [1, 64, 256])
