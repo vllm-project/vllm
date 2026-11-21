@@ -106,6 +106,24 @@ def test_broken_hw_agnostic_module_raises(monkeypatch, tmp_path):
         hw_agnostic.resolve("broken_port", "Layer")
 
 
+@pytest.mark.parametrize(
+    "module,name",
+    [
+        ("vocab_parallel_embedding", "VocabParallelEmbedding"),
+        ("vocab_parallel_embedding", "ParallelLMHead"),
+        ("logits_processor", "LogitsProcessor"),
+    ],
+)
+@pytest.mark.parametrize("use_hw_agnostic", [False, True])
+def test_resolves_ported_layer(monkeypatch, use_hw_agnostic, module, name):
+    """Each ported layer resolves to its hw-agnostic class only when enabled."""
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", str(int(use_hw_agnostic)))
+    package = "hw_agnostic.layers" if use_hw_agnostic else "layers"
+    expected = importlib.import_module(f"vllm.model_executor.{package}.{module}")
+
+    assert hw_agnostic.resolve(module, name) is getattr(expected, name)
+
+
 def test_act_and_mul_falls_back_for_unknown_activation(
     monkeypatch, default_vllm_config
 ):
