@@ -6872,7 +6872,6 @@ def test_retention_interval_zero_stores_only_replay_boundaries(
 def _mtp_config():
     """Speculative config for single-module MTP (L = 1)."""
     spec = MagicMock(name="mtp_spec")
-    spec.use_eagle.return_value = True
     spec.use_multi_module_mtp.return_value = False
     spec.num_speculative_tokens_per_batch_size = None
     spec.max_num_new_slots_for_drafting = 0
