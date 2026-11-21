@@ -35,6 +35,8 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both"},{"kv_connector":"ExampleConnector","kv_role":"kv_both","kv_connector_extra_config":{"shared_storage_path":"local_storage"}}]}}'
   ```
 
+  KV is saved to every connector but loaded from only one per request: the first connector in the list that reports any new matched tokens. Tokens it does not cover are computed locally, even if a later connector reported them, so the order matters. For example, on a decode instance with `[OffloadingConnector, NixlConnector]`, a CPU hit on the tail of a shared prefix that was evicted from GPU memory claims the request, and the decode instance recomputes the prompt tokens that NIXL would have transferred. Listing `NixlConnector` first avoids this. MultiConnector logs a warning, once per pair of connectors, when a later connector reported more tokens than the one it picked.
+
 - **OffloadingConnector**: enable offloading of KV data to CPU memory, customizing the CPU block size (in tokens) and total CPU memory bytes to allocate:
 
   ```bash
