@@ -47,6 +47,23 @@ class TestGemma4ChatTemplate:
         assert "How are you?" in result
         assert result.rstrip("\n").endswith("<|channel>thought\n<channel|>")
 
+    def test_no_empty_thought_on_past_model_turns(self, gemma4_template):
+        """With enable_thinking=False, only the generation prompt gets the
+        empty thought channel. Repeating it on past model turns makes the
+        model loop on empty thought channels until max_tokens."""
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+            {"role": "user", "content": "Can you help me?"},
+            {"role": "assistant", "content": "Sure."},
+            {"role": "user", "content": "How are you?"},
+        ]
+        result = _render(gemma4_template, messages, add_generation_prompt=True)
+        assert "<|turn>model\nHi there!" in result
+        assert "<|turn>model\nSure." in result
+        assert result.count("<|channel>thought\n<channel|>") == 1
+        assert result.rstrip("\n").endswith("<|channel>thought\n<channel|>")
+
     def test_basic_multiturn_thinking_enabled(self, gemma4_template):
         """With enable_thinking=True, generation prompt ends with model
         turn opener (no thought suppression)."""
