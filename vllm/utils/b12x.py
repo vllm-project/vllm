@@ -7,9 +7,12 @@ import importlib.util
 from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass, fields, is_dataclass
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 # Logical elements and encoded bytes per block.
 B12X_BLOCK_CODECS = {"iq2_xs": (256, 74), "iq2_xxs": (256, 66), "q8_0": (32, 34)}
@@ -94,6 +97,38 @@ def b12x_warmup_token_counts(
     if int(max_tokens) > 0:
         counts.add(int(max_tokens))
     return tuple(sorted(counts))
+
+
+def b12x_plan_capacity(vllm_config: "VllmConfig") -> tuple[int, tuple[int, ...]]:
+    """Return the largest row count the scheduler can send to a linear and the
+    CUDA graph capture sizes below it. Planning these at load time keeps b12x
+    from preparing an undeclared row count on first use after CUDA graph
+    capture. On GB10 that crashed NVFP4 W4A16 Nemotron-3.5-Bolt; it does not
+    reproduce with b12x alone yet, so there is no upstream issue to link."""
+    scheduler = vllm_config.scheduler_config
+    capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
+    capacity = max(
+        scheduler.max_num_batched_tokens,
+        scheduler.max_num_scheduled_tokens or 0,
+        *capture_sizes,
+    )
+    return capacity, tuple(sorted({m for m in capture_sizes if 0 < m < capacity}))
+
+
+def plan_b12x_blockscaled(
+    api: ModuleType,
+    vllm_config: "VllmConfig",
+    query_fields: dict[str, Any],
+    **plan_kwargs: Any,
+) -> tuple[Any, Any]:
+    """Plan a b12x blockscaled linear for every row count it can be called with.
+
+    `query_fields` are the `BlockscaledQuery` fields other than `num_tokens`;
+    `plan_kwargs` are passed to `plan_regimes`. Returns the query and its plan.
+    """
+    capacity, exact_m = b12x_plan_capacity(vllm_config)
+    query = api.BlockscaledQuery(num_tokens=capacity, **query_fields)
+    return query, api.plan_regimes(query, exact_m=exact_m, **plan_kwargs)
 
 
 def _same_packed_layout(current: Any, replacement: Any) -> bool:
