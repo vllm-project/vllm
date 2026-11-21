@@ -10,8 +10,9 @@ from typing import Any
 import pybase64
 import pytest
 import torch
+from transformers import GPT2Config
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
@@ -821,3 +822,62 @@ class TestRenderEmbedPrompt:
         assert len(results[0]["prompt_token_ids"]) == len(text_input)
         # Second should be embed prompt
         assert torch.equal(results[1]["prompt_embeds"], tensor_input)
+
+
+@pytest.fixture
+def prompt_embeds_renderer(tmp_path):
+    GPT2Config(n_embd=4, n_head=1, n_layer=1, n_positions=16).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        enable_prompt_embeds=True,
+        max_model_len=16,
+        dtype="float32",
+    )
+    renderer = HfRenderer(VllmConfig(model_config=model_config), tokenizer=None)
+    yield renderer
+    renderer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("batched", [False, True], ids=["2d", "singleton-batch"])
+@pytest.mark.parametrize("side,limit", [("left", 2), ("right", 2), ("left", 5)])
+async def test_prompt_embeds_shape_preserves_truncation(
+    prompt_embeds_renderer, use_async, batched, side, limit
+):
+    """Equivalent embedding shapes must retain the same prompt rows."""
+    embeds = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    prompt = {"prompt_embeds": embeds.unsqueeze(0) if batched else embeds}
+    params = TokenizeParams(
+        max_total_tokens=16,
+        truncate_prompt_tokens=limit,
+        truncation_side=side,
+    )
+    render = (
+        prompt_embeds_renderer.render_cmpl_async
+        if use_async
+        else prompt_embeds_renderer.render_cmpl
+    )
+    outputs = await render([prompt], params) if use_async else render([prompt], params)
+    expected = embeds[-limit:] if side == "left" else embeds[:limit]
+    assert torch.equal(outputs[0]["prompt_embeds"], expected)
+
+
+@pytest.mark.parametrize("shape", [(5, 4), (1, 5, 4)])
+def test_prompt_embeds_shape_preserves_length_limit(prompt_embeds_renderer, shape):
+    with pytest.raises(VLLMValidationError, match="contains 5 input tokens"):
+        prompt_embeds_renderer.render_cmpl(
+            [{"prompt_embeds": torch.zeros(shape)}],
+            TokenizeParams(max_total_tokens=3),
+        )
+
+
+@pytest.mark.parametrize("shape", [(2, 5, 4), (1, 1, 5, 4), (5,)])
+def test_prompt_embeds_truncation_rejects_invalid_shape(prompt_embeds_renderer, shape):
+    """Truncation must not turn an unsupported batch into a valid prompt."""
+    with pytest.raises(VLLMValidationError, match="shape"):
+        prompt_embeds_renderer.render_cmpl(
+            [{"prompt_embeds": torch.zeros(shape)}],
+            TokenizeParams(max_total_tokens=16, truncate_prompt_tokens=1),
+        )
