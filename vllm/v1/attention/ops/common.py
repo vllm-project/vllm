@@ -161,6 +161,50 @@ def pack_ue8m0_x4(scale):
     return ((scale.to(tl.int32, bitcast=True) >> 23) & 0xFF) * 0x01010101
 
 
+@triton.jit
+def e4m3_uint8_to_f32(code):
+    """Decode OCP E4M3FN bytes (`uint8`) to `float32` without native `fp8e4nv`.
+
+    Used on CUDA compute capability < 8.9 (e.g. SM80 Ampere) where Triton's
+    PTX backend does not support `tl.float8e4nv`. Handles normals, subnormals,
+    signed zero, and NaN without relying on FP32 subnormal multiplication.
+    """
+    c = code.to(tl.uint32)
+    sign_bit = (c & 0x80) << 24
+    exp = (c >> 3) & 0xF
+    mant = c & 0x7
+    normal_bits = sign_bit | ((exp + 120) << 23) | (mant << 20)
+    normal_val = normal_bits.to(tl.float32, bitcast=True)
+    sub_mag = mant.to(tl.float32) * (1.0 / 512.0)
+    sub_val = (sign_bit | sub_mag.to(tl.uint32, bitcast=True)).to(
+        tl.float32, bitcast=True
+    )
+    is_nan = (c & 0x7F) == 0x7F
+    nan_val = (sign_bit | 0x7FC00000).to(tl.float32, bitcast=True)
+    return tl.where(is_nan, nan_val, tl.where(exp == 0, sub_val, normal_val))
+
+
+@triton.jit
+def f32_to_e4m3_uint8(x):
+    """Encode `float32` to OCP E4M3FN bytes (`uint8`) without native `fp8e4nv`.
+
+    Saturating round-to-nearest-even matching
+    `x.clamp(-448.0, 448.0).to(torch.float8_e4m3fn).view(torch.uint8)`.
+    """
+    x_f32 = x.to(tl.float32)
+    bits = x_f32.to(tl.uint32, bitcast=True)
+    sign = (bits >> 24) & 0x80
+    ax = tl.minimum(tl.abs(x_f32), 448.0)
+    abits = ax.to(tl.uint32, bitcast=True)
+    lsb = (abits >> 20) & 1
+    normal_code = ((abits + 0x7FFFF + lsb) >> 20) - 960
+    magic = 12582912.0  # 1.5 * 2^23
+    sub_code = (ax * 512.0 + magic).to(tl.uint32, bitcast=True) - 0x4B400000
+    mag_code = tl.where(ax >= 0.015625, normal_code, sub_code)
+    code = tl.where(x_f32 != x_f32, sign | 0x7F, sign | mag_code)
+    return code.to(tl.uint8)
+
+
 def pack_seq_triton(
     x: torch.Tensor,
     lengths: torch.Tensor,

@@ -237,7 +237,13 @@ hardware and configuration.
 ### Decode Backends
 
 MLA decode backends are selected using the standard
-`-ac.backend=<BACKEND>` argument (e.g., `FLASHMLA`, `TRITON_MLA`).
+`-ac.backend=<BACKEND>` argument (e.g., `FLASHMLA`, `TRITON_MLA`,
+`TRITON_MLA_SPARSE`).
+
+For sparse MLA (DeepSeek Sparse Attention / DSA, used by DeepSeek-V3.2 and
+GLM-5.x), `TRITON_MLA_SPARSE` provides a Triton fallback on NVIDIA SM 8.x+
+(including Ampere A100/A800) with FP16/BF16 KV cache and pairs with a Triton
+FP8 MQA logits fallback in the sparse indexer when DeepGEMM is unavailable.
 
 --8<-- "gen:table-mla-decode"
 
