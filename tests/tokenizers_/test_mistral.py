@@ -152,6 +152,24 @@ class TestMistralTokenizer:
         )
         assert mistral_tokenizer.encode("", add_special_tokens=False) == []
 
+    @pytest.mark.parametrize("truncation_side", ["left", "right"])
+    @pytest.mark.parametrize("add_special_tokens", [False, True])
+    def test_encode_matches_call_with_truncation(
+        self, mistral_tokenizer, monkeypatch, truncation_side, add_special_tokens
+    ):
+        monkeypatch.setattr(
+            mistral_tokenizer.transformers_tokenizer,
+            "truncation_side",
+            truncation_side,
+        )
+        text = "Hello world !"
+        kwargs = {"max_length": 2, "add_special_tokens": add_special_tokens}
+        expected = mistral_tokenizer(text, truncation=True, **kwargs)["input_ids"]
+
+        assert mistral_tokenizer.encode(text, truncation=True, **kwargs) == expected
+        assert mistral_tokenizer.encode(text, **kwargs) == expected
+        assert mistral_tokenizer.encode(text, truncation=True, max_length=0) == []
+
     def test_call(self, mistral_tokenizer: MistralTokenizer):
         token_ids = (
             [1, 22177, 4304, 2662]
