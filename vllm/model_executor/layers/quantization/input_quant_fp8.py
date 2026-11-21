@@ -86,6 +86,7 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
+        is_padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.quantization.utils import fp8_utils
 
@@ -122,6 +123,13 @@ class QuantFP8(CustomOp):
             and scale_ub.numel() == 1
         )
 
+        if (
+            is_padding is not None
+            and not self.static
+            and self.group_shape.is_per_tensor()
+        ):
+            scale = fp8_utils.masked_per_tensor_fp8_scale(x, is_padding)
+
         return ops.scaled_fp8_quant(
             x,
             scale,
@@ -139,7 +147,16 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
+        is_padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            is_padding is not None
+            and not self.static
+            and self.group_shape.is_per_tensor()
+        ):
+            return QuantFP8.forward_cuda(
+                self, x, scale, scale_ub, use_triton, is_padding
+            )
         use_aiter_quant = self.use_aiter and scale_ub is None and x.is_contiguous()
         use_aiter_per_tensor_quant = (
             use_aiter_quant and self.group_shape.is_per_tensor()
@@ -167,6 +184,7 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
+        is_padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.is_group_quant and not self.static:
             from vllm.model_executor.layers.quantization.utils import fp8_utils
@@ -179,7 +197,7 @@ class QuantFP8(CustomOp):
                 use_ue8m0=self.use_ue8m0,
             )
         # Dispatch on the class, for the same reason as in forward_hip.
-        return QuantFP8.forward_cuda(self, x, scale, scale_ub, use_triton)
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub, use_triton, is_padding)
 
     def forward_native(
         self,
@@ -187,6 +205,7 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
+        is_padding: torch.Tensor | None = None,
     ):
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
@@ -205,13 +224,18 @@ class QuantFP8(CustomOp):
                 x_max = x_max.unsqueeze(-1).to(torch.float32)
                 if scale_ub is not None:
                     x_max = x_max.clamp(max=scale_ub)
+            elif is_padding is not None:
+                scale = self._masked_scale(x, is_padding, _FP8_MIN_SCALING_FACTOR)
+                x_max = None
             else:
                 x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
 
-            scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+            if x_max is not None:
+                scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
         else:
             scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
 
+        assert scale is not None
         # Even for dynamic per-token scales,
         # reciprocal performs slightly better than division
         out = (
@@ -229,6 +253,16 @@ class QuantFP8(CustomOp):
             out = F.pad(out, (0, 0, 0, padding), "constant", 0.0)
 
         return out, scale
+
+    def _masked_scale(
+        self, x: torch.Tensor, is_padding: torch.Tensor, min_scale: float
+    ) -> torch.Tensor:
+        # Mask after the row reduction so NaNs in unused rows cannot poison
+        # the scale, without creating a second full-sized activation tensor.
+        assert x.ndim == 2 and is_padding.shape == (x.shape[0],)
+        row_max = x.abs().amax(dim=-1).masked_fill(is_padding, 0)
+        amax = row_max.amax().float().reshape(1)
+        return (amax / _FP8_MAX).clamp(min=min_scale)
 
     def _quantize_group_native(
         self, x: torch.Tensor

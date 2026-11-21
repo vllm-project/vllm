@@ -8,6 +8,7 @@ from typing import Generic, TypeVar
 
 import torch
 
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -126,7 +127,20 @@ class FP8ScaledMMLinearKernel(
 
         x_2d_q = x_2d
         if qa is None:
-            x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
+            is_padding = None
+            if (
+                not self.quant_fp8.static
+                and self.quant_fp8.group_shape.is_per_tensor()
+                and is_forward_context_available()
+            ):
+                mask = get_forward_context().is_padding
+                # Reordered or sharded activations need their own row mapping.
+                if mask is not None and mask.shape == (x_2d.shape[0],):
+                    is_padding = mask
+            if is_padding is None:
+                x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
+            else:
+                x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub, is_padding=is_padding)
         return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,
