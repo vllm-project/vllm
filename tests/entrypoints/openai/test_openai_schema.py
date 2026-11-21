@@ -33,22 +33,8 @@ DEFAULT_TIMEOUT_SECONDS: Final[int] = 10 * _ROCM_TIMEOUT_MULTIPLIER
 LONG_TIMEOUT_SECONDS: Final[int] = 60 * _ROCM_TIMEOUT_MULTIPLIER
 
 
-def test_openapi_exposes_completion_response_schemas() -> None:
-    """The published 200 contract of both completion APIs must reference the
-    real response models, for the JSON body and for each SSE data chunk.
-
-    Uses the production app: FastAPI renames models used as both input and
-    output (-Input/-Output), which a router-only app cannot show.
-    """
+def _get_openapi_document() -> dict:
     from vllm.entrypoints.launchers.app import build_app
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionResponse,
-        ChatCompletionStreamResponse,
-    )
-    from vllm.entrypoints.openai.completion.protocol import (
-        CompletionResponse,
-        CompletionStreamResponse,
-    )
 
     args = Namespace(
         disable_fastapi_docs=False,
@@ -66,7 +52,26 @@ def test_openapi_exposes_completion_response_schemas() -> None:
     )
     # No lifespan: schema generation does not need an inference engine.
     client = TestClient(build_app(args, supported_tasks=("generate",)))
-    document = client.get("/openapi.json").json()
+    return client.get("/openapi.json").json()
+
+
+def test_openapi_exposes_completion_response_schemas() -> None:
+    """The published 200 contract of both completion APIs must reference the
+    real response models, for the JSON body and for each SSE data chunk.
+
+    Uses the production app: FastAPI renames models used as both input and
+    output (-Input/-Output), which a router-only app cannot show.
+    """
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionResponse,
+        ChatCompletionStreamResponse,
+    )
+    from vllm.entrypoints.openai.completion.protocol import (
+        CompletionResponse,
+        CompletionStreamResponse,
+    )
+
+    document = _get_openapi_document()
     message = {"role": "assistant", "content": "hi"}
     for path, unary, unary_choice, chunk, chunk_choice in (
         (
@@ -101,6 +106,132 @@ def test_openapi_exposes_completion_response_schemas() -> None:
             validator.validate(payload)
             payload["choices"] = "not an array"
             assert not validator.is_valid(payload)
+
+
+def test_openapi_exposes_responses_response_schemas() -> None:
+    """The published 200 contract of /v1/responses* must expose ResponsesResponse
+    for JSON and StreamingResponsesResponse without '[DONE]' for SSE."""
+    from openai.types.responses import (
+        ResponseFunctionCallArgumentsDeltaEvent,
+        ResponseFunctionCallArgumentsDoneEvent,
+        ResponseOutputMessage,
+        ResponseOutputText,
+        ResponseTextDeltaEvent,
+        ResponseTextDoneEvent,
+    )
+
+    from vllm.entrypoints.openai.responses.protocol import (
+        ResponseCompletedEvent,
+        ResponseCreatedEvent,
+        ResponsesResponse,
+    )
+
+    document = _get_openapi_document()
+    unary_ref = {"$ref": f"#/components/schemas/{ResponsesResponse.__name__}"}
+
+    cancel_content = document["paths"]["/v1/responses/{response_id}/cancel"]["post"][
+        "responses"
+    ]["200"]["content"]
+    assert cancel_content["application/json"]["schema"] == unary_ref
+
+    sample_response = ResponsesResponse(
+        model="m",
+        output=[
+            ResponseOutputMessage(
+                id="msg_1",
+                type="message",
+                role="assistant",
+                content=[
+                    ResponseOutputText(type="output_text", text="hi", annotations=[])
+                ],
+                status="completed",
+            )
+        ],
+        parallel_tool_calls=True,
+        temperature=0.0,
+        tool_choice="auto",
+        tools=[],
+        top_p=1.0,
+        background=False,
+        max_output_tokens=16,
+        service_tier="auto",
+        status="completed",
+        truncation="disabled",
+    )
+
+    for path, method in (
+        ("/v1/responses", "post"),
+        ("/v1/responses/{response_id}", "get"),
+    ):
+        content = document["paths"][path][method]["responses"]["200"]["content"]
+        assert content["application/json"]["schema"] == unary_ref
+
+        unary_validator = Draft202012Validator(
+            {
+                **content["application/json"]["schema"],
+                "components": document["components"],
+            }
+        )
+        unary_payload = sample_response.model_dump(mode="json", by_alias=True)
+        unary_validator.validate(unary_payload)
+        assert not unary_validator.is_valid({**unary_payload, "output": "bad"})
+
+        data = content["text/event-stream"]["schema"]["properties"]["data"]
+        assert all("const" not in item for item in data["anyOf"])
+        assert data["anyOf"][1]["contentSchema"] == {
+            "$ref": "#/components/schemas/ErrorResponse"
+        }
+
+        chunk_validator = Draft202012Validator(
+            {**data["anyOf"][0]["contentSchema"], "components": document["components"]}
+        )
+        for event in (
+            ResponseCreatedEvent(
+                type="response.created",
+                sequence_number=0,
+                response=sample_response,
+            ),
+            ResponseTextDeltaEvent(
+                type="response.output_text.delta",
+                sequence_number=1,
+                content_index=0,
+                output_index=0,
+                item_id="msg_1",
+                delta="hi",
+                logprobs=[],
+            ),
+            ResponseTextDoneEvent(
+                type="response.output_text.done",
+                sequence_number=2,
+                content_index=0,
+                output_index=0,
+                item_id="msg_1",
+                text="hi",
+                logprobs=[],
+            ),
+            ResponseFunctionCallArgumentsDeltaEvent(
+                type="response.function_call_arguments.delta",
+                sequence_number=3,
+                output_index=0,
+                item_id="fc_1",
+                delta="{}",
+            ),
+            ResponseFunctionCallArgumentsDoneEvent(
+                type="response.function_call_arguments.done",
+                sequence_number=4,
+                output_index=0,
+                item_id="fc_1",
+                arguments="{}",
+                name="fn",
+            ),
+            ResponseCompletedEvent(
+                type="response.completed",
+                sequence_number=5,
+                response=sample_response,
+            ),
+        ):
+            chunk_validator.validate(event.model_dump(mode="json", by_alias=True))
+        assert not chunk_validator.is_valid({"type": "response.unknown"})
 
 
 @pytest.fixture(scope="module")

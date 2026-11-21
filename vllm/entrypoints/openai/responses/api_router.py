@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    json_or_sse_responses,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -48,12 +49,16 @@ async def _convert_stream_to_sse_events(
 @router.post(
     "/v1/responses",
     dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
+    **json_or_sse_responses(
+        ResponsesResponse,
+        StreamingResponsesResponse,
+        {
+            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        },
+        done_sentinel=None,
+    ),
 )
 @with_cancellation
 @load_aware_call
@@ -77,7 +82,17 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     )
 
 
-@router.get("/v1/responses/{response_id}")
+@router.get(
+    "/v1/responses/{response_id}",
+    **json_or_sse_responses(
+        ResponsesResponse,
+        StreamingResponsesResponse,
+        {
+            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        },
+        done_sentinel=None,
+    ),
+)
 @load_aware_call
 async def retrieve_responses(
     response_id: str,
@@ -107,7 +122,14 @@ async def retrieve_responses(
     )
 
 
-@router.post("/v1/responses/{response_id}/cancel")
+@router.post(
+    "/v1/responses/{response_id}/cancel",
+    response_model=ResponsesResponse,
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+    },
+)
 @load_aware_call
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)

@@ -1,17 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
+import json
+import pathlib
+import typing
+from argparse import Namespace
+
 import pytest
+from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator
+from openai.types.responses import (
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputText,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
+)
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai_harmony import (
     Message,
 )
 from pydantic import ValidationError
 
+from vllm.entrypoints.launchers.app import build_app
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponseCompletedEvent,
+    ResponseCreatedEvent,
     ResponsesRequest,
+    ResponsesResponse,
+    StreamingResponsesResponse,
     serialize_message,
     serialize_messages,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.exceptions import VLLMValidationError
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -332,3 +353,246 @@ def test_non_list_tools_rejected_by_field_validation(tools, with_item) -> None:
         )
     (error,) = exc_info.value.errors()
     assert error["loc"] == ("tools",) and error["type"] == "list_type"
+
+
+def test_streaming_responses_response_covers_all_emitted_events() -> None:
+    """StreamingResponsesResponse must include every event class emitted by
+    streaming_events.py and serving.py."""
+    import vllm.entrypoints.openai.responses.serving as serving_mod
+    import vllm.entrypoints.openai.responses.streaming_events as events_mod
+
+    emitted: set[str] = set()
+    for mod in (events_mod, serving_mod):
+        assert mod.__file__ is not None
+        tree = ast.parse(pathlib.Path(mod.__file__).read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id.endswith("Event")
+            ):
+                emitted.add(node.func.id)
+
+    union_names = {cls.__name__ for cls in typing.get_args(StreamingResponsesResponse)}
+    assert emitted <= union_names
+
+
+def _sample_responses_response() -> ResponsesResponse:
+    return ResponsesResponse(
+        id="resp_test_1",
+        model="test-model",
+        output=[
+            ResponseOutputMessage(
+                id="msg_1",
+                type="message",
+                role="assistant",
+                content=[
+                    ResponseOutputText(type="output_text", text="hi", annotations=[])
+                ],
+                status="completed",
+            )
+        ],
+        parallel_tool_calls=True,
+        temperature=0.0,
+        tool_choice="auto",
+        tools=[],
+        top_p=1.0,
+        background=False,
+        max_output_tokens=16,
+        service_tier="auto",
+        status="completed",
+        truncation="disabled",
+    )
+
+
+def _sample_streaming_events(response: ResponsesResponse) -> list:
+    return [
+        ResponseCreatedEvent(
+            type="response.created",
+            sequence_number=0,
+            response=response,
+        ),
+        ResponseTextDeltaEvent(
+            type="response.output_text.delta",
+            sequence_number=1,
+            content_index=0,
+            output_index=0,
+            item_id="msg_1",
+            delta="hi",
+            logprobs=[],
+        ),
+        ResponseTextDoneEvent(
+            type="response.output_text.done",
+            sequence_number=2,
+            content_index=0,
+            output_index=0,
+            item_id="msg_1",
+            text="hi",
+            logprobs=[],
+        ),
+        ResponseFunctionCallArgumentsDeltaEvent(
+            type="response.function_call_arguments.delta",
+            sequence_number=3,
+            output_index=0,
+            item_id="fc_1",
+            delta="{}",
+        ),
+        ResponseFunctionCallArgumentsDoneEvent(
+            type="response.function_call_arguments.done",
+            sequence_number=4,
+            output_index=0,
+            item_id="fc_1",
+            arguments="{}",
+            name="fn",
+        ),
+        ResponseCompletedEvent(
+            type="response.completed",
+            sequence_number=5,
+            response=response,
+        ),
+    ]
+
+
+def _parse_sse_frames(body: str) -> list[tuple[str | None, str]]:
+    frames: list[tuple[str | None, str]] = []
+    for raw_frame in body.strip().split("\n\n"):
+        if not raw_frame.strip():
+            continue
+        event_name: str | None = None
+        data_lines: list[str] = []
+        for line in raw_frame.splitlines():
+            if line.startswith("event:"):
+                event_name = line[len("event:") :].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].strip())
+        frames.append((event_name, "\n".join(data_lines)))
+    return frames
+
+
+def test_responses_openapi_and_sse_conformance() -> None:
+    """/v1/responses* OpenAPI contracts match actual ASGI JSON and SSE output."""
+    args = Namespace(
+        disable_fastapi_docs=False,
+        enable_offline_docs=False,
+        root_path="",
+        allowed_origins=["*"],
+        allow_credentials=False,
+        allowed_methods=["*"],
+        allowed_headers=["*"],
+        api_key=None,
+        enable_request_id_headers=False,
+        enable_fault_tolerance=False,
+        middleware=[],
+        log_error_stack=False,
+    )
+    app = build_app(args, supported_tasks=("generate",))
+    sample_response = _sample_responses_response()
+    sample_events = _sample_streaming_events(sample_response)
+
+    class _StubServingResponses:
+        async def create_responses(self, request, raw_request):
+            if request.stream:
+
+                async def _gen():
+                    for event in sample_events:
+                        yield event
+
+                return _gen()
+            return sample_response
+
+        async def retrieve_responses(self, response_id, starting_after, stream):
+            if response_id == "missing":
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message="not found", type="invalid_request_error", code=404
+                    )
+                )
+            if stream:
+
+                async def _gen():
+                    for event in sample_events:
+                        yield event
+
+                return _gen()
+            return sample_response
+
+        async def cancel_responses(self, response_id):
+            return sample_response
+
+    app.state.openai_serving_responses = _StubServingResponses()
+    client = TestClient(app)
+
+    document = client.get("/openapi.json").json()
+    unary_ref = {"$ref": f"#/components/schemas/{ResponsesResponse.__name__}"}
+
+    cancel_200 = document["paths"]["/v1/responses/{response_id}/cancel"]["post"][
+        "responses"
+    ]["200"]["content"]
+    assert cancel_200["application/json"]["schema"] == unary_ref
+    cancel_resp = client.post("/v1/responses/resp_test_1/cancel")
+    assert cancel_resp.status_code == 200
+    Draft202012Validator(
+        {
+            **cancel_200["application/json"]["schema"],
+            "components": document["components"],
+        }
+    ).validate(cancel_resp.json())
+
+    for path, method, call_fn in (
+        (
+            "/v1/responses",
+            "post",
+            lambda stream: client.post(
+                "/v1/responses", json={"input": "hi", "stream": stream}
+            ),
+        ),
+        (
+            "/v1/responses/{response_id}",
+            "get",
+            lambda stream: client.get(
+                f"/v1/responses/resp_test_1?stream={str(stream).lower()}"
+            ),
+        ),
+    ):
+        content = document["paths"][path][method]["responses"]["200"]["content"]
+        assert content["application/json"]["schema"] == unary_ref
+
+        unary_validator = Draft202012Validator(
+            {
+                **content["application/json"]["schema"],
+                "components": document["components"],
+            }
+        )
+        unary_http = call_fn(False)
+        assert unary_http.status_code == 200
+        unary_validator.validate(unary_http.json())
+
+        data_prop = content["text/event-stream"]["schema"]["properties"]["data"]
+        assert all("const" not in item for item in data_prop["anyOf"])
+        chunk_validator = Draft202012Validator(
+            {
+                **data_prop["anyOf"][0]["contentSchema"],
+                "components": document["components"],
+            }
+        )
+
+        sse_http = call_fn(True)
+        assert sse_http.status_code == 200
+        assert sse_http.headers["content-type"].startswith("text/event-stream")
+        frames = _parse_sse_frames(sse_http.text)
+        assert len(frames) == len(sample_events)
+        assert all(raw_data != "[DONE]" for _, raw_data in frames)
+        for event_name, raw_data in frames:
+            payload = json.loads(raw_data)
+            assert event_name == payload["type"]
+            chunk_validator.validate(payload)
+        assert frames[-1][0] == "response.completed"
+
+    not_found = client.get("/v1/responses/missing")
+    assert not_found.status_code == 404
+    err_404_schema = document["paths"]["/v1/responses/{response_id}"]["get"][
+        "responses"
+    ]["404"]["content"]["application/json"]["schema"]
+    Draft202012Validator(
+        {**err_404_schema, "components": document["components"]}
+    ).validate(not_found.json())

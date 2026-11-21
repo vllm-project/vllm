@@ -16,6 +16,8 @@ from openai.types.responses import (
     ResponseContentPartDoneEvent,
     ResponseCustomToolCallInputDeltaEvent,
     ResponseCustomToolCallInputDoneEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -32,6 +34,8 @@ from openai.types.responses import (
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
     ResponseTextConfig,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
@@ -1217,6 +1221,10 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent
     | ResponseContentPartDoneEvent
+    | ResponseTextDeltaEvent
+    | ResponseTextDoneEvent
+    | ResponseFunctionCallArgumentsDeltaEvent
+    | ResponseFunctionCallArgumentsDoneEvent
     | ResponseCustomToolCallInputDeltaEvent
     | ResponseCustomToolCallInputDoneEvent
     | ResponseReasoningTextDeltaEvent
