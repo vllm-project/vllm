@@ -921,31 +921,16 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         spatial_conv_size = hf_config.spatial_conv_size
         temporal_conv_size = hf_config.temporal_conv_size
 
-        if self.ctx.model_config.trust_remote_code:
-            # Defined in HF Hub repo
-            min_pixels_key = "min_pixels"
-            max_pixels_key = "max_pixels"
-        else:
-            # Defined in Transformers library (requires v5.0 or above)
-            min_pixels_key = "shortest_edge"
-            max_pixels_key = "longest_edge"
-
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = image_processor.size
-        if override_size := mm_kwargs.get("size"):
-            size = size | override_size
-        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
-            size = size | {min_pixels_key: override_min_pixels}
-        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
-            size = size | {max_pixels_key: override_max_pixels}
-
         if do_resize:
+            min_pixels, max_pixels = self._get_image_pixel_limits(
+                image_processor, mm_kwargs
+            )
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_conv_size,
-                min_pixels=size[min_pixels_key],
-                max_pixels=size[max_pixels_key],
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -994,16 +979,90 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         )
         return num_video_tokens
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_image_processor()
+    def _get_image_pixel_limits(
+        self,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[int, int]:
+        if self.ctx.model_config.trust_remote_code:
+            # The HF Hub processor resizes images with these limits, not with
+            # the image processor's `min_pixels`/`max_pixels`.
+            hf_processor = self.get_hf_processor(**mm_kwargs)
+            return hf_processor.image_min_pixels, hf_processor.image_max_pixels
 
-        max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
-            image_processor=image_processor,
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
+        return size["shortest_edge"], size["longest_edge"]
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return self._get_size_with_most_features(
+            *self._get_image_pixel_limits(self.get_image_processor(), {})
+        )
+
+    def _get_video_pixel_limits(self) -> tuple[int, int]:
+        hf_processor = self.get_hf_processor()
+        if self.ctx.model_config.trust_remote_code:
+            return hf_processor.video_min_pixels, hf_processor.video_max_pixels
+        size = hf_processor.video_processor.size
+        return size["shortest_edge"], size["longest_edge"]
+
+    def _get_resize_factor(self) -> int:
+        hf_config = self.get_hf_config()
+        return hf_config.vision_config.patch_size * hf_config.spatial_conv_size
+
+    def get_video_size_with_most_features(
+        self, max_width: int | None = None, max_height: int | None = None
+    ) -> ImageSize:
+        return self._get_size_with_most_features(
+            *self._get_video_pixel_limits(), max_width, max_height
+        )
+
+    def _get_size_with_most_features(
+        self,
+        min_pixels: int,
+        max_pixels: int,
+        max_width: int | None = None,
+        max_height: int | None = None,
+    ) -> ImageSize:
+        # A square is usually not the largest grid under `max_pixels`.
+        factor = self._get_resize_factor()
+        max_cells = max_pixels // factor**2
+        max_cols = max(round(max_width / factor), 1) if max_width else max_cells
+        max_rows = max(round(max_height / factor), 1) if max_height else max_cells
+        grids = [
+            (rows, cols)
+            for rows in range(1, min(max_rows, max_cells) + 1)
+            if (cols := min(max_cols, max_cells // rows)) >= 1
+            and max(rows, cols) <= 200 * min(rows, cols)
+        ]
+        rows, cols = max(grids, key=lambda grid: (grid[0] * grid[1], min(grid)))
+        if rows * cols * factor**2 < min_pixels:
+            resized_height, resized_width = smart_resize(
+                height=max_height or rows * factor,
+                width=max_width or cols * factor,
+                factor=factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+            return ImageSize(width=resized_width, height=resized_height)
+        return ImageSize(width=cols * factor, height=rows * factor)
+
+    def _get_num_video_tokens_for_size(self, size: ImageSize, num_frames: int) -> int:
+        _, num_video_tokens = self._get_vision_info(
+            image_width=size.width,
+            image_height=size.height,
+            num_frames=num_frames,
+            do_resize=False,
+            image_processor=self.get_image_processor(),
             mm_kwargs={},
         )
-        return max_image_size
+        return num_video_tokens
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()
@@ -1018,19 +1077,14 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         return num_image_tokens
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
-        image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        video_size = self.get_video_size_with_most_features()
 
         num_frames = 0
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
-                image_width=target_width,
-                image_height=target_height,
-                num_frames=next_num_frames,
-                image_processor=image_processor,
-                mm_kwargs={},
+            next_max_tokens = self._get_num_video_tokens_for_size(
+                video_size, next_num_frames
             )
 
             if next_max_tokens > max_tokens:
@@ -1059,17 +1113,9 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_video_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(
-                seq_len, mm_counts.get("video", 0)
-            ),
-            image_processor=image_processor,
-            mm_kwargs={},
+        return self._get_num_video_tokens_for_size(
+            self.get_video_size_with_most_features(),
+            self.get_num_frames_with_most_features(seq_len, mm_counts.get("video", 0)),
         )
 
 
@@ -1279,6 +1325,13 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
+        video_overrides = mm_options.get("video")
+        if isinstance(video_overrides, VideoDummyOptions):
+            video_size = self.info.get_video_size_with_most_features(
+                video_overrides.width, video_overrides.height
+            )
+        else:
+            video_size = self.info.get_video_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts.get("video", 0)
         )
@@ -1291,8 +1344,8 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=video_size.width,
+                height=video_size.height,
                 num_frames=target_num_frames,
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),
@@ -1614,16 +1667,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             # are at the LM hidden dim, used only for DP gather sizing.
             out_hidden_size=self.config.hidden_size,
         )
-
-    def get_encoder_cudagraph_budget_range(self, vllm_config) -> tuple[int, int]:
-        # Min: a 224x224 image -> 16x16 patches (patch_size=14),
-        # spatial_merge_size=2 -> 8x8 = 64 output tokens.
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
 
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec

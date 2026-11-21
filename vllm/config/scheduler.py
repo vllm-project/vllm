@@ -175,12 +175,22 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = Field(init=False)
-    """Multimodal encoder cache size, only used in V1.
+    encoder_cache_size: int | None = Field(default=None, ge=1)
+    """Multimodal encoder cache size in tokens, only used in V1, or None to
+    derive it from `max_num_batched_tokens`.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    This is a *capacity*: how many tokens of encoder output may stay resident,
+    including across requests, so a later request reusing the same image can skip
+    the encoder. It is unrelated to how much encoder work one step may do
+    (`max_num_encoder_input_tokens`), and deriving it from a per-step batch budget
+    caps cross-request reuse at `max_num_batched_tokens / tokens_per_item` items.
+    Size it as `in_flight_items * tokens_per_item` when a workload sends several
+    requests against the same image.
+
+    Raised to the largest single item if that would not fit. Costs GPU memory at
+    the model's multimodal embedding width, which is taken from the KV cache.
+
+    Resolved in `__post_init__`; never None afterwards."""
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:
@@ -261,6 +271,15 @@ class SchedulerConfig:
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
+
+    async_scheduling_depth: int = Field(default=2, ge=2)
+    """Steps in flight with async scheduling: the step on the GPU plus
+    `async_scheduling_depth - 1` steps scheduled ahead of it (per pipeline
+    stage beyond the first). The default 2 overlaps one step's host work
+    (output processing, scheduling, input preparation) with the next step's GPU
+    work. A deeper queue helps when the host round trip is longer than a GPU
+    step, as in low-batch decode across nodes with speculative decoding.
+    Ignored without async scheduling."""
 
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
@@ -362,7 +381,8 @@ class SchedulerConfig:
             )
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
+        if self.encoder_cache_size is None:
+            self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info_once(
