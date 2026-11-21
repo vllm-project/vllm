@@ -25,6 +25,8 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
+    _LAYER_TYPE_C1A,
+    _LAYER_TYPE_C2A,
     _LAYER_TYPE_C4A,
     _LAYER_TYPE_C128A,
     _LAYER_TYPE_SWAONLY,
@@ -124,4 +126,6 @@ class DeepseekV4CPUSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
             _LAYER_TYPE_SWAONLY: None,
             _LAYER_TYPE_C4A: None,
             _LAYER_TYPE_C128A: None,
+            _LAYER_TYPE_C1A: None,
+            _LAYER_TYPE_C2A: None,
         }
