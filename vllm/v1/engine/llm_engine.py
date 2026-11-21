@@ -108,6 +108,7 @@ class LLMEngine:
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            reasoning_parser=self.vllm_config.structured_outputs_config.reasoning_parser,
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
