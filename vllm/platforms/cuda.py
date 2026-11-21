@@ -19,15 +19,23 @@ from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
-# import custom ops, trigger op registration
-import vllm._C_stable_libtorch  # noqa
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.import_utils import import_pynvml
-from vllm.utils.platform_utils import cuda_get_device_properties
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+# import custom ops, trigger op registration. import_vllm_extension turns
+# a missing CUDA runtime library (e.g. libcudart.so.13 on a CUDA 12 stack)
+# into an actionable error instead of a bare loader ImportError.
+# See https://github.com/vllm-project/vllm/issues/52300.
+from vllm.utils.import_utils import import_vllm_extension
 
-from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+import_vllm_extension("vllm._C_stable_libtorch")
+
+import vllm.envs as envs  # noqa: E402
+from vllm.logger import init_logger  # noqa: E402
+from vllm.utils.import_utils import import_pynvml  # noqa: E402
+from vllm.utils.platform_utils import cuda_get_device_properties  # noqa: E402
+from vllm.v1.attention.backends.registry import (  # noqa: E402
+    AttentionBackendEnum,
+)
+
+from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl  # noqa: E402
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

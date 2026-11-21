@@ -123,6 +123,96 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     return getattr(module, obj_name)
 
 
+# Matches the Linux dynamic-loader failure raised when a shared library
+# is missing, e.g. "libcudart.so.13: cannot open shared object file: No
+# such file or directory".
+_SHARED_LIBRARY_LOAD_ERROR_RE = re.compile(r"cannot open shared object file")
+# Extracts the missing library file name from the loader error above.
+_MISSING_LIBRARY_RE = re.compile(r"\b(lib[\w.+-]+\.so(?:\.[\w.+-]+)?)")
+# Extracts the CUDA major version from a libcudart name like
+# "libcudart.so.13".
+_CUDA_RUNTIME_VERSION_RE = re.compile(r"libcudart\.so\.(\d+)")
+
+
+class VllmExtensionImportError(ImportError):
+    """A vLLM compiled extension could not load its shared libraries.
+
+    Subclasses :class:`ImportError` so existing ``except ImportError``
+    handlers around extension imports keep working.
+    """
+
+
+def import_vllm_extension(module_name: str) -> ModuleType:
+    """Import one of vLLM's compiled extensions (``vllm._C*``).
+
+    When these extensions fail to load, the raw :class:`ImportError` only
+    names the missing shared library (e.g. ``libcudart.so.13``) and gives
+    users no hint that the vLLM wheel was built against a different CUDA
+    version than the installed PyTorch stack (see
+    https://github.com/vllm-project/vllm/issues/52300). Convert loader
+    failures into an actionable message; every other import error
+    propagates unchanged.
+    """
+    try:
+        return importlib.import_module(module_name)
+    except ImportError as exc:
+        message = str(exc)
+        if _SHARED_LIBRARY_LOAD_ERROR_RE.search(message) is None:
+            raise
+
+        missing = _MISSING_LIBRARY_RE.search(message)
+        missing_lib = missing.group(1) if missing else "a shared library"
+
+        cuda_major = None
+        runtime_match = _CUDA_RUNTIME_VERSION_RE.search(message)
+        if runtime_match is not None:
+            cuda_major = runtime_match.group(1)
+
+        try:
+            import torch
+
+            torch_cuda = torch.version.cuda
+        except Exception:
+            torch_cuda = None
+
+        lines = [
+            f"Cannot load the compiled extension {module_name}: the loader "
+            f"reported a missing shared library ({missing_lib}).",
+            "",
+            "This usually means the installed vLLM wheel was built against a "
+            "different CUDA version than your PyTorch stack, not a bug in "
+            "your code.",
+        ]
+        if cuda_major is not None:
+            lines.append(
+                f"- The extension needs CUDA {cuda_major} runtime libraries "
+                f"(e.g. {missing_lib})."
+            )
+        if torch_cuda is not None:
+            lines.append(
+                f"- Your PyTorch reports CUDA {torch_cuda} "
+                f"(torch.version.cuda == {torch_cuda!r})."
+            )
+        lines.extend(
+            [
+                "",
+                "To fix it, make both sides use the same CUDA major version:",
+                "- Install the vLLM wheel matching your PyTorch CUDA version, e.g.",
+                "  pip install vllm --extra-index-url "
+                "https://wheels.vllm.ai/<vllm_version>/<cuda_tag>",
+                "  (see https://docs.vllm.ai/en/latest/getting_started/install/"
+                "gpu/gpu.html for the published tags),",
+                "- or upgrade PyTorch to a CUDA build matching the vLLM wheel,",
+                "- or, if the CUDA runtime is pip-installed "
+                "(nvidia-cuda-runtime-*), add its lib directory "
+                "(<site-packages>/nvidia/cuda_runtime/lib) to LD_LIBRARY_PATH.",
+                "",
+                f"Original error: {message}",
+            ]
+        )
+        raise VllmExtensionImportError("\n".join(lines)) from exc
+
+
 @cache
 def get_vllm_optional_dependencies():
     metadata = importlib.metadata.metadata("vllm")
