@@ -927,7 +927,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.defer_gdn_spec_state = (
             self.gdn_decode_kernel == "triton"
             and self.num_spec > 0
-            and self.cache_config.mamba_cache_mode == "none"
+            and not self.cache_config.enable_prefix_caching
             and self.get_state_dtype()[1] == torch.float32
         )
 
