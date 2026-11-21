@@ -127,6 +127,12 @@ def _update_server_metrics(
     output.server_ttft = to_seconds(metrics.get("time_to_first_token_ms"))
 
 
+def _has_aborted_choice(choices: Any) -> bool:
+    return isinstance(choices, list) and any(
+        isinstance(c, dict) and c.get("finish_reason") == "abort" for c in choices
+    )
+
+
 class RequestFunc(Protocol):
     def __call__(
         self,
@@ -250,11 +256,13 @@ async def async_request_openai_completions(
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
+    stream_error: str | None = None
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
-                stream_error: str | None = None
+                saw_done = False
+                server_aborted = False
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
@@ -271,16 +279,23 @@ async def async_request_openai_completions(
 
                         chunk = message.removeprefix("data: ")
 
-                        if chunk != "[DONE]":
+                        if chunk == "[DONE]":
+                            saw_done = True
+                        else:
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
+                            choices = data.get("choices")
+                            if _has_aborted_choice(choices):
+                                server_aborted = True
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if error := data.get("error"):
-                                stream_error = json.dumps(error)
-                            elif choices := data.get("choices"):
+                            if (error := data.get("error")) or data.get(
+                                "object"
+                            ) == "error":
+                                stream_error = json.dumps(error or data)
+                            elif choices:
                                 # Note that text could be empty here
                                 # e.g. for special tokens
                                 text = choices[0].get("text")
@@ -303,15 +318,23 @@ async def async_request_openai_completions(
                 if stream_error is not None:
                     output.success = False
                     output.error = stream_error
-                elif first_chunk_received:
-                    output.success = True
-                else:
+                elif server_aborted:
+                    output.success = False
+                    output.error = "Server aborted the request."
+                elif not first_chunk_received:
                     output.success = False
                     output.error = (
                         "Never received a valid chunk to calculate TTFT."
                         "This response will be marked as failed!"
                     )
-                output.generated_text = generated_text
+                elif not saw_done:
+                    output.success = False
+                    output.error = (
+                        "Stream ended without [DONE]."
+                        "This response will be marked as failed!"
+                    )
+                else:
+                    output.success = True
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
@@ -319,8 +342,9 @@ async def async_request_openai_completions(
     except Exception:
         output.success = False
         exc_info = sys.exc_info()
-        output.error = "".join(traceback.format_exception(*exc_info))
+        output.error = stream_error or "".join(traceback.format_exception(*exc_info))
 
+    output.generated_text = generated_text
     if pbar:
         pbar.update(1)
     return output
@@ -452,11 +476,13 @@ async def async_request_openai_chat_completions(
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
+    stream_error: str | None = None
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
-                stream_error: str | None = None
+                saw_done = False
+                server_aborted = False
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     if not chunk_bytes:
@@ -472,16 +498,21 @@ async def async_request_openai_chat_completions(
 
                         chunk = message.removeprefix("data: ")
 
-                        if chunk != "[DONE]":
+                        if chunk == "[DONE]":
+                            saw_done = True
+                        else:
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
+                            choices = data.get("choices")
+                            if _has_aborted_choice(choices):
+                                server_aborted = True
 
-                            if error := data.get("error"):
-                                stream_error = json.dumps(error)
-                            elif (
-                                choices := data.get("choices")
-                            ) and _choice_has_streamed_output(choices[0]):
+                            if (error := data.get("error")) or data.get(
+                                "object"
+                            ) == "error":
+                                stream_error = json.dumps(error or data)
+                            elif choices and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
                                 # First token
                                 if not first_chunk_received:
@@ -501,18 +532,26 @@ async def async_request_openai_chat_completions(
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
 
-                output.generated_text = generated_text
                 if stream_error is not None:
                     output.success = False
                     output.error = stream_error
-                elif first_chunk_received:
-                    output.success = True
-                else:
+                elif server_aborted:
+                    output.success = False
+                    output.error = "Server aborted the request."
+                elif not first_chunk_received:
                     output.success = False
                     output.error = (
                         "Never received a valid chunk to calculate TTFT."
                         "This response will be marked as failed!"
                     )
+                elif not saw_done:
+                    output.success = False
+                    output.error = (
+                        "Stream ended without [DONE]."
+                        "This response will be marked as failed!"
+                    )
+                else:
+                    output.success = True
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
@@ -520,8 +559,9 @@ async def async_request_openai_chat_completions(
     except Exception:
         output.success = False
         exc_info = sys.exc_info()
-        output.error = "".join(traceback.format_exception(*exc_info))
+        output.error = stream_error or "".join(traceback.format_exception(*exc_info))
 
+    output.generated_text = generated_text
     if pbar:
         pbar.update(1)
     return output
