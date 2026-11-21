@@ -58,6 +58,7 @@ def _load_checkpoint(moe, tensors: dict[str, torch.Tensor]) -> None:
     weights = ((name.removeprefix(prefix), tensor) for name, tensor in weights)
     loaded = set(moe.experts.load_weights(weights))
     assert loaded == {name for name, _ in moe.experts.named_parameters()}
+    moe.experts.process_weights_after_loading()
 
 
 def _fuse_experts(
