@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
@@ -48,6 +51,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.sharded_to_full_mapping = sharded_to_full_mapping
+        self._skip_lora = False
 
     @property
     def logits_as_input(self):
@@ -138,6 +142,15 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
+    @contextmanager
+    def skip_lora(self) -> Iterator[None]:
+        previous = self._skip_lora
+        self._skip_lora = True
+        try:
+            yield
+        finally:
+            self._skip_lora = previous
+
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
@@ -189,12 +202,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
-            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
-        )
-
-        if not current_platform.can_update_inplace():
-            logits = lora_output
+        if not self._skip_lora:
+            lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
+                logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
+            )
+            if not current_platform.can_update_inplace():
+                logits = lora_output
 
         # Remove paddings in vocab (if any).
         logits = logits[:, : self.base_layer.vocab_size]

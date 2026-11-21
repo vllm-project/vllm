@@ -7,6 +7,8 @@ import numpy as np
 import torch
 
 from vllm.config.model import LogprobsMode
+from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestError
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -67,6 +69,45 @@ class PromptLogprobsWorker:
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
         self.token_id_scores.pop(req_id, None)
+
+    def reject_lm_head_lora_requests(
+        self,
+        input_batch: InputBatch,
+        prompt_lens: np.ndarray,
+        lora_requests: dict[str, LoRARequest],
+        has_lm_head_lora: Callable[[int], bool],
+    ) -> dict[str, RequestError] | None:
+        if not (self.in_progress_prompt_logprobs or self.token_id_scores):
+            return None
+
+        errors: dict[str, RequestError] = {}
+        for i, req_id in enumerate(input_batch.req_ids):
+            lora_request = lora_requests.get(req_id)
+            if lora_request is None:
+                continue
+            req_idx = input_batch.idx_mapping_np[i]
+            if not (
+                self.uses_prompt_logprobs[req_idx] or req_id in self.token_id_scores
+            ):
+                continue
+            prompt_len = prompt_lens[req_idx]
+            if (
+                input_batch.num_computed_prefill_tokens_np[i] >= prompt_len
+                or input_batch.prefill_len_np[i] > prompt_len
+                or not has_lm_head_lora(lora_request.lora_int_id)
+            ):
+                continue
+            errors[req_id] = RequestError(
+                code="validation_error",
+                message=(
+                    "prompt_logprobs and prompt_logprob_token_ids are unsupported "
+                    f"with LoRA adapter {lora_request.lora_name!r}, which applies "
+                    "LoRA to lm_head."
+                ),
+            )
+            self.uses_prompt_logprobs[req_idx] = False
+            self.remove_request(req_id)
+        return errors or None
 
     def compute_prompt_token_id_logprobs(
         self,

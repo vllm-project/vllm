@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Literal
 
 import torch
@@ -196,6 +196,12 @@ class WorkerLoRAManager:
         self._apply_adapters(requests)
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
+
+    def has_lm_head_lora(self, lora_id: int) -> bool:
+        return self._adapter_manager.has_lm_head_lora(lora_id)
+
+    def skip_lm_head_lora(self) -> AbstractContextManager[None]:
+        return self._adapter_manager.skip_lm_head_lora()
 
     def supports_tower_connector_lora(self) -> bool:
         return (

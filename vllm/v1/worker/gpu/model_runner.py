@@ -2246,6 +2246,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )[: input_batch.num_tokens]
         return None
 
+    def _compute_prompt_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Prompt chunks contain token rows, so the sampler's LoRA mapping
+        # cannot be used here. Requests that need an lm_head delta are rejected.
+        with self.lora_manager.skip_lm_head_lora():
+            return self.model.compute_logits(hidden_states)
+
     @torch.inference_mode()
     @step_eplb_after()
     def sample_tokens(
@@ -2312,9 +2318,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
             )
 
-        assert self.prompt_logprobs_worker is not None
-        prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
-            self.model.compute_logits,
+        prompt_logprobs_worker = self.prompt_logprobs_worker
+        assert prompt_logprobs_worker is not None
+        prompt_logits_fn = self.model.compute_logits
+        request_errors = None
+        if self.lora_config is not None and current_platform.is_cuda_alike():
+            prompt_logits_fn = self._compute_prompt_logits
+            if self.lora_state.lora_requests:
+                request_errors = prompt_logprobs_worker.reject_lm_head_lora_requests(
+                    input_batch,
+                    self.req_states.prompt_len.np,
+                    self.lora_state.lora_requests,
+                    self.lora_manager.has_lm_head_lora,
+                )
+        prompt_logprobs_dict = prompt_logprobs_worker.compute_prompt_logprobs(
+            prompt_logits_fn,
             hidden_states,
             input_batch,
             self.req_states.all_token_ids.gpu,
@@ -2322,8 +2340,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.prompt_len.np,
         )
         prompt_token_id_logprobs_dict = (
-            self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
-                self.model.compute_logits,
+            prompt_logprobs_worker.compute_prompt_token_id_logprobs(
+                prompt_logits_fn,
                 hidden_states,
                 input_batch,
                 self.req_states.prompt_len.np,
@@ -2337,6 +2355,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
+            request_errors=request_errors,
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:

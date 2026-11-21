@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from typing import TypeVar
 
 import torch
@@ -17,6 +18,7 @@ from vllm.lora.layers import (
     ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
+    LogitsProcessorWithLoRA,
     LoRAMapping,
     LoRAMappingType,
     TokenClassificationHeadWithLoRA,
@@ -165,6 +167,11 @@ class LoRAModelManager:
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
+        self._lm_head_modules = {
+            name: module
+            for name, module in self.modules.items()
+            if isinstance(module, LogitsProcessorWithLoRA)
+        }
 
         self._classification_head: tuple[str, BaseClassificationHeadWithLoRA] | None = (
             None
@@ -351,6 +358,20 @@ class LoRAModelManager:
     @property
     def adapter_slots(self) -> int:
         return self.lora_slots
+
+    def has_lm_head_lora(self, lora_id: int) -> bool:
+        adapter = self._registered_adapters.peek(lora_id)
+        return adapter is not None and any(
+            self._get_lora_layer_weights(adapter, name) is not None
+            for name in self._lm_head_modules
+        )
+
+    @contextmanager
+    def skip_lm_head_lora(self) -> Iterator[None]:
+        with ExitStack() as stack:
+            for module in self._lm_head_modules.values():
+                stack.enter_context(module.skip_lora())
+            yield
 
     def activate_adapter(
         self,
