@@ -30,7 +30,7 @@ It's often advantageous to exploit the inherent parallelism of experts by using 
 
 vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. The implementation includes [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf).
 
-The default distributed runtimes are [Ray](https://github.com/ray-project/ray) for multi-node inference and native Python `multiprocessing` for single-node inference. You can override the defaults by setting `distributed_executor_backend` in the `LLM` class or `--distributed-executor-backend` in the API server. Use `mp` for `multiprocessing` or `ray` for Ray.
+For multi-GPU inference, the default distributed runtime is native Python `multiprocessing`. [Ray](https://github.com/ray-project/ray) is not selected automatically for CUDA multi-node inference: to use it, set `distributed_executor_backend="ray"` in the `LLM` class or `--distributed-executor-backend ray` in the API server. vLLM selects Ray on its own only when it already runs inside a Ray placement group, for example under Ray Serve LLM, or when `--data-parallel-backend ray` is set. For multi-node `multiprocessing`, also set `--nnodes`, `--node-rank`, and `--master-addr`, as shown in [Running vLLM with MultiProcessing](#running-vllm-with-multiprocessing). If the world size exceeds the number of GPUs on the current node and neither a backend nor `--nnodes` is given, vLLM raises an error asking you to choose one.
 
 For multi-GPU inference, set `tensor_parallel_size` in the `LLM` class to the desired GPU count. For example, to run inference on 4 GPUs:
 
