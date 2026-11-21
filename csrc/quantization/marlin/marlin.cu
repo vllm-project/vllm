@@ -47,7 +47,7 @@ __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 
 #ifdef VLLM_MARLIN_GROUPED_NVFP4
-MarlinFuncPtr get_grouped_nvfp4_marlin_kernel();
+MarlinFuncPtr get_grouped_nvfp4_marlin_kernel(bool group_all_mn_tiles = false);
 MarlinFuncPtr get_grouped_nvfp4_marlin_kernel_m32();
 #endif
 
@@ -414,8 +414,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     auto kernel = MarlinDefault;
   #ifdef VLLM_MARLIN_GROUPED_NVFP4
     if (grouped_part) {
-      kernel = grouped_m32_part ? get_grouped_nvfp4_marlin_kernel_m32()
-                                : get_grouped_nvfp4_marlin_kernel();
+      kernel =
+          grouped_m32_part
+              ? get_grouped_nvfp4_marlin_kernel_m32()
+              : get_grouped_nvfp4_marlin_kernel(bolt_input && prob_m == 128);
       // The generic validator pads M and scale bytes beyond these NVFP4
       // kernels' actual launch allocations.
       max_shared_mem_new = grouped_m32_part ? 34816 : 43520;
