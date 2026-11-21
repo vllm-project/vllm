@@ -258,12 +258,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     Set internally by `MultiModalRegistry.register_processor`.
     """
 
-    _language_model_names: list[str] = []
+    _language_model_names: tuple[str, ...] = ()
     """
     Set internally by `_mark_language_model`.
     """
 
-    _tower_model_names: list[str] = []
+    _tower_model_names: tuple[str, ...] = ()
     """
     Set internally by `_mark_tower_model`.
     """
@@ -377,7 +377,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             ):
                 yield
 
-        self._language_model_names = children_names
+        self._language_model_names = tuple(children_names)
 
     @contextmanager
     def _mark_tower_model(
@@ -386,6 +386,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         modalities: set[str] | str,
         *,
         targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+        auto_offload: bool = True,
     ):
         """Mark each child module that was assigned to this model during this context
         as a tower model component.
@@ -394,12 +395,16 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         is set to zero for all of their modalities, and on pipeline stages after the
         first, since encoders run on the first stage only.
 
-        If `targets` is set, instead include descendants that are an instance
-        of `targets`, even if they aren't direct children.
+        Args:
+            vllm_config: The vLLM config, used to read the per-modality limits.
+            modalities: The modalities the marked components encode.
+            targets: If set, mark descendants that are an instance of `targets`,
+                even if they aren't direct children.
+            auto_offload: Route the marked components through the active offloader
+                (when it supports tower offloading) on exit, since `make_layers`
+                only ever sees the decoder layer stack. Set to `False` if the caller
+                offloads them itself, e.g. once they are materialised.
 
-        Marked components are also routed through the active offloader (when
-        it supports tower offloading), since `make_layers` only ever sees the
-        decoder layer stack.
         """
         from vllm.distributed import get_pp_group
         from vllm.model_executor.offloader import get_offloader
@@ -429,13 +434,13 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             ):
                 yield
 
-        self._tower_model_names = children_names
+        self._tower_model_names += tuple(children_names)
 
         # Towers are constructed directly, so `make_layers` never routes them
         # through the offloader. Do it here, at the same construction stage,
         # so offloaded tower weights are never allocated on the device.
         offloader = get_offloader()
-        if offloader.supports_tower_offload:
+        if auto_offload and offloader.supports_tower_offload:
             for name in children_names:
                 modules = (module for module in [attrgetter(name)(self)])
                 offloader.wrap_modules(modules, prefix=name)
