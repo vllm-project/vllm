@@ -349,7 +349,7 @@ def build_moe_layer(layer, variant: KernelVariant, rank: int, npes: int) -> MoeL
     elif GFX942:
         t.update(_routed_experts_fp8(layer.mlp.experts))
         t.update(_shared_expert_fp8(layer.mlp.shared_experts))
-        layouts = {}
+        layouts: dict[str, Any] = {}
     else:
         t.update(_routed_experts(layer.mlp.experts))
         t.update(_shared_expert_mxfp4(layer.mlp.shared_experts))

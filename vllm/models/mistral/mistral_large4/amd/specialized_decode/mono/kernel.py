@@ -4855,7 +4855,7 @@ def build_ml4_monokernel(
             # round to the first UG_TASKS % G CTAs of the rotation.
             UG_TASKS = TOP_K * UG_C
             UG_ROUNDS = UG_ROUTED * UG_C // G if moe_dedup else (UG_TASKS + G - 1) // G
-            ug_carry = {}
+            ug_carry: dict[str, list] = {}
 
             def ug_round(task_round):
                 u = fx.Int32(u0 + task_round * G)
