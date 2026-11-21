@@ -66,4 +66,5 @@ async def is_sleeping(raw_request: Request):
 
 
 def attach_router(app: FastAPI):
+    sleep_mode_operation_metrics()
     app.include_router(router)

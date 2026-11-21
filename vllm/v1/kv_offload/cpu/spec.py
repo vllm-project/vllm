@@ -63,6 +63,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "values indicate transfers (stores or promotions) may be "
                     "dropped due to insufficient capacity."
                 ),
+                initial_value=0,
             ),
             CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
@@ -70,6 +71,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "in-flight stores that have not yet "
                     "completed (0.0 = idle, 1.0 = saturated)."
                 ),
+                initial_value=0,
             ),
             CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
@@ -77,6 +79,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "in-flight loads that have not yet "
                     "completed (0.0 = idle, 1.0 = saturated)."
                 ),
+                initial_value=0,
             ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
                 documentation=(
