@@ -47,6 +47,7 @@ def _encode_metadata_items(
     items: Sequence[MultiModalKwargsItem | None],
     *,
     declared: Collection[str],
+    include_empty: bool,
 ) -> list[str | None]:
     """Serialize placeholder-metadata and `keep_on_cpu` fields per item."""
     metadata_items: list[str | None] = []
@@ -63,7 +64,9 @@ def _encode_metadata_items(
             }
         )
         metadata_items.append(
-            encode_mm_kwargs_item(metadata_item) if metadata_item else None
+            encode_mm_kwargs_item(metadata_item)
+            if metadata_item or include_empty
+            else None
         )
     return metadata_items
 
@@ -72,6 +75,7 @@ def _encode_mm_metadata(
     raw_mm_kwargs: MultiModalKwargsOptionalItems,
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
+    include_empty: bool = False,
 ) -> dict[str, list[str | None]] | None:
     """Serialize metadata-only subsets, or `None` if a modality has none."""
     metadata_by_modality: dict[str, list[str | None]] = {}
@@ -82,7 +86,11 @@ def _encode_mm_metadata(
             if metadata_fields_for is not None
             else set()
         )
-        metadata_items = _encode_metadata_items(items, declared=declared)
+        metadata_items = _encode_metadata_items(
+            items, declared=declared, include_empty=include_empty
+        )
+        if include_empty and any(item is None for item in metadata_items):
+            return None
         if not any(item is not None for item in metadata_items):
             return None
         metadata_by_modality[modality] = metadata_items
@@ -174,6 +182,7 @@ def extract_mm_features(
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
     mm_payload: MMPayload = "tensors",
+    include_empty_metadata: bool = False,
 ) -> MultiModalFeatures | None:
     """Extract multimodal features from a rendered engine prompt.
 
@@ -181,8 +190,9 @@ def extract_mm_features(
     intersection of processed kwargs that prefill needs after EC transfer:
     fields declared as embedding metadata, plus fields marked
     `keep_on_cpu` (for example M-RoPE grid dims). It is `None` if any
-    modality has no such fields. `mm_payload="metadata"` omits `kwargs_data`
-    and `mm_payload="none"` omits both.
+    modality has no such fields, unless `include_empty_metadata` represents
+    those items as empty maps for an EC handoff. `mm_payload="metadata"`
+    omits `kwargs_data` and `mm_payload="none"` omits both.
     """
     if engine_input.get("type") != "multimodal":
         return None
@@ -199,6 +209,7 @@ def extract_mm_features(
         mm_metadata = _encode_mm_metadata(
             raw_mm_kwargs,
             metadata_fields_for=metadata_fields_for,
+            include_empty=include_empty_metadata,
         )
         if mm_payload == "metadata" and mm_metadata is None:
             raise ValueError(

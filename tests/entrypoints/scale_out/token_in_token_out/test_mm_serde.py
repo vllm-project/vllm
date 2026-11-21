@@ -251,6 +251,18 @@ def test_metadata_payload_rejects_modality_without_metadata():
         extract_mm_features(_mixed_engine_input(), mm_payload="metadata")
 
 
+def test_prompt_features_preserve_items_with_no_cpu_metadata():
+    """An empty item still refers to remote encoder output, not a local cache hit."""
+    features = extract_mm_features(
+        _mixed_engine_input(), mm_payload="metadata", include_empty_metadata=True
+    )
+    assert features is not None and features.kwargs_data is None
+    kwargs = mm_kwargs_from_features(features)
+    assert kwargs["audio"][0] is not None
+    assert not kwargs["audio"][0]
+    assert "image_grid_thw" in kwargs["image"][0]
+
+
 @pytest.mark.parametrize(
     ("mm_payload", "has_kwargs"),
     [("tensors", True), ("none", False)],
