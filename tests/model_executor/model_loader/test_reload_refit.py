@@ -13,7 +13,10 @@ on every rank:
 - no allocator block appeared or disappeared, and the peak stays bounded;
 - reloaded A decodes exactly as cold A, reloaded B close to fresh B.
 
-Unless a case names B, B is A perturbed by `_perturb`.
+Unless a case names B, B is A perturbed by `_perturb`. A `planned` case
+reloads as a load-plan engine does, in-process: `plan_loads` at the first
+update, then `load_planned` for every chunk, so the same checks hold for the
+plan path; its fallbacks must match the case's allowlist.
 """
 
 import asyncio
@@ -22,15 +25,19 @@ import gc
 import glob
 import hashlib
 import itertools
+import json
 import os
 import shutil
+import time
 import uuid
 from collections import deque
 from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import pytest
+import regex as re
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -40,7 +47,9 @@ from tests.models.utils import check_logprobs_close
 from tests.utils import wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
 from vllm.config import set_current_vllm_config
+from vllm.distributed.weight_transfer.base import ParamMeta
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.model_executor.model_loader.reload import load_planned, plan_loads
 from vllm.model_executor.model_loader.reload.direct import direct_reload_active
 from vllm.model_executor.model_loader.weight_checksum import _tensors
 from vllm.model_executor.model_loader.weight_utils import (
@@ -63,6 +72,7 @@ NOT_COMPARED = (
     ".num_unpadded_tokens_tensors",
     "._ckpt_",
     "._direct_reload",
+    "name_or_path",
     "._aot_",
     ".compiled",
     ".was_aot_compile_fn_loaded_from_disk",
@@ -178,11 +188,55 @@ def _active_blocks() -> set[tuple[int, int]]:
     }
 
 
-def _stream_reload(worker, folder: str) -> dict:
+def _metadata(folder: str) -> list[ParamMeta]:
+    """What a trainer declares at init: every checkpoint tensor's name, dtype
+    and shape, read from the file headers."""
+    metas = []
+    for path in _safetensors(folder):
+        with safe_open(path, "pt") as f:
+            for n in f.keys():  # noqa: SIM118
+                s = f.get_slice(n)
+                metas.append(
+                    ParamMeta(n, _ST_DTYPES[s.get_dtype()], tuple(s.get_shape()))
+                )
+    return metas
+
+
+_ST_DTYPES = {
+    "BOOL": torch.bool,
+    "U8": torch.uint8,
+    "I8": torch.int8,
+    "I16": torch.int16,
+    "I32": torch.int32,
+    "I64": torch.int64,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F32": torch.float32,
+    "F64": torch.float64,
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E5M2": torch.float8_e5m2,
+    "F8_E8M0": torch.float8_e8m0fnu,
+}
+
+
+def _plan_report(plan) -> dict:
+    """Per-rank M0 numbers: names and bytes by kind, fallbacks with reasons."""
+    from vllm.model_executor.model_loader.reload.plan import _nbytes
+
+    kinds: dict[str, list[int]] = {}
+    for e in plan.entries.values():
+        kind = "fallback" if e.writes is None else "direct" if e.boxes else "unneeded"
+        n, b = kinds.setdefault(kind, [0, 0])
+        kinds[kind] = [n + 1, b + _nbytes(e)]
+    fallbacks = {n: e.reason for n, e in plan.entries.items() if e.writes is None}
+    return {"kinds": kinds, "fallbacks": fallbacks}
+
+
+def _stream_reload(worker, folder: str, planned: bool = False) -> dict:
     """Reload `folder` through the worker's weight-update session; return the
     mode seen inside it, the allocator blocks it added or freed, and whether
     its peak stayed within a chunk plus twice the largest transformed
-    parameter (embeddings aren't)."""
+    parameter (embeddings aren't). `planned`: as a load-plan engine."""
     weights = safetensors_weights_iterator(_safetensors(folder), use_tqdm_on_load=False)
     model = worker.model_runner.get_model()
     largest_param = max(
@@ -200,12 +254,19 @@ def _stream_reload(worker, folder: str) -> dict:
     worker.start_weight_update()
     mode = "direct" if direct_reload_active(model) else "layerwise"
     with set_current_vllm_config(worker.vllm_config):
+        load = model.load_weights
+        if planned:
+            if not hasattr(worker, "_refit_plan"):
+                t0 = time.perf_counter()
+                worker._refit_plan = plan_loads(model, _metadata(folder))
+                worker._refit_plan_seconds = time.perf_counter() - t0
+            load = partial(load_planned, model, worker._refit_plan)
         while batch := [
             (n, t.to(worker.device)) for n, t in itertools.islice(weights, BATCH_SIZE)
         ]:
             largest_batch = max(largest_batch, sum(t.nbytes for _, t in batch))
             # one call per transfer chunk, so no call sees the whole checkpoint
-            model.load_weights(iter(batch))
+            load(batch)
             torch.accelerator.synchronize()
             del batch  # one chunk in flight
     worker.finish_weight_update()
@@ -220,6 +281,12 @@ def _stream_reload(worker, folder: str) -> dict:
         "freed_blocks": sorted(before - after),
         "peak_bounded": peak <= largest_batch + 2 * largest_param,
     }
+
+
+def _plan_summary(worker) -> dict:
+    report = _plan_report(worker._refit_plan)
+    report["bake_s"] = round(worker._refit_plan_seconds, 3)
+    return report
 
 
 def _diff(before: dict, after: dict) -> dict:
@@ -237,6 +304,126 @@ def _download(model: str) -> str:
     folder = download_weights_from_hf(model, None, ["*.safetensors"])
     hf_api().snapshot_download(model, allow_patterns=CONFIG_FILES)
     return folder
+
+
+_LAYER = re.compile(r"\.layers\.(\d+)\.")
+_EXPERT = re.compile(r"\.experts\.(\d+)\.")
+_EXPERT_KEYS = (
+    "num_experts",
+    "num_local_experts",
+    "n_routed_experts",
+    "moe_num_experts",
+)
+_NOT_DECODER = ("vision", "visual", "audio", "mtp", "quantization")
+
+
+def _is_pattern(v, n: int) -> bool:
+    """A per-layer pattern string, e.g. Nemotron-H's `MEMEM*E...`."""
+    return isinstance(v, str) and len(v) == n and len(set(v)) <= 4
+
+
+def _cut_layers(d: dict, n: int, layers: int) -> None:
+    """Truncate per-layer lists and patterns, and lists of layer indices, to
+    `layers`; entries and indices of MTP layers (past `n`) stay, renumbered."""
+
+    def index(i: int) -> int | None:
+        return i if i < layers else i - n + layers if i >= n else None
+
+    for k, v in d.items():
+        if isinstance(v, list) and n <= len(v) <= n + 3 or _is_pattern(v, n):
+            d[k] = v[:layers] + v[n:]  # MTP layers' entries stay
+        elif "layer" in k and isinstance(v, list) and all(type(i) is int for i in v):
+            d[k] = [j for i in v if (j := index(i)) is not None]
+        elif "layer" in k and isinstance(v, str) and re.fullmatch(r"[\d,]+", v):
+            kept = (index(int(i)) for i in v.split(","))
+            d[k] = ",".join(str(j) for j in kept if j is not None)
+        elif isinstance(v, dict) and not any(s in k for s in _NOT_DECODER):
+            _cut_layers(v, n, layers)  # e.g. linear_attn_config
+
+
+def _reduce_config(cfg: dict, layers: int, experts: int | None) -> int:
+    """Cut the decoder's config to `layers` layers and `experts` routed
+    experts in place; return the original expert count."""
+    if "text_config" in cfg:
+        return _reduce_config(cfg["text_config"], layers, experts)
+    _cut_layers(cfg, cfg["num_hidden_layers"], layers)
+    cfg["num_hidden_layers"] = layers
+    num_experts = 0
+    for k in _EXPERT_KEYS:
+        if experts is not None and isinstance(cfg.get(k), int):
+            num_experts, cfg[k] = cfg[k], experts
+    if experts is not None and not num_experts:
+        raise ValueError(f"no routed-expert count among {_EXPERT_KEYS}")
+    return num_experts
+
+
+def _not_config(folder: str, names: list[str]) -> list[str]:
+    """For `copytree`: weights, caches and files a partial snapshot lacks."""
+    skip = set(
+        shutil.ignore_patterns("*.safetensors", "*.index.json", ".cache")(folder, names)
+    )
+    return [
+        n for n in names if n in skip or not os.path.exists(os.path.join(folder, n))
+    ]
+
+
+def _reduced(model: str, layers: int, experts: int | None, out: Path) -> str:
+    """A checkpoint of `model` cut to its first `layers` decoder layers and
+    first `experts` routed experts, with real names, dtypes, quantization and
+    values; only the shards holding kept tensors are downloaded."""
+    local = os.path.isdir(model)
+    src = (
+        model
+        if local
+        else hf_api().snapshot_download(model, allow_patterns=CONFIG_FILES)
+    )
+    cfg = json.loads(Path(src, "config.json").read_text())
+    num_experts = _reduce_config(cfg, layers, experts)
+
+    def keep(name: str) -> bool:
+        m = _LAYER.search(name)
+        decoder = not any(v in name for v in _NOT_DECODER)
+        if m and decoder and int(m.group(1)) >= layers:
+            return False
+        m = _EXPERT.search(name)
+        return experts is None or not m or int(m.group(1)) < experts
+
+    index = Path(src, "model.safetensors.index.json")
+    if index.exists():
+        weight_map = json.loads(index.read_text())["weight_map"]
+        files = sorted({f for n, f in weight_map.items() if keep(n)})
+    else:
+        files = ["*.safetensors"]
+    if not local:
+        src = hf_api().snapshot_download(model, allow_patterns=[*CONFIG_FILES, *files])
+    shutil.copytree(
+        src,
+        out,
+        ignore=_not_config,
+    )
+    (out / "config.json").write_text(json.dumps(cfg, indent=2))
+    tensors = {}
+    paths = [os.path.join(src, f) for f in files] if index.exists() else None
+    for path in paths or _safetensors(src):
+        with safe_open(path, "pt") as f:
+            for n in f.keys():  # noqa: SIM118
+                if not keep(n):
+                    continue
+                sl = f.get_slice(n)
+                shape = sl.get_shape()
+                # stacked experts, router rows and biases: the first `experts`
+                if (
+                    experts
+                    and shape
+                    and shape[0] == num_experts
+                    and not _EXPERT.search(n)
+                    and re.search(r"(experts|moe|mlp|gate|router)[._]", n)
+                ):
+                    tensors[n] = sl[:experts].contiguous()
+                else:
+                    tensors[n] = f.get_tensor(n)
+    save_file(tensors, out / "model.safetensors", metadata={"format": "pt"})
+    return str(out)
 
 
 def _counts(t: torch.Tensor) -> bool:
@@ -389,6 +576,11 @@ class RefitCase:
     # level-2 sleep before each reload, waking weights before and the KV
     # cache after it, as RL colocated with training does
     sleep: bool = False
+    # A cut to (decoder layers, routed experts) at test time, see `_reduced`
+    reduce: tuple[int, int | None] | None = None
+    # reload through a load plan; fallback names must match `fallbacks`
+    planned: bool = False
+    fallbacks: tuple[str, ...] = ()  # regexes
 
     @property
     def tp(self) -> int:
@@ -405,7 +597,13 @@ class RefitCase:
     @property
     def reference_key(self) -> tuple:
         """Cases that differ only in sleep share a fresh-B reference."""
-        return (self.model, self.model_b, repr(self.parallel), repr(self.engine))
+        return (
+            self.model,
+            self.model_b,
+            self.reduce,
+            repr(self.parallel),
+            repr(self.engine),
+        )
 
     @property
     def id(self) -> str:
@@ -415,6 +613,7 @@ class RefitCase:
         layout += ["ep"] if p.get("enable_expert_parallel") else []
         layout += ["eplb"] if p.get("enable_eplb") else []
         layout += ["sleep"] if self.sleep else []
+        layout += ["planned"] if self.planned else []
         return "-".join([self.family, self.quant, *layout])
 
 
@@ -431,6 +630,10 @@ NIGHTLY = (pytest.mark.slow_test,)  # CI runs these in the nightly step only
 GPT_OSS = "openai/gpt-oss-20b"
 # pinned: the only TRT-LLM MXFP4 reload coverage, not left to the oracle
 TRTLLM_MOE = dict(kernel_config={**KERNEL_CONFIG, "moe_backend": "flashinfer_trtllm"})
+
+QWEN3_MOE = "Qwen/Qwen3-30B-A3B"
+PLAN_QWEN3_MOE = dict(planned=True, reduce=(2, 16))  # top-8 routing
+PLAN_GPT_OSS = dict(planned=True, reduce=(2, 8))  # sliding and full attention
 
 REFIT_CASES = [
     # one GPU
@@ -453,6 +656,27 @@ REFIT_CASES = [
         for parallel in (TP2, TP2_EP, TP2_EP_EPLB, DP2_EP)
     ),
     RefitCase("qwen3-moe", "fp8-block", "Qwen/Qwen3-30B-A3B-FP8", TP2_EP),
+    # load plan (one case per RL family), on checkpoints cut at test time
+    *(
+        RefitCase(family, quant, model, parallel, engine=engine, **plan)
+        for family, quant, model, engine, plan in (
+            ("qwen3-moe", "bf16", QWEN3_MOE, {}, dict(PLAN_QWEN3_MOE, marks=NIGHTLY)),
+            ("qwen3-moe", "fp8-block", f"{QWEN3_MOE}-FP8", {}, PLAN_QWEN3_MOE),
+            ("gpt-oss", "mxfp4", GPT_OSS, TRTLLM_MOE, PLAN_GPT_OSS),
+        )
+        for parallel in ({}, TP2_EP)
+    ),
+    # Gated DeltaNet and full attention, FP8
+    RefitCase(
+        "qwen3.5-moe",
+        "fp8",
+        "Qwen/Qwen3.5-35B-A3B-FP8",
+        engine={"limit_mm_per_prompt": {"image": 0, "video": 0}},
+        marks=NIGHTLY,
+        planned=True,
+        reduce=(4, 32),
+        fallbacks=(r".*\.linear_attn\.conv1d\.weight",),  # a `view` the plan rejects
+    ),
 ]
 
 
@@ -460,12 +684,17 @@ REFIT_CASES = [
 def checkpoints(tmp_path_factory):
     """A's and B's local folders for a case, and the checkpoint tensors equal
     in both; derived B is written once per model."""
-    cache: dict[tuple[str, str | None], tuple[str, str, list[str]]] = {}
+    cache: dict[tuple, tuple[str, str, list[str]]] = {}
 
     def get(case: RefitCase) -> tuple[str, str, list[str]]:
-        key = (case.model, case.model_b)
+        key = (case.model, case.model_b, case.reduce)
         if key not in cache:
-            a = _download(case.model)
+            if case.reduce is None:
+                a = _download(case.model)
+            else:
+                a = _reduced(
+                    case.model, *case.reduce, tmp_path_factory.mktemp("reduced") / "a"
+                )
             if case.model_b is None:
                 b = str(tmp_path_factory.mktemp("derived") / "b")
                 unchanged = _derive_b(a, Path(b))
@@ -536,7 +765,9 @@ async def test_refit_equals_fresh(
                 await asyncio.wait_for(engine.sleep(level=2), TIMEOUT_S)
                 result[f"reload_{name}_slept"] = await engine.is_sleeping()
                 await asyncio.wait_for(engine.wake_up(tags=["weights"]), TIMEOUT_S)
-            result[f"reload_{name}"] = await _rpc(engine, _stream_reload, folder)
+            result[f"reload_{name}"] = await _rpc(
+                engine, _stream_reload, folder, case.planned
+            )
             if case.sleep:
                 result[f"reload_{name}_woke"] = await asyncio.wait_for(
                     engine.wake_up(tags=["kv_cache"]), TIMEOUT_S
@@ -546,8 +777,18 @@ async def test_refit_equals_fresh(
             differs[name] = list(map(_diff, expected, digests))
             result[f"reload_{name}_moved"] = list(map(_diff, ptrs, moved))
 
+        if case.planned:
+            plans = await _rpc(engine, _plan_summary)
     for name, per_rank in differs.items():
         result[f"reload_{name}_differs"] = per_rank
+    if case.planned:
+        for rank, report in enumerate(plans):
+            print(f"M0 {case.id} rank {rank}: {json.dumps(report, default=str)}")
+        allowed = re.compile("|".join(case.fallbacks) or "(?!)")
+        result["unexpected_fallbacks"] = [
+            {n: r for n, r in p["fallbacks"].items() if not allowed.fullmatch(n)}
+            for p in plans
+        ]
     # one assert, so a failure reports everything
     ranks = case.num_gpus
     reload = dict(mode="direct", new_blocks=[], freed_blocks=[], peak_bounded=True)
@@ -561,6 +802,7 @@ async def test_refit_equals_fresh(
             for key, value in (("", reload), ("_differs", {}), ("_moved", {}))
         },
         **{f"reload_{name}{key}": v for name in ("b", "a") for key, v in sleep.items()},
+        **({"unexpected_fallbacks": [{}] * ranks} if case.planned else {}),
     }
     # same engine, same graphs: reloading A must reproduce its cold outputs
     assert tokens["a"] == cold_a_tokens
