@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+from copy import deepcopy
+from itertools import chain
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call
 
@@ -8,7 +10,12 @@ import pytest
 
 from vllm import LLM
 from vllm.exceptions import ProfilerAlreadyActiveError
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.outputs import CompletionOutput
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
@@ -254,6 +261,84 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}"
             )
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_llm_engine_parallel_sampling_output_kind(
+    vllm_runner, output_kind: RequestOutputKind
+) -> None:
+    """Check parallel completions and their emission through LLMEngine.step."""
+    n = 3
+    max_tokens = 8
+    request_id = f"parallel-sampling-{output_kind.name.lower()}"
+    sampling_params = SamplingParams(
+        n=n,
+        max_tokens=max_tokens,
+        # Make the expected token count independent of sampled EOS tokens.
+        ignore_eos=True,
+        seed=33,
+        output_kind=output_kind,
+    )
+
+    with _vllm_model(False, vllm_runner) as vllm_model:
+        engine = vllm_model.llm.llm_engine
+        engine.add_request(request_id, "Hello my name is", sampling_params)
+
+        request_outputs_by_step = []
+        while engine.has_unfinished_requests():
+            # Token lists can be updated in place by subsequent engine steps.
+            request_outputs_by_step.append(deepcopy(engine.step()))
+
+    # Streaming updates may contain only a subset of the parallel completions.
+    # Keep each completion's history, including its final update, by index.
+    expected_indices = set(range(n))
+    updates_by_index: dict[int, list[CompletionOutput]] = {i: [] for i in range(n)}
+    finished_indices: set[int] = set()
+
+    for request_output in chain.from_iterable(request_outputs_by_step):
+        assert request_output.request_id == request_id
+
+        indices = [completion.index for completion in request_output.outputs]
+        assert indices
+        assert len(indices) == len(set(indices))
+        assert set(indices) <= expected_indices
+
+        for completion in request_output.outputs:
+            index = completion.index
+            assert index not in finished_indices, "Completion emitted after finishing"
+            updates_by_index[index].append(completion)
+
+            if completion.finished():
+                assert completion.finish_reason == "length"
+                finished_indices.add(index)
+
+        # The parent finishes exactly when all of its completions have finished.
+        assert request_output.finished == (finished_indices == expected_indices)
+
+    assert finished_indices == expected_indices
+
+    token_counts = {}
+    if output_kind == RequestOutputKind.FINAL_ONLY:
+        assert all(not outputs for outputs in request_outputs_by_step[:-1])
+        assert len(request_outputs_by_step[-1]) == 1
+        for index, updates in updates_by_index.items():
+            token_counts[index] = len(updates[0].token_ids)
+
+    elif output_kind == RequestOutputKind.CUMULATIVE:
+        for index, updates in updates_by_index.items():
+            for previous, current in zip(updates, updates[1:]):
+                prefix = previous.token_ids
+                assert current.token_ids[: len(prefix)] == prefix
+            token_counts[index] = len(updates[-1].token_ids)
+
+    elif output_kind == RequestOutputKind.DELTA:
+        for index, updates in updates_by_index.items():
+            token_counts[index] = sum(len(update.token_ids) for update in updates)
+
+    else:
+        pytest.fail(f"Unhandled output kind: {output_kind}")
+
+    assert token_counts == dict.fromkeys(expected_indices, max_tokens)
 
 
 def test_engine_metrics(vllm_runner, example_prompts):

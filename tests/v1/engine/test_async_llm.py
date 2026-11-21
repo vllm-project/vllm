@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 import threading
 import time
 from contextlib import ExitStack
+from copy import deepcopy
+from dataclasses import replace
 from http import HTTPStatus
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -28,7 +31,7 @@ from vllm.exceptions import (
     VLLMValidationError,
 )
 from vllm.inputs import PromptType
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import WorkerProfiler
 from vllm.sampling_params import RequestOutputKind
@@ -489,6 +492,92 @@ async def generate(
         await asyncio.sleep(0.0)
 
     return count, request_id
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+@pytest.mark.asyncio
+async def test_parallel_sampling_output_kind(output_kind: RequestOutputKind) -> None:
+    """Check parallel completions and their emission through AsyncLLM.generate."""
+    n = 3
+    max_tokens = 8
+    request_id = f"parallel-sampling-{output_kind.name.lower()}"
+    params = SamplingParams(
+        n=n,
+        max_tokens=max_tokens,
+        # Make the expected token count independent of sampled EOS tokens.
+        ignore_eos=True,
+        seed=33,
+        output_kind=output_kind,
+    )
+
+    engine_args = replace(
+        TEXT_ENGINE_ARGS,
+        max_model_len=128,
+        max_num_seqs=n,
+        max_num_batched_tokens=128,
+        gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.5")),
+    )
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        request_outputs = []
+        async for request_output in engine.generate(TEXT_PROMPT, params, request_id):
+            # Later updates can mutate the token lists in earlier outputs.
+            request_outputs.append(deepcopy(request_output))
+
+        assert not engine.output_processor.has_unfinished_requests()
+
+    # Streaming updates may contain only a subset of the parallel completions.
+    # Keep each completion's history, including its final update, by index.
+    expected_indices = set(range(n))
+    updates_by_index: dict[int, list[CompletionOutput]] = {i: [] for i in range(n)}
+    finished_indices: set[int] = set()
+
+    for request_output in request_outputs:
+        assert request_output.request_id == request_id
+
+        indices = [completion.index for completion in request_output.outputs]
+        assert indices
+        assert len(indices) == len(set(indices))
+        assert set(indices) <= expected_indices
+
+        for completion in request_output.outputs:
+            index = completion.index
+            assert index not in finished_indices, "Completion emitted after finishing"
+            updates_by_index[index].append(completion)
+
+            if completion.finished():
+                assert completion.finish_reason == "length"
+                finished_indices.add(index)
+
+        # The parent finishes exactly when all of its completions have finished.
+        assert request_output.finished == (finished_indices == expected_indices)
+
+    assert finished_indices == expected_indices
+
+    token_counts = {}
+    if output_kind == RequestOutputKind.FINAL_ONLY:
+        assert len(request_outputs) == 1
+        for index, updates in updates_by_index.items():
+            token_counts[index] = len(updates[0].token_ids)
+
+    elif output_kind == RequestOutputKind.CUMULATIVE:
+        for index, updates in updates_by_index.items():
+            for previous, current in zip(updates, updates[1:]):
+                prefix = previous.token_ids
+                assert current.token_ids[: len(prefix)] == prefix
+            token_counts[index] = len(updates[-1].token_ids)
+
+    elif output_kind == RequestOutputKind.DELTA:
+        for index, updates in updates_by_index.items():
+            token_counts[index] = sum(len(update.token_ids) for update in updates)
+
+    else:
+        pytest.fail(f"Unhandled output kind: {output_kind}")
+
+    assert token_counts == dict.fromkeys(expected_indices, max_tokens)
 
 
 @pytest.mark.parametrize(
