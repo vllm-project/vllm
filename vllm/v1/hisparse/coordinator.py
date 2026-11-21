@@ -1027,10 +1027,7 @@ class HiSparseCoordinator:
         state.publication = None
 
     def free(self, request_id: str) -> None:
-        """Detach the request; its clean pages stay readable copies in the pool.
-
-        Copies no live request reads join the pool's retained tier.
-        """
+        """Detach the request; its clean pages stay readable copies in the pool."""
         self._resident_requests.discard(request_id)
         self._pending_imports.pop(request_id, None)
         self._import_pages.pop(request_id, None)
@@ -1064,8 +1061,7 @@ class HiSparseCoordinator:
         released: list[KVCacheBlock] = []
         reclaimable: list[KVCacheBlock] = []
         dropped: list[list[int]] = [[] for _ in rows]
-        # Tail first, so a prefix loses its tail pages before its head, and
-        # page by page, since a copy needs the page's block in every group.
+        # Tail pages first, each page's blocks across groups adjacent.
         for page_idx in reversed(range(max(map(len, rows), default=0))):
             for row, row_dropped in zip(rows, dropped):
                 if page_idx >= len(row) or row[page_idx].is_null:
@@ -1084,8 +1080,6 @@ class HiSparseCoordinator:
                 row_dropped.append(page_idx)
         if released:
             self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
-        # A copy only serves prefix hits that also need the prefix-cached
-        # indexer blocks, so it must not outlive them in the pool.
         self.gpu_pool.retain(
             block for block in reclaimable if block.block_id not in self._owners
         )

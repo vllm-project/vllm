@@ -172,8 +172,8 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
-        # Free blocks holding a disposable copy, reused after uncached free
-        # blocks and before prefix-cached ones (see `retain`).
+        # Free blocks reused after uncached free blocks and before
+        # prefix-cached ones (see `retain`).
         self.retained_queue = FreeKVCacheBlockQueue([])
         self._retained_ids: set[int] = set()
 
@@ -777,8 +777,8 @@ class BlockPool:
     def retain(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Move free blocks to the retained tier, the first block reused first.
 
-        Retained blocks hold copies worth less than prefix-cached blocks, so
-        they are reused after uncached free blocks but before cached ones.
+        Retained blocks are reused after uncached free blocks but before
+        prefix-cached ones. Blocks still referenced are left in place.
         """
         moved: list[KVCacheBlock] = []
         for block in blocks:
@@ -820,14 +820,28 @@ class BlockPool:
             blocks: A list of blocks to touch.
 
         """
+        if self._retained_ids:
+            self._touch_with_retained(blocks)
+            return
         for block in blocks:
             if block.is_null:
                 continue
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
             if block.ref_cnt == 0:
-                if self._retained_ids and block.block_id in self._retained_ids:
-                    self._retained_ids.remove(block.block_id)
+                self.free_block_queue.remove(block)
+            block.ref_cnt += 1
+            if self.metrics_collector:
+                self.metrics_collector.on_block_accessed(block)
+
+    def _touch_with_retained(self, blocks: Sequence[KVCacheBlock]) -> None:
+        retained = self._retained_ids
+        for block in blocks:
+            if block.is_null:
+                continue
+            if block.ref_cnt == 0:
+                if block.block_id in retained:
+                    retained.remove(block.block_id)
                     self.retained_queue.remove(block)
                 else:
                     self.free_block_queue.remove(block)
