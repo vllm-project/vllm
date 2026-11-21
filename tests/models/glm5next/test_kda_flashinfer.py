@@ -271,7 +271,19 @@ def _run_both(
 def test_backend_selection(model_dir):
     """`auto` runs GLM-5.3's decode shapes (64 heads at TP1, 16 at TP4) on
     FlashInfer on SM10x, keeps Triton for 8-head draft-verify rows, and an
-    explicit `flashinfer` fails at startup where it is unsupported."""
+    explicit `flashinfer` fails at startup where it is unsupported. The opt-in
+    `flashkda_sm90` is selected on SM90 with the op built and fails at startup
+    elsewhere or with a bf16 recurrent state."""
+    if current_platform.is_device_capability(90) and hasattr(
+        torch.ops._C, "kda_prefill_sm90"
+    ):
+        layer, _ = _make_layer(model_dir, 64, prefill="flashkda_sm90")
+        assert layer.kda_prefill_backend == "flashkda_sm90"
+    else:
+        with pytest.raises(RuntimeError, match="flashkda_sm90 requires CUDA SM90"):
+            _make_layer(model_dir, 64, prefill="flashkda_sm90")
+    with pytest.raises(RuntimeError, match="flashkda_sm90 requires CUDA SM90"):
+        _make_layer(model_dir, 64, prefill="flashkda_sm90", state_dtype=torch.bfloat16)
     if not current_platform.is_device_capability_family(100):
         with pytest.raises(RuntimeError, match="SM10x"):
             _make_layer(model_dir, 64, decode="flashinfer")

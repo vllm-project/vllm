@@ -17,7 +17,11 @@ from vllm.v1.worker.workspace import (
 TritonKDACheckpointSpec = tuple[tuple[int, ...], torch.dtype]
 
 # The Triton chunk kernel sees the recurrent state only at chunk boundaries.
-_KDA_PREFILL_CHECKPOINT_ALIGNMENT = {"flashkda": 16, "triton": FLA_CHUNK_SIZE}
+_KDA_PREFILL_CHECKPOINT_ALIGNMENT = {
+    "flashkda": 16,
+    "flashkda_sm90": 16,
+    "triton": FLA_CHUNK_SIZE,
+}
 
 
 def kda_prefill_checkpoint_alignment(backend: str) -> int | None:
