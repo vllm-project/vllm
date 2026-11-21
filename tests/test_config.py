@@ -220,6 +220,40 @@ def test_triton_replayssm_spec_decode_validates_config(
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "backend", "stochastic_rounding", "buffer_len", "error"),
+    [
+        (0, MambaBackendEnum.TRITON, False, 32, None),
+        (2, MambaBackendEnum.TRITON, False, 16, "speculative decoding"),
+        (0, MambaBackendEnum.FLASHINFER, False, 16, "--mamba-backend triton"),
+        (0, MambaBackendEnum.TRITON, True, 16, "stochastic-rounding"),
+        (0, MambaBackendEnum.TRITON, False, 64, "--replayssm-buffer-len <= 32"),
+    ],
+    ids=["stp", "spec", "flashinfer", "stochastic-rounding", "long-buffer"],
+)
+def test_gdn_replayssm_validates_config(
+    num_speculative_tokens, backend, stochastic_rounding, buffer_len, error
+):
+    """The Gated DeltaNet layer owns these limits, so every model built on it
+    (Qwen3.5, Qwen4Exp, and their subclasses) is checked, whatever its name."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+    )
+
+    config = SimpleNamespace(
+        num_speculative_tokens=num_speculative_tokens,
+        cache_config=SimpleNamespace(replayssm_buffer_len=buffer_len),
+        mamba_config=SimpleNamespace(
+            backend=backend, enable_stochastic_rounding=stochastic_rounding
+        ),
+    )
+    reason = QwenGatedDeltaNetAttention._replayssm_unsupported_reason(config)
+    if error:
+        assert reason is not None and error in reason
+    else:
+        assert reason is None
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
