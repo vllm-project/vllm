@@ -563,6 +563,9 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
         if value is None:
             value = getattr(args, legacy, None)
         d[name] = default if value is None else value
+    # Unset unless passed (see add_cli_args); fall back to the dataset default.
+    if d.get("random_range_ratio") is None:
+        d["random_range_ratio"] = RandomDataset.DEFAULT_RANGE_RATIO
     output_len = getattr(args, "output_len", None)
     # --output-len maps to the per-dataset output-len entry points get_samples
     # reads. None passes through (each dataset applies its own default),
@@ -1002,6 +1005,13 @@ def add_cli_args(parser: FlexibleArgumentParser):
             action.help = (
                 f"{action.help} Takes precedence over "
                 f"--{legacy.replace('_', '-')}{fallback}."
+            )
+        elif action.dest == "random_range_ratio":
+            # Unset unless passed, so validate_args only warns that it is
+            # ignored when the user actually set it.
+            action.default = None
+            action.help = (
+                f"{action.help} If not set, {RandomDataset.DEFAULT_RANGE_RATIO}."
             )
     add_random_multimodal_dataset_args(parser)
 

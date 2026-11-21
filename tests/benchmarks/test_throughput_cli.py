@@ -388,6 +388,47 @@ def test_one_flag_per_length_does_not_warn(argv) -> None:
     assert not [str(w.message) for w in caught if "are specified" in str(w.message)]
 
 
+def test_unset_range_ratio_does_not_warn_for_non_random_dataset() -> None:
+    """--random-range-ratio was not passed, so there is nothing to ignore."""
+    args = _parse_throughput_args(
+        "--dataset-name", "sharegpt", "--dataset-path", "sharegpt.json"
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        validate_args(args)
+
+    assert not [
+        str(w.message) for w in caught if "--random-range-ratio" in str(w.message)
+    ]
+
+
+def test_explicit_range_ratio_warns_for_non_random_dataset() -> None:
+    args = _parse_throughput_args(
+        "--dataset-name",
+        "sharegpt",
+        "--dataset-path",
+        "sharegpt.json",
+        "--random-range-ratio",
+        "0.5",
+    )
+    with pytest.warns(UserWarning, match="--random-range-ratio will be ignored"):
+        validate_args(args)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], 0.0),
+        (["--random-range-ratio", "0.5"], 0.5),
+    ],
+)
+def test_parsed_range_ratio_reaches_get_samples(argv, expected) -> None:
+    """Unset --random-range-ratio still resolves to the RandomDataset default."""
+    serve_args = _to_serve_args(_parse_throughput_args(*argv))
+
+    assert float(serve_args.random_range_ratio) == expected
+
+
 @pytest.mark.benchmark
 def test_get_requests_random_mm_with_mm_processor_args(
     hf_tokenizer: PreTrainedTokenizerBase,
