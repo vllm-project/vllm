@@ -128,6 +128,20 @@ class LlamaJsonParser(ParserEngine):
         super()._reset(initial_state)
         self._at_output_start = True
 
+    def _normalize_content(
+        self,
+        content: str | None,
+        trailing_content: str | None,
+        tools_called: bool,
+    ) -> str | None:
+        if (
+            tools_called
+            and trailing_content
+            and trailing_content.strip() in LLAMA_OUTPUT_END_TOKENS
+        ):
+            trailing_content = None
+        return super()._normalize_content(content, trailing_content, tools_called)
+
     def _preprocess_feed(
         self,
         delta_text: str,
