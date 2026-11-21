@@ -380,5 +380,12 @@ def quant_rows(x: torch.Tensor) -> FP8Weight:
 
 
 def gemm(xq: FP8Weight, w: FP8Weight, out_dtype: torch.dtype) -> torch.Tensor:
-    """FP8 GEMM of the `quant_rows` output `xq` with `w` (aiter CK)."""
-    return rocm_aiter_ops.w8a8_gemm(xq[0], w[0], xq[1], w[1], None, out_dtype)
+    """FP8 GEMM of the `quant_rows` output `xq` with `w` (hipBLASLt's row-wise
+    scaled GEMM)."""
+    return torch._scaled_mm(
+        xq[0],
+        w[0].t(),
+        scale_a=xq[1].view(-1, 1),
+        scale_b=w[1].view(1, -1),
+        out_dtype=out_dtype,
+    )

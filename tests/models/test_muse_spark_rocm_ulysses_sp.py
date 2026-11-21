@@ -318,6 +318,27 @@ def _prompt_logprobs(llm) -> torch.Tensor:
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Muse Spark Ulysses needs ROCm"
 )
+@pytest.mark.parametrize("rows", [1, 255, 256, 2096, 4096, 4100])
+def test_ulysses_gemm_matches_the_dequantized_product(rows: int) -> None:
+    """The FP8 GEMM agrees with the product of its dequantized operands, at row
+    counts on and off 256-row multiples."""
+    torch.manual_seed(rows)
+    n, k = 1024, 2048
+    x = torch.randn(rows, k, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.05
+    wq = usp._quant_weight(weight)
+    xq = usp.quant_rows(x)
+    out = usp.gemm(xq, wq, torch.bfloat16)
+    ref = (xq[0].float() * xq[1].float().view(-1, 1)) @ (
+        wq[0].float() * wq[1].float().view(-1, 1)
+    ).t()
+    assert out.shape == (rows, n) and out.dtype == torch.bfloat16
+    torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Muse Spark Ulysses needs ROCm"
+)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("options", MODES)
 def test_ulysses_prefill_matches_the_token_sharded_stream(
