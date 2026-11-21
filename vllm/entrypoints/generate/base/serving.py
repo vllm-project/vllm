@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.engine.types import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
@@ -237,6 +238,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             | CompletionRequest
             | ResponsesRequest
             | GenerateRequest
+            | SpeechToTextRequest
         ),
         raw_request: Request | None,
     ) -> int:
