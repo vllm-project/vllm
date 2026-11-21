@@ -661,6 +661,7 @@ class OutputProcessor:
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
         self._update_admission_stats()
+        self._update_queued_tokens_stat()
         return request_ids_to_abort
 
     def add_request(
@@ -675,6 +676,7 @@ class OutputProcessor:
         req_state = self.request_states.get(request_id)
         if req_state is not None:
             self._update_streaming_request_state(req_state, request, prompt)
+            self._update_queued_tokens_stat()
             return
 
         req_state = RequestState.from_new_request(
@@ -694,6 +696,7 @@ class OutputProcessor:
         # Track the external_req_id -> [internal_req_id, ...] mapping
         self.external_req_ids[req_state.external_req_id].append(request_id)
         self._update_admission_stats()
+        self._update_queued_tokens_stat()
 
     def _update_streaming_request_state(
         self, req_state: RequestState, request: EngineCoreRequest, prompt: str | None
@@ -757,6 +760,7 @@ class OutputProcessor:
         """
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
+        queued_tokens_changed = False
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -769,6 +773,7 @@ class OutputProcessor:
                 # Rejected on arrival, e.g. by a paused engine; nothing was run.
                 req_state.queue.put(error.to_exception())
                 self._finish_request(req_state)
+                queued_tokens_changed = True
                 if req_state.streaming_input:
                     # Input chunks sent since may re-create the session.
                     reqs_to_abort.append(req_id)
@@ -801,6 +806,7 @@ class OutputProcessor:
                 if req_state.remote_prefill_cached_tokens is not None:
                     req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens
                 req_state.is_prefilling = False
+                queued_tokens_changed = True
 
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
@@ -874,6 +880,7 @@ class OutputProcessor:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
+                        queued_tokens_changed = True
                     else:
                         req_state.input_chunk_queue = None
                 else:
@@ -891,6 +898,8 @@ class OutputProcessor:
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
+        if queued_tokens_changed:
+            self._update_queued_tokens_stat()
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
@@ -937,6 +946,12 @@ class OutputProcessor:
     def _update_admission_stats(self) -> None:
         if self.admission_stats is not None:
             self.admission_stats.set_num_requests(self.get_num_unfinished_requests())
+
+    def _update_queued_tokens_stat(self) -> None:
+        # get_num_queued_tokens() walks request_states, so this runs once per
+        # add, abort or batch of outputs, not once per finished request.
+        if self.admission_stats is not None:
+            self.admission_stats.set_num_queued_tokens(self.get_num_queued_tokens())
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)

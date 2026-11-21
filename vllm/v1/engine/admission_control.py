@@ -50,3 +50,12 @@ class SharedAdmissionStats:
             self._counters[client_index * self.COUNTERS_PER_SLOT]
             for client_index in range(self._client_count)
         )
+
+    def set_num_queued_tokens(self, count: int) -> None:
+        self._counters[self._slot_offset + 1] = count
+
+    def get_num_queued_tokens(self) -> int:
+        return sum(
+            self._counters[client_index * self.COUNTERS_PER_SLOT + 1]
+            for client_index in range(self._client_count)
+        )
