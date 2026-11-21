@@ -31,6 +31,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.utils.system_utils import get_mp_context, set_env_var
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.dp_rpc_port import binds_dp_rpc_port, check_dp_rpc_port_available
 from vllm.v1.executor import Executor, UniProcExecutor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
@@ -1375,6 +1376,13 @@ def launch_core_engines(
     else:
         local_handshake_address = handshake_address
         client_handshake_address = None
+
+    # Only the rank 0 frontend binds the TCP handshake address, and only when
+    # the data parallel engines are not all local (otherwise the local IPC
+    # transport is used). Report a port that is still held by a stale engine
+    # here, before the bind fails with a bare "Address already in use".
+    if binds_dp_rpc_port(handshake_local_only, local_engines_only, dp_rank):
+        check_dp_rpc_port_available(host, parallel_config.data_parallel_rpc_port)
 
     with zmq_socket_ctx(
         local_handshake_address, zmq.ROUTER, bind=True
