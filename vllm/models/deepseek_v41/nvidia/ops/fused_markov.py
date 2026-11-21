@@ -4,6 +4,8 @@
 Tokens are drawn by inverse CDF of softmax(cached logits / temperature), one exp
 per logit instead of Gumbel-max's hash and two logs; temperature 0 is argmax."""
 
+from collections.abc import Callable
+
 import torch
 
 from vllm.triton_utils import LOG2E, tl, triton
@@ -79,6 +81,8 @@ def _markov_select_kernel(
     draft_tokens_stride,
     embed_weight_ptr,  # [VOCAB, RANK] markov_w1
     embed_ptr,  # [max_num_reqs, RANK], the next step's bias GEMM input
+    prev_embed_ptr,
+    confidence_embeds_ptr,  # [max_num_reqs, NUM_STEPS, RANK]
     partial_max_ptr,
     partial_sum_ptr,
     NUM_STEPS: tl.constexpr,
@@ -86,6 +90,7 @@ def _markov_select_kernel(
     RANK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     BLOCK_P: tl.constexpr,
+    SAVE_EMBEDS: tl.constexpr,
 ):
     req = tl.program_id(0).to(tl.int64)
     row = req * NUM_STEPS + step
@@ -135,6 +140,10 @@ def _markov_select_kernel(
         token = tl.sum(tl.where(p == winner, sums, 0.0)).to(tl.int64)
     tl.store(draft_tokens_ptr + req * draft_tokens_stride + step, token)
     r = tl.arange(0, RANK)
+    if SAVE_EMBEDS:
+        # Save the input to this step's bias before overwriting it for the next.
+        previous = tl.load(prev_embed_ptr + req * RANK + r)
+        tl.store(confidence_embeds_ptr + row * RANK + r, previous)
     tl.store(embed_ptr + req * RANK + r, tl.load(embed_weight_ptr + token * RANK + r))
 
 
@@ -143,7 +152,13 @@ class FusedMarkovSampler:
     at model init, so CUDA graphs keep the addresses."""
 
     def __init__(
-        self, max_num_reqs: int, vocab_size: int, rank: int, dtype: torch.dtype
+        self,
+        max_num_reqs: int,
+        vocab_size: int,
+        rank: int,
+        dtype: torch.dtype,
+        *,
+        confidence_steps: int = 0,
     ):
         assert rank & (rank - 1) == 0, rank
         self.vocab_size, self.rank = vocab_size, rank
@@ -152,15 +167,65 @@ class FusedMarkovSampler:
         self.markov_embed = torch.empty(max_num_reqs, rank, dtype=dtype)
         self.partial_max = torch.empty(max_num_reqs, self.block_p, dtype=torch.float32)
         self.partial_sum = torch.empty_like(self.partial_max)
+        self.confidence_embeds = (
+            torch.empty(max_num_reqs, confidence_steps, rank, dtype=dtype)
+            if confidence_steps
+            else None
+        )
 
     def __call__(self, spec, num_reqs: int, head_hidden: torch.Tensor) -> bool:
         model, n_spec = spec.model, spec.num_speculative_steps
-        base_logits = model.compute_draft_logits(
-            head_hidden[spec.sample_indices[: num_reqs * n_spec]]
-        )
+        if (
+            spec.draft_logits is None
+            or spec.draft_logits.row_mapping is not None
+            or spec.acceptance_estimator is not None
+            or spec.use_confidence_head != (self.confidence_embeds is not None)
+        ):
+            return False
+        sample_hidden = head_hidden[spec.sample_indices[: num_reqs * n_spec]]
+        base_logits = model.compute_draft_logits(sample_hidden)
         markov_embed = model.markov_embed(
             spec.input_buffers.input_ids[spec._anchor_idx[:num_reqs]]
         )
+        embeds = self.sample(
+            base_logits,
+            markov_embed,
+            model.markov_bias,
+            model.model.markov_head.markov_w1.weight,
+            spec.sample_idx_mapping[: num_reqs * n_spec],
+            spec.sample_pos[: num_reqs * n_spec],
+            spec.temperature,
+            spec.seeds,
+            spec.draft_logits.values,
+            spec.draft_tokens[:num_reqs],
+        )
+        if embeds is not None:
+            confidence = spec._confidence(
+                sample_hidden, embeds, spec.draft_tokens[:num_reqs].shape
+            )
+            spec.draft_token_confidence_probs[:num_reqs] = confidence
+        return True
+
+    def sample(
+        self,
+        base_logits: torch.Tensor,
+        markov_embed: torch.Tensor,
+        markov_bias: Callable[[torch.Tensor], torch.Tensor],
+        embed_weight: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        sample_pos: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        logits_cache: torch.Tensor,
+        draft_tokens: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Write proposals/cache and return the embeddings used to propose them.
+
+        Embeddings are request-major `[rows, steps, rank]`, not cache-slot-major.
+        """
+        num_reqs, n_spec = draft_tokens.shape
+        if self.confidence_embeds is not None:
+            assert self.confidence_embeds.shape[1] == n_spec
         consts = dict(
             NUM_STEPS=n_spec,
             VOCAB=self.vocab_size,
@@ -168,16 +233,16 @@ class FusedMarkovSampler:
             BLOCK_P=self.block_p,
         )
         for step in range(n_spec):
-            bias = model.markov_bias(markov_embed)
+            bias = markov_bias(markov_embed)
             _markov_sample_kernel[(num_reqs, self.num_blocks)](
                 base_logits,
                 base_logits.stride(0),
                 bias,
                 bias.stride(0),
                 step,
-                spec.sample_idx_mapping,
-                spec.temperature,
-                spec.draft_logits.values,
+                idx_mapping,
+                temperature,
+                logits_cache,
                 self.partial_max,
                 self.partial_sum,
                 **consts,
@@ -185,19 +250,26 @@ class FusedMarkovSampler:
             )
             _markov_select_kernel[(num_reqs,)](
                 step,
-                spec.sample_idx_mapping,
-                spec.sample_pos,
-                spec.temperature,
-                spec.seeds,
-                spec.draft_logits.values,
-                spec.draft_tokens,
-                spec.draft_tokens.stride(0),
-                model.model.markov_head.markov_w1.weight,
+                idx_mapping,
+                sample_pos,
+                temperature,
+                seeds,
+                logits_cache,
+                draft_tokens,
+                draft_tokens.stride(0),
+                embed_weight,
                 self.markov_embed,
+                markov_embed,
+                self.confidence_embeds,
                 self.partial_max,
                 self.partial_sum,
                 RANK=self.rank,
+                SAVE_EMBEDS=self.confidence_embeds is not None,
                 **consts,
             )
             markov_embed = self.markov_embed[:num_reqs]
-        return True
+        return (
+            self.confidence_embeds[:num_reqs]
+            if self.confidence_embeds is not None
+            else None
+        )
