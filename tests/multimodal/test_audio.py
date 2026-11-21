@@ -198,6 +198,16 @@ def test_bounded_resample_rates_rejects_non_positive():
         _bounded_resample_rates(16000, -1)
 
 
+def test_bounded_resample_rates_checks_padded_kernel():
+    with pytest.raises(ValueError, match="resampling kernel"):
+        _bounded_resample_rates(7, 8, max_kernel_elems=100)
+
+
+def test_polyphase_kernel_elems_matches_torchaudio():
+    resampler = _get_torchaudio_resampler(14, 16)
+    assert _polyphase_kernel_elems(14, 16) == resampler.kernel.numel()
+
+
 def test_coprime_header_rate_does_not_build_unbounded_kernel(dummy_audio):
     with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
         out = resample_audio_torchaudio(dummy_audio, orig_sr=16001, target_sr=16000)

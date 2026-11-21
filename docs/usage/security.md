@@ -109,6 +109,10 @@ Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
 
+The torchaudio resampler also limits the size of its padded sinc filter.
+It can approximate an unusual sample-rate ratio and rejects the input if
+the resulting filter would still exceed the limit.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
