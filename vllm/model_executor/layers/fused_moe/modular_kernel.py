@@ -925,6 +925,9 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     above.
     """
 
+    # Optional transform between activation and GEMM2 activation quantization.
+    post_activation_transform: Callable[[torch.Tensor], torch.Tensor] | None = None
+
     @staticmethod
     def is_monolithic() -> bool:
         return False
@@ -1059,6 +1062,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             expert_map=expert_map,
             valid_token_counts=valid_token_counts,
         )
+        if self.post_activation_transform is not None:
+            output.copy_(self.post_activation_transform(output))
 
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:

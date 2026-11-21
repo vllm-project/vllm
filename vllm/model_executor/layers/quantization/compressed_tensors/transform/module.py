@@ -13,7 +13,6 @@ from torch import Tensor
 
 import vllm._custom_ops as ops
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,
 )
@@ -24,8 +23,9 @@ from vllm.model_executor.parameter import SharedWeightParameter
 
 class HadamardTransform(torch.nn.Module):
     """Class which handles weight loading, postprocessing, and application of
-    transforms. Meant to be used with `CompressedTensorsLinearTransformMethod`
-    and attention transforms method (not implemented yet)
+    transforms. Meant to be used with `CompressedTensorsLinearTransformMethod`,
+    `CompressedTensorsMoETransforms` and attention transforms method (not
+    implemented yet)
     """
 
     transforms: dict[int, TransformTuple]  # info parsed from transforms config
@@ -137,14 +137,14 @@ class HadamardTransform(torch.nn.Module):
         if scheme.head_dim is not None:
             return scheme.head_dim
 
-        if isinstance(layer, LinearBase):
+        if not isinstance(layer, VocabParallelEmbedding):
             if args.location == TransformLocation.INPUT:
                 return input_size
 
             elif args.location == TransformLocation.OUTPUT:
                 return output_size
 
-        elif isinstance(layer, VocabParallelEmbedding):
+        else:
             if args.location == TransformLocation.INPUT:
                 return output_size
 

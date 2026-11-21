@@ -439,7 +439,7 @@ class SharedWeightParameter(BasevLLMParameter):
         """
         # load (shared) tensor using `data_key`
         if data_key not in self.tensors_registry:
-            data = torch.empty(*args, **kwargs)
+            data = torch.zeros(*args, **kwargs)
             self.tensors_registry[data_key] = data
         else:
             data = self.tensors_registry[data_key]
