@@ -30,6 +30,10 @@ class InternS2PreviewProcessingInfo(Qwen3VLProcessingInfo):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS2PreviewForConditionalGeneration(Qwen3_5MoeForConditionalGeneration):
+    # Inherits SupportsReplaySSM from its Qwen3.5 base, but RecoverSSM is not
+    # validated here: keep rejecting --use-replayssm.
+    supports_replayssm = False  # type: ignore[assignment]
+
     # `mtp.` is already dropped by `Qwen3_5ForConditionalGeneration`.
     hf_to_vllm_mapper = Qwen3_5MoeForConditionalGeneration.hf_to_vllm_mapper | (
         WeightsMapper(

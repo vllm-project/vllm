@@ -18,6 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.interfaces import SupportsReplaySSM
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextDecoderLayer,
     Qwen3NextModel,
@@ -172,7 +173,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
-class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
+class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts, SupportsReplaySSM):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
