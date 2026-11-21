@@ -255,6 +255,8 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu_worker.py
   - examples/rl/
   - examples/features/data_parallel/data_parallel_offline.py
   commands:
@@ -270,6 +272,7 @@ steps:
   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   # test with torchrun tp=2 and dp=2 with ep
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - TP_SIZE=2 ENABLE_EP=1 ENABLE_EPLB=1 torchrun --nproc-per-node=2 tests/distributed/test_torchrun_example_moe.py
   # test with internal dp
   - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
   # rlhf examples (each launches its own `vllm serve` and tears it down)
@@ -298,6 +301,8 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - tests/distributed/test_torchrun_example.py
       - tests/distributed/test_torchrun_example_moe.py
+      - vllm/v1/worker/gpu/model_runner.py
+      - vllm/v1/worker/gpu_worker.py
       - examples/rl/
       - examples/features/data_parallel/data_parallel_offline.py
       - .buildkite/scripts/check-kv-connectors.sh
@@ -314,6 +319,7 @@ steps:
       # tp=2, pp=2 and dp=1 with torchrun: no longer supported with MRV2
       - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
       - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+      - TP_SIZE=2 ENABLE_EP=1 ENABLE_EPLB=1 torchrun --nproc-per-node=2 tests/distributed/test_torchrun_example_moe.py
       # Loading weights from the shared HF cache can exceed the default 300s --timeout.
       - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager --timeout 900
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py

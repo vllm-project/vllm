@@ -110,7 +110,37 @@ Every plugin has three parts:
 
     To use an `EplbState` subclass, construct it in the plugin's worker or controller. The platform configuration hooks do not select the state class; the upstream `EPLBController` constructs the base `EplbState`.
 
-    An `EplbState` subclass can implement `create_policy()` and `create_model_communicator()`. `create_policy()` returns one `AbstractEplbPolicy` instance shared by the models in that state. Device-specific expert mapping and load recording belong to a registered router subclass overriding `_apply_eplb_mapping()`; the router retains ownership of its layer state. Synchronous, profiling and asynchronous planning call `policy.rebalance_experts(stats, old_global_expert_indices)` directly. Asynchronous planning runs on the background worker thread; synchronous planning and profiling run on the main thread. `EplbStats` holds one load/topology snapshot; downstream policies can accept dataclass subclasses carrying additional planning inputs. Before calling the policy, the worker replaces the snapshot's load field with its CPU copy on the worker stream. This preserves the stats instance, its subclass and any additional fields. The default policy consumes aggregate CPU loads of shape `[layers, experts]` and returns a CPU integer placement tensor. Keep policy configuration on the policy instance and per-model, per-round inputs in the snapshot. Set `EplbState.model_state_cls` to an `EplbModelState` subclass to customize model-local commits. `_commit_eplb_maps()` installs a full-model placement and `_commit_eplb_maps_for_layer()` installs one layer. `_move_to_workspace()` consumes that model's pending transfer result; commit overrides must submit device-specific updates before returning so buffer acknowledgement remains after weight installation and map updates.
+    An `EplbState` subclass can implement `create_policy()` and `create_model_communicator()`. `create_policy()` returns one `AbstractEplbPolicy` instance shared by the models in that state. Device-specific expert mapping and load recording belong to a registered router subclass overriding `_apply_eplb_mapping()`; the router retains ownership of its layer state. Synchronous planning and profiling call `policy.rebalance_experts(stats, old_global_expert_indices)` directly on the main thread. Asynchronous planning uses a serialized copy of the policy in one persistent CPU subprocess per worker; subsequent async policy state belongs to that child and is not shared with the original instance. `EplbStats` holds one load/topology snapshot; downstream policies can accept dataclass subclasses carrying additional planning inputs. Before async dispatch, the worker replaces the snapshot's load field with its CPU copy on the worker stream, then serializes the stats and old placement. The child receives a copy retaining the stats subclass and additional fields. Policies and their CPU inputs must be serializable. The default policy consumes aggregate CPU loads of shape `[layers, experts]` and returns a CPU integer placement tensor. Keep policy configuration on the policy instance and per-model, per-round inputs in the snapshot. Set `EplbState.model_state_cls` to an `EplbModelState` subclass to customize model-local commits. `_commit_eplb_maps()` installs a full-model placement and `_commit_eplb_maps_for_layer()` installs one layer. `_move_to_workspace()` consumes that model's pending transfer result; commit overrides must submit device-specific updates before returning so buffer acknowledgement remains after weight installation and map updates.
+
+    Async policy compatibility differs from the former in-process thread: the policy instance and CPU snapshots must support serialization. Policies holding locks or other process-local resources must use `__getstate__()` / `__setstate__()` or `__reduce__()` to preserve their configuration and CPU history while recreating those resources in the child. An incompatible policy fails before a child is launched, with a migration hint. Existing plugins without this support need adaptation; there is no automatic thread fallback. Keep inference process groups, model weights, device contexts, and references to the inference state out of the serialized policy.
+
+    For example, a policy can retain its round counter and recreate its private lock:
+
+    ```python
+    import threading
+
+    from vllm.distributed.eplb.policy import DefaultEplbPolicy
+
+
+    class LockedPolicy(DefaultEplbPolicy):
+        def __init__(self):
+            self.rounds = 0
+            self.lock = threading.Lock()
+
+        def __getstate__(self):
+            return self.rounds
+
+        def __setstate__(self, rounds):
+            self.rounds = rounds
+            self.lock = threading.Lock()
+
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            with self.lock:
+                self.rounds += 1
+                return super().rebalance_experts(stats, old_global_expert_indices)
+    ```
+
+    The worker owns and explicitly closes its async thread and policy subprocess before releasing model and communication resources. Plugin workers with their own shutdown path must call `EplbState.stop_async_loop()` at the same point. The 60-second IPC timeout covers the startup handshake or a planning request's send and complete response; it does not interrupt arbitrary Python serialization or deserialization code. Planner failures stop all participating async workers. FT cancellation is coordinated before further layer transfers; a failed planner process is terminal rather than automatically restarted.
 
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 

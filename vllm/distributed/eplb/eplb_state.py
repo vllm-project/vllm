@@ -30,6 +30,7 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -44,7 +45,7 @@ from vllm.distributed.parallel_state import (
     in_the_same_node_as,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-from vllm.distributed.utils import StatelessProcessGroup
+from vllm.distributed.utils import StatelessProcessGroup, cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
@@ -55,6 +56,7 @@ from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, EplbStats
+from .policy_process import EplbPolicyProcess
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     copy_rows,
@@ -331,6 +333,7 @@ class EplbState:
         """
         Selected EPLB algorithm
         """
+        self.policy_process: EplbPolicyProcess | None = None
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
@@ -391,6 +394,7 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.async_worker_stop = threading.Event()
         self.async_worker_error: Exception | None = None
         """
         Exception that stopped the async worker thread, if any.
@@ -440,8 +444,8 @@ class EplbState:
     def create_policy(self) -> AbstractEplbPolicy:
         """Create the policy shared by every model in this EPLB state.
 
-        `rebalance_experts` runs on the background worker thread for asynchronous
-        planning and on the main thread for synchronous planning and profiling.
+        Async planning runs a serialized copy in a persistent CPU subprocess.
+        Synchronous planning and profiling use this instance on the main thread.
         """
         policy = self.parallel_config.eplb_config.policy
         return EPLB_POLICIES["default" if policy is None else policy]()
@@ -1160,12 +1164,32 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self.async_worker_stop.clear()
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
             )
 
-    def drain_async(self) -> None:
+    def stop_async_loop(self, timeout: float = 65) -> None:
+        """Drain and stop the async worker before releasing model resources."""
+        worker = self.async_worker
+        try:
+            if worker is not None and worker.is_alive():
+                self.drain_async(timeout=timeout)
+        except Exception:
+            logger.exception("Failed to drain async EPLB during shutdown")
+        finally:
+            self.async_worker_stop.set()
+            if self.policy_process is not None:
+                self.policy_process.close()
+            if worker is not None:
+                worker.join(timeout=10)
+                if worker.is_alive():
+                    raise RuntimeError("Async EPLB worker did not stop")
+                self.async_worker = None
+            self.policy_process = None
+
+    def drain_async(self, timeout: float | None = None) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.
 
         Each pending result is acknowledged (consumed_event recorded) so the
@@ -1181,6 +1205,7 @@ class EplbState:
         """
         if not self.is_async:
             return
+        deadline = None if timeout is None else time.monotonic() + timeout
         for model_key, ms in self.model_states.items():
             needs_drain = ms.rebalanced
             if needs_drain:
@@ -1189,7 +1214,10 @@ class EplbState:
                     model_key,
                 )
             while ms.rebalanced:
-                if self._all_ranks_result_ready(ms):
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("Timed out draining async EPLB")
+                if self._all_ranks_result_ready(ms, timeout=remaining):
                     result = ms.pending_result
                     assert result is not None
                     if result.layer_idx == ms.model.num_moe_layers - 1:
@@ -1204,7 +1232,9 @@ class EplbState:
                     model_key,
                 )
 
-    def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
+    def _all_ranks_result_ready(
+        self, model_state: EplbModelState, timeout: float | None = None
+    ) -> bool:
         flags = torch.tensor(
             (
                 int(self.async_worker_error is not None),
@@ -1214,7 +1244,10 @@ class EplbState:
             device="cpu",
         )
         # cpu_all_reduce_ only sums, so count failed and pending ranks.
-        get_ep_group().cpu_all_reduce_(flags)
+        if timeout is None:
+            get_ep_group().cpu_all_reduce_(flags)
+        else:
+            cpu_all_reduce_(flags, get_ep_group().cpu_group, timedelta(seconds=timeout))
         num_failed, num_pending = flags.tolist()
         if num_failed:
             raise RuntimeError(
