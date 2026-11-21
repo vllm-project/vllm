@@ -6435,6 +6435,21 @@ def test_store_worker_close_is_idempotent():
     store.close.assert_called_once_with()
 
 
+def test_store_worker_close_keeps_store_open_under_running_lookups():
+    worker = _make_bare_worker()
+    store = worker.store
+    lookup_server = MagicMock()
+    lookup_server.close.return_value = False
+    worker.lookup_server = lookup_server
+
+    worker.close()
+
+    # A lookup is still inside a store call; closing the store could crash.
+    lookup_server.close.assert_called_once_with()
+    store.close.assert_not_called()
+    assert worker.store is None
+
+
 def test_store_worker_close_swallows_store_errors():
     worker = _make_bare_worker()
     worker.store.close.side_effect = RuntimeError("boom")
