@@ -42,6 +42,8 @@ class ParserState(Enum):
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
     TOOL_BETWEEN = auto()
+    FENCED = auto()
+    FENCED_REASONING = auto()
 
 
 class ToolCallBodyCollection(Enum):
@@ -83,6 +85,8 @@ class ParserEngineConfig:
             ParserState.REASONING: EventType.REASONING_CHUNK,
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            ParserState.FENCED: EventType.TEXT_CHUNK,
+            ParserState.FENCED_REASONING: EventType.REASONING_CHUNK,
         },
     )
 
@@ -137,6 +141,14 @@ class ParserEngineConfig:
 
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
+
+    # Opt-in markdown-style code fences. When fence_terminal is set the lexer
+    # emits one token per run of fence_characters and the engine keeps fenced
+    # spans out of the tool-call state machine.
+    fence_terminal: str | None = None
+
+    # Backtick and tilde, the CommonMark fence delimiters.
+    fence_characters: str = "\u0060~"
 
     def __post_init__(self) -> None:
         if self.arg_value_extender is not None and (
