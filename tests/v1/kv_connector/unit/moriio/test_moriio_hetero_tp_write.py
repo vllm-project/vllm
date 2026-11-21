@@ -672,3 +672,52 @@ def test_write_refuses_peer_with_different_block_size(monkeypatch):
                 tp_mapping=producer.worker._write_tp_mapping(1),
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("prefill_kernel_block_size", "decode_kernel_block_size"),
+    [(1, BLOCK_SIZE), (BLOCK_SIZE, 1), (1, 2)],
+)
+def test_write_kernel_split_lands_byte_exact(
+    monkeypatch, prefill_kernel_block_size, decode_kernel_block_size
+):
+    """P and D may split manager blocks into different kernel blocks; the write
+    still moves whole manager blocks."""
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    decode = _build_rank(
+        "mla", 0, 1, KVCacheLayout.LBNHC, True, state, False, decode_kernel_block_size
+    )
+    decode.wrapper = _consumer_wrapper()
+    prefill = _build_rank(
+        "mla", 0, 1, KVCacheLayout.LBNHC, True, state, True, prefill_kernel_block_size
+    )
+    _connect(prefill, [decode], "decode")
+    mapping = prefill.worker._write_tp_mapping(1)
+    info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS["full"]])
+    prefill.wrapper.done_remote_allocate_req_dict["t"] = info
+    writer = make_moriio_writer(prefill.worker)
+    for layer in layers:
+        writer._execute_write_task(
+            WriteTask(
+                request_id="req",
+                transfer_id="t",
+                dst_engine_id="decode",
+                local_block_ids=[PREFILL_BLOCKS["full"]],
+                remote_block_ids_hint=None,
+                layer_name=layer.name,
+                event=SimpleNamespace(synchronize=lambda: None),
+                remote_notify_port=NOTIFY_PORT,
+                remote_ip="decode",
+                remote_tp_size=1,
+                tp_mapping=mapping,
+            )
+        )
+
+    for layer, region in zip(layers, decode.regions, strict=True):
+        received = region.view(NUM_BLOCKS, -1)
+        expected = torch.zeros_like(received)
+        for src, dst in zip(PREFILL_BLOCKS["full"], DECODE_BLOCKS["full"]):
+            expected[dst] = state[layer.name][src].flatten()
+        assert torch.equal(received, expected), layer.name

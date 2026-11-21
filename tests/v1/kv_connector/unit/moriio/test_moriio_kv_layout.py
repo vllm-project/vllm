@@ -12,12 +12,14 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from ..utils import make_moriio_writer
 
@@ -291,6 +293,57 @@ def test_kernel_block_layout_without_spec_dimensions_rejects_ambiguous_axes():
         moriio_layout.get_layer_transfer_geometry(
             "layer", cache, worker.layer_to_spec, remote_num_blocks=8
         )
+
+
+@pytest.mark.parametrize(
+    ("block_size", "kernel_block_size", "head_size", "content", "tokens_per_state"),
+    [(8, 1, 576, None, 1), (8, 1, 128, 132, 1), (640, 128, 128, 132, 4)],
+    ids=["mla_latent", "indexer", "pooled_indexer"],
+)
+def test_kernel_split_view_matches_manager_geometry(
+    block_size, kernel_block_size, head_size, content, tokens_per_state
+):
+    num_blocks = 3
+    spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        head_size_v=0,
+        dtype=torch.uint8,
+        state_content_bytes=content,
+        tokens_per_state=tokens_per_state,
+    )
+    raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)
+    (manager_view,) = dense_kv_cache_views(
+        raw, spec, num_blocks, 1, KVCacheLayout.LBNHC
+    )
+    (kernel_view,) = dense_kv_cache_views(
+        raw, spec, num_blocks, 1, KVCacheLayout.LBNHC, kernel_block_size
+    )
+    layer_to_spec = {"layer": spec}
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", kernel_view, layer_to_spec
+    )
+
+    assert geometry == moriio_layout.get_layer_transfer_geometry(
+        "layer", manager_view, layer_to_spec
+    )
+    assert geometry.num_blocks == num_blocks
+    assert geometry.block_len == geometry.block_stride == spec.page_size_bytes
+
+
+def test_kernel_split_multi_head_view_is_unsupported():
+    # A raw block copy keeps the byte order of a multi-head split only if P
+    # and D split alike, which the handshake does not check.
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=4, dtype=torch.bfloat16
+    )
+    raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
+    (kernel_view,) = dense_kv_cache_views(raw, spec, 3, 1, KVCacheLayout.LBNHC, 4)
+
+    with pytest.raises(ValueError, match="Unsupported MoRIIO"):
+        moriio_layout.get_layer_transfer_geometry("layer", kernel_view, {"layer": spec})
 
 
 def test_mixed_layers_compute_distinct_offsets_per_layer():
