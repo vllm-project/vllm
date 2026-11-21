@@ -11,13 +11,20 @@ import regex as re
 import torch
 from torch import nn
 
+from vllm.model_executor.kernels.linear import triton_skinny_gemm as triton_gemm
 from vllm.model_executor.kernels.linear.cute_dsl import (
     skinny_gemm_plans as skinny_plans,
 )
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
 )
-from vllm.model_executor.layers.utils import maybe_use_skinny_gemm
+from vllm.model_executor.kernels.linear.triton_skinny_gemm import (
+    TritonSkinnyGemmConfig,
+)
+from vllm.model_executor.layers.utils import (
+    cuda_skinny_unquantized_gemm_impl,
+    maybe_use_skinny_gemm,
+)
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
@@ -1717,3 +1724,109 @@ def test_fallback_preserves_default_method() -> None:
     output = method.apply(SimpleNamespace(weight=weight), x)
 
     torch.testing.assert_close(output, torch.nn.functional.linear(x, weight))
+
+
+def _smallest_triton_shape(capability: tuple[int, int]) -> tuple[int, int]:
+    plans = skinny_plans.TRITON_SKINNY_GEMM_PLANS_BY_CAPABILITY[capability]
+    return min(plans, key=lambda shape: shape[0] * shape[1])
+
+
+def test_triton_skinny_gemm_plans_are_valid() -> None:
+    """Triton plans use legal tiles and list only measured CUDA graph sizes."""
+    tables = skinny_plans.TRITON_SKINNY_GEMM_PLANS_BY_CAPABILITY
+    assert tables
+    for plans in tables.values():
+        for (n, k), shape_plans in plans.items():
+            for num_tokens, config in shape_plans.items():
+                assert num_tokens % 8 == 0 and 8 <= num_tokens <= 256
+                tiles = (config.block_m, config.block_n, config.block_k)
+                assert all(t >= 16 and t & (t - 1) == 0 for t in tiles)
+                assert config.block_m <= max(16, num_tokens)
+                assert config.block_n <= n and config.block_k <= k
+                assert config.num_warps in (4, 8) and config.num_stages >= 2
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton GEMM needs CUDA")
+@pytest.mark.parametrize("num_tokens", [1, 17, 200])
+# Both shapes leave partial N and K tiles.
+@pytest.mark.parametrize("n,k", [(200, 320), (96, 200)])
+@pytest.mark.parametrize(
+    "config",
+    [
+        TritonSkinnyGemmConfig(16, 32, 64, 4, 3),
+        TritonSkinnyGemmConfig(64, 128, 128, 4, 2),
+    ],
+)
+@pytest.mark.parametrize("padded_rows", [False, True])
+def test_triton_skinny_gemm_matches_reference(
+    num_tokens: int,
+    n: int,
+    k: int,
+    config: TritonSkinnyGemmConfig,
+    padded_rows: bool,
+) -> None:
+    torch.manual_seed(0)
+    width = k + 64 if padded_rows else k
+    x = torch.randn(num_tokens, width, device="cuda", dtype=torch.bfloat16)[:, :k]
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) / 16
+    reference = x.float() @ weight.float().T
+
+    output = triton_gemm.triton_skinny_gemm(x, weight, config)
+
+    assert output.dtype == torch.bfloat16 and output.shape == (num_tokens, n)
+    torch.testing.assert_close(output.float(), reference, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Dispatch needs CUDA")
+def test_cuda_skinny_gemm_routes_triton_plans(monkeypatch: pytest.MonkeyPatch) -> None:
+    capability = (8, 0)
+    n, k = _smallest_triton_shape(capability)
+    shape_plans = skinny_plans.TRITON_SKINNY_GEMM_PLANS_BY_CAPABILITY[capability][
+        (n, k)
+    ]
+    num_tokens, config = next(iter(shape_plans.items()))
+    monkeypatch.setattr(
+        skinny_plans.current_platform, "get_device_capability", lambda: capability
+    )
+    calls = []
+
+    def fake_triton_skinny_gemm(x, weight, selected):
+        calls.append(selected)
+        return torch.nn.functional.linear(x, weight)
+
+    monkeypatch.setattr(triton_gemm, "triton_skinny_gemm", fake_triton_skinny_gemm)
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16)
+
+    cuda_skinny_unquantized_gemm_impl(
+        torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16), weight
+    )
+    assert calls == [config]
+
+    # Unplanned token counts and non-BF16 inputs keep using F.linear.
+    cuda_skinny_unquantized_gemm_impl(
+        torch.randn(257, k, device="cuda", dtype=torch.bfloat16), weight
+    )
+    cuda_skinny_unquantized_gemm_impl(
+        torch.randn(num_tokens, k, device="cuda", dtype=torch.float16), weight.half()
+    )
+    assert calls == [config]
+
+
+def test_maybe_use_skinny_gemm_triton_plan_without_cutedsl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Triton plans apply even when CuTe DSL is not installed."""
+    capability = (8, 9)
+    n, k = _smallest_triton_shape(capability)
+    monkeypatch.setattr(
+        skinny_plans.current_platform, "get_device_capability", lambda: capability
+    )
+    monkeypatch.setattr(
+        skinny_plans.shape_dynamic_skinny_gemm, "is_available", lambda: False
+    )
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    layer = nn.Linear(k, n, bias=False, dtype=torch.bfloat16, device="meta")
+
+    maybe_use_skinny_gemm(layer)
+
+    assert layer.use_skinny_gemm is True
