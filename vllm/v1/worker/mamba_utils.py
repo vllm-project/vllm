@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import dataclasses
 from typing import Any, cast
 
@@ -14,7 +15,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import is_mamba_group, is_mamba_prefix_caching_group
@@ -645,6 +646,53 @@ def precopy_mamba_align_fused_kernel(
         CONV_STATE_DIM_FIRST,
         TEMPORAL_TILES,
     )
+
+
+@triton.jit
+def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+
+    src_ptr = tl.load(src_ptrs + pid)
+    dst_ptr = tl.load(dst_ptrs + pid)
+    size = tl.load(sizes + pid)
+    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
+
+    offsets = tl.arange(0, BLOCK_SIZE)
+    for i in range(0, size, BLOCK_SIZE):
+        mask = (i + offsets) < size
+
+        curr_src_ptr = (src_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+        curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+
+        data = tl.load(curr_src_ptr, mask=mask)
+        if is_left_overlap:
+            # Preserve each lane's source before a lower-address lane stores
+            # over it. The condition is uniform within the program.
+            tl.debug_barrier()
+        tl.store(curr_dst_ptr, data, mask=mask)
+
+
+def batch_memcpy(src_ptrs, dst_ptrs, sizes):
+    batch = src_ptrs.shape[0]
+    assert dst_ptrs.shape[0] == batch
+    assert sizes.shape[0] == batch
+
+    if not HAS_TRITON or not hasattr(batch_memcpy_kernel, "__getitem__"):
+        # Host memmove is only valid for CPU addresses. Device pointer tensors
+        # must keep using the Triton kernel.
+        if any(t.device.type != "cpu" for t in (src_ptrs, dst_ptrs)):
+            raise RuntimeError(
+                "Mamba state copy requires Triton when the pointer tensors "
+                "are on device memory. The CPU fallback uses host memmove "
+                "and cannot copy GPU (or other device) addresses."
+            )
+        for src, dst, size in zip(src_ptrs.tolist(), dst_ptrs.tolist(), sizes.tolist()):
+            ctypes.memmove(dst, src, size)
+        return
+
+    grid = (batch,)
+    BLOCK_SIZE = 1024
+    batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
 
 
 def _get_mamba_spec_for_layer(
