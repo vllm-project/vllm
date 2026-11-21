@@ -686,7 +686,8 @@ def _build_render_config(
         rf_type = rf.get("type")
         if rf_type == "json_object":
             config["json_mode"] = True
-        elif rf_type in ("json_schema", "json"):
+        # v2 sends a schema as ``{"type": "json_object", "json_schema": ...}``.
+        if rf_type in ("json_object", "json_schema", "json"):
             schema = rf.get("schema") or rf.get("json_schema")
             if isinstance(schema, dict) and "schema" in schema:
                 schema = schema["schema"]
