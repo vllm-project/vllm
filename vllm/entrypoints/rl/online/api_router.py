@@ -16,7 +16,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.rl.online.metrics import weight_operation_metrics
 from vllm.logger import init_logger
-from vllm.v1.engine import PauseMode
+from vllm.v1.engine import PauseMode, WeightCheckerModel
 
 logger = init_logger(__name__)
 
@@ -234,11 +234,13 @@ async def weight_checker(
     raw_request: Request,
     action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
     baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
+    model: Annotated[WeightCheckerModel, Body(embed=True)] = "target",
 ) -> JSONResponse:
     """Checksum, reset, or compare model weights against a baseline."""
     client = engine_client(raw_request)
     if action == "reset":
-        await client.collective_rpc("reset_weights")
+        if error := await client.reset_weights(model):
+            raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=error)
         return JSONResponse(content={"status": "reset"})
     if action == "compare" and baseline is None:
         raise HTTPException(
@@ -247,7 +249,11 @@ async def weight_checker(
         )
 
     checksums: dict[str, str] = {}
-    for worker_checksums in await client.compute_weight_checksums():
+    for worker_checksums in await client.compute_weight_checksums(model):
+        if isinstance(worker_checksums, str):
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT.value, detail=worker_checksums
+            )
         if duplicates := checksums.keys() & worker_checksums.keys():
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,

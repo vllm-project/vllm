@@ -95,6 +95,7 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
+    WeightCheckerModel,
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -1227,8 +1228,26 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
-    def compute_weight_checksums(self) -> list[dict[str, str]]:
-        return self.collective_rpc("compute_weight_checksums")
+    def compute_weight_checksums(
+        self, model: WeightCheckerModel = "target"
+    ) -> list[dict[str, str] | str]:
+        args = () if model == "target" else (model,)
+        return self.collective_rpc("compute_weight_checksums", args=args)
+
+    def reset_weights(
+        self, model: WeightCheckerModel, validate_only: bool
+    ) -> str | None:
+        # Both phases validate every worker. EngineCore processes the checks
+        # and writes in the second phase without interleaving utility calls.
+        errors: list[str | None] = self.collective_rpc(
+            "reset_weights", args=(model, True)
+        )
+        if error := next((error for error in errors if error is not None), None):
+            return error
+        if not validate_only:
+            errors = self.collective_rpc("reset_weights", args=(model,))
+            return next((error for error in errors if error is not None), None)
+        return None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

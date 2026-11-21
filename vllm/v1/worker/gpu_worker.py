@@ -81,6 +81,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
+    find_shared_weight_storage,
     zero_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -110,6 +111,7 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.engine import WeightCheckerModel
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -423,13 +425,74 @@ class Worker(WorkerBase):
         tp = get_tp_group().rank_in_group
         return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
 
-    def compute_weight_checksums(self) -> dict[str, str]:
-        prefix = self._weight_checksum_prefix()
-        digests = compute_tensor_digests(self.model_runner.get_model())
-        return {prefix + name: digest for name, digest in digests.items()}
+    def _weight_checker_draft(self) -> nn.Module | str | None:
+        spec = self.speculative_config
+        if (
+            spec is None
+            or spec.draft_model_config is None
+            or spec.prefill_context_kv_only
+        ):
+            return "Weight Checker requires a resident speculative draft model."
+        # The draft runs on the last PP stage, including when its own PP size is 1.
+        draft = self.get_draft_model()
+        if draft is None and get_pp_group().is_last_rank:
+            return f"Missing resident draft model on {self._weight_checksum_prefix()}"
+        return draft
 
-    def reset_weights(self) -> None:
-        zero_weights(self.model_runner.get_model())
+    def compute_weight_checksums(
+        self, model: WeightCheckerModel = "target"
+    ) -> dict[str, str] | str:
+        if model not in ("target", "draft", "both"):
+            return f"Invalid Weight Checker model selection: {model!r}"
+        draft = self._weight_checker_draft() if model != "target" else None
+        if isinstance(draft, str):
+            return draft
+        prefix = self._weight_checksum_prefix()
+        checksums = {}
+        if model != "draft":
+            target_prefix = "target:" + prefix if model == "both" else prefix
+            checksums.update(
+                (target_prefix + name, digest)
+                for name, digest in compute_tensor_digests(self.get_model()).items()
+            )
+        if draft is not None:
+            draft_prefix = "draft:" + prefix if model == "both" else prefix
+            checksums.update(
+                (draft_prefix + name, digest)
+                for name, digest in compute_tensor_digests(draft).items()
+            )
+        return checksums
+
+    def reset_weights(
+        self, model: WeightCheckerModel = "target", validate_only: bool = False
+    ) -> str | None:
+        if model not in ("target", "draft", "both"):
+            return f"Invalid Weight Checker model selection: {model!r}"
+        if self._weight_update_active or self._incomplete_weight_updates:
+            return "Cannot reset weights during an active or incomplete weight update."
+
+        target = self.get_model()
+        draft: nn.Module | str | None
+        if model == "target":
+            draft = self.get_draft_model() if self.speculative_config else None
+        else:
+            draft = self._weight_checker_draft()
+        if isinstance(draft, str):
+            return draft
+        if draft is not None and model != "both":
+            selected, other = (target, draft) if model == "target" else (draft, target)
+            if shared := find_shared_weight_storage(selected, other):
+                return (
+                    f"Cannot reset {model} weights independently: {shared[0]!r} "
+                    f"shares storage with {shared[1]!r} in the other model."
+                )
+        if not validate_only:
+            if model != "draft":
+                zero_weights(target)
+            if draft is not None and model != "target":
+                zero_weights(draft)
+            self.synchronize_device()
+        return None
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (

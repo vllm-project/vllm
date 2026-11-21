@@ -11045,19 +11045,38 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
                 Value::Map(vec![(Value::from("tp0:a"), Value::from("1"))]),
                 Value::Map(vec![(Value::from("tp1:a"), Value::from("2"))]),
             ]);
-            for (method, result) in [
-                ("compute_weight_checksums", workers.clone()),
-                ("compute_weight_checksums", workers),
-                ("reset_weights", Value::Array(vec![Value::Nil, Value::Nil])),
+            let both = Value::Array(vec![Value::Map(vec![
+                (Value::from("target:tp0:a"), Value::from("1")),
+                (Value::from("draft:tp0:a"), Value::from("2")),
+            ])]);
+            for (method, args, result) in [
+                (
+                    "compute_weight_checksums",
+                    vec![Value::from("target")],
+                    workers,
+                ),
+                ("compute_weight_checksums", vec![Value::from("both")], both),
+                (
+                    "reset_weights",
+                    vec![Value::from("draft"), Value::from(true)],
+                    Value::Nil,
+                ),
+                (
+                    "reset_weights",
+                    vec![Value::from("draft"), Value::from(false)],
+                    Value::Nil,
+                ),
+                (
+                    "reset_weights",
+                    vec![Value::from("both"), Value::from(true)],
+                    Value::from("Missing resident draft model"),
+                ),
             ] {
                 let utility = recv_engine_message(dealer).await;
                 let payload = decode_value(&utility[1]).expect("decode utility payload");
                 let array = payload.as_array().expect("utility payload array");
-                assert_eq!(array[2], Value::from("collective_rpc"));
-                assert_eq!(
-                    array[3].as_array().expect("rpc args")[0],
-                    Value::from(method)
-                );
+                assert_eq!(array[2], Value::from(method));
+                assert_eq!(array[3], Value::Array(args));
                 let call_id = array[1].as_u64().expect("call id");
                 let envelope = UtilityResultEnvelope::without_type_info(result);
                 send_outputs(push, utility_outputs(call_id, envelope)).await;
@@ -11071,22 +11090,34 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({"checksums": {"tp0:a": "1", "tp1:a": "2"}}));
 
-    let baseline = json!({"tp0:a": "1", "tp1:a": "9", "tp2:a": "3"});
+    let baseline = json!({"target:tp0:a": "1", "draft:tp0:a": "9", "draft:tp2:a": "3"});
     let (status, body) = post_json(
         &mut app,
         "/weight_checker",
-        json!({"action": "compare", "baseline": baseline}),
+        json!({"action": "compare", "model": "both", "baseline": baseline}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"match": false, "mismatches": ["tp1:a", "tp2:a"]})
+        json!({"match": false, "mismatches": ["draft:tp0:a", "draft:tp2:a"]})
     );
 
-    let (status, body) = post_json(&mut app, "/weight_checker", json!({"action": "reset"})).await;
+    let (status, body) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "reset", "model": "draft"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({"status": "reset"}));
+    let (status, _) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "reset", "model": "both"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
     engine_task.abort_and_join().await;
 }
 
@@ -11105,6 +11136,8 @@ async fn weight_checker_route_rejects_invalid_requests_before_engine_calls() {
         json!({"action": "frobnicate"}),
         json!({"action": "compare"}),
         json!({"action": "compare", "baseline": {"k": 1}}),
+        json!({"action": "checksum", "model": "model"}),
+        json!({"action": "reset", "model": null}),
     ] {
         let (status, _) = post_json(&mut app, "/weight_checker", body.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

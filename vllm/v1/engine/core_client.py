@@ -53,6 +53,7 @@ from vllm.v1.engine import (
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
+    WeightCheckerModel,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -1489,9 +1490,23 @@ class AsyncMPClient(MPClient):
             "collective_rpc", method, timeout, args, kwargs
         )
 
-    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
-        per_engine = await self.call_utility_all_async("compute_weight_checksums")
+    async def compute_weight_checksums_async(
+        self, model: WeightCheckerModel = "target"
+    ) -> list[dict[str, str] | str]:
+        args = () if model == "target" else (model,)
+        per_engine = await self.call_utility_all_async(
+            "compute_weight_checksums", *args
+        )
         return [worker for workers in per_engine for worker in workers]
+
+    async def reset_weights_async(self, model: WeightCheckerModel) -> str | None:
+        for validate_only in (True, False):
+            errors = await self.call_utility_all_async(
+                "reset_weights", model, validate_only
+            )
+            if error := next((error for error in errors if error is not None), None):
+                return error
+        return None
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest

@@ -11,6 +11,7 @@ from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
+    find_shared_weight_storage,
     zero_weights,
 )
 from vllm.v1.worker import gpu_worker
@@ -75,6 +76,23 @@ def test_tensor_subclass_inner_tensors_are_hashed_and_reset():
     assert set(before) == {"weight.a", "weight.b"}
     assert all(
         before[name] != digest for name, digest in compute_tensor_digests(model).items()
+    )
+
+
+@pytest.mark.parametrize("alias", ["parameter", "view", "buffer"])
+def test_reset_preflight_detects_storage_shared_with_the_other_model(alias):
+    draft = nn.Linear(2, 2, bias=False)
+    target = nn.Linear(2, 2, bias=False)
+    assert find_shared_weight_storage(draft, target) is None
+    if alias == "parameter":
+        target.weight = draft.weight
+    elif alias == "view":
+        target.weight = nn.Parameter(draft.weight.view(-1)[1:])
+    else:
+        target.register_buffer("shared", draft.weight.detach())
+    assert find_shared_weight_storage(draft, target) == (
+        "weight",
+        "shared" if alias == "buffer" else "weight",
     )
 
 
