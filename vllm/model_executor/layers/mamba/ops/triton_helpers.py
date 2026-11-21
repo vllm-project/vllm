@@ -3,7 +3,7 @@
 
 from typing import Any
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tp_synced_autotune, triton
 
 _autotuned_configs: dict[tuple, Any] = {}
 
@@ -16,9 +16,12 @@ def launch_autotuned(kernel: Any, grid: Any, **kwargs) -> None:
     argument, several microseconds of host time per launch. This builds an
     equivalent key directly from `kwargs`: the values of the kernel's
     autotune `key` arguments plus the dtype (or `None`) of every argument.
+    Configs picked under TP-synced autotune are kept apart from the ones a
+    rank tuned alone, so a synced launch never reuses a local choice.
     """
     key = (
         kernel,
+        tp_synced_autotune.syncing(),
         *[kwargs.get(name) for name in kernel.keys],
         *[getattr(arg, "dtype", None) for arg in kwargs.values()],
     )

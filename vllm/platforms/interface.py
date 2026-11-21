@@ -63,6 +63,18 @@ def get_assigned_physical_gpu_ids() -> list[int] | None:
     return _assigned_physical_gpu_ids
 
 
+def _attn_kv_heads_per_rank(vllm_config: "VllmConfig") -> int:
+    """KV heads one TP rank caches per full-attention layer."""
+    from vllm import envs
+
+    model_config = vllm_config.model_config
+    # Nemotron-H replicated mixers keep every KV head on every TP rank.
+    model_type = getattr(model_config.hf_text_config, "model_type", "") or ""
+    if envs.VLLM_NEMOTRON_H_REPLICATE_MIXER and model_type.startswith("nemotron_h"):
+        return model_config.get_total_num_kv_heads()
+    return model_config.get_num_kv_heads(vllm_config.parallel_config)
+
+
 @functools.cache
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
@@ -884,7 +896,6 @@ class Platform:
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        parallel_config = vllm_config.parallel_config
         if not model_config:
             return
 
@@ -892,7 +903,7 @@ class Platform:
             """Bytes one token occupies in one layer, for the given dtype."""
             spec = AttentionSpec(
                 block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                num_kv_heads=_attn_kv_heads_per_rank(vllm_config),
                 head_size=model_config.get_head_size(),
                 dtype=dtype,
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
@@ -1050,7 +1061,7 @@ class Platform:
 
             tq_spec = AttentionSpec(
                 block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                num_kv_heads=_attn_kv_heads_per_rank(vllm_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
@@ -1059,7 +1070,7 @@ class Platform:
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = AttentionSpec(
                     block_size=1,
-                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    num_kv_heads=_attn_kv_heads_per_rank(vllm_config),
                     head_size=model_config.get_head_size(),
                     dtype=model_config.dtype,
                 ).page_size_bytes
@@ -1072,7 +1083,7 @@ class Platform:
         else:
             attn_spec = AttentionSpec(
                 block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                num_kv_heads=_attn_kv_heads_per_rank(vllm_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
