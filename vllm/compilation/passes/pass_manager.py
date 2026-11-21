@@ -4,7 +4,7 @@ import functools
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar
 
-from torch import fx as fx
+import torch
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -35,19 +35,25 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         RMSNormReshapeFusionPass,
     )
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
-    from .fusion.sequence_parallelism import SequenceParallelismPass
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
     from .fusion.qk_norm_rope_kvcache_fusion import QkNormRopeKvCacheFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
+
+if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+    from vllm.platforms.rocm import on_gfx950
+
+    from .fusion.muse_glimmer_qk_rope_cache_fusion import (
+        MuseGlimmerQkRopeCacheFusionPass,
+    )
+    from .fusion.muse_glimmer_sandwich_norm_fusion import MuseSandwichNormFusionPass
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
@@ -105,7 +111,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         self.passes: list[InductorPass] = []
 
     @with_pattern_match_debug
-    def __call__(self, graph: fx.Graph) -> None:
+    def __call__(self, graph: torch.fx.Graph) -> None:
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
         compile_range = get_pass_context().compile_range
@@ -125,6 +131,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # DCE handles mutating ops correctly as well.
         self.ir_lowering(graph)
         VllmInductorPass.dump_prefix += 1
+        if self.post_lowering_noop_elimination is not None:
+            # Lowered impls add reshapes that can cancel out the caller's
+            # (e.g. RoPE's per-head view after QK-norm); left in place, they
+            # block Inductor fusions.
+            self.post_lowering_noop_elimination(graph)
+            VllmInductorPass.dump_prefix += 1
         self.clone_elimination(graph)
         VllmInductorPass.dump_prefix += 1
 
@@ -155,11 +167,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         with set_current_vllm_config(config, check_compile=False):
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
-
-            if self.pass_config.enable_sp:
-                self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.fuse_gemm_comms:
-                    self.passes += [AsyncTPPass(config)]
 
             if enable_transformers_norm_canonicalization:
                 self.passes += [AddRMSNormFusionPass(config)]
@@ -200,10 +207,38 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.fuse_qk_norm_rope_kvcache:
+            muse_sandwich_norm = (
+                current_platform.is_rocm()
+                and rocm_aiter_ops.is_enabled()
+                and on_gfx950()
+                and model_config is not None
+                and model_config.dtype == torch.bfloat16
+                and model_config.architecture
+                in {
+                    "MuseGlimmerForCausalLM",
+                    "MuseGlimmerForConditionalGeneration",
+                }
+            )
+            if muse_sandwich_norm:
+                self.passes += [MuseSandwichNormFusionPass(config)]
+
+            muse_qk_rope_cache = (
+                current_platform.is_rocm()
+                and rocm_aiter_ops.is_enabled()
+                and model_config is not None
+                and model_config.architecture
+                in {
+                    "MuseGlimmerForCausalLM",
+                    "MuseGlimmerForConditionalGeneration",
+                }
+            )
+            if self.pass_config.fuse_qk_norm_rope_kvcache or muse_qk_rope_cache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
-                self.passes += [QkNormRopeKvCacheFusionPass(config)]
+                if muse_qk_rope_cache:
+                    self.passes += [MuseGlimmerQkRopeCacheFusionPass(config)]
+                if self.pass_config.fuse_qk_norm_rope_kvcache:
+                    self.passes += [QkNormRopeKvCacheFusionPass(config)]
 
             if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
                 self.passes += [MLADualRMSNormFusionPass(config)]
@@ -225,6 +260,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
+            self.post_lowering_noop_elimination: NoOpEliminationPass | None = None
+            if self.pass_config.eliminate_noops:
+                self.post_lowering_noop_elimination = NoOpEliminationPass(
+                    config, graph_may_mutate=True
+                )
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
@@ -240,12 +280,14 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         """
         passes = []
 
-        state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
+        state: dict[str, Any] = {"pass_config": self.pass_config.compile_factors()}
         for pass_ in self.passes:
             passes.append(pass_.uuid())
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
+        if self.post_lowering_noop_elimination is not None:
+            passes.append(self.post_lowering_noop_elimination.uuid())
         passes.append(self.clone_elimination.uuid())
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())

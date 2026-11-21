@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal, Self
 
-from pydantic import Field, model_validator
-from typing_extensions import Self
+import regex as re
+from pydantic import ConfigDict, Field, model_validator
+from pydantic_core import ArgsKwargs
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -19,17 +21,48 @@ WatermarkContextScope = Literal["none", "single_turn", "all"]
 _MIN_RECOMMENDED_DEDUP_HISTORY = 1024
 
 
+def warn_watermarking_override() -> None:
+    logger.warning_once(
+        "Watermark enforcement is enabled; overriding watermarking=False at "
+        "request admission. This does not guarantee that the decoding mode "
+        "can apply a watermark.",
+        scope="global",
+    )
+
+
 def derive_watermark_key(key: int, domain: bytes) -> int:
     digest = hashlib.sha256(domain + key.to_bytes(8, "big")).digest()
     return int.from_bytes(digest[:8], "big")
 
 
-@config
+_DECIMAL_KEY = re.compile(r"[0-9]{1,20}")
+
+
+def _read_key_file(path: str) -> int:
+    try:
+        text = Path(path).read_text().strip()
+    except OSError as error:
+        raise ValueError(
+            f"Cannot read watermark key file {path!r}: {error.strerror}"
+        ) from None
+    if not _DECIMAL_KEY.fullmatch(text) or int(text) > 2**64 - 1:
+        raise ValueError(
+            f"Watermark key file {path!r} must contain a decimal integer "
+            "between 0 and 2**64 - 1."
+        )
+    return int(text)
+
+
+@config(config=ConfigDict(hide_input_in_errors=True))
 class WatermarkConfig:
     """Configuration for text watermark generation."""
 
     key: int = Field(ge=0, repr=False, exclude=True)
-    """Secret key used to watermark generated text."""
+    """Secret key used to watermark generated text. Set either `key` or
+    `key_file`."""
+    key_file: str | None = None
+    """Path to a file holding the secret key as a decimal integer, such as a
+    Docker or Kubernetes secret. It is read once at startup."""
     algorithm: WatermarkingAlgorithm = "gumbel"
     """Algorithm used to watermark generated text."""
     alpha: float = Field(default=0.1, ge=0, le=1)
@@ -51,10 +84,24 @@ class WatermarkConfig:
     """Pseudorandom function used by the watermarking algorithm."""
     allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""
+    enforce: bool = False
+    """Override request-level opt-outs; unsupported decoding remains unwatermarked."""
 
     @property
     def supports_speculative_decoding(self) -> bool:
         return self.algorithm == "dual_key_gumbel"
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_key_file(cls, data: Any) -> Any:
+        is_args_kwargs = isinstance(data, ArgsKwargs)
+        values = data.kwargs if is_args_kwargs else data
+        if not isinstance(values, dict) or values.get("key_file") is None:
+            return data
+        if values.get("key") is not None or (is_args_kwargs and data.args):
+            raise ValueError("Set either key or key_file, not both.")
+        values = {**values, "key": _read_key_file(values["key_file"])}
+        return ArgsKwargs(data.args, values) if is_args_kwargs else values
 
     @model_validator(mode="after")
     def validate_watermark_settings(self) -> Self:

@@ -80,7 +80,7 @@ class XferState(enum.Enum):
 # ── ProducerXfer ──────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ProducerXfer:
     """One pinned read grant on the producer side.
 
@@ -99,7 +99,7 @@ class ProducerXfer:
 # ── ConsumerXfer ──────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerXfer:
     """State machine for one NIXL READ on the consumer side.
 
@@ -121,7 +121,7 @@ class ConsumerXfer:
     def handle_ack(self, ack: XferAck, agent_name: str) -> bool:
         """Issue the NIXL READ on an OK XferAck.
 
-        Returns False on any NACK, and when ``src_block_indices`` is not a
+        Returns False on any NACK, and when `src_block_indices` is not a
         list of the same length as the local allocation. A mismatched ack
         must fail this transfer, not raise out of the scheduler.
         """
@@ -414,7 +414,7 @@ class ProducerSession:
 # ── ConsumerSession ───────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerSessionResults:
     """Results from ConsumerSession.take_results()."""
 

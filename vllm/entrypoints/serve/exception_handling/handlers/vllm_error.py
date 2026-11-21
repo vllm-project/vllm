@@ -70,8 +70,8 @@ async def generation_error_handler(req: Request, exc: GenerationError):
     """Handle GenerationError without logging stack traces.
 
     GenerationError is a known, expected error (e.g. KV cache load failure)
-    that should be returned to the client as a 500 response without polluting
-    server logs with stack traces.
+    that should be returned to the client without polluting server logs with
+    stack traces.
     """
     err = create_error_response(exc)
     return JSONResponse(err.model_dump(), status_code=err.error.code)

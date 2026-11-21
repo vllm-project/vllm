@@ -142,9 +142,3 @@ def trace_service() -> Generator[FakeTraceService, None, None]:
     yield service
 
     server.stop(grace=None)
-
-
-@pytest.fixture
-def trace_server_address() -> str:
-    """Returns the address of the fake trace server."""
-    return FAKE_TRACE_SERVER_ADDRESS

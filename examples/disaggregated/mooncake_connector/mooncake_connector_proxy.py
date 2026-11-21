@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
     app.state.ready = asyncio.Event()
 
     # Create prefill clients
-    for i, (url, bootstrap_port) in enumerate(global_args.prefill):
+    for url, bootstrap_port in global_args.prefill:
         parsed_url = urllib.parse.urlparse(url)
         hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
         app.state.prefill_clients.append(
@@ -92,7 +92,7 @@ async def lifespan(app: FastAPI):
         )
 
     # Create decode clients
-    for i, url in enumerate(global_args.decode):
+    for url in global_args.decode:
         parsed_url = urllib.parse.urlparse(url)
         hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
         app.state.decode_clients.append(
@@ -340,7 +340,10 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        media_type = (
+            "text/event-stream" if req_data.get("stream") else "application/json"
+        )
+        return StreamingResponse(generate_stream(), media_type=media_type)
 
     except Exception as e:
         import sys

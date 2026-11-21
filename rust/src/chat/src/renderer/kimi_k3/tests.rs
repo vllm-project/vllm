@@ -13,7 +13,7 @@ use vllm_text::tokenizer::DynTokenizer;
 use vllm_tokenizer::Tokenizer;
 use vllm_tokenizer::test_utils::TestTokenizer;
 
-use super::KimiK3ChatRenderer;
+use super::{KimiK3ChatRenderer, KimiK3Variant};
 use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
@@ -66,8 +66,11 @@ fn standard_effort_controls_prompt_and_exported_native_effort() {
             "max",
         ),
     ] {
-        let renderer =
-            KimiK3ChatRenderer::new(tokenizer.clone(), serde_json::from_value(defaults).unwrap());
+        let renderer = KimiK3ChatRenderer::new(
+            tokenizer.clone(),
+            serde_json::from_value(defaults).unwrap(),
+            KimiK3Variant::K3,
+        );
         let mut request = crate::ChatRequest::for_test();
         request.chat_options.reasoning_effort = typed;
         request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
@@ -96,7 +99,7 @@ fn standard_effort_controls_prompt_and_exported_native_effort() {
 }
 
 fn render_token_ids(request: &crate::request::ChatRequest, tokenizer: DynTokenizer) -> Vec<u32> {
-    let prompt = KimiK3ChatRenderer::new(tokenizer, Default::default())
+    let prompt = KimiK3ChatRenderer::new(tokenizer, Default::default(), KimiK3Variant::K3)
         .render(request)
         .unwrap()
         .prompt;
@@ -178,6 +181,7 @@ fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
             }
         }),
         strict: None,
+        defer_loading: None,
     }];
     request.tool_context =
         crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
@@ -200,6 +204,7 @@ fn tool_declare_preserves_present_optional_fields() {
         description: Some("Look up a record".to_string()),
         parameters: json!({"type": "object"}),
         strict: Some(false),
+        defer_loading: None,
     }];
     request.tool_context =
         crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
@@ -375,7 +380,11 @@ fn media_order_follows_reordered_tool_results() {
         ),
     ];
     request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
-    let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()), Default::default());
+    let renderer = KimiK3ChatRenderer::new(
+        Arc::new(test_tokenizer()),
+        Default::default(),
+        KimiK3Variant::K3,
+    );
 
     let rendered = renderer.render(&request).unwrap();
     let media_order = rendered.media_order.unwrap();
@@ -508,9 +517,13 @@ fn rejects_unsupported_standard_reasoning_effort() {
     let mut request = crate::request::ChatRequest::for_test();
     request.chat_options.reasoning_effort = Some(EffortValue::from("medium"));
 
-    let error = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()), Default::default())
-        .render(&request)
-        .unwrap_err();
+    let error = KimiK3ChatRenderer::new(
+        Arc::new(test_tokenizer()),
+        Default::default(),
+        KimiK3Variant::K3,
+    )
+    .render(&request)
+    .unwrap_err();
 
     expect![[r#"
         InvalidReasoningEffort(
@@ -518,4 +531,25 @@ fn rejects_unsupported_standard_reasoning_effort() {
         )
     "#]]
     .assert_debug_eq(&error);
+}
+
+#[test]
+fn k31_accepts_medium_reasoning_effort() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.chat_options.reasoning_effort = Some(EffortValue::from("medium"));
+    let tokenizer: DynTokenizer = Arc::new(test_tokenizer());
+
+    let rendered =
+        KimiK3ChatRenderer::new(tokenizer.clone(), Default::default(), KimiK3Variant::K31)
+            .render(&request)
+            .unwrap();
+
+    assert_eq!(
+        rendered.effective_template_kwargs["thinking_effort"],
+        "medium"
+    );
+    let Prompt::TokenIds(token_ids) = rendered.prompt else {
+        panic!("Kimi K3 renders token IDs");
+    };
+    assert!(tokenizer.decode(&token_ids, false).unwrap().contains("thinking_effort=medium"));
 }

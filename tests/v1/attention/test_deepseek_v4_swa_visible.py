@@ -3,18 +3,19 @@
 """Tests for DeepSeek-V4 in-image bidirectional SWA visibility (vision variant).
 
 The reference semantics are a torch port of the official
-``get_image_visible`` / ``get_window_topk_idxs_visible``: inside an image span
-[span_start, span_end] (inclusive), a token at ``pos`` sees
-``min(pos - span_start, max_image_tokens - 1)`` extra tokens to the left and
-``min(span_end - pos, max_image_tokens)`` to the right; the window then starts
-at ``max(pos - (window - 1) - max(left - (window - 1), 0), 0)`` and ends at
-``pos + right`` (inclusive).
+`get_image_visible` / `get_window_topk_idxs_visible`: inside an image span
+[span_start, span_end] (inclusive), a token at `pos` sees
+`min(pos - span_start, max_image_tokens - 1)` extra tokens to the left and
+`min(span_end - pos, max_image_tokens)` to the right; the window then starts
+at `max(pos - (window - 1) - max(left - (window - 1), 0), 0)` and ends at
+`pos + right` (inclusive).
 """
 
 import inspect
 
 import pytest
 import torch
+from transformers import DeepseekV4Config
 from typing_extensions import TypedDict
 
 from tests.v1.attention.utils import create_vllm_config
@@ -22,13 +23,21 @@ from vllm.models.deepseek_v4.common.ops.cache_utils import (
     build_flashinfer_mixed_sparse_indices,
     combine_topk_swa_indices,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadataBuilder,
     _compute_image_visibility_kernel,
     _compute_swa_indices_and_lens_kernel,
 )
-from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+DEVICE_TYPE = current_platform.device_type
+
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA, ROCm or XPU device",
+)
 
 WINDOW = 8
 MAX_IMG = 6
@@ -63,7 +72,7 @@ def ref_swa_bounds(
     pos: int, window: int, left: int, right: int, replay_start: int = 0
 ) -> tuple[int, int]:
     """Reference [start, end) window bounds for one query token. Under SWA
-    bounded replay no window KV exists below ``replay_start``."""
+    bounded replay no window KV exists below `replay_start`."""
     left_add = max(left - (window - 1), 0)
     start = max(pos - (window - 1) - left_add, 0, replay_start)
     return start, pos + right + 1
@@ -139,7 +148,7 @@ def run_swa_kernel(
     max_image_tokens: int = MAX_IMG,
     with_image: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     query_start_loc, seq_lens_t, token_to_req, slot_mapping, block_table = make_batch(
         seq_lens, query_lens, device
     )
@@ -218,14 +227,14 @@ CASES: list[_Case] = [
 ]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("case", CASES)
 def test_swa_indices_kernel_with_image_spans(case):
     rows, lens = ref_swa_slot_rows(
         case["seq_lens"],
         case["query_lens"],
         case["spans"],
-        make_batch(case["seq_lens"], case["query_lens"], torch.device("cuda"))[4],
+        make_batch(case["seq_lens"], case["query_lens"], torch.device(DEVICE_TYPE))[4],
         WINDOW,
         MAX_IMG,
         WIDTH,
@@ -237,7 +246,7 @@ def test_swa_indices_kernel_with_image_spans(case):
     assert indices.cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("case", CASES)
 def test_swa_indices_kernel_without_image_unchanged(case):
     """HAS_IMAGE=False must reproduce the plain causal sliding window."""
@@ -245,7 +254,7 @@ def test_swa_indices_kernel_without_image_unchanged(case):
         case["seq_lens"],
         case["query_lens"],
         [[] for _ in case["seq_lens"]],
-        make_batch(case["seq_lens"], case["query_lens"], torch.device("cuda"))[4],
+        make_batch(case["seq_lens"], case["query_lens"], torch.device(DEVICE_TYPE))[4],
         WINDOW,
         MAX_IMG,
         WINDOW,
@@ -258,10 +267,10 @@ def test_swa_indices_kernel_without_image_unchanged(case):
     assert indices.cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_image_visibility_kernel():
     """The builder's visibility kernel must match get_image_visible."""
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     seq_lens = [30, 12]
     query_lens = [30, 12]
     spans = [[(4, 12), (20, 24)], []]
@@ -302,9 +311,14 @@ def combine_case(
     with_image: bool,
     replay_starts: list[int] | None = None,
     combine_fn=combine_topk_swa_indices,
+    in_range_topk: bool = False,
 ):
-    """Run combine_topk_swa_indices and return (indices, lens, expected)."""
-    device = torch.device("cuda")
+    """Run combine_topk_swa_indices and return (indices, lens, expected).
+
+    `in_range_topk` draws top-k indices below N, for combiners that drop
+    out-of-range ones.
+    """
+    device = torch.device(DEVICE_TYPE)
     num_reqs = len(seq_lens)
     replay_starts = replay_starts or [0] * num_reqs
     query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
@@ -326,7 +340,11 @@ def combine_case(
     M = N + int(gather_lens.max()) + 8
     gen = torch.Generator(device="cpu").manual_seed(0)
     topk_indices = torch.randint(
-        0, 4096, (num_tokens, max(topk, 1)), generator=gen, dtype=torch.int32
+        0,
+        N if in_range_topk else 4096,
+        (num_tokens, max(topk, 1)),
+        generator=gen,
+        dtype=torch.int32,
     ).to(device)
     topk_indices = topk_indices[:, : max(topk, 1)]
 
@@ -397,7 +415,7 @@ COMBINE_CASES = [
 ]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_with_image_spans(cfg):
     case = CASES[0]
@@ -413,32 +431,34 @@ def test_combine_topk_swa_with_image_spans(cfg):
     assert indices.cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
-def test_v41_combine_topk_swa_stops_at_replay_start(cfg):
+@pytest.mark.parametrize("query_len", [24, 20])
+def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
     """SWA bounded replay: the gathered buffer starts at replay_start, so the
     window never indexes below it."""
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         combine_topk_swa_indices as combine_v41,
     )
 
-    # Request 0 replays [16, 40): the windows of its first rows would
-    # otherwise reach below 16.
+    # Request 0 replays from 16: a 24-token chunk starts there, a 20-token
+    # chunk leaves only 4 context tokens above it (fewer than the window).
     indices, lens, rows, exp_lens = combine_case(
         cfg["compress_ratio"],
         cfg["topk"],
         seq_lens=[40, 12],
-        query_lens=[24, 12],
+        query_lens=[query_len, 12],
         spans=[[], []],
         with_image=False,
         replay_starts=[16, 0],
         combine_fn=combine_v41,
+        in_range_topk=True,
     )
     assert lens.cpu().tolist() == exp_lens
     assert indices.cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_without_image_unchanged(cfg):
     """left_visible=None must reproduce the plain causal combined indices."""
@@ -455,9 +475,9 @@ def test_combine_topk_swa_without_image_unchanged(cfg):
     assert indices.cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_flashinfer_mixed_sparse_indices_with_image_spans():
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     # 1 decode token (req 0) + two prefill requests (reqs 1, 2).
     seq_lens = [20, 30, 9]
     query_lens = [1, 30, 9]
@@ -517,45 +537,42 @@ def make_builder(
     window: int = WINDOW,
     max_image_tokens: int = MAX_IMG,
     max_num_batched_tokens: int = 64,
-    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    model_name: str = "Qwen/Qwen3-0.6B",
     builder_cls: type[
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,
-    mm_prefix_clamp_sliding_window: bool = True,
-    bounded_replay: bool = False,
+    deepseek_v4_config: bool = True,
 ) -> DeepseekSparseSWAMetadataBuilder:
-    overrides: dict = {"sliding_window": window}
-    if vision:
-        # Emulate the V4 vision config, whose mm_prefix_clamp_sliding_window
-        # gates the in-kernel SWA widening. V4.1 (causal image tokens) leaves
-        # it off.
-        overrides.update(
-            vision_n_layers=2,
-            vision_max_n_token=max_image_tokens,
-            mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
-        )
+    vision_fields = dict(vision_n_layers=2, vision_max_n_token=max_image_tokens)
     vllm_config = create_vllm_config(
         model_name=model_name,
         max_model_len=4096,
         max_num_batched_tokens=max_num_batched_tokens,
         max_num_seqs=8,
-        hf_config_override=overrides,
+        hf_config_override={"sliding_window": window}
+        | (vision_fields if vision and not deepseek_v4_config else {}),
     )
-    spec = SlidingWindowMLASpec(
+    if vision and deepseek_v4_config:
+        # Only V4 configs widen the SWA window in-kernel over image spans
+        vllm_config.model_config.hf_config = DeepseekV4Config(
+            num_hidden_layers=1,
+            layer_types=["sliding_attention"],
+            sliding_window=window,
+            **vision_fields,
+        )
+    spec = MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        sliding_window=window,
         cache_dtype_str="auto",
         model_version="deepseek_v4",
-        bounded_replay=bounded_replay,
     )
     return builder_cls(
         kv_cache_spec=spec,
         layer_names=["layer0"],
         vllm_config=vllm_config,
-        device=torch.device("cuda"),
+        device=torch.device(DEVICE_TYPE),
     )
 
 
@@ -566,7 +583,7 @@ def build_metadata(
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None,
     replay_starts: list[int] | None = None,
 ):
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     query_start_loc, seq_lens_t, _, slot_mapping, block_table = make_batch(
         seq_lens, query_lens, device
     )
@@ -595,7 +612,7 @@ def build_metadata(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_builder_in_image_visibility():
     seq_lens = [30, 12]
     query_lens = [30, 12]
@@ -612,7 +629,9 @@ def test_builder_in_image_visibility():
     assert md.prefill_left_visible.cpu().tolist() == ref_left
     assert md.prefill_right_visible.cpu().tolist() == ref_right
 
-    _, _, _, _, block_table = make_batch(seq_lens, query_lens, torch.device("cuda"))
+    _, _, _, _, block_table = make_batch(
+        seq_lens, query_lens, torch.device(DEVICE_TYPE)
+    )
     rows, lens = ref_swa_slot_rows(
         seq_lens, query_lens, spans, block_table, WINDOW, MAX_IMG, WIDTH
     )
@@ -620,7 +639,7 @@ def test_builder_in_image_visibility():
     assert md.prefill_swa_indices[:, 0].cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_builder_no_image_spans_fast_path():
     """Vision model, image-free batch: no visibility tensors, plain window."""
     seq_lens = [30, 12]
@@ -630,7 +649,9 @@ def test_builder_no_image_spans_fast_path():
     assert md.prefill_left_visible is None
     assert md.prefill_right_visible is None
 
-    _, _, _, _, block_table = make_batch(seq_lens, query_lens, torch.device("cuda"))
+    _, _, _, _, block_table = make_batch(
+        seq_lens, query_lens, torch.device(DEVICE_TYPE)
+    )
     rows, lens = ref_swa_slot_rows(
         seq_lens, query_lens, [[], []], block_table, WINDOW, MAX_IMG, WIDTH
     )
@@ -638,7 +659,7 @@ def test_builder_no_image_spans_fast_path():
     assert md.prefill_swa_indices[:, 0].cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_builder_text_model_unchanged():
     """Text-only model: buffers stay window-sized and spans are ignored."""
     seq_lens = [30, 12]
@@ -649,7 +670,9 @@ def test_builder_text_model_unchanged():
     assert md.prefill_swa_indices.shape[-1] == WINDOW
     assert md.prefill_left_visible is None
 
-    _, _, _, _, block_table = make_batch(seq_lens, query_lens, torch.device("cuda"))
+    _, _, _, _, block_table = make_batch(
+        seq_lens, query_lens, torch.device(DEVICE_TYPE)
+    )
     rows, lens = ref_swa_slot_rows(
         seq_lens, query_lens, [[], []], block_table, WINDOW, MAX_IMG, WINDOW
     )
@@ -657,7 +680,7 @@ def test_builder_text_model_unchanged():
     assert md.prefill_swa_indices[:, 0].cpu().tolist() == rows
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("compress_ratio", [0, 1, 2])
 @pytest.mark.parametrize("query_len", [100, 4000])
 def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
@@ -675,7 +698,7 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
         max_image_tokens,
         query_len,
         builder_cls=DeepseekV41SparseSWAMetadataBuilder,
-        mm_prefix_clamp_sliding_window=False,
+        deepseek_v4_config=False,
     )
     assert builder.max_image_tokens == 0
     md = build_metadata(builder, [seq_len], [query_len], {0: spans})
@@ -690,7 +713,7 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
     assert (start, end, m - n) == (0, 1, gather_len)
     assert gather_len == query_len + min(seq_len - query_len, window - 1)
     indices, lens = combine_v41(
-        torch.empty(query_len, 0, dtype=torch.int32, device="cuda"),
+        torch.empty(query_len, 0, dtype=torch.int32, device=DEVICE_TYPE),
         md.query_start_loc,
         md.prefill_seq_lens,
         md.prefill_gather_lens,
@@ -717,7 +740,7 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
 # SWA bounded replay: every prefill index path clamps the window at replay_start.
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_builder_replay_start_bounds_prefill_window_and_gather():
     """Paged-direct prefill indices stop at replay_start and the FlashMLA
     gather only covers the context the request may see."""
@@ -729,7 +752,9 @@ def test_builder_replay_start_bounds_prefill_window_and_gather():
     assert md.replay_start is not None
     assert md.replay_start.cpu().tolist() == replay_starts
 
-    _, _, _, _, block_table = make_batch(seq_lens, query_lens, torch.device("cuda"))
+    _, _, _, _, block_table = make_batch(
+        seq_lens, query_lens, torch.device(DEVICE_TYPE)
+    )
     rows, lens = ref_swa_slot_rows(
         seq_lens,
         query_lens,
@@ -754,23 +779,23 @@ def test_builder_replay_start_bounds_prefill_window_and_gather():
     ]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_builder_replaying_group_builds_without_replay_start():
     """Graph captures build without model-specific kwargs: a replaying group's
     metadata then bounds nothing."""
-    builder = make_builder(vision=False, bounded_replay=True)
+    builder = make_builder(vision=False)
     md = build_metadata(builder, [40, 12], [24, 12], None)
     assert not md.replay_start.any()
     assert md.prefill_swa_lens[0].item() == WINDOW
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_v41_flashinfer_mixed_sparse_indices_respect_replay_start():
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         build_flashinfer_mixed_sparse_indices as build_v41,
     )
 
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     # 1 decode token (req 0) + two prefill requests; req 1 resumes at 16.
     seq_lens = [20, 40, 9]
     query_lens = [1, 24, 9]
@@ -817,3 +842,167 @@ def test_v41_flashinfer_mixed_sparse_indices_respect_replay_start():
     # Decode row is copied through; prefill rows follow the bounded window.
     assert bounded[0].cpu().tolist() == plain[0].cpu().tolist()
     assert bounded[1:].cpu().tolist() == rows[1:]
+
+
+@requires_accelerator
+def test_dspark_noncausal_draft_decode_update_matches_build():
+    """A DSpark draft graph refreshes its non-causal SWA metadata in place
+    instead of rebuilding it, so the refresh must match a fresh build."""
+    from vllm.v1.attention.backends.mla.compressor_utils import (
+        get_dspark_swa_index_width,
+    )
+
+    num_spec = 4
+    query_lens = [num_spec] * 3
+
+    def make_dspark_builder():
+        builder = make_builder(vision=False)
+        builder.is_dspark = True
+        builder.noncausal_index_width = get_dspark_swa_index_width(WINDOW, num_spec)
+        builder.decode_threshold = num_spec
+        return builder
+
+    def common_metadata(seq_lens):
+        query_start_loc, seq_lens_t, _, slot_mapping, block_table = make_batch(
+            seq_lens, query_lens, torch.device(DEVICE_TYPE)
+        )
+        return CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.cpu(),
+            seq_lens=seq_lens_t,
+            seq_lens_cpu_upper_bound=seq_lens_t.cpu(),
+            num_reqs=len(seq_lens),
+            num_actual_tokens=int(query_start_loc[-1]),
+            max_query_len=num_spec,
+            max_seq_len=max(seq_lens),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=False,
+        )
+
+    captured_seq_lens = [6, 40, 130]
+    replay_seq_lens = [130, 9, 90]
+    builder = make_dspark_builder()
+    captured = common_metadata(captured_seq_lens)
+    md = builder.build(0, captured)
+    replay = common_metadata(replay_seq_lens)
+    expected = make_dspark_builder().build(0, replay)
+
+    # A replay sees new inputs through the same device buffers.
+    captured.seq_lens.copy_(replay.seq_lens)
+    captured.block_table_tensor.copy_(replay.block_table_tensor)
+    builder.update_draft_decode_metadata(md)
+
+    assert md.decode_swa_width == builder.noncausal_index_width
+    torch.testing.assert_close(md.decode_swa_lens, expected.decode_swa_lens)
+    torch.testing.assert_close(md.decode_swa_indices, expected.decode_swa_indices)
+
+
+class _StubLinear(torch.nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.weight_block_size = None
+
+
+def _prefix_replay_attention_cls():
+    from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+
+    class _Backend:
+        @staticmethod
+        def get_name() -> str:
+            return "STUB"
+
+    class Layer(DeepseekV4Attention):
+        backend_cls = _Backend
+
+        @classmethod
+        def get_padded_num_q_heads(cls, num_heads: int) -> int:
+            return num_heads
+
+        def forward_mqa(
+            self,
+            q: torch.Tensor,
+            kv: torch.Tensor,
+            positions: torch.Tensor,
+            output: torch.Tensor,
+        ) -> None:
+            return None
+
+        def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor):
+            return attn_out
+
+    return Layer
+
+
+@requires_accelerator
+@pytest.mark.parametrize(
+    "is_rocm,cdna,flag,replays_window",
+    [
+        (False, 0, True, True),
+        (True, 4, True, True),
+        (True, 3, True, True),
+        (True, 2, True, False),
+        (True, 4, False, False),
+    ],
+)
+def test_prefix_cache_replays_the_swa_window(
+    monkeypatch, is_rocm, cdna, flag, replays_window
+):
+    """Prefix caching stays on, and the window is replayed on a compatible
+    CDNA version.
+
+    tests/v1/core/test_prefix_replay.py already checks that a
+    bounded-replay SWA spec makes a prefix hit recompute the window.
+    This is the spec the attention layer actually publishes. Forcing
+    the window back into the prefix cache, on a compatible CDNA version
+    or off it, fails here.
+    The replay_start clamp used by the gather kernels is covered by
+    test_builder_replay_start_bounds_prefill_window_and_gather.
+    """
+    from vllm.config import set_current_vllm_config
+    from vllm.models.deepseek_v41 import attention as attn
+
+    if is_rocm and not current_platform.is_cuda_alike():
+        pytest.skip("vllm.platforms.rocm requires a CUDA or ROCm torch build")
+
+    monkeypatch.setattr(attn, "MergedColumnParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "ColumnParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "DeepseekV4GroupedWoA", _StubLinear)
+    monkeypatch.setattr(attn, "RowParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "RMSNorm", _StubLinear)
+    monkeypatch.setattr(attn, "build_deepseek_v4_rope", lambda *a, **k: None)
+    monkeypatch.setattr(attn, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "Event", lambda *a, **k: object())
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    if is_rocm:
+        import vllm.platforms.rocm as rocm_platform
+
+        monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+
+    window = 128
+    vllm_config = create_vllm_config(
+        max_model_len=256, max_num_seqs=4, max_num_batched_tokens=64
+    )
+    vllm_config.cache_config.swa_bounded_replay = flag
+    assert vllm_config.cache_config.enable_prefix_caching
+    vllm_config.model_config.hf_config = DeepseekV4Config(
+        num_hidden_layers=1,
+        hidden_size=128,
+        num_attention_heads=8,
+        q_lora_rank=32,
+        o_lora_rank=32,
+        head_dim=64,
+        qk_rope_head_dim=16,
+        o_groups=8,
+        sliding_window=window,
+        compress_ratios=[0],
+    )
+    layer_cls = _prefix_replay_attention_cls()
+    with set_current_vllm_config(vllm_config):
+        layer = layer_cls(vllm_config, prefix="model.layers.0.self_attn")
+    config = layer.swa_cache_layer.get_kv_cache_config(vllm_config).manager_config
+    assert config.params.bounded_replay is replays_window
+    assert config.manager_cls.prefix_cacheable(config) is not replays_window
+    assert config.manager_cls.prefix_replay_tokens(config) == (
+        window if replays_window else 0
+    )

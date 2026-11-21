@@ -24,8 +24,8 @@ from vllm.model_executor.models.intern_vit import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
+    InternVLChatImageProcessor,
+    InternVLChatProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -103,9 +103,9 @@ class SkyworkR1VProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return InternVLChatImageProcessor(**kwargs)
 
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         config = self.get_hf_config()
         vision_config = config.vision_config
 
@@ -115,7 +115,7 @@ class SkyworkR1VProcessingInfo(BaseInternVLProcessingInfo):
         downsample_ratio = config.downsample_ratio
         image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
 
-        return InternVLProcessor(
+        return InternVLChatProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             image_seq_length=image_seq_length,

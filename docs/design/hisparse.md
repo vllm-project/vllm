@@ -30,12 +30,46 @@ configured, `MultiConnector` composes it with `HiSparseConnector`.
 
 `host_pool_gib` is configured on `HiSparseConnector` and is the usable
 host-cache capacity per data-parallel replica, not a node-wide memory budget.
-Tensor-parallel ranks hold replicated views of that logical cache. Those views
-may use private per-rank backing or one shared
-physical allocation without changing the configured capacity. Physical host
-memory consumption is therefore topology- and implementation-dependent. The
+MLA tensor-parallel ranks hold replicated views of that logical cache, using
+private per-rank backing or one shared physical allocation. QSA stores full K/V
+heads in private per-rank pools, with each rank writing its own shard. Its
+logical capacity counts each unique K/V head once; heads replicated when TP
+exceeds the K/V head count still consume physical memory in each rank's pool.
+Padding also contributes to physical allocation, not logical capacity. Physical
+host memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
+
+Startup logs report two concurrency bounds at `max_model_len`. The generic
+`Maximum concurrency` line charges each request its full admission footprint,
+including the in-flight window of every resident group. The `HiSparse
+steady-state maximum concurrency` line charges running requests that read from
+host only their active tail pages, plus one request being admitted at its full
+footprint. Host-pool metrics are listed in
+[Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
+
+## QSA models
+
+For Qwen4Exp QSA models, configure `HiSparseConnector` to offload the main K/V
+cache.
+
+```bash
+vllm serve QSA_MODEL \
+  --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+```
+
+The device layout resolves to `BLNHC`, so one copy row holds a token's K and V
+for every local K/V head. HiSparse leaves compressed indexer keys, raw-key rings
+and recurrent state in their normal GPU cache groups. With prefix caching,
+prefixes are reused at whole scheduler-page boundaries; matching tokens past
+the boundary are recomputed.
+
+QSA does not yet implement decode context parallelism, even without HiSparse.
+The current HiSparse configuration also rejects DCP.
+
+QSA P/D with HiSparse requires a separate NIXL integration for mixed host/GPU
+cache registration and transfer-group mapping across P and D. It is not yet
+supported by this implementation.
 
 ## Ownership
 
@@ -60,8 +94,8 @@ sees only device pools.
 The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
-For single-node MP tensor parallelism, every TP worker maps the same pinned host
-pool and uses the same block and layer offsets. MLA source KV is replicated
+For MLA with single-node MP tensor parallelism, every TP worker maps the same
+pinned host pool and uses the same block and layer offsets. Source KV is replicated
 across TP ranks, so this stores one physical copy instead of one copy per rank.
 TP rank 0 writes the shared host pool; peers wait on its IPC events before
 reading it. Other executor and parallel layouts retain private per-rank pools.
@@ -130,38 +164,35 @@ path. The resolver consumes the existing graph-stable request mapping from
 attention metadata; neither the worker nor individual cache handles keep a
 duplicate mapping.
 
-Speculative decoding resolves and consumes each verification step in order.
-Each step receives distinct replayable plan rows while sharing the request's
-hot-cache state, so a later step cannot reuse a hot row before an earlier step
-has consumed it.
+Speculative decoding resolves all verification rows of a request in one pass:
+one block resolves the union of the rows' top-k against the request's hot-cache
+state, so rows that select the same host row share its hot row and no row
+evicts a hot row another row of the step still reads. Draft layers write their
+rows after the target forward, so their host mirror runs at the start of the
+next step, after the drafter, and the step's page transfers are submitted
+behind it.
 
 ## P/D import target
 
-The decoder chooses the landing target once per request from the normal cache
-admission calculation. If the complete imported prefix fits the device pools,
-NIXL transfers it directly into resident GPU pages. Otherwise, if the fixed
-host-backed GPU footprint and host source blocks fit, the request imports into
-the host tier. There is no context-length threshold or other heuristic, and a
-request waiting for capacity retains its choice across admission retries.
-
-A host import reads through a bounded decoder-GPU staging pool before copying
-into registered host memory. Pages needed immediately are mirrored into their
-resident destinations during that copy. Both landing targets then use the same
-fused decode resolver described above.
+For supported P/D configurations, NIXL imports offloaded main KV into the host
+tier. After an import completes, the coordinator schedules host-to-device
+copies for the tail page and promotes additional imported pages using free
+GPU blocks above the transition watermark. Promoted pages retain their host
+backing and follow the normal residency policy. Indexer KV is transferred to
+its GPU cache group.
 
 ## Indexer KV offloading
 
 HiSparse does not keep a private CPU copy of indexer KV. The indexer remains a
 normal prefix-cacheable GPU cache group. If `OffloadingConnector` is configured
 with HiSparse, it stores and restores that group through the generic KV
-offloading path; HiSparse continues to own only the sparse MLA host tier.
+offloading path; HiSparse continues to own only the main sparse-attention host tier.
 
 The two prefix sources can have different hit lengths. When the HiSparse host
 prefix extends beyond the GPU-resident indexer prefix, the scheduler asks
 `OffloadingConnector` to restore only the missing indexer suffix, capped at the
 host prefix boundary. If that suffix is unavailable, all groups fall back to
-the shorter prefix they share. NIXL P/D transfers continue to place indexer KV
-directly in its GPU group.
+the shorter prefix they share.
 
 ## Spill transaction
 
@@ -195,6 +226,36 @@ coordinates. Request identity and logical page state remain in the scheduler.
 
 ## Hot lookup and LRU
 
+### Speculative decode group prefetch
+
+HiSparse prefetches historical KV for layers sharing an indexer during pure
+decode batches, including multi-token verification with speculative decoding
+such as MTP. It uses the existing speculative-decoding configuration and swap
+capacity; no additional switch or backend capability flag is required.
+
+The index-producing layer resolves the current top-k once and queues each
+layer's missing rows on the group's copy stream. Each layer waits on its own
+completion event before consuming those rows, allowing later layers' copies to
+overlap earlier layers' computation. Prefill and mixed prefill/decode batches
+retain per-layer staging.
+
+This prefetch eligibility is separate from single-token resident-write and host
+mirror policy. Current verification tokens remain in resident KV, are excluded
+from the historical host-row swap plan, and are written by each layer before
+its attention runs. Prefetching does not publish rejected draft tokens as
+durable host KV. The benefit depends on host misses, shared-index group size,
+and how much copy work can overlap computation.
+
+The CUDA compact gather uses at most 64 thread blocks per launch. Workers loop
+over additional rows when verification expands the batch beyond that limit;
+the existing column parallelism is retained for smaller batches. This bounds
+copy-kernel occupancy while later layers are prefetched, without reading miss
+counts back to the CPU or launching a separate compaction kernel. Actual copy
+bandwidth and end-to-end latency must be measured together, since bounding the
+grid can trade peak copy throughput for compute overlap.
+
+### Row resolution
+
 The NVIDIA CUDA path keeps replacement entirely on the accelerator:
 
 ```text
@@ -210,9 +271,16 @@ hot row? ──────── yes ──► existing hot physical row + upda
 choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 ```
 
-ROCm is not currently supported because the fused HiSparse cache operations are
-implemented only by CUDA kernels. A future platform-specific worker may provide
-the same command, output, and cache-resolution boundaries.
+Device operations are selected by `Platform.get_hisparse_backend_cls()`. The base
+platform returns `None`; CUDA selects `CUDAHiSparseBackend` in `platforms/cuda.py`.
+Hardware plugins can provide a `HiSparseBackend` for host registration, cache
+operations, IPC events, capture queries, and transfers while reusing the common
+runtime and connector. HiSparse validates availability and cache formats before
+allocation. Streams, ordinary events, current-stream queries, and synchronization
+use `torch.Stream`, `torch.Event`, and `torch.accelerator` directly. The backend
+provides IPC event creation/import/export only for shared host pools.
+Without HiSparse, sparse attention keeps its normal stream and event path.
+ROCm does not currently provide a HiSparse backend.
 
 ## Main classes
 
@@ -249,6 +317,5 @@ the same command, output, and cache-resolution boundaries.
 The command/result and attention-layer boundaries can be shared. The host
 allocator, copy implementation, hot layout, and replacement policy should stay
 platform-specific. NVIDIA uses the current accelerator LRU and fused host/hot
-kernel. ROCm is not currently supported; AMD or other accelerator backends can
-implement their own worker without forcing NVIDIA's policy into the shared
-boundary.
+kernel. Other accelerators can implement `HiSparseBackend` and return its class
+path from their platform override without changing the shared control flow.

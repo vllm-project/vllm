@@ -18,7 +18,7 @@ from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.torch_utils import set_random_seed
 
 IS_SUPPORTED_BY_GPU = (
-    current_platform.is_cuda() and current_platform.get_device_capability()[0] >= 9
+    current_platform.is_cuda() and current_platform.is_device_capability(90)
 )
 
 
@@ -93,7 +93,7 @@ TEST_SHAPES = [
 ALIGNMENT = 16  # torch._scaled_mm alignment for M, needed for reference check
 
 
-@dataclass
+@dataclass(slots=True)
 class MoETestSetup:
     num_experts: int
     K: int
