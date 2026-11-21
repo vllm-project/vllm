@@ -13,7 +13,7 @@ A packed page holds one 128-token block of one KV head. Segment byte offsets
     K rank table  + 512         D       uint8 [D], DB means not boosted
 
 The residual block of a (request, KV head) is a [640, D] array: K sink rows
-0-127, K tail ring 128-255 (row 128 + p % 128), V sink 256-383, V tail ring
+0-127, K tail buffer 128-255 (row 128 + p % 128), V sink 256-383, V tail buffer
 384-639 (row 384 + p % 256).
 """
 
@@ -106,7 +106,11 @@ def kitty_first_unsealed_v(n):
 
 @triton.jit
 def kitty_dequant_k_page(page_ptr, offs_t, offs_d, D: tl.constexpr, DB: tl.constexpr):
-    """Dequantized K page as an fp32 [D, 128] tile."""
+    """Reconstruct a packed K page as an fp32 `[D, 128]` tile.
+
+    Read 2-bit codes for all channels and 2 extra bits for boosted channels,
+    then reconstruct values with each channel's `code * scale + minimum`.
+    """
     off_khi: tl.constexpr = 64 * D
     off_ksm: tl.constexpr = 64 * D + 32 * DB
     off_rank: tl.constexpr = off_ksm + 4 * D + 512
@@ -131,7 +135,11 @@ def kitty_dequant_k_page(page_ptr, offs_t, offs_d, D: tl.constexpr, DB: tl.const
 
 @triton.jit
 def kitty_dequant_v_page(page_ptr, offs_t, offs_d, D: tl.constexpr, DB: tl.constexpr):
-    """Dequantized V page as an fp32 [128, D] tile."""
+    """Reconstruct a packed V page as an fp32 `[128, D]` tile.
+
+    Read 2-bit codes packed along channels, then reconstruct values with
+    each token's `code * scale + minimum`.
+    """
     off_v: tl.constexpr = 32 * D
     off_vsm: tl.constexpr = 68 * D + 32 * DB
     byte = offs_d // 4
@@ -156,10 +164,14 @@ def kitty_load_k_tile(
     D: tl.constexpr,
     DB: tl.constexpr,
 ):
-    """K of position block b as a [D, 128] tile in the residual's dtype.
+    """K of position block b as a `[D, 128]` tile in the residual's dtype.
 
-    page_ptr is packed block block_table[r, b] of this KV head and res_ptr the
-    request's [640, D] residual region. Slots at positions >= old_len load as 0.
+    `page_ptr` is packed block `block_table[r, b]` of this KV head and
+    `res_ptr` the request's `[640, D]` residual region.
+
+    Blocks `0 < b < s_k` are dequantized from `page_ptr`. K seals each non-sink
+    block as soon as it is full. Block 0 uses residual sink rows 0-127; the
+    unfinished block uses tail rows 128-255. Positions >= `old_len` load as 0.
     """
     if (b > 0) & (b < s_k):
         k = kitty_dequant_k_page(page_ptr, offs_t, offs_d, D, DB)
@@ -187,7 +199,13 @@ def kitty_load_v_tile(
     D: tl.constexpr,
     DB: tl.constexpr,
 ):
-    """V of position block b as a [128, D] tile; see kitty_load_k_tile."""
+    """V of position block b as a `[128, D]` tile in the residual's dtype.
+
+    Blocks `0 < b < s_v` are dequantized from `page_ptr`. V seals one block
+    later than K, keeping the most recent full block unquantized. Block 0
+    uses residual sink rows 256-383; unsealed blocks use the two-block tail
+    at rows 384-639, selected by `b % 2`. Positions >= `old_len` load as 0.
+    """
     if (b > 0) & (b < s_v):
         v = kitty_dequant_v_page(page_ptr, offs_t, offs_d, D, DB)
         v = v.to(res_ptr.dtype.element_ty)
