@@ -107,6 +107,9 @@ pub struct EngineCoreReadyResponse {
     pub supports_lora: bool,
     /// Maximum number of LoRA adapters the engine may keep active.
     pub max_loras: u32,
+    /// Maximum number of LoRA adapters the engine may keep in its CPU cache.
+    #[serde(default)]
+    pub max_cpu_loras: u32,
     /// Total KV cache capacity in tokens, if reported.
     pub kv_cache_size_tokens: Option<u64>,
     /// Maximum achievable request concurrency given the KV cache, if reported.
