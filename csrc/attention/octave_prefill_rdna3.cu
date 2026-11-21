@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Octave prefill for RDNA3 (gfx11), head size 256, fp16. Reads the packed
-// cache directly; no intermediate buffers. Everything is in the rotated space
+// Octave prefill for RDNA3 (gfx1100), head size 256, fp16. Reads the packed
+// cache without materializing dequantized K/V. Everything is in rotated space
 // (the caller rotates Q/K/V of the chunk and rotates the output back).
 //
 // Phase 1 (prefix_attn): attention of the chunk's queries over the cached
@@ -21,13 +21,9 @@
 // merged with the phase-1 partials; writes the output.
 
 #include <cstdint>
-#include <mutex>
-#include <unordered_map>
-#include <vector>
 #include <algorithm>
 
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #if defined(USE_ROCM)
@@ -35,17 +31,21 @@
   #include <hip/hip_fp16.h>
 
   #include "octave_format.cuh"
+  #include "octave_prefill.cuh"
 
   #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__)
-    #define OCTAVE_PREFILL_STUB
+    #define OCTAVE_RDNA_STUB
   #endif
 
-namespace octave_pf {
+namespace octave_rdna {
+namespace {
 
 using octave::D;
 using octave::Format;
 using octave::LUT_ONE;
 
+// TODO(correctness): Adapt WMMA builtins, fragments and lane maps in both
+// phases for RDNA4's different A/B packing and accumulator rows.
 typedef _Float16 h16v __attribute__((ext_vector_type(16)));
 typedef _Float16 h8v __attribute__((ext_vector_type(8)));
 typedef _Float16 h2v __attribute__((ext_vector_type(2)));
@@ -72,12 +72,21 @@ __device__ __forceinline__ int split_len(int ctx, int used) {
 // ===========================================================================
 // Phase 1: prefix
 // ===========================================================================
+// TODO(tuning): Tune NW/NL and launch bounds per target; measure VGPR/LDS
+// occupancy before reusing gfx1100's 24-wave block on RDNA3.5/4.
+// TODO(correctness): If NW/NL change, match the launcher row tile to NW * 16
+// and adapt the loader mapping to NL * 32 threads, covering each K/V tile
+// completely without out-of-bounds accesses.
 constexpr int NW = 8;  // compute wave pairs (16 query vectors each)
 constexpr int NL = 8;  // loader waves
+// TODO(tuning): Recheck KROW/VPAD padding and LDS bank conflicts per target
+// after adapting the WMMA lane mapping.
 [[maybe_unused]] constexpr int KROW = D + 16;  // bytes per K row in LDS
 [[maybe_unused]] constexpr float PSCALE = 4096.0f;
 // The LDS read of PV step c waits for the WMMA of step c - DEPV, which keeps
 // the scheduler from hoisting every read (and spilling).
+// TODO(tuning): Retune DEPV per target; this scheduling dependency does
+// not encode the ISA's WMMA register-overlap spacing requirements.
 [[maybe_unused]] constexpr int DEPV = 4;
 constexpr int NTHREADS = (2 * NW + NL) * 32;
 constexpr int VPAD = 16;  // halves after every 8 rows of V^T
@@ -109,6 +118,9 @@ __device__ __forceinline__ void tr4(uint32_t a0, uint32_t a1, uint32_t a2,
 }
 // LDS-only barrier: __syncthreads() would also wait for the loaders' global
 // prefetch.
+// TODO(correctness): Add a GFX12 wait/barrier implementation (DScnt,
+// signal/wait) that preserves LDS visibility across the workgroup.
+// TODO(tuning): Keep the loaders' global prefetch outstanding at the barrier.
 __device__ __forceinline__ void tile_barrier() {
   asm volatile("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory");
 }
@@ -137,7 +149,7 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     int num_q_heads, int num_kv_heads, int block_size, int max_blocks,
     int num_splits, int total_q_tokens, int64_t sq_tok, int64_t sq_head,
     int64_t scb, int64_t sch, int64_t sct) {
-  #ifndef OCTAVE_PREFILL_STUB
+  #ifndef OCTAVE_RDNA_STUB
   using F = Format<VB, KC>;
   const int seq = blockIdx.x, kvh = blockIdx.y;
   const int rowtile = blockIdx.z / num_splits, split = blockIdx.z % num_splits;
@@ -518,13 +530,16 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     wp[D] = m * 0.6931471805599453f;
     wp[D + 1] = l;
   }
-  #endif  // OCTAVE_PREFILL_STUB
+  #endif  // OCTAVE_RDNA_STUB
 }
 
 // ===========================================================================
 // Phase 2: the chunk's own K/V (fp16, causal), merged with the prefix
 // partials. 8 waves, 16 query rows each, one query head per block.
 // ===========================================================================
+// TODO(tuning): Tune CW/CM and LDS tiling per target.
+// TODO(correctness): If CW changes, update the D-thread launch, launch
+// bounds and cooperative loads together with the LDS tile layout.
 constexpr int CW = 8;        // waves
 constexpr int CM = 16 * CW;  // query rows per block
 [[maybe_unused]] constexpr int FRAGS = D / 16;
@@ -553,7 +568,7 @@ __global__ void __launch_bounds__(D)
                int total_q_tokens, int64_t sq_tok, int64_t sq_head,
                int64_t sk_tok, int64_t sk_head, int64_t sv_tok, int64_t sv_head,
                int64_t so_tok, int64_t so_head) {
-  #ifndef OCTAVE_PREFILL_STUB
+  #ifndef OCTAVE_RDNA_STUB
   const int seq = blockIdx.x, head = blockIdx.y;
   const int tid = threadIdx.x, wave = tid >> 5, lane = tid & 31;
   const int lo = lane & 15, hi = lane >> 4;
@@ -693,117 +708,48 @@ __global__ void __launch_bounds__(D)
     for (int f = 0; f < FRAGS; ++f)
       orow[16 * f + lo] = __float2half(acc[f][i] * inv);
   }
-  #endif  // OCTAVE_PREFILL_STUB
+  #endif  // OCTAVE_RDNA_STUB
 }
 
-// Partials of phase 1, kept alive for the process: a graph that captured a
-// pointer must keep finding it valid. Grows geometrically, so it settles.
-float* workspace(int64_t need, const at::TensorOptions& opts) {
-  static std::mutex mtx;
-  static std::unordered_map<int, std::vector<at::Tensor>> kept;
-  std::lock_guard<std::mutex> lock(mtx);
-  std::vector<at::Tensor>& bufs = kept[opts.device().index()];
-  if (bufs.empty() || bufs.back().numel() < need) {
-    int64_t n = 8 << 20;
-    while (n < need) n *= 2;
-    bufs.push_back(at::empty({n}, opts));
-  }
-  return (float*)bufs.back().data_ptr();
-}
+}  // namespace
 
-}  // namespace octave_pf
-
-int octave_slot_bytes(int64_t fmt);
-void octave_prefill_cdna(torch::Tensor out, torch::Tensor q, torch::Tensor k,
-                         torch::Tensor v, torch::Tensor cache,
-                         torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-                         torch::Tensor seq_lens, int64_t max_query_len,
-                         double sm_scale, int64_t fmt, float* ws,
-                         int num_splits);
-
-void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
-                    torch::Tensor v, torch::Tensor cache,
-                    torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-                    torch::Tensor seq_lens, int64_t max_query_len,
-                    double sm_scale, int64_t fmt) {
-  using namespace octave_pf;
-  TORCH_CHECK(q.dtype() == at::kHalf && k.dtype() == at::kHalf &&
-                  v.dtype() == at::kHalf && out.dtype() == at::kHalf,
-              "octave_prefill: fp16 only");
-  TORCH_CHECK(q.size(2) == D && q.stride(2) == 1 && k.stride(2) == 1 &&
-              v.stride(2) == 1 && out.stride(2) == 1);
-  TORCH_CHECK(cache.dtype() == at::kByte && cache.dim() == 4 &&
-              cache.stride(3) == 1);
-  TORCH_CHECK(cache.size(3) == octave_slot_bytes(fmt),
-              "octave_prefill: slot size mismatch");
-  const int align = fmt & octave::kCompactFlag ? 4 : 8;
-  TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
-                  cache.stride(0) % align == 0,
-              "octave_prefill: misaligned slots");
-  // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna.cu).
-  static const int arch = [] {
-    const std::string name =
-        at::cuda::getCurrentDeviceProperties()->gcnArchName;
-    if (name.rfind("gfx1100", 0) == 0) return 0;
-    if (name.rfind("gfx942", 0) == 0) return 1;
-    return -1;
-  }();
-  TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100 or gfx942 only");
-  const int num_seqs = seq_lens.size(0);
-  if (num_seqs == 0 || q.size(0) == 0) return;
-  const at::cuda::OptionalCUDAGuard guard(device_of(q));
+void octave_prefill(const octave::PrefillArgs& args) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  const int hq = q.size(1), hkv = cache.size(1);
-  TORCH_CHECK(hq % hkv == 0);
+  const int num_seqs = args.seq_lens.size(0);
+  const int hq = args.q.size(1), hkv = args.cache.size(1);
   const int hpk = hq / hkv;
-  const int block_size = cache.size(2);
-  const int max_blocks = block_table.size(1);
-  TORCH_CHECK(block_table.stride(1) == 1 && block_table.stride(0) == max_blocks,
-              "octave_prefill: block_table rows must be contiguous");
-  const int total_q = q.size(0);
+  const int block_size = args.cache.size(2);
+  const int max_blocks = args.block_table.size(1);
+  const int total_q = args.q.size(0);
+  const int rowtiles = (int)((args.max_query_len * hpk + 127) / 128);
 
-  const int rowtiles = (int)((max_query_len * hpk + 127) / 128);
-  const int base_blocks = std::max(1, num_seqs * hkv * rowtiles);
-  // Blocks whose split has no keys exit at once, so ask for plenty.
-  const int num_splits =
-      std::min(16, std::max(1, (1024 + base_blocks - 1) / base_blocks));
-  float* ws = workspace((int64_t)num_splits * total_q * hq * (D + 2),
-                        q.options().dtype(at::kFloat));
-  if (arch == 1) {
-    octave_prefill_cdna(out, q, k, v, cache, block_table, cu_seqlens_q,
-                        seq_lens, max_query_len, sm_scale, fmt, ws, num_splits);
-    return;
-  }
-
-  dim3 grid1(num_seqs, hkv, rowtiles * num_splits);
-  #define PREFIX(B, KC)                                                     \
-    prefix_attn<B, KC><<<grid1, NTHREADS, 0, stream>>>(                     \
-        (const __half*)q.data_ptr(), cache.data_ptr<uint8_t>(),             \
-        block_table.data_ptr<int>(), cu_seqlens_q.data_ptr<int>(),          \
-        seq_lens.data_ptr<int>(), ws, (float)sm_scale, hq, hkv, block_size, \
-        max_blocks, num_splits, total_q, q.stride(0), q.stride(1),          \
-        cache.stride(0), cache.stride(1), cache.stride(2))
-  if (fmt == 4)
+  dim3 grid1(num_seqs, hkv, rowtiles * args.num_splits);
+  #define PREFIX(B, KC)                                                        \
+    prefix_attn<B, KC><<<grid1, NTHREADS, 0, stream>>>(                        \
+        (const __half*)args.q.data_ptr(), args.cache.data_ptr<uint8_t>(),      \
+        args.block_table.data_ptr<int>(), args.cu_seqlens_q.data_ptr<int>(),   \
+        args.seq_lens.data_ptr<int>(), args.ws, (float)args.sm_scale, hq, hkv, \
+        block_size, max_blocks, args.num_splits, total_q, args.q.stride(0),    \
+        args.q.stride(1), args.cache.stride(0), args.cache.stride(1),          \
+        args.cache.stride(2))
+  if (args.fmt == 4)
     PREFIX(4, false);
-  else if (fmt == 3)
+  else if (args.fmt == 3)
     PREFIX(3, false);
   else
     PREFIX(3, true);
   #undef PREFIX
-  dim3 grid2(num_seqs, hq, (max_query_len + CM - 1) / CM);
+
+  dim3 grid2(num_seqs, hq, (args.max_query_len + CM - 1) / CM);
   chunk_attn<<<grid2, D, 0, stream>>>(
-      (__half*)out.data_ptr(), ws, (const __half*)q.data_ptr(),
-      (const __half*)k.data_ptr(), (const __half*)v.data_ptr(),
-      cu_seqlens_q.data_ptr<int>(), seq_lens.data_ptr<int>(), hq, hkv,
-      max_blocks * block_size, (float)sm_scale, num_splits, total_q,
-      q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0),
-      v.stride(1), out.stride(0), out.stride(1));
+      (__half*)args.out.data_ptr(), args.ws, (const __half*)args.q.data_ptr(),
+      (const __half*)args.k.data_ptr(), (const __half*)args.v.data_ptr(),
+      args.cu_seqlens_q.data_ptr<int>(), args.seq_lens.data_ptr<int>(), hq, hkv,
+      max_blocks * block_size, (float)args.sm_scale, args.num_splits, total_q,
+      args.q.stride(0), args.q.stride(1), args.k.stride(0), args.k.stride(1),
+      args.v.stride(0), args.v.stride(1), args.out.stride(0),
+      args.out.stride(1));
 }
 
-#else
-void octave_prefill(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    int64_t, double, int64_t) {
-  TORCH_CHECK(false, "octave requires ROCm");
-}
+}  // namespace octave_rdna
 #endif

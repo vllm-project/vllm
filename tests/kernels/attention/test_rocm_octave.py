@@ -4,10 +4,12 @@
 vllm/v1/attention/ops/rocm_octave.py."""
 
 import math
+from contextlib import nullcontext
 
 import pytest
 import torch
 
+from tests.utils import spawn_new_process_for_each_test
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.rocm_octave_attn import RocmOctaveAttentionBackend
@@ -26,7 +28,12 @@ def _arch() -> str | None:
 
 
 pytestmark = pytest.mark.skipif(
-    _arch() is None or not hasattr(torch.ops._C, "octave_decode"),
+    not current_platform.is_rocm() or not hasattr(torch.ops._C, "octave_prefill"),
+    reason="Octave HIP operators require a ROCm build with Octave support",
+)
+
+requires_native_octave = pytest.mark.skipif(
+    _arch() is None,
     reason="Octave kernels need RDNA3 or CDNA3",
 )
 
@@ -60,6 +67,7 @@ def _fill(cache, block_ids, k, v, k_signs, v_signs, fmt):
     return slots
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 def test_store_matches_reference(cache_dtype):
     torch.manual_seed(0)
@@ -85,6 +93,7 @@ def test_store_matches_reference(cache_dtype):
     assert _rel(v_got, v) < (0.12 if fmt.v_bits == 4 else 0.22)
 
 
+@requires_native_octave
 @pytest.mark.parametrize(
     "cache_dtype,slot_bytes",
     [("octave_k3v4", 248), ("octave_k3v3", 216), ("octave_k3v3_compact", 196)],
@@ -95,6 +104,7 @@ def test_slot_bytes_match_kernel_layout(cache_dtype, slot_bytes):
     assert _format(cache_dtype).slot_bytes == slot_bytes
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 def test_store_skips_padding_slots(cache_dtype):
     """Tokens with slot -1 (cudagraph padding) leave every byte unchanged."""
@@ -117,6 +127,7 @@ def test_store_skips_padding_slots(cache_dtype):
     assert not torch.equal(cache[written], before[written])
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_group", [1, 4])
 @pytest.mark.parametrize("num_splits", [1, 7, 64])
@@ -190,14 +201,19 @@ def test_decode_matches_reference(
     assert out[-1].abs().max().item() == 0
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_lens", [[300], [129, 1, 517]])
 def test_prefill_matches_reference(cache_dtype, query_lens):
+    _check_prefill_matches_reference(cache_dtype, query_lens, "cuda")
+
+
+def _check_prefill_matches_reference(cache_dtype, query_lens, dev):
     """Chunked prefill: each request's chunk attends causally to itself
     (unquantized K/V) and to its cached prefix (packed cache), in the rotated
     space the backend runs it in."""
     torch.manual_seed(3)
-    dev, fmt = "cuda", _format(cache_dtype)
+    fmt = _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
     hkv, group = 1, 6
     ctx_lens = [2500, 0, 4100][: len(query_lens)]
@@ -227,7 +243,9 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
     torch.ops._C.octave_rotate(q_rot, ksg, not fmt.compact, False)
     torch.ops._C.octave_rotate(k_rot, ksg, not fmt.compact, False)
     torch.ops._C.octave_rotate(v_rot, vsg, False, False)
-    out = torch.empty_like(q_rot)
+    # A kernel compiled as a no-op for the wrong target must fail the comparison.
+    out = torch.full_like(q_rot, float("nan"))
+    caller_device = torch.accelerator.current_device_index()
     torch.ops._C.octave_prefill(
         out,
         q_rot,
@@ -241,6 +259,7 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
         1 / 16,
         fmt.kernel_code,
     )
+    assert torch.accelerator.current_device_index() == caller_device
     torch.ops._C.octave_rotate(out, vsg, False, True)
 
     ref = torch.empty(total, hkv * group, HEAD, device=dev)
@@ -263,6 +282,93 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
         ref[int(qsl[i]) : int(qsl[i + 1])] = torch.einsum("hqt,thd->qhd", p, v_all)
     # Only the kernel's int8 query and fp16 P/V rounding differ.
     assert _rel(out, ref) < 2e-2
+
+
+def _device_target(device: int) -> str:
+    return torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
+
+
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+@pytest.mark.parametrize("first_device", [0, 1])
+@pytest.mark.parametrize("mismatch_current_device", [False, True])
+@spawn_new_process_for_each_test
+def test_prefill_on_multiple_devices(
+    cache_dtype, first_device, mismatch_current_device
+):
+    """Check prefill outputs and caller-device restoration across two GPUs."""
+    devices = [
+        i
+        for i in range(torch.accelerator.device_count())
+        if _device_target(i) in {"gfx1100", "gfx942"}
+    ]
+    if len(devices) < 2:
+        pytest.skip("Requires two Octave-supported GPUs; same architecture is allowed")
+    first, other = devices[first_device], devices[1 - first_device]
+    # Isolate both device orders from earlier calls and workspace allocations.
+    for query_device, peer in [(first, other), (other, first), (first, other)]:
+        caller_device = peer if mismatch_current_device else query_device
+        with torch.accelerator.device_index(caller_device):
+            _check_prefill_matches_reference(
+                cache_dtype, [129, 1, 517], f"cuda:{query_device}"
+            )
+
+
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+@pytest.mark.parametrize("supported", [True, False], ids=["supported", "unsupported"])
+@pytest.mark.parametrize(
+    "num_queries,num_seqs",
+    [(0, 0), (0, 1), (1, 0)],
+    ids=["empty-batch", "no-queries", "no-sequences"],
+)
+@spawn_new_process_for_each_test
+def test_prefill_empty_input_validates_query_device(
+    cache_dtype, num_queries, num_seqs, supported
+):
+    """Validate q's target even on early return, and restore the caller device."""
+    fmt = _format(cache_dtype)
+    devices = range(torch.accelerator.device_count())
+    query_devices = [
+        i for i in devices if (_device_target(i) in {"gfx1100", "gfx942"}) == supported
+    ]
+    if not query_devices:
+        requirement = "supported" if supported else "unsupported"
+        pytest.skip(f"Requires a visible GPU with an {requirement} Octave target")
+    for query_device in query_devices:
+        dev = f"cuda:{query_device}"
+        q = torch.zeros(num_queries, 1, HEAD, dtype=torch.float16, device=dev)
+        out = torch.full_like(q, 42)
+        before = out.clone()
+        cache = torch.zeros(1, 1, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
+        block_table = torch.zeros(num_seqs, 1, dtype=torch.int32, device=dev)
+        qsl = torch.zeros(num_seqs + 1, dtype=torch.int32, device=dev)
+        seq_lens = torch.zeros(num_seqs, dtype=torch.int32, device=dev)
+        for caller_device in devices:
+            with torch.accelerator.device_index(caller_device):
+                expected = (
+                    nullcontext()
+                    if supported
+                    else pytest.raises(
+                        RuntimeError,
+                        match="octave_prefill: unsupported GPU target; "
+                        "expected gfx1100 or gfx942",
+                    )
+                )
+                with expected:
+                    torch.ops._C.octave_prefill(
+                        out,
+                        q,
+                        q,
+                        q,
+                        cache,
+                        block_table,
+                        qsl,
+                        seq_lens,
+                        num_queries,
+                        1 / 16,
+                        fmt.kernel_code,
+                    )
+                assert torch.accelerator.current_device_index() == caller_device
+                assert torch.equal(out, before)
 
 
 def _decode(cache, q, block_table, q_to_req, q_to_klen, signs, fmt, use_wmma):
@@ -305,6 +411,7 @@ def _prefill(cache, q, k, v, block_table, qsl, seq_lens, signs, fmt):
     return out
 
 
+@requires_native_octave
 @pytest.mark.parametrize(
     "layout", RocmOctaveAttentionBackend.supported_kv_cache_layouts()
 )

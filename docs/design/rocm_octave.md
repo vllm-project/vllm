@@ -19,7 +19,7 @@ is bounded by compute. The existing options on ROCm were:
   fused multi-step MTP draft.
 
 Octave KV targets the same bit budget as TurboQuant with HIP kernels written for
-the AMD matrix instructions (WMMA on RDNA3, MFMA on CDNA as a contract slot),
+the AMD matrix instructions (WMMA on RDNA3, MFMA on CDNA3),
 reading the packed cache directly in both decode and prefill, and with
 multi-token verification (MTP / speculative decoding) as a first-class case.
 
@@ -107,11 +107,31 @@ scores are those of the unrotated vectors.
 | Step | Kernel | File |
 | --- | --- | --- |
 | Cache write | `octave_cache_store`: one wave per slot, rotate + quantize + pack | `csrc/attention/octave_attn.cu` |
-| Decode / MTP verify (≤128 query tokens per request) | `octave_decode`: split-KV; WMMA tier on gfx11, portable dot4 tier elsewhere; consecutive query tokens of a request share each K/V read | `octave_decode_wmma_rdna3.cu`, `octave_attn.cu` |
-| Split reduce + inverse V rotation | `reduce_kernel` | `octave_attn.cu` |
-| Prefill | `octave_prefill`: phase 1 reads the cached prefix from the packed cache (int8 WMMA for QK with per-segment scales, fp16 WMMA for PV), phase 2 attends to the chunk's own unquantized K/V and merges | `octave_prefill_rdna3.cu` |
+| Decode / MTP verify (≤128 query tokens per request) | `octave_decode`: split-KV; WMMA on gfx1100, MFMA on gfx942, portable dot4 reference tier; consecutive query tokens of a request share each K/V read | `octave_attn.cu`, `octave_decode_rdna3.cu`, `octave_decode_cdna3.cu` |
+| Split reduce + inverse V rotation | Portable reduction, or a specialized gfx942 reduction | `octave_attn.cu`, `octave_decode_cdna3.cu` |
+| Prefill | `octave_prefill`: phase 1 reads the packed prefix (int8 QK with per-segment scales, fp16 PV; WMMA on gfx1100, MFMA on gfx942); phase 2 attends to the chunk's unquantized K/V and merges | `octave_prefill.cu`, `octave_prefill_rdna3.cu`, `octave_prefill_cdna3.cu` |
 | Q/K/V chunk rotation for prefill | `octave_rotate` | `octave_attn.cu` |
 | Codebooks (`v_perm_b32` tables) and byte layout | — | `octave_format.cuh` |
+
+The public decode entries in `octave_attn.cu` own architecture selection,
+dispatch to the native implementations, and the portable dense fallback.
+`octave_decode.cuh` defines `octave::DecodeArgs`, `octave::SparseDecodeArgs`, and
+the architecture entry points. A native decode implementation returns the
+selected split count, or zero without launching if the request is ineligible;
+the caller decides whether to fall back or reject it. Eligible empty queries
+return the selected count without launching a kernel or writing partials.
+Architecture entry points do not repeat target selection. The existing cached
+decode target selection is unchanged. `octave_target.h` recognizes only the
+native Octave targets, `gfx1100` and `gfx942`, including HIP target-feature
+suffixes such as `:sramecc+:xnack-`. This target selection is local to Octave
+and does not require a shared AMD architecture classification library.
+
+The public prefill entry in `octave_prefill.cu` owns input validation,
+architecture selection, the split policy, and process-lifetime workspace
+management for graph capture. `octave_prefill.cuh` defines `octave::PrefillArgs`
+and the `octave_rdna` / `octave_cdna` entry points, which receive validated
+arguments. Kernels, helpers, and constants stay local to each implementation.
+`octave_format.cuh` also declares the shared `octave_slot_bytes` helper.
 
 The metadata builder builds, on the device and without host syncs, the
 per-query request and causal-length maps the kernels index by. They are what
@@ -121,11 +141,12 @@ padding queries a K length of 0.
 
 ## Architecture contract
 
-Kernels are native: HIP or FlyDSL, never Triton. There is no fallback: an
-architecture without a required kernel is rejected at startup with an error
-naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
-(for example a CDNA prefill) must keep the same signature and semantics, pass
-the same tests, and report a clear error when `flydsl` is not installed.
+Kernels are native: HIP or FlyDSL, never Triton. There is no fallback to
+another attention backend: an architecture without a required kernel is
+rejected at startup with an error naming what is missing. The kernels in this
+tree are HIP; a FlyDSL kernel must keep the same operator signature and
+semantics, pass the same tests, and report a clear error when `flydsl` is not
+installed.
 
 Octave is enabled only on RDNA3 and CDNA3, validated on gfx1100 and gfx942
 (MI300). The backend rejects any other family at selection
@@ -149,16 +170,108 @@ native tiers against.
 
 To add an architecture:
 
-1. Implement `octave_prefill` for it, in HIP or FlyDSL (same signature and semantics as
-   `octave_prefill_rdna3.cu`: phase-1 partials over the packed prefix, phase-2
-   chunk attention and merge, rotated space in and out).
-2. Add a decode tier, or validate the portable dot4 kernel there.
-3. Add the architecture to the CMake guard, to `_kernel_tier` and
-   `supports_compute_capability` in
-   `vllm/v1/attention/backends/rocm_octave_attn.py`, and to the test gate.
+1. Add a prefill implementation using `octave::PrefillArgs` and declare its
+   entry point in `octave_prefill.cuh`. Preserve the public operator signature
+   and semantics: phase-1 partials over the packed prefix, phase-2 chunk
+   attention and merge, rotated space in and out. Reuse the validation and
+   workspace management in `octave_prefill.cu`; revisit the shared split policy
+   if the new kernel uses a different prefix tile size.
+2. Add a decode implementation through `octave_decode.cuh`, preserving the
+   split-count return value and supported dense/sparse input contracts, or
+   validate the portable dot4 kernel on the new target. Register native decode
+   and any specialized reduction in `octave_attn.cu`; keep kernels and helpers
+   local to the implementation files.
+3. Register the target in the common prefill dispatch in `octave_prefill.cu`.
+   Add source files to CMake and device-code guards to the implementation.
+   Scope compiler options to the implementation that needs them, as for the
+   CDNA3 decode MFMA option. Add the target to the CMake enablement guard,
+   `_kernel_tier` and `supports_compute_capability` in
+   `vllm/v1/attention/backends/rocm_octave_attn.py`, and the test gate.
 4. Run `tests/kernels/attention/test_rocm_octave.py`: every kernel is checked
    against the PyTorch reference, and `test_decode_matches_reference` runs
    both the fast and the portable decode tier.
+
+### Prefill device selection
+
+The public prefill entry guards `q.device()` before querying the GPU target
+and selects the architecture on every call. Previously it cached the initial
+current-device target before entering that guard. Calls whose current device
+differs from `q.device()`, or which switch between GPU architectures, therefore
+use the query device's prefill implementation. The guard and architecture
+checks also run before the empty-input return. This change applies to prefill;
+the existing decode target caches remain unchanged.
+
+### Validation scope
+
+The standalone architecture separation uses Octave-local target selection.
+The final branch compiled and linked `_C` for gfx1100 and gfx942 in a fresh
+standalone CMake build directory, with two parallel jobs and without IDE
+presets, indexing overlays, or ccache. The built extension was loaded from
+that directory for focused runtime checks without replacing the installed
+extension.
+
+A CPU comparison of 116 target-name and feature-suffix combinations matched
+the shared AMD parser used by the earlier stacked branch. That comparison
+does not establish equivalence to upstream `main`. Comparing the same cases
+against `main` at `157e42a762` gives 96 matches and 20 differences: the new
+selector rejects `gfx11000`, `gfx9420`, `gfx1100junk`, `gfx942junk`, and
+`gfx1100-strict`, each with four suffix variants, while the former prefix
+checks accepted them. Exact matching intentionally narrows selection to
+`gfx1100` and `gfx942`, optionally followed by colon-delimited HIP features.
+A bounded `std::string_view` check also passed. All applicable pre-commit
+hooks and `git diff --check` passed. These compilation and CPU checks do not
+exercise Octave kernels.
+
+On an RX 9060 XT (gfx1200), the unsupported-device empty-input cases passed
+for all three cache formats and all three empty-input shapes (9 passed).
+The focused prefill device/empty-input run skipped 12 multi-GPU cases and 9
+supported-device empty-input cases. The passing cases check target rejection
+and unchanged output. The original module-level
+architecture gate skipped all nine cases. The module now only requires a
+ROCm build with registered Octave operators; numerical and layout tests
+retain their architecture gates (107 skipped on this gfx1200 host). The
+attention test directory is a Python package so fresh test processes can
+import the test module with pytest's default import mode.
+Only one GPU was visible, so the caller-device assertion does not establish
+restoration across different devices. These calls reject before launching
+an Octave kernel and do not establish gfx1200 support.
+
+Native gfx1100/gfx942 results have not yet been collected for this change.
+Validate each architecture on its own hardware; they do not need to be visible
+in one process. Use the same baseline and candidate revisions on both targets,
+recording the GPU, software environment, commands, and results. Compare the
+candidate with the baseline as well as the PyTorch reference; agreement with
+the reference alone does not establish unchanged output. The following
+single-GPU checks remain pending:
+
+| Check | Required environment | Missing evidence |
+| --- | --- | --- |
+| Existing kernel/reference suite | gfx1100 and gfx942, separately | Numerical results for both architectures, including native and portable decode paths |
+| Supported-device empty inputs | gfx1100 or gfx942 | All cache formats and empty-input shapes accepted without changing output |
+| End-to-end serving and model evaluation | Supported GPU and a supported model | Successful serving and output-quality comparison with the baseline |
+
+Multi-GPU coverage is separate and conditional on available hardware.
+`test_prefill_on_multiple_devices` uses the first two visible supported device
+indices, including two gfx1100 or two gfx942 GPUs. It checks numerical output
+and restoration of the caller device while alternating query devices, with
+both initial device orders and matching or mismatched caller/query devices.
+Each case runs in a fresh process. It skips when fewer than two supported GPUs
+are visible; single-GPU numerical and empty-input tests still run. The existing
+MI300 attention CI job selects this file, but its single-GPU allocation cannot
+execute the multi-GPU cases.
+
+Same-architecture multi-GPU results cannot detect a cached first-call target,
+and CPU target-name checks cannot detect caching in the caller either. Code
+inspection confirms that prefill queries and selects the target on every call
+after guarding the query device. Heterogeneous GPU integration has not been
+tested and is not a prerequisite for the separate gfx1100/gfx942 validation.
+No failure-before/success-after runtime evidence is claimed for the former
+architecture cache. The gfx1200 rejection checks do not replace the pending
+native checks above. Performance benchmarks were not run, and this refactor
+makes no performance claim.
+
+The results below are retained from the original implementation and do not
+validate the architecture separation or the prefill device-selection change.
 
 ## Results
 

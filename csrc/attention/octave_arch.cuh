@@ -6,7 +6,7 @@
 // the host code (see docs/design/rocm_octave.md, "Architecture contract").
 //
 //   int8 dot4: v_dot4_i32_iu8 on gfx11/gfx12, v_dot4_i32_i8 on gfx9/gfx10.3
-//   decode, fast tier: octave_decode_wmma_rdna3.cu (WMMA, gfx11)
+//   decode, fast tier: octave_decode_rdna3.cu (WMMA, gfx11)
 //   prefill: octave_prefill_rdna3.cu (WMMA, gfx11)
 //   decode, portable: octave_attn.cu decode_kernel (dot4, every target)
 //

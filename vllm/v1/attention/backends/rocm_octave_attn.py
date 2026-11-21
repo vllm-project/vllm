@@ -299,7 +299,7 @@ class RocmOctaveAttentionImpl(AttentionImpl):
                 "ROCM_OCTAVE kernels need ROCm, head_size=256 and 64 rotary "
                 f"dims; got head_size={head_size}, rotary dims={rope_dim}"
             )
-        # The MFMA decode takes up to 256 splits (octave_decode_mfma_cdna.cu).
+        # The MFMA decode takes up to 256 splits (octave_decode_cdna3.cu).
         self._split_cap = 256 if _kernel_tier() == "mfma" else None
 
         self.max_num_kv_splits = (
