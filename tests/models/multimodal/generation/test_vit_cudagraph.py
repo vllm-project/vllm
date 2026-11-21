@@ -637,6 +637,29 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         assert isinstance(output_text, str)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
+def test_deepseek_v41_eager_image(vllm_runner, image_assets):
+    """Eager image span assembly must serve a request with sync checking on."""
+    config = MODEL_CONFIGS["deepseek_v41"]
+    assert config.image_prompt is not None
+
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        max_model_len=config.max_model_len,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config={"cudagraph_mm_encoder": False},
+        **config.vllm_runner_kwargs,
+    ) as vllm_model:
+        ((output_ids, _),) = vllm_model.generate_greedy(
+            [config.image_prompt], 1, images=[[image_assets[0].pil_image]]
+        )
+        assert len(output_ids) == 1
+
+
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
