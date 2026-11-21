@@ -390,6 +390,7 @@ steps:
     - vllm/config/
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/

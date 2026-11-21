@@ -67,6 +67,10 @@ block, and the hash unit must be divisible by the DCP size.
 Partial-tail reuse follows the hit alignment and the EAGLE/MTP hash lookahead
 resolved by the core prefix cache.
 
+For partial-tail hits, `sync_load_budget_bytes` charges whole attention pages
+and the final state page for each recurrent group. The charge includes page
+padding, so it can exceed the bytes copied by the worker.
+
 ## Single-Tier Setup (CPU Only)
 
 ```bash

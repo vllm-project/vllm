@@ -235,6 +235,10 @@ class OffloadingConnectorScheduler:
         self._group_configs_by_id = {
             config.group_idx: config for config in self.config.kv_group_configs
         }
+        self._page_size_bytes_by_group = {
+            idx: kv_cache_config.kv_cache_groups[idx].page_size_bytes
+            for idx in self._group_configs_by_id
+        }
         # Block IDs are pool-local. Track every group sharing a pool with an
         # offloaded group so other-pool allocations cannot trigger its fences.
         offload_pool_kinds = {
@@ -996,8 +1000,22 @@ class OffloadingConnectorScheduler:
             or num_computed_tokens + num_hit_tokens >= req_status.req.num_tokens
         ):
             return False
-        # Overestimates sliding-window and recurrent groups, which load less.
-        num_bytes = num_hit_tokens * self.config.kv_bytes_per_token
+        if req_status.partial_tail_boundary is None:
+            # Overestimates sliding-window and recurrent groups, which load less.
+            num_bytes = num_hit_tokens * self.config.kv_bytes_per_token
+        else:
+            # The transfer copies a whole attention page even for a partial hit,
+            # and a recurrent group restores only its terminal state page.
+            end = req_status.partial_tail_boundary
+            num_bytes = 0
+            for group in self.config.kv_group_configs:
+                block_size = group.tokens_per_block
+                num_pages = cdiv(end, block_size) - cdiv(
+                    num_computed_tokens, block_size
+                )
+                if group.requires_cow_source:
+                    num_pages = min(num_pages, 1)
+                num_bytes += num_pages * self._page_size_bytes_by_group[group.group_idx]
         budget = self.config.sync_load_budget_bytes
         if self._current_batch_sync_load_bytes + num_bytes > budget:
             return False
