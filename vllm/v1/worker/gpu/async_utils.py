@@ -156,6 +156,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.num_nans: np.ndarray | None = None
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
+            self.num_draft_nans: np.ndarray | None = None
+            if sampler_output.num_draft_nans is not None:
+                self.num_draft_nans = async_copy_to_np(sampler_output.num_draft_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
             self.num_drafted_tokens_per_req_np = (
                 async_copy_to_np(num_drafted_tokens_per_req)
@@ -217,8 +220,17 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.num_nans_in_logits = dict(
                 zip(self.model_runner_output.req_ids, self.num_nans.tolist())
             )
+
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(self.model_runner_output.num_nans_in_logits)
+
+        if self.num_draft_nans is not None:
+            self.model_runner_output.num_draft_nans_in_logits = dict(
+                zip(
+                    self.model_runner_output.req_ids,
+                    self.num_draft_nans.tolist(),
+                )
+            )
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()

@@ -2347,6 +2347,7 @@ class Scheduler(SchedulerInterface):
         num_verified_tokens_per_req = model_runner_output.num_verified_tokens_per_req
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        num_draft_nans_in_logits = model_runner_output.num_draft_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
@@ -2614,6 +2615,12 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
+            if (
+                num_draft_nans_in_logits is not None
+                and req_id in num_draft_nans_in_logits
+            ):
+                request.num_draft_nans_in_logits = num_draft_nans_in_logits[req_id]
+
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
@@ -2642,6 +2649,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        num_draft_nans_in_logits=request.num_draft_nans_in_logits,
                         watermarking=watermarking,
                     )
                 )
