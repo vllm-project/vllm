@@ -141,6 +141,43 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 
 NIXL pull transfers with `--decode-context-parallel-size` greater than 1 require an MLA model. When `--cp-kv-cache-interleave-size` is omitted, vLLM resolves it from the global KV cache groups before profiling. Explicit values are preserved and must divide the cache block size without exceeding it. For a block size of 16, explicit values of 1 and 8 are valid; 3 and 32 are rejected under either connector name.
 
+### HiSparse with hybrid caches
+
+For a hybrid model supported by HiSparse, NIXL pull can receive main KV into
+host memory while keeping indexer and recurrent state in GPU memory. Keep
+HiSparse disabled on P and compose `NixlConnector` with `HiSparseConnector` on D.
+Use matching TP degrees, cache layouts and block sizes, with PP, PCP and DCP at 1.
+
+Each local transfer group must map to one remote group through its layer names;
+ambiguous hybrid mappings are rejected. Resident and hot groups do not take part
+in the P/D transfer. After import, the existing HiSparse coordinator restores
+the tail and promotes other pages when GPU capacity is available.
+
+Use the producer and proxy setup above and this KV transfer configuration on D:
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_both",
+  "kv_buffer_device": "cuda",
+  "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+      {
+        "kv_connector": "HiSparseConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"host_pool_gib": 8}
+      }
+    ]
+  }
+}
+```
+
+Model-side HiSparse support remains a separate requirement. For QSA, that
+integration is tracked in [#59209](https://github.com/vllm-project/vllm/pull/59209);
+use `VLLM_KV_CACHE_LAYOUT=BLNHC` on both endpoints with that integration.
+
 ## Environment Variables
 
 - `VLLM_NIXL_SIDE_CHANNEL_PORT`: Port for NIXL handshake communication

@@ -238,6 +238,7 @@ steps:
   # already cover these paths on PRs.
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/unit/test_nixl_desc_geometry.py
     - tests/v1/kv_connector/nixl_integration/
     - tests/v1/kv_connector/nixl_push_integration/
   commands:
@@ -246,6 +247,7 @@ steps:
     # so a broken NIXL install fails each job in seconds.
     - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
     - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_core_sweep.py
+    - pytest -v -s v1/kv_connector/unit/test_nixl_desc_geometry.py -k qsa_hisparse
 
 - label: ":nvidia: (L4) NixlConnector PD edge case"
   key: nixlconnector-pd-edge-cases-2-gpus
