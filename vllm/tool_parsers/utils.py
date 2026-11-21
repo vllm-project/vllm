@@ -12,6 +12,7 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+import regex as re
 from openai.types.responses import (
     CustomTool,
     FunctionTool,
@@ -979,6 +980,48 @@ def _is_escaped(text: str, index: int) -> bool:
     return backslashes % 2 == 1
 
 
+def _get_active_bracket_item(text: str, open_bracket: str) -> str:
+    """Get the active parameter or property text inside the unclosed bracket.
+
+    Scans backwards at the current bracket nesting level until encountering a
+    top-level comma or the opening bracket itself.
+    """
+    depth = 0
+    in_quote = None
+    i = len(text) - 1
+    closing_to_opening = {")": "(", "]": "[", "}": "{"}
+    opening_to_closing = {"(": ")", "[": "]", "{": "}"}
+
+    while i >= 0:
+        char = text[i]
+        if in_quote:
+            if char == in_quote and not _is_escaped(text, i):
+                in_quote = None
+            i -= 1
+            continue
+
+        if char in {"'", '"'}:
+            in_quote = char
+            i -= 1
+            continue
+
+        if char in closing_to_opening:
+            depth += 1
+        elif char in opening_to_closing:
+            if depth > 0:
+                depth -= 1
+            elif char == open_bracket:
+                return text[i + 1 :].strip()
+        elif char == "," and depth == 0:
+            return text[i + 1 :].strip()
+        i -= 1
+    return ""
+
+
+# A number literal at the very end of the text, which may still be growing.
+_TRAILING_NUMBER_RE = re.compile(r"(?<![\w.])\.?\d[\w.]*(?:[eE][+-])?$")
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
@@ -988,7 +1031,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     Returns:
         A tuple of (completed_text, added_suffix) if the text can be
         made valid, or None if the text is too incomplete to complete
-        meaningfully (e.g. mid-parameter-name or mid-dict-key).
+        meaningfully (e.g. mid-parameter-name, mid-dict-key, or mid-number).
 
     Raises:
         UnexpectedAstError: If mismatched brackets or parentheses
@@ -996,6 +1039,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
 
     """
     bracket_stack: list[str] = []
+    last_closed_quote = -1
     for index, char in enumerate(text):
         # Inside a string literal only an unescaped matching quote is
         # significant; brackets are literal text. Without this guard a bracket
@@ -1004,6 +1048,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
         if bracket_stack and bracket_stack[-1] in {"'", '"'}:
             if char == bracket_stack[-1] and not _is_escaped(text, index):
                 bracket_stack.pop()
+                last_closed_quote = index
             continue
         if char in {"[", "(", "{"}:
             bracket_stack.append(char)
@@ -1019,23 +1064,34 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
         elif char in {"'", '"'}:
             bracket_stack.append(char)
 
+    # A number still arriving can parse as a different value ("37." is 37.0,
+    # "1.5" before "e3"), and a streamed prefix can't be taken back.
+    in_string = bool(bracket_stack) and bracket_stack[-1] in {"'", '"'}
+    if not in_string and _TRAILING_NUMBER_RE.search(text):
+        return None
+
+    # A string that just closed may be continued by an adjacent literal
+    # ('a' 'b'), so wait for the next non-whitespace character before emitting it.
+    if (
+        not in_string
+        and last_closed_quote >= 0
+        and not text[last_closed_quote + 1 :].strip()
+    ):
+        return None
+
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
         return None
-    if bracket_stack and bracket_stack[-1] == "{":
-        trailing_dict_text = text[: text.rfind("{")]
-        num_keys = trailing_dict_text.count(":")
-        num_values = trailing_dict_text.count(",")
-        if num_keys <= num_values:
-            return None
-    if bracket_stack and bracket_stack[-1] == "(":
-        trailing_params_text = text[: text.rfind("(")]
-        num_full_param_names = trailing_params_text.count("=")
-        num_full_param_values = trailing_params_text.count(",")
-        if num_full_param_names <= num_full_param_values:
-            return None
     if text.endswith(","):
-        text = text[:-1]
+        text = text[:-1].rstrip()
+    if bracket_stack and bracket_stack[-1] == "{":
+        active_prop = _get_active_bracket_item(text, "{")
+        if ":" not in active_prop:
+            return None  # Incomplete property name within parameter value
+    if bracket_stack and bracket_stack[-1] == "(":
+        active_param = _get_active_bracket_item(text, "(")
+        if "=" not in active_param:
+            return None  # Incomplete parameter name
     if (
         bracket_stack
         and bracket_stack[-1] == "["
