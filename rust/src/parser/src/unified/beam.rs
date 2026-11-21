@@ -104,7 +104,10 @@ impl BeamUnifiedParser {
     /// Create a parser for one request from the checkpoint's `response_template`.
     pub fn new(template: Arc<ResponseTemplate>, tools: &[Tool], tokenizer: DynTokenizer) -> Self {
         Self {
-            lenient: template.argument_lookahead() == Some(PARAMETER_OPEN),
+            // The tag pattern ends a value where the next parameter opens.
+            lenient: template
+                .argument_tag_pattern()
+                .is_some_and(|pattern| pattern.contains(&format!("(?={PARAMETER_OPEN})"))),
             reasoning_ends: match template.reasoning_closers() {
                 [] => vec![NEXT_MESSAGE.to_string()],
                 closers => closers.to_vec(),

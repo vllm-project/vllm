@@ -14,7 +14,7 @@ from .chat_template import (
     load_chat_template,
     validate_chat_template,
 )
-from .content_parser import PROMPT_EMBEDS_PLACEHOLDER_TOKEN, uses_audio_in_video
+from .content_parser import PROMPT_EMBEDS_PLACEHOLDER_TOKEN
 from .item_tracker import (
     AsyncMultiModalItemTracker,
     BaseMultiModalItemTracker,
@@ -41,5 +41,4 @@ __all__ = [
     "parse_chat_messages",
     "parse_chat_messages_async",
     "PROMPT_EMBEDS_PLACEHOLDER_TOKEN",
-    "uses_audio_in_video",
 ]

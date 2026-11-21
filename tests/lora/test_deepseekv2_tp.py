@@ -49,7 +49,6 @@ def test_deepseekv2_lora(deepseekv2_lora_files):
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
     )
     generate_and_test(llm, deepseekv2_lora_files, 1)
@@ -64,7 +63,6 @@ def test_deepseekv2(deepseekv2_lora_files):
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
     )
     generate_and_test(llm, deepseekv2_lora_files, 1)
 
@@ -79,7 +77,6 @@ def test_deepseekv2_tp2(deepseekv2_lora_files):
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         tensor_parallel_size=2,
     )
     generate_and_test(llm, deepseekv2_lora_files, 2)
@@ -95,7 +92,6 @@ def test_deepseekv2_tp4(deepseekv2_lora_files):
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         tensor_parallel_size=4,
     )
     generate_and_test(llm, deepseekv2_lora_files, 2)

@@ -907,7 +907,7 @@ class GraniteSpeechForConditionalGeneration(
             multi_modal_data={"audio": audio},
         )
 
-    # Adapted from https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/models/granite_speech/feature_extraction_granite_speech.py#L122 # noqa: E501
+    # Adapted from https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/models/granite_speech/feature_extraction_granite_speech.py#L122
     @classmethod
     def get_num_audio_tokens(
         cls,
