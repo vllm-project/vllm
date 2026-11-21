@@ -20,6 +20,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream
 
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
@@ -108,6 +109,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
+                _get_current_stream=current_stream,
             )
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
