@@ -2507,9 +2507,16 @@ def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
     assert config.num_blocks == 9
 
 
-@pytest.mark.parametrize("short", [True, False])
+@pytest.mark.parametrize(
+    "short, gpu_memory_utilization, hint",
+    [
+        (True, 0.9, "Increase `gpu_memory_utilization`"),
+        (True, 1.0, "Use more GPUs"),
+        (False, 0.9, None),
+    ],
+)
 def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
-    short, monkeypatch, caplog_vllm
+    short, gpu_memory_utilization, hint, monkeypatch, caplog_vllm
 ):
     """A re-fit length below AUTO_FIT_SHORT_MAX_MODEL_LEN is a warning that says
     what gets rejected; a longer one is logged at info."""
@@ -2526,6 +2533,7 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.cache_config.gpu_memory_utilization = gpu_memory_utilization
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
         vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
@@ -2547,7 +2555,7 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
     if short:
         assert records[0].levelname == "WARNING"
         assert f"longer than {fitted} tokens will be rejected" in message
-        assert "gpu_memory_utilization" in message
+        assert hint in message
     else:
         assert records[0].levelname == "INFO"
 
