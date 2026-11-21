@@ -142,6 +142,7 @@ def test_manual_fusion_fp8_static_with_linear(
         )
 
 
+@pytest.mark.parametrize("num_tokens", [1, 7, 32])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Dynamic block quant CUDA only"
@@ -149,7 +150,7 @@ def test_manual_fusion_fp8_static_with_linear(
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
-def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
+def test_manual_fusion_fp8_dynamic_128(num_tokens: int, dtype: torch.dtype):
     """Test kFp8Dynamic128Sym fusion path (group_size=128).
 
     Compares fused (silu_and_mul_per_block_quant) vs unfused (silu_and_mul)
@@ -162,7 +163,7 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
     torch.set_default_dtype(dtype)
 
     # hidden_size must be divisible by group_size (128)
-    num_tokens, hidden_size = 32, 256
+    hidden_size = 256
     group_size = 128
     x = torch.rand(num_tokens, hidden_size * 2)
 
@@ -189,9 +190,10 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
         assert result_fused.data.shape == (num_tokens, hidden_size)
         assert result_fused.orig_dtype == dtype
 
-        # Check scale shape
+        # Check scale shape and TMA-aligned column-major strides
         expected_num_groups = hidden_size // group_size
         assert result_fused.scale.shape == (num_tokens, expected_num_groups)
+        assert result_fused.scale.stride() == (1, (num_tokens + 3) // 4 * 4)
 
         # Dequantize fused result and compare with unfused
         # Per-block dequant: data * scale (broadcast scale across group)
