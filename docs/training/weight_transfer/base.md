@@ -407,6 +407,7 @@ The base class provides:
 2. `update_weights(update_info_dict)`, a thin wrapper for `receive_weights`: it parses the dict into the typed dataclass, calls `receive_weights`, and synchronizes the device — unless the engine sets `defers_processing`, below.
 3. `parse_init_info` / `parse_update_info`, which convert API-level dicts into the typed dataclasses and raise `ValueError` on a bad payload.
 4. `set_weight_update_target` / `reset_weight_update_target`, used to retarget an update at the speculative draft model.
+5. `abort_weight_update()` runs after a failed start, update, or finish, before the worker drops the session. It is a no-op by default. Checkpoint-format engines call `abort_reload`. With layerwise reload, layers still loading recover their original weights. Completed layers keep their new weights. Direct reload writes in place, including when selected by `VLLM_RELOAD_MODE=auto`. Keep inference paused until a full resend completes. If the failure also broke the transport (e.g. a poisoned NCCL communicator), re-establish it before resending.
 
 !!! note "Read wire params from the handshake, not the payload"
     Anything the two sides must agree on — `packed`, buffer geometry — arrives
@@ -508,6 +509,11 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
     def finish_weight_update(self) -> None:
         # Checkpoint-format engines: run finalize_layerwise_reload(...).
         # In-place engines: no-op
+        ...
+
+    def abort_weight_update(self) -> None:
+        # Checkpoint-format engines: run abort_reload(self.model).
+        # In-place engines: leave the base no-op
         ...
 
     def receive_weights(self, update_info: MyUpdateInfo) -> None:

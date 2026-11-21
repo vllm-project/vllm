@@ -23,7 +23,7 @@ Under the hood every round is the same **four-phase protocol**, which the traine
 engine drives on your behalf:
 
 1. **Initialization** (`init_weight_transfer_engine`): establishes the communication channel between the trainer and inference workers. Called once, from `trainer_init`, before the training loop begins.
-2. **Start** (`start_weight_update`): prepares the inference engine for a weight update.
+2. **Start** (`start_weight_update`): prepares the inference engine for a weight update. The model weights must be resident on the device: after `sleep()` (either level), call `wake_up()` or `wake_up(tags=["weights"])` before starting an update, otherwise the update is rejected with an error.
 3. **Weight Update** (`update_weights`): transfers updated weights. May be called one or more times (e.g. for chunked transfers).
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
@@ -190,10 +190,12 @@ When running vLLM as an HTTP server, the following endpoints are available for w
     The HTTP weight transfer endpoints require `VLLM_SERVER_DEV_MODE=1` to be set.
 
 !!! warning
-    If `/update_weights` fails, the model is left mid-reload while `/health`
-    stays 200, and `/finish_weight_update` is rejected. Before generating again,
-    resend a full `/start_weight_update` → `/update_weights` →
-    `/finish_weight_update` (see [#57854](https://github.com/vllm-project/vllm/pull/57854)).
+    A failed weight update or finish ends the session. With layerwise reload,
+    IPC, NCCL and NCCL M2N restore layers still loading. Completed layers may
+    already hold new weights. Direct reload writes into live weights, including
+    when selected automatically. Keep generation paused until a full
+    `/start_weight_update` → `/update_weights` → `/finish_weight_update`
+    succeeds. A healthy `/health` response does not verify the weight version.
 
 The Rust frontend's optional gRPC `Control` service exposes the same pause, sleep, weight-transfer, and weight-version lifecycle for trusted sidecars. The `ServerInfo.rl_capabilities` response reports whether weight transfer and sleep mode were configured. Backend-specific `init_info` and `update_info` remain JSON metadata; model tensors continue to move over the configured NCCL, IPC, sparse-NCCL, or sharded-RDT transport.
 

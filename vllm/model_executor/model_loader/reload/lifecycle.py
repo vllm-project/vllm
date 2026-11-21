@@ -1,16 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Begin and complete a checkpoint-format weight update in the reload mode
-the model's cold start fixed."""
+"""Begin, complete or abort a checkpoint-format weight update in the mode
+selected at model load."""
 
 import torch
 
 from vllm.config import ModelConfig
 
-from .direct import begin_direct_reload, finish_direct_reload, reloads_directly
-from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
+from .direct import (
+    abort_direct_reload,
+    begin_direct_reload,
+    finish_direct_reload,
+    reloads_directly,
+)
+from .layerwise import (
+    abort_layerwise_reload,
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+)
 
-__all__ = ["finish_reload", "start_reload", "weight_update_active"]
+__all__ = ["abort_reload", "finish_reload", "start_reload", "weight_update_active"]
 
 
 _weight_update_active = False
@@ -43,3 +52,17 @@ def finish_reload(
         finish_direct_reload(model, model_config, device)
     else:
         finalize_layerwise_reload(model, model_config)
+
+
+def abort_reload(model: torch.nn.Module) -> None:
+    """Undo a weight update `start_reload` began that will not finish.
+
+    Layerwise reload restores layers still loading. Direct reload keeps any
+    writes already made. A full resend brings all weights to the same version.
+    """
+    global _weight_update_active
+    _weight_update_active = False
+    if reloads_directly(model):
+        abort_direct_reload(model)
+    else:
+        abort_layerwise_reload(model)

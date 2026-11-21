@@ -584,6 +584,15 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
+    def abort_weight_update(self) -> None:
+        """Undo an update that will not reach `finish_weight_update`.
+
+        The worker calls this on a failed start, update, or finish before
+        resetting the target. Checkpoint-format engines call `abort_reload` to
+        clear reload state and restore any layers still mid-reload in layerwise
+        mode. Direct reload writes in place and requires a full resend.
+        """
+
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Receive one weight update chunk and load it into the model.
 
