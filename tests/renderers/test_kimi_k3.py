@@ -18,6 +18,12 @@ from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
 from vllm.renderers.registry import RENDERER_REGISTRY, renderer_from_config
 from vllm.tokenizers.registry import TokenizerRegistry
 
+_K3_VIDEO_DEFAULTS = {
+    "video_backend": "kimi_k3",
+    "num_frames": -1,
+    "media_proc_cfg": {"sample_fps": 8.0},
+}
+
 
 class StubTokenizer:
     """Stands in for the model's TikTokenTokenizer.
@@ -128,19 +134,54 @@ def test_kimi_k3_render_server_rejects_jinja_fallback(model_with_jinja_template)
     assert "requires native chat encoding" in response.json()["error"]["message"]
 
 
-def test_k3_media_io_defaults_preserve_original_mode():
-    # Default: K3 keeps the original image mode (no background flattening).
-    assert _merge_k3_media_io_kwargs(None) == {"image": {"image_mode": None}}
-
-    # Server-/request-level values take precedence over the K3 default.
-    assert _merge_k3_media_io_kwargs({"image": {"image_mode": "RGB"}}) == {
-        "image": {"image_mode": "RGB"}
-    }
-
-    # Unrelated image kwargs are merged with the default.
-    assert _merge_k3_media_io_kwargs(
-        {"image": {"rgba_background_color": (0, 0, 0)}}
-    ) == {"image": {"image_mode": None, "rgba_background_color": (0, 0, 0)}}
+@pytest.mark.parametrize(
+    ("media_io_kwargs", "video_defaults", "expected"),
+    [
+        # K3 keeps the original image mode (no background flattening).
+        pytest.param(None, None, {"image": {"image_mode": None}}, id="image-default"),
+        # Server-/request-level values take precedence over the K3 default.
+        pytest.param(
+            {"image": {"image_mode": "RGB"}},
+            None,
+            {"image": {"image_mode": "RGB"}},
+            id="image-override",
+        ),
+        # Unrelated image kwargs are merged with the default.
+        pytest.param(
+            {"image": {"rgba_background_color": (0, 0, 0)}},
+            None,
+            {"image": {"image_mode": None, "rgba_background_color": (0, 0, 0)}},
+            id="image-merge",
+        ),
+        pytest.param(
+            None,
+            _K3_VIDEO_DEFAULTS,
+            {"image": {"image_mode": None}, "video": _K3_VIDEO_DEFAULTS},
+            id="video-default",
+        ),
+        pytest.param(
+            {"video": {"video_backend": "opencv", "num_frames": 8}},
+            _K3_VIDEO_DEFAULTS,
+            {
+                "image": {"image_mode": None},
+                "video": {
+                    **_K3_VIDEO_DEFAULTS,
+                    "video_backend": "opencv",
+                    "num_frames": 8,
+                },
+            },
+            id="video-override",
+        ),
+        pytest.param(
+            {"video": {"media_proc_cfg": {"sample_fps": 1000.0}}},
+            _K3_VIDEO_DEFAULTS,
+            {"image": {"image_mode": None}, "video": _K3_VIDEO_DEFAULTS},
+            id="video-config-pinned",
+        ),
+    ],
+)
+def test_k3_media_io_defaults(media_io_kwargs, video_defaults, expected):
+    assert _merge_k3_media_io_kwargs(media_io_kwargs, video_defaults) == expected
 
 
 def test_apply_chat_template_forces_tokenize_and_pins_return_dict():

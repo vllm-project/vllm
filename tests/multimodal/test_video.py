@@ -17,6 +17,7 @@ from transformers import AutoVideoProcessor, Qwen3VLVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
+from vllm.models.kimi_k3.common.mm_preprocess import KimiK3VideoBackend
 from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -49,6 +50,8 @@ from vllm.multimodal.video_decoders.pynvvideocodec import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
+from vllm.transformers_utils.processors.kimi_k3 import plan_kimi_k3_video
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .utils import (
     create_edit_list_trimmed_video,
@@ -1905,6 +1908,36 @@ def dummy_video_path(tmp_path):
     video_path = tmp_path / "test_RGB_video.mp4"
     create_video_from_image(str(image_path), str(video_path), num_frames=1800, fps=30)
     return video_path
+
+
+@pytest.fixture(scope="module")
+def kimi_k3_media_proc_cfg() -> dict[str, Any]:
+    # K3 nests its processor settings under `media_proc_cfg`.
+    config = get_hf_file_to_dict("preprocessor_config.json", "moonshotai/Kimi-K3")
+    assert config is not None
+    return config["media_proc_cfg"]
+
+
+@pytest.mark.parametrize("num_frames", [-1, 10])
+def test_kimi_k3_backend_decodes_planned_frames(
+    dummy_video_path, kimi_k3_media_proc_cfg: dict[str, Any], num_frames: int
+):
+    """The decoder passes the frame size, so only planned frames are decoded."""
+    frames, metadata = KimiK3VideoBackend.load_bytes(
+        dummy_video_path.read_bytes(),
+        num_frames=num_frames,
+        media_proc_cfg=kimi_k3_media_proc_cfg,
+        backend="opencv",
+    )
+    height, width = frames.shape[1:3]
+    cfg = dict(kimi_k3_media_proc_cfg)
+    if num_frames > 0:
+        cfg["max_num_frames_each_video"] = num_frames
+    planned = plan_kimi_k3_video(
+        metadata["total_num_frames"], metadata["fps"], width, height, cfg
+    )
+    assert metadata["frames_indices"] == planned
+    assert len(frames) == len(planned) < metadata["total_num_frames"]
 
 
 # ============================================================================

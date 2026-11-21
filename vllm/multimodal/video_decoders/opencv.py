@@ -42,7 +42,9 @@ def decode_opencv(
         OpenCVVideoBackendMixin.get_video_metadata(data, cap=cap)
     )
     frame_idx = loader_cls.compute_frames_index_to_sample(
-        source=source, target=target, **sampling_kwargs
+        source=source,
+        target=target,
+        **{**sampling_kwargs, "frame_size": (width, height)},
     )
     # OpenCV reads each distinct index once.
     charge_sampled_frames(len(set(frame_idx)), width, height)

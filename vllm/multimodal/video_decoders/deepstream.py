@@ -35,7 +35,9 @@ def decode_deepstream(
         VideoSourceMetadata(total_frames, original_fps, duration)
     )
     frame_idx = loader_cls.compute_frames_index_to_sample(
-        source=source, target=target, **sampling_kwargs
+        source=source,
+        target=target,
+        **{**sampling_kwargs, "frame_size": (_width, _height)},
     )
     charge_sampled_frames(len(frame_idx), _width, _height)
     frames, valid = DeepStreamVideoBackendMixin.decode_indices(
