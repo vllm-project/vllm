@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -69,6 +70,11 @@ def conv_residual_norm(
     rows, width = hidden.shape
     if num_warps is None:
         num_warps = 16 if rows <= 256 else (8 if rows < 4096 else 4)
+    if current_platform.is_rocm():
+        # Extra 64-lane wavefronts replicate the block, and a replica can reload
+        # RESIDUAL after another wavefront has updated it in place.
+        # https://github.com/triton-lang/triton/issues/12616
+        num_warps = min(num_warps, max(1, triton.next_power_of_2(width) // 64))
     output = torch.empty_like(hidden)
     if rows:
         _conv_residual_norm_kernel[(rows,)](
