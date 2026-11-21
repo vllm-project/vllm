@@ -84,8 +84,8 @@ class FlashInferPcieIpcAllReduce:
             )
             return
 
-        # Setup is deferred until kernel_warmup, where the model hidden size and
-        # exact CUDA Graph buckets are known. Until then dispatch falls through.
+        # Setup runs before KV cache memory profiling, once the model hidden
+        # size and CUDA Graph buckets are known. Until then dispatch falls through.
         self.disabled = False
 
     @property
@@ -200,7 +200,7 @@ class FlashInferPcieIpcAllReduce:
 
 
 def warmup_flashinfer_pcie_ipc_allreduce(worker: "Worker") -> None:
-    """Initialize the TP PCIe IPC backend immediately before graph capture."""
+    """Initialize the TP PCIe IPC backend before profiling or graph capture."""
     from vllm.distributed.device_communicators.cuda_communicator import (
         CudaCommunicator,
     )
