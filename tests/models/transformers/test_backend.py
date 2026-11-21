@@ -19,6 +19,7 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    Gemma3nTextConfig,
     PreTrainedConfig,
 )
 
@@ -37,7 +38,10 @@ from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
-from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
+from vllm.model_executor.models.transformers.utils import (
+    infer_dynamic_arg_dims,
+    maybe_precompute_gemma3n_sparsity,
+)
 from vllm.model_executor.models.utils import StageMissingLayer
 
 from ...conftest import HfRunner, VllmRunner
@@ -65,6 +69,86 @@ def count_modules(model, cls: type) -> int:
 def count_fusers(model) -> dict[str, int]:
     counts = Counter(type(f).__name__ for fs in model.fusers.values() for f in fs)
     return dict(counts)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("sparsity", [0.0, 0.5, 0.9])
+def test_gemma3n_sparsity_preserves_outputs_without_sync(dtype, sparsity):
+    """Eager sparse MLP inference matches HF without host/device transfers."""
+    from transformers.models.gemma3n.modeling_gemma3n import Gemma3nTextMLP
+
+    config = Gemma3nTextConfig(
+        hidden_size=16,
+        intermediate_size=[32],
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        activation_sparsity_pattern=[sparsity],
+    )
+    with torch.random.fork_rng(devices=[0]):
+        torch.manual_seed(0)
+        mlp = Gemma3nTextMLP(config).to(device="cuda", dtype=dtype).eval()
+        inputs = torch.randn(1, 4, 16, device="cuda", dtype=dtype)
+    with torch.inference_mode():
+        expected = mlp(inputs)
+        maybe_precompute_gemma3n_sparsity(mlp, torch.device("cuda"))
+        previous_mode = torch.cuda.get_sync_debug_mode()
+        try:
+            torch.cuda.set_sync_debug_mode("error")
+            actual = mlp(inputs)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous_mode)
+    assert torch.equal(expected, actual)
+
+
+def test_gemma3n_eager_generation_matches_hf(vllm_runner, tmp_path, monkeypatch):
+    """The real backend loads sparse Gemma3n weights and generates without sync."""
+    from transformers.models.gemma3n.modeling_gemma3n import Gemma3nForCausalLM
+
+    from vllm import SamplingParams
+
+    config = Gemma3nTextConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=[128],
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=32,
+        max_position_embeddings=128,
+        vocab_size_per_layer_input=128,
+        hidden_size_per_layer_input=4,
+        altup_num_inputs=2,
+        num_kv_shared_layers=0,
+        laurel_rank=4,
+        activation_sparsity_pattern=[0.5],
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        reference = Gemma3nForCausalLM(config).to(dtype=torch.bfloat16).eval()
+    reference.save_pretrained(tmp_path)
+    prompt = [5, 6, 7, 8]
+    with torch.inference_mode():
+        expected = reference.generate(
+            torch.tensor([prompt]), do_sample=False, max_new_tokens=2
+        )[0, len(prompt) :].tolist()
+    del reference
+
+    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    with vllm_runner(
+        str(tmp_path),
+        model_impl="transformers",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+    ) as model:
+        (output,) = model.llm.generate(
+            [{"prompt_token_ids": prompt}],
+            SamplingParams(temperature=0, max_tokens=2, detokenize=False),
+        )
+    assert list(output.outputs[0].token_ids) == expected
 
 
 def check_implementation(
