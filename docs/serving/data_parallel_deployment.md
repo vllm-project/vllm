@@ -141,3 +141,24 @@ The coordinator process also runs in this scenario, co-located with the DP rank 
 </figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+
+## Cross-DP Prefill Hold
+
+In MoE DP attention + EP deployments, all DP ranks execute forward passes in lockstep, so a prefill scheduled on a single rank stalls running decodes across every rank. Cross-DP prefill hold coordinates all ranks to briefly hold prefills and release them together in aligned mixed steps, improving decode interactivity (ITL) while bounding TTFT.
+
+Disabled by default (`--prefill-hold-ttft-target` is `None`). Enable it by setting a TTFT target in seconds (for example, `5`):
+
+```bash
+vllm serve $MODEL --data-parallel-size 8 --enable-expert-parallel \
+                  --prefill-hold-ttft-target 5
+```
+
+Use `--prefill-hold-ttft-weight` (default `1.0`) to tune the TTFT vs. ITL trade-off: higher values weigh waiting requests' TTFT more heavily (holding less, including at low arrival rates), while lower values hold longer in favour of ITL.
+
+Notes and limitations:
+
+- Also works without data parallelism and on independent dense DP ranks (each engine updates the hold locally without a DP all-reduce). Cannot be combined with `--prefill-schedule-interval > 1`.
+- With MoE DP, performs a per-step DP CPU all-reduce (overriding `--dp-sync-interval`), which may add overhead on high-latency multi-node networks with very short decode steps.
+- With `--pipeline-parallel-size > 1`, overlapped pipeline stages add noise to the online step-cost fit (a startup warning is logged).
+- The step-cost model is calibrated for text prefills; multimodal vision encoder time is not modeled separately.
+- Has no effect on prefill-only or decode-only instances of disaggregated serving.

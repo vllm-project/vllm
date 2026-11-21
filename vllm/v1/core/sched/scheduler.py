@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import heapq
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -45,6 +46,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.dp_prefill_hold import PrefillHold, PrefillQueueState
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -94,6 +96,14 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    # Prefill hold; replaces `throttle_prefills` when set. Class defaults, so
+    # schedulers built without `__init__` (as tests do) have them.
+    prefill_hold: PrefillHold | None = None
+    # Whether the scheduler updates the hold itself, as no DP state sync does.
+    _hold_local = False
+    # Whether every request has left since the hold's last update.
+    _hold_idle = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -406,6 +416,25 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # Whether the last release stopped for lack of KV blocks, or preempted.
+        self.prefill_kv_stopped = False
+        if self.scheduler_config.prefill_hold_ttft_target is not None:
+            spec = self.vllm_config.speculative_config
+            draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+            self.prefill_hold = PrefillHold(
+                self._prefill_queue_state,
+                self.scheduler_config.prefill_hold_ttft_target,
+                self.scheduler_config.prefill_hold_ttft_weight,
+                self.max_num_scheduled_tokens,
+                input_budget=self.scheduler_config.max_num_batched_tokens,
+                decode_tokens_per_req=1 + self.num_spec_tokens,
+                draft_slots_per_req=draft_slots,
+                lag_steps=self.vllm_config.max_concurrent_batches - 1,
+                log_stats=self.parallel_config.data_parallel_rank == 0,
+            )
+            # Only DP ranks of a MoE model step in lockstep and sync rows; the
+            # ranks of a dense model run independently, each with DP size 1.
+            self._hold_local = self.parallel_config.data_parallel_size == 1
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -701,6 +730,8 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        if self._hold_local:
+            self._update_local_hold()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -754,26 +785,20 @@ class Scheduler(SchedulerInterface):
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
+        hold = self.prefill_hold
         defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
+            hold.hold
+            if hold is not None
+            else throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
         num_running, num_waiting = self.get_request_counts()
-        num_eligible_reqs = num_running + num_waiting
-        long_prefill_token_threshold = (
-            self.scheduler_config.long_prefill_token_threshold
-            if self.scheduler_config.enable_chunked_prefill and num_eligible_reqs > 1
-            else 0
+        long_prefill_token_threshold = self._effective_long_prefill_threshold(
+            num_running + num_waiting
         )
-        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
-            # Floor the cap at a fair share of the input budget so it never
-            # cuts a request below max_num_batched_tokens / num requests.
-            long_prefill_token_threshold = max(
-                long_prefill_token_threshold, input_budget // num_eligible_reqs
-            )
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -1038,6 +1063,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
+        stopped_on_kv = bool(preempted_reqs)
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
@@ -1259,6 +1285,9 @@ class Scheduler(SchedulerInterface):
                         connector_prefix_cache_hits = 0
                         num_computed_tokens = 0
                         load_kv_async = False
+
+                    if self.prefill_hold is not None:
+                        self.prefill_hold.on_lookup(request, num_computed_tokens)
 
                     # Computed tokens after the replay rewind applied later by
                     # _mark_prefix_replay; must match its calculation.
@@ -1512,6 +1541,7 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    stopped_on_kv = True
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -1668,6 +1698,8 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+        if not defer_prefills:
+            self.prefill_kv_stopped = stopped_on_kv
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -1811,6 +1843,8 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        if hold is not None:
+            hold.on_scheduled(scheduler_output, self.requests)
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -2350,6 +2384,9 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+
+        if self.prefill_hold is not None:
+            self.prefill_hold.on_step_finished(scheduler_output)
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -3147,6 +3184,85 @@ class Scheduler(SchedulerInterface):
             if self.ec_connector is not None:
                 self.ec_connector.on_new_request(request)
 
+    def _effective_long_prefill_threshold(self, num_eligible_reqs: int) -> int:
+        threshold = (
+            self.scheduler_config.long_prefill_token_threshold
+            if self.scheduler_config.enable_chunked_prefill and num_eligible_reqs > 1
+            else 0
+        )
+        if threshold > 0 and self.adaptive_long_prefill_threshold:
+            # Floor the cap at a fair share of the input budget so it never
+            # cuts a request below max_num_batched_tokens / num requests.
+            threshold = max(
+                threshold,
+                self.scheduler_config.max_num_batched_tokens // num_eligible_reqs,
+            )
+        return threshold
+
+    def _prefill_queue_state(self) -> PrefillQueueState:
+        num_running, num_waiting = self.get_request_counts()
+        return PrefillQueueState(
+            self.running,
+            # HiSparse also tracks async KV loads parked in kv_holding_waiting.
+            [r for r in self._inflight_prefills if r.status == RequestStatus.RUNNING],
+            self._startable_waiting,
+            num_waiting,
+            # Sessions waiting for their next streaming input keep their slots.
+            self.max_num_active_reqs - self.num_waiting_for_streaming_input,
+            self.kv_cache_manager.get_num_cached_tokens,
+            self.kv_cache_manager.block_pool.get_num_free_blocks()
+            - self._inflight_prefill_reserved_blocks()
+            if self.prefill_kv_stopped
+            else None,
+            self._num_blocks_to_admit,
+            self._effective_long_prefill_threshold(num_running + num_waiting),
+        )
+
+    def _num_blocks_to_admit(self, request: Request, cached_tokens: int) -> int:
+        """Roughly the KV blocks a waiting request needs to be admitted: those
+        of its full sequence it lacks, less its prefix hit's share."""
+        blocks = self._request_remaining_blocks(request)
+        if request.num_computed_tokens or not cached_tokens:
+            return blocks
+        return blocks - blocks * cached_tokens // max(request.num_tokens, 1)
+
+    def _startable_waiting(self) -> Iterator[Request]:
+        """Waiting requests that can start now, in the order `schedule` admits
+        them: `kv_holding_waiting` first, then `waiting` and `async_kv_waiting`
+        merged as `_next_waiting_queue` picks."""
+        merged = heapq.merge(
+            self.waiting,
+            self.async_kv_waiting,
+            key=None
+            if self.policy == SchedulingPolicy.PRIORITY
+            else lambda r: r.arrival_time,
+        )
+        return filter(
+            self._can_start_waiting, itertools.chain(self.kv_holding_waiting, merged)
+        )
+
+    def _update_local_hold(self) -> None:
+        """Updates the hold from this rank's row alone, before each step, as a
+        DP state sync would between steps."""
+        hold = self.prefill_hold
+        assert hold is not None
+        if self._hold_idle:
+            # Do not time a step across the idle gap, as at a DP wave's end.
+            self._hold_idle = False
+            hold.reset()
+        hold.update([hold.local_row()])
+
+    def dp_row(self) -> Sequence[float] | None:
+        if self.prefill_hold is None or self._hold_local:
+            return None
+        return self.prefill_hold.local_row()
+
+    def update_from_dp_rows(self, rows: Sequence[Sequence[float]], idle: bool) -> None:
+        assert self.prefill_hold is not None
+        self.prefill_hold.update(rows)
+        if idle:
+            self.prefill_hold.reset()
+
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
     ) -> list[Request]:
@@ -3255,6 +3371,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self._free_request_blocks(request)
         del self.requests[request.request_id]
+        if self._hold_local and not self.requests:
+            self._hold_idle = True
 
     @property
     def pause_state(self) -> PauseState:
@@ -3723,6 +3841,19 @@ class Scheduler(SchedulerInterface):
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
+
+    def _can_start_waiting(self, request: Request) -> bool:
+        """Whether `_handle_blocked_waiting_request` and the stale-output guard
+        would let `request` proceed, without promoting it."""
+        if request.num_stale_output_tokens and not request.drop_stale_output:
+            return False
+        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            return request.request_id in self.finished_recving_kv_req_ids
+        if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
+            struct_output_req = request.structured_output_request
+            grammar = struct_output_req.grammar if struct_output_req else None
+            return grammar is not None and not isinstance(grammar, Exception)
+        return request.status != RequestStatus.WAITING_FOR_STREAMING_REQ
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if

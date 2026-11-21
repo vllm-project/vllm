@@ -1421,6 +1421,25 @@ class VllmConfig:
         if model_config is None or not model_config.enable_trace_replay:
             return
 
+    def _verify_prefill_hold(self) -> None:
+        if self.scheduler_config.prefill_hold_ttft_target is None:
+            return
+        if self.parallel_config.pipeline_parallel_size > 1:
+            logger.warning(
+                "prefill_hold_ttft_target with pipeline_parallel_size > 1 "
+                "measures overlapped pipeline stage intervals, which can "
+                "increase step-cost model noise."
+            )
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None and (
+            kv_transfer_config.is_kv_producer != kv_transfer_config.is_kv_consumer
+        ):
+            logger.warning(
+                "prefill_hold_ttft_target has no effect on a prefill-only or "
+                "decode-only instance: it holds prefills only while they would "
+                "stall running decodes."
+            )
+
     def _check_supports_watermarking(
         self,
         config: "SamplingParams | BeamSearchParams | None" = None,
@@ -1643,6 +1662,7 @@ class VllmConfig:
 
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
+        self._verify_prefill_hold()
 
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (

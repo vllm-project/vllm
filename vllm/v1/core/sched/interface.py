@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -264,6 +264,18 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def shutdown(self) -> None:
         """Shutdown the scheduler."""
+        raise NotImplementedError
+
+    def dp_row(self) -> Sequence[float] | None:
+        """This rank's row for the DP engine core (DP attention + EP) to
+        all-gather this step, for scheduling that coordinates across ranks.
+        A row forces a DP state sync, so a scheduler returns one on every step
+        and every rank, or never (None, the default)."""
+        return None
+
+    def update_from_dp_rows(self, rows: Sequence[Sequence[float]], idle: bool) -> None:
+        """Takes every rank's `dp_row()` in rank order after a DP state sync,
+        and whether that sync found every rank idle."""
         raise NotImplementedError
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
