@@ -3,12 +3,33 @@
 """Tests for EP weight filtering during model loading."""
 
 import glob
+import os
 import tempfile
+from pathlib import Path
 
 import huggingface_hub.constants
 import pytest
 import torch
+from safetensors.torch import save_file
+from torch import nn
+from transformers import MixtralConfig
 
+from vllm.config import (
+    DeviceConfig,
+    LoadConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_eplb_local_expert_ids,
     compute_local_expert_ids,
@@ -18,6 +39,9 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
+from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 # ---------------------------------------------------------------------------
 # Unit tests for parse_expert_id
@@ -506,3 +530,148 @@ class TestEpFilterOnSyntheticMoeWeights:
         # Experts 2, 3, 4 are on rank 0's plain partition and stay filtered.
         expert_names = {n for n in loaded if parse_expert_id(n) is not None}
         assert len(expert_names) == 5 * 3
+
+
+# The config's count, then a smaller one as in a draft model's MoE layers.
+LAYER_EXPERT_COUNTS = (8, 4)
+# The CPU MoE kernel needs both dimensions divisible by 32.
+HIDDEN_SIZE = 32
+INTERMEDIATE_SIZE = 32
+
+
+def _expert_weights(layer: int, expert: int) -> dict[str, torch.Tensor]:
+    value = 100.0 * layer + expert + 1
+    return {
+        f"layers.{layer}.experts.{expert}.gate_proj.weight": torch.full(
+            (INTERMEDIATE_SIZE, HIDDEN_SIZE), value
+        ),
+        f"layers.{layer}.experts.{expert}.up_proj.weight": torch.full(
+            (INTERMEDIATE_SIZE, HIDDEN_SIZE), -value
+        ),
+        f"layers.{layer}.experts.{expert}.down_proj.weight": torch.full(
+            (HIDDEN_SIZE, INTERMEDIATE_SIZE), value
+        ),
+    }
+
+
+def _write_checkpoint(model_dir: Path) -> None:
+    MixtralConfig(
+        vocab_size=32,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=INTERMEDIATE_SIZE,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        num_local_experts=LAYER_EXPERT_COUNTS[0],
+        num_experts_per_tok=1,
+        max_position_embeddings=32,
+    ).save_pretrained(model_dir)
+    weights: dict[str, torch.Tensor] = {}
+    for layer, num_experts in enumerate(LAYER_EXPERT_COUNTS):
+        for expert in range(num_experts):
+            weights.update(_expert_weights(layer, expert))
+    save_file(weights, str(model_dir / "model.safetensors"))
+
+
+class _MoeBlock(nn.Module):
+    def __init__(self, layer: int, num_experts: int):
+        super().__init__()
+        self.experts = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=1,
+            hidden_size=HIDDEN_SIZE,
+            intermediate_size=INTERMEDIATE_SIZE,
+            params_dtype=torch.float32,
+            prefix=f"layers.{layer}.experts",
+        )
+
+
+class _TwoExpertCountModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            _MoeBlock(layer, num_experts)
+            for layer, num_experts in enumerate(LAYER_EXPERT_COUNTS)
+        )
+
+    def load_weights(self, weights):
+        return AutoWeightsLoader(self).load_weights(weights)
+
+
+def _load_on_ep_rank(rank: int, port: int, model_dir: str) -> None:
+    model_config = ModelConfig(
+        model=model_dir,
+        tokenizer=model_dir,
+        skip_tokenizer_init=True,
+        dtype="float32",
+        max_model_len=32,
+        enforce_eager=True,
+    )
+    load_config = LoadConfig(load_format="safetensors", use_tqdm_on_load=False)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        load_config=load_config,
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_ep_weight_filter=True,
+        ),
+    )
+    try:
+        os.environ["VLLM_DIST_IDENT"] = str(port)
+        with set_current_vllm_config(vllm_config):
+            init_distributed_environment(
+                world_size=2,
+                rank=rank,
+                local_rank=rank,
+                backend="gloo",
+                distributed_init_method=f"tcp://127.0.0.1:{port}",
+            )
+            initialize_model_parallel(tensor_model_parallel_size=2, backend="gloo")
+            model = _TwoExpertCountModel()
+            loader = DefaultModelLoader(load_config)
+            loader.load_weights(model, model_config)
+
+            for layer, block in enumerate(model.layers):
+                routed_experts = block.experts.routed_experts
+                expert_map = routed_experts.expert_map_manager.expert_map
+                for expert, local in enumerate(expert_map.tolist()):
+                    if local < 0:
+                        continue
+                    weights = _expert_weights(layer, expert)
+                    prefix = f"layers.{layer}.experts.{expert}"
+                    torch.testing.assert_close(
+                        routed_experts.w13_weight[local],
+                        torch.cat(
+                            [
+                                weights[f"{prefix}.gate_proj.weight"],
+                                weights[f"{prefix}.up_proj.weight"],
+                            ]
+                        ),
+                    )
+                    torch.testing.assert_close(
+                        routed_experts.w2_weight[local],
+                        weights[f"{prefix}.down_proj.weight"],
+                    )
+            # The filter stays on: rank 1 owns experts 4-7 of 8 and 2-3 of 4.
+            assert loader.local_expert_ids == [{0, 1, 2, 3}, {2, 3, 4, 5, 6, 7}][rank]
+            torch.distributed.barrier()
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="builds a gloo EP group of two processes"
+)
+def test_each_moe_layer_loads_its_own_experts(tmp_path: Path):
+    """A layer with fewer experts than the config, like a draft model's,
+    gets every expert its rank owns while the filter still skips the rest."""
+    _write_checkpoint(tmp_path)
+    torch.multiprocessing.spawn(
+        _load_on_ep_rank,
+        args=(get_open_port(), str(tmp_path)),
+        nprocs=2,
+        join=True,
+    )
