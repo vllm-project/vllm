@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
   date_added: 2026-08-26
-  date_updated: 2026-10-27
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -13,12 +13,14 @@ meta:
     - "Qwen/Qwen3-Next-80B-A3B-Instruct"
   default_variant:
     mi355x: mxfp4
+    mi325x: bf16
   hardware:
     h200: verified
     h100: verified
     gb200: verified
     gb300: verified
     mi355x: verified
+    mi325x: verified
     rtx_pro_6000_4x: verified
     dgx_station_gb300: verified
 
@@ -26,15 +28,6 @@ model:
   model_id: "Qwen/Qwen3.8-Flash-Next"
   min_vllm_version: "0.30.0"
   default_frontend: rust
-  docker_image:
-    nvidia: "vllm/vllm-openai:nightly"
-    amd: "vllm/vllm-openai-rocm:nightly"
-  nightly_required: true
-  install:
-    pip:
-      note: "Nightly wheels are recommended and verified by this recipe; stable vLLM ≥0.30.0 also runs the model."
-    docker:
-      note: "Use the vLLM nightly image."
   architecture: moe
   parameter_count: "176B"
   active_parameters: "6B"
@@ -148,6 +141,12 @@ variants:
     precision: bf16
     vram_minimum_gb: 423
     description: "Official BF16 checkpoint"
+    hardware_overrides:
+      mi325x:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
   mxfp4:
     model_id: "amd/Qwen3.8-Flash-Next-Quark-MXFP4"
     precision: mxfp4
@@ -246,9 +245,9 @@ guide: |
 
   ## Prerequisites
 
-  - **Runtime:** use the nightly image, `vllm/vllm-openai:nightly` on NVIDIA or
-    `vllm/vllm-openai-rocm:nightly` on AMD, or the nightly PyPI wheels. Stable
-    ≥0.30.0 runs the model, but this recipe is tuned and verified on nightly.
+  - **Runtime:** vLLM 0.30.0 or newer runs the model. This recipe was tuned and
+    verified on nightly builds that have since shipped, so use the latest release
+    (`vllm/vllm-openai:latest` on NVIDIA, `vllm/vllm-openai-rocm:latest` on AMD).
   - **Hardware:** NVIDIA CUDA and AMD ROCm instructions are provided below.
   - **FP8 memory:** the checkpoint is 172.78 GiB; it fits on a single GB300 GPU
     (288 GB HBM3e).
@@ -259,7 +258,7 @@ guide: |
   - **Host memory for N-gram Embedding offload:** at least 51 GB plus
     runtime headroom.
 
-  The Install block above generates the nightly-wheel and Docker launch flows.
+  The Install block above generates the pip and Docker launch flows.
 
   ## Serving
 
@@ -376,6 +375,13 @@ guide: |
   | TEP8 | 0.965 | 665 / 1831 |
   | TP2 | 0.967 | 801 / 1384 |
   | TP1 | 0.967 | 751 / 1282 |
+
+  ### BF16 on MI325X
+
+  The BF16 variant sets `VLLM_ROCM_USE_AITER=1` and
+  `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`. With AITER on, Gated DeltaNet
+  prefill uses the AITER FlyDSL kernel (`requested=auto`), and the shared expert
+  runs inside the routed-expert MoE kernel.
 
   ### FP8 configuration on a 4x MI355X GPU
   ```bash
