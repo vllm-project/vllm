@@ -108,6 +108,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # the topk_tokens buffer written by a previous layer in the same pass.
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
         self.skip_topk = skip_topk
+        # Set when this layer runs whole on every TP rank: the top-k kernel returns
+        # the same set in rank-dependent order, which changes the attention sum.
+        self.canonical_topk_order = False
         # When True, fuse the q_a and kv_a RMSNorms into a single kernel launch
         # (MLA layers with q-LoRA). Opt-in; default False preserves other models.
         self.fuse_qkv_rmsnorm = fuse_qkv_rmsnorm
@@ -161,6 +164,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.mla_attn.layer_name if enable_short_prefill_scoring_skip else ""
             )
         self.prefix = prefix
+
+    def _sort_topk_indices(self, num_tokens: int) -> None:
+        """Sort each token's selected indices ascending, invalid (-1) entries last."""
+        assert self.topk_indices_buffer is not None
+        view = self.topk_indices_buffer[:num_tokens]
+        top = torch.iinfo(view.dtype).max
+        ordered = torch.where(view < 0, top, view).sort(dim=-1).values
+        view.copy_(torch.where(ordered == top, -1, ordered))
 
     def forward(
         self,
@@ -234,6 +245,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            if self.canonical_topk_order:
+                self._sort_topk_indices(hidden_states.shape[0])
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 

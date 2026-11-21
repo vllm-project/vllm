@@ -13,6 +13,7 @@ steps:
   - vllm/distributed
   - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
+  - vllm/triton_utils/tp_synced_autotune.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
@@ -24,6 +25,7 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
   - pytest -v -s distributed/test_pipeline_partition.py
+  - pytest -v -s distributed/test_tp_synced_autotune.py
   mirror:
     amd:
       automatic_shard: true
