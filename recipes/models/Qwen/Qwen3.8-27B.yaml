@@ -440,7 +440,6 @@ guide: |
 
   ```bash
   export VLLM_ROCM_USE_AITER=1
-  export VLLM_USE_RUST_FRONTEND=1
 
   vllm serve Qwen/Qwen3.8-27B-FP8 \
     --tensor-parallel-size 1 \
