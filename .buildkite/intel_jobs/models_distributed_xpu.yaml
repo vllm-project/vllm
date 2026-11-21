@@ -37,7 +37,7 @@ steps:
 - label: ':nvidia: (L4) Distributed Models'
   key: distributed-model-tests-2-gpus-xpu
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 120
   num_devices: 2
   optional: true
   working_dir: "."
@@ -82,6 +82,7 @@ steps:
   key: pp-equivalence-4-gpus
   device: intel_gpu
   timeout_in_minutes: 240
+  parallelism: 4
   num_devices: 4
   optional: true
   working_dir: "."
@@ -108,4 +109,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest --continue-on-collection-errors -v -s models/test_pp_equivalence.py -m distributed(num_gpus=4) || true'
+    VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest --continue-on-collection-errors -v -s models/test_pp_equivalence.py -m distributed(num_gpus=4) --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
