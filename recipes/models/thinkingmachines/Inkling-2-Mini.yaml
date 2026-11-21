@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Looped multimodal (text and image in, text out) MoE from Thinking Machines Lab with 26B total and 3.5B active parameters and up to 1M context: its 12 middle layers run three passes per token, each with its own KV cache and gated messages from the previous pass. Bundles a DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-20
+  date_updated: 2026-11-21
   difficulty: intermediate
   tasks:
     - multimodal
@@ -20,6 +20,7 @@ meta:
     h100: verified
     h200: verified
     dgx_spark_gb10: verified
+    jetson_agx_thor: verified
 
 model:
   model_id: "thinkingmachines/Inkling-2-Mini"
@@ -73,7 +74,7 @@ hardware_overrides: {}
 strategy_overrides:
   # One GPU serves the model's full 1M context (a GB200 holds ~1.8 concurrent
   # 1M-token requests; ~69 KB of cache per token). H100 (80 GB) and DGX Spark
-  # (128 GB shared with the host) keep a 262,144-token cap.
+  # (128 GB shared with the host) keep a 262,144-token cap; Jetson AGX Thor 524,288.
   single_node_tp:
     tp: 1
     hardware_overrides:
@@ -85,6 +86,14 @@ strategy_overrides:
         extra_args:
           - "--max-model-len"
           - "262144"
+      # Jetson AGX Thor (128 GB shared with the host): 524,288 tokens at 0.65 of memory (the cache
+      # holds ~845k tokens there). Needs vLLM built with Thor's arch (vllm-project/vllm#69167).
+      jetson_agx_thor:
+        extra_args:
+          - "--max-model-len"
+          - "524288"
+          - "--gpu-memory-utilization"
+          - "0.65"
 
 guide: |
   ## Overview
@@ -127,6 +136,13 @@ guide: |
 
   On one GPU, the KV cache bounds the number of concurrent long sessions: with 32K, 64K and
   128K-token sessions, about 45, 32 and 20 sessions run at 100 tokens/s per user.
+
+  **Jetson AGX Thor** (SM110, 128 GB unified memory) needs vLLM built for its arch
+  (`TORCH_CUDA_ARCH_LIST=11.0`, with vllm-project/vllm#69167 for Inkling's own kernels); the
+  `inkling-2-mini` image has no SM110 kernels. Verified on one Thor with DSpark: 50-53 output
+  tokens/s for one request (39.6 without DSpark), about 3,600 prefill tokens/s, 82.5 tokens/s
+  across 4 requests, and a 524,288-token context. The KV cache stays BF16 there (FP8 KV is an
+  SM12x option only).
 
   Tool calling uses the `inkling` tool-call parser (opt-in above).
 
