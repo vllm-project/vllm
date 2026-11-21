@@ -229,6 +229,7 @@ def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
         parallel_config=SimpleNamespace(enable_fault_tolerance=enable_ft)
     )
     executor.is_failed = False
+    executor.failure_callback = None
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda *_: None)
     executor.response_mqs = [
         _FakeResponseMQ(
