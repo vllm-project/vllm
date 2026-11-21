@@ -11,6 +11,7 @@ from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
+from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
@@ -1020,6 +1021,98 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     )
     assert punica_wrapper is not None
     assert punica_wrapper.device == device
+
+
+def _inplace_reload_manager(dummy_model, device, tmp_path):
+    """A worker manager with room for one adapter, and three adapter directories
+    with different weights: two versions of "pet" and one other adapter."""
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=1, max_loras=1, lora_dtype=DEFAULT_DTYPE
+    )
+    paths = {}
+    for seed, name in enumerate(("pet_v1", "pet_v2", "other")):
+        paths[name] = f"{tmp_path}/{name}"
+        os.makedirs(paths[name], exist_ok=True)
+        torch.manual_seed(seed)
+        create_peft_lora(
+            dummy_model,
+            save_dir=paths[name],
+            target_modules=["dense2"],
+            lora_dtype=DEFAULT_DTYPE,
+        )
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16), lora_config=lora_config
+    )
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+    manager = LRUCacheWorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    manager.create_lora_manager(dummy_model, vllm_config)
+    return manager, paths
+
+
+def _assert_loaded_from(manager, lora_id, path):
+    lora_a = manager._adapter_manager.get_adapter(lora_id).loras["dense2"].lora_a
+    expected = load_file(f"{path}/adapter_model.safetensors")[
+        "base_model.model.dense2.lora_A.weight"
+    ]
+    torch.testing.assert_close(lora_a.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_inplace_reload_is_kept_after_eviction(
+    dist_init, dummy_model, device, tmp_path
+):
+    """A request admitted before an in-place reload still holds the old
+    LoRARequest; reloading the evicted adapter for it must use the new path."""
+    manager, paths = _inplace_reload_manager(dummy_model, device, tmp_path)
+    mapping = LoRAMapping([], [])
+    old_request = LoRARequest("pet", 1, paths["pet_v1"])
+    manager.set_active_adapters([old_request], mapping)
+    manager.add_adapter(LoRARequest("pet", 1, paths["pet_v2"], load_inplace=True))
+    manager.set_active_adapters([LoRARequest("other", 2, paths["other"])], mapping)
+    assert manager.list_adapters() == {2}
+
+    manager.set_active_adapters([old_request], mapping)
+    _assert_loaded_from(manager, 1, paths["pet_v2"])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_failed_inplace_reload_keeps_previous_version(
+    dist_init, dummy_model, device, tmp_path
+):
+    """A failed in-place reload leaves the previous version in force, also when
+    the adapter is evicted and loaded again later."""
+    manager, paths = _inplace_reload_manager(dummy_model, device, tmp_path)
+    mapping = LoRAMapping([], [])
+    request = LoRARequest("pet", 1, paths["pet_v1"])
+    manager.set_active_adapters([request], mapping)
+    with pytest.raises(LoRAAdapterNotFoundError):
+        manager.add_adapter(
+            LoRARequest("pet", 1, f"{tmp_path}/missing", load_inplace=True)
+        )
+    manager.set_active_adapters([LoRARequest("other", 2, paths["other"])], mapping)
+
+    manager.set_active_adapters([request], mapping)
+    _assert_loaded_from(manager, 1, paths["pet_v1"])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("remove_all", [False, True])
+def test_removed_adapter_forgets_inplace_reload(
+    dist_init, dummy_model, device, tmp_path, remove_all
+):
+    """After the adapter is removed, a later load of the same id uses its own
+    request."""
+    manager, paths = _inplace_reload_manager(dummy_model, device, tmp_path)
+    mapping = LoRAMapping([], [])
+    manager.add_adapter(LoRARequest("pet", 1, paths["pet_v2"], load_inplace=True))
+    if remove_all:
+        manager.remove_all_adapters()
+    else:
+        manager.remove_adapter(1)
+
+    manager.set_active_adapters([LoRARequest("pet", 1, paths["pet_v1"])], mapping)
+    _assert_loaded_from(manager, 1, paths["pet_v1"])
 
 
 @pytest.mark.parametrize("device", DEVICES)
