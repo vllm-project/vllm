@@ -96,6 +96,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     def _prefill_capture_slot_mappings(self) -> torch.Tensor | None:
         return None
 
+    def _capture_prefill_graphs(self) -> bool:
+        """Whether to capture CUDA graphs for the draft prefill. Without them,
+        dispatch finds no prefill graph and the draft prefill runs eagerly."""
+        return True
+
     def _configure_decode_metadata_update(self) -> None:
         if self.num_speculative_steps == 1:
             self.supports_decode_metadata_update = False
@@ -127,19 +132,22 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
 
-        input_buffers, attn_groups = self._prefill_capture_inputs()
-        self.on_prefill_begin(self.max_num_reqs)
-        self.prefill_cudagraph_manager.capture(
-            self._prefill,
-            self.model_state,
-            input_buffers,
-            self.block_tables,
-            attn_groups,
-            self.kv_cache_config,
-            progress_bar_desc="Capturing prefill CUDA graphs",
-            slot_mappings_buffer=self._prefill_capture_slot_mappings(),
-        )
-        self.on_prefill_end(self.max_num_reqs)
+        if self._capture_prefill_graphs():
+            input_buffers, attn_groups = self._prefill_capture_inputs()
+            self.on_prefill_begin(self.max_num_reqs)
+            self.prefill_cudagraph_manager.capture(
+                self._prefill,
+                self.model_state,
+                input_buffers,
+                self.block_tables,
+                attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing prefill CUDA graphs",
+                slot_mappings_buffer=self._prefill_capture_slot_mappings(),
+            )
+            self.on_prefill_end(self.max_num_reqs)
+        else:
+            logger.info("Draft prefill runs eagerly (no prefill CUDA graphs).")
 
         if self.num_speculative_steps == 1:
             return

@@ -71,6 +71,14 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         )
         return self.target_input_buffers, attn_groups
 
+    def _capture_prefill_graphs(self) -> bool:
+        # Capture uses generic dummy inputs, but under PCP the draft prefill
+        # runs on inputs the PCP manager prepares (prepare_draft_prefill);
+        # capturing it fails in the sparse indexer of DSA models. Without
+        # prefill graphs the draft prefill runs eagerly while the target model
+        # keeps its prefill graphs.
+        return self.pcp_manager is None
+
     def _prepare_decode_inputs(
         self,
         input_batch: InputBatch,
