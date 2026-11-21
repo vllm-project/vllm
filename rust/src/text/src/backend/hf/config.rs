@@ -357,12 +357,12 @@ impl ModelConfig {
 
 /// Load the tokenizer-side EOS metadata if a config file is present.
 pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
-    read_json_file(path, false)
+    read_json_file(path)
 }
 
 /// Load `generation_config.json`, if present.
 pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
-    read_json_file(path, false)
+    read_json_file(path)
 }
 
 /// Parse merged generation-config JSON into its sampling defaults.
@@ -377,12 +377,16 @@ pub(super) fn parse_sampling_defaults(config: Map<String, Value>) -> Result<Samp
 
 /// Load the model-side config (`config.json`) if present.
 pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
-    read_json_file(path, true)
+    read_config_json_file(path)
 }
 
-/// Read one checkpoint JSON file; `lenient` also accepts Python's bare
-/// non-finite constants, see [`from_lenient_json`].
-fn read_json_file<T>(path: Option<&Path>, lenient: bool) -> Result<T>
+/// Load the model-side config as a JSON value, including bare non-finite
+/// constants that Python's `json` module writes.
+pub fn load_model_config_json(path: Option<&Path>) -> Result<Value> {
+    read_config_json_file(path)
+}
+
+fn read_json_file<T>(path: Option<&Path>) -> Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
 {
@@ -396,12 +400,30 @@ where
             error.as_report()
         ))
     })?;
-    let parsed = if lenient {
-        from_lenient_json(&content)
-    } else {
-        serde_json::from_str(&content)
+    serde_json::from_str(&content).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to parse {}: {}",
+            path.display(),
+            error.as_report()
+        ))
+    })
+}
+
+fn read_config_json_file<T>(path: Option<&Path>) -> Result<T>
+where
+    T: for<'de> Deserialize<'de> + Default,
+{
+    let Some(path) = path else {
+        return Ok(T::default());
     };
-    parsed.map_err(|error| {
+    let content = fs::read_to_string(path).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to read {}: {}",
+            path.display(),
+            error.as_report()
+        ))
+    })?;
+    parse_config_json(&content).map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
@@ -416,37 +438,8 @@ where
 ///
 /// serde_json has no non-finite numbers, so each such constant outside a
 /// string is read as `null`.
-pub fn from_lenient_json<T: DeserializeOwned>(text: &str) -> serde_json::Result<T> {
-    const CONSTANTS: [&str; 3] = ["-Infinity", "Infinity", "NaN"];
-    let bytes = text.as_bytes();
-    let mut json = String::with_capacity(text.len());
-    let (mut copied, mut index) = (0, 0);
-    let (mut in_string, mut escaped) = (false, false);
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if in_string {
-            match byte {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-        } else if byte == b'"' {
-            in_string = true;
-        } else if let Some(constant) = CONSTANTS
-            .iter()
-            .find(|constant| bytes[index..].starts_with(constant.as_bytes()))
-        {
-            json.push_str(&text[copied..index]);
-            json.push_str("null");
-            index += constant.len();
-            copied = index;
-            continue;
-        }
-        index += 1;
-    }
-    json.push_str(&text[copied..]);
-    serde_json::from_str(&json)
+fn parse_config_json<T: DeserializeOwned>(text: &str) -> std::result::Result<T, json5::Error> {
+    json5::from_str(text)
 }
 
 #[cfg(test)]
@@ -454,8 +447,8 @@ mod tests {
     use super::{HfTokenizerConfig, ModelConfig, ModelDtype, SamplingDefaults};
 
     #[test]
-    fn lenient_json_reads_bare_constants_outside_strings_as_null() {
-        let config: serde_json::Value = super::from_lenient_json(
+    fn config_json_reads_bare_constants_as_null() {
+        let config: serde_json::Value = super::parse_config_json(
             r#"{"time_step_limit": [0.0, Infinity], "low": -Infinity, "nan": NaN,
                 "max": {"__float__": "Infinity"}, "text": "a \"NaN\" b"}"#,
         )

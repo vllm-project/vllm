@@ -533,6 +533,8 @@ mod tests {
         let ranges = expand_prompt_token_ids(&mut tokens, &[prepared]).unwrap();
         let range = &ranges[&Modality::Video][0];
         assert_eq!((range.offset, range.length), (1, ids.len()));
-        assert!(range.is_embed.is_none());
+        let mask = range.is_embed.as_ref().expect("video embedding mask");
+        let expected = ids.iter().map(|&id| u8::from(id == 1018)).collect::<Vec<_>>();
+        assert_eq!(mask.data.as_raw_view().unwrap(), expected.as_slice());
     }
 }

@@ -207,7 +207,7 @@ fn materialize_config(
     overrides: &HfOverrides,
 ) -> anyhow::Result<tempfile::TempPath> {
     let mut config: serde_json::Value = match path {
-        Some(path) => super::config::from_lenient_json(&std::fs::read_to_string(path)?)?,
+        Some(path) => super::config::load_model_config_json(Some(path))?,
         None => serde_json::json!({}),
     };
     anyhow::ensure!(config.is_object(), "HF model config must be a JSON object");

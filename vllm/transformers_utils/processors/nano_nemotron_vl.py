@@ -1190,6 +1190,9 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             )
             num_tubelets = math.ceil(num_frames / T) if T > 1 else num_frames
 
+            use_video_pruning = (
+                self.video_pruning_rate is not None and self.video_pruning_rate > 0.0
+            )
             if self.video_pruning_rate is not None and self.video_pruning_rate > 0.0:
                 # Start of EVS-specific code
                 num_tokens = compute_retained_tokens_count(
@@ -1216,6 +1219,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 img_end_token_ids=self._img_end_token_ids,
                 img_context_token_ids=self._img_context_token_ids,
                 video_temporal_patch_size=T,
+                select_token_ids=not use_video_pruning,
             )
 
             # video_repl.full is a list of token IDs
@@ -1371,16 +1375,16 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
         video_temporal_patch_size: int = 1,
+        select_token_ids: bool = False,
     ) -> PromptUpdateDetails:
         """Build prompt replacement for a video.
-        The replacement returned is not actually used to replace the placeholder
-        tokens - it's just used to make sure we allocate the correct number
-        of tokens.
-        Actual replacement is done in embed_multimodal of
-        NemotronH_Nano_VL_V2
-        (specifically in _process_video_input -> _create_final_video_embeddings).
-        There, we create the final embeddings with text embeddings for indicator tokens
-        and video embeddings for video tokens.
+
+        When select_token_ids is true, only image context tokens receive video
+        embeddings; timestamps and structural tokens use text embeddings.
+        Otherwise, the final merge is handled in embed_multimodal of
+        NemotronH_Nano_VL_V2 (specifically in _process_video_input ->
+        _create_final_video_embeddings).
+
         This is a single function that handles all cases - non EVS, EVS dummy, EVS real.
         The differentiation is done via tokens_per_frame parameter.
         - non EVS case - constant value same value across all frames
@@ -1398,6 +1402,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             img_end_token_ids (list[int]): pre-tokenized IMG_END tokens
             img_context_token_ids (list[int]): pre-tokenized IMG_CONTEXT tokens
             video_temporal_patch_size (int): temporal patch size for videos
+            select_token_ids (bool): whether to select only image context tokens
+                for video embeddings
         """
         # TODO: Add support of frame_duration_ms to be None
         # At preprocessing step we should allow absent / metadata without
@@ -1464,4 +1470,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             all_token_ids.extend(img_context_token_ids * num_tokens)
             all_token_ids.extend(img_end_token_ids)
 
+        if select_token_ids:
+            return PromptUpdateDetails.select_token_ids(
+                all_token_ids, img_context_token_ids
+            )
         return PromptUpdateDetails.from_seq(all_token_ids)
