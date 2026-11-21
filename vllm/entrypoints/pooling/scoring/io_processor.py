@@ -614,7 +614,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             target_prompt.update(engine_prompt_extras)
 
         engine_input = self.renderer.process_for_engine(
-            engine_prompt, arrival_time, skip_mm_cache=render_params["skip_mm_cache"]
+            engine_prompt,
+            arrival_time,
+            # Temporary workaround to avoid state drift with the engine-side LRU.
+            skip_mm_cache=False,
         )
 
         return PoolingEngineInput(

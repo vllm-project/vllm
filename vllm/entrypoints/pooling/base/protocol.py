@@ -280,18 +280,6 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
     )
     # --8<-- [end:chat-extra-params]
 
-    @model_validator(mode="before")
-    @classmethod
-    def check_generation_prompt(cls, data):
-        if not isinstance(data, dict):
-            return data
-        if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise VLLMValidationError(
-                "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True.",
-            )
-        return data
-
     @model_validator(mode="after")
     def set_default_add_special_tokens(self):
         # Unlike `CompletionRequestMixin` where `None` falls back to the
@@ -307,20 +295,34 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
     ) -> ChatParams:
-        explicit_flags = dict(self.chat_template_kwargs or {})
+        default_flags: dict[str, Any] = {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+        explicit_flags: dict[str, Any] = {}
 
         if self.add_generation_prompt is not None:
             explicit_flags["add_generation_prompt"] = self.add_generation_prompt
         if self.continue_final_message is not None:
             explicit_flags["continue_final_message"] = self.continue_final_message
 
+        merged_kwargs = merge_kwargs(
+            merge_kwargs(default_flags, self.chat_template_kwargs),
+            explicit_flags,
+        )
+
+        if merged_kwargs.get("add_generation_prompt") and merged_kwargs.get(
+            "continue_final_message"
+        ):
+            raise VLLMValidationError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True."
+            )
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(
-                self.chat_template_kwargs,
-                explicit_flags,
-            ),
+            chat_template_kwargs=merged_kwargs,
             media_io_kwargs=self.media_io_kwargs,
         )
 

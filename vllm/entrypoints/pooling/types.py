@@ -197,10 +197,16 @@ class OfflineInputsContext:
         # Priority: explicit `add_generation_prompt` / `continue_final_message`
         #         > `self.chat_template_kwargs`
         #         > `params.extra_kwargs["chat_template_kwargs"]`
+        #         > default (`add_generation_prompt=False`,
+        #                    `continue_final_message=False`)
+        default_flags: dict[str, Any] = {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
         extra_kwargs: dict[str, Any] = dict(params.extra_kwargs or {})
         merged = dict(
             merge_kwargs(
-                extra_kwargs.get("chat_template_kwargs"),
+                merge_kwargs(default_flags, extra_kwargs.get("chat_template_kwargs")),
                 self.chat_template_kwargs,
             )
             or {}

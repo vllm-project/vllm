@@ -3,23 +3,50 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.entrypoints.pooling.base.protocol import (
+    ChatRequestOptionsMixin,
+    EmbeddingTokenizeParamsMixin,
+    FixedMaxLenTokenizeParamsMixin,
+    PoolingBasicRequestMixin,
+)
 from vllm.entrypoints.pooling.types import OfflineInputsContext
 from vllm.exceptions import VLLMValidationError
 
 
-def _make_tokenize_params() -> MagicMock:
-    """A stand-in for `TokenizeParams` that records `with_kwargs` calls."""
-    tp = MagicMock(name="TokenizeParams")
-    tp.with_kwargs = MagicMock(
-        name="TokenizeParams.with_kwargs",
-        side_effect=lambda **kw: MagicMock(name="TokenizeParams.clone", _kw=kw),
-    )
-    return tp
+@dataclass
+class _DummyTokenizeParams:
+    add_special_tokens: bool | None = True
+    max_total_tokens: int | None = None
+    max_output_tokens: int | None = None
+    truncate_prompt_tokens: int | None = None
+    truncation_side: str | None = None
+    do_lower_case: bool = False
+    max_total_tokens_param: str = "max_model_len"
+    max_output_tokens_param: str | None = None
+    kwargs: dict[str, Any] | None = None
+
+    def with_kwargs(self, **kw: Any) -> _DummyTokenizeParams:
+        merged = dict(self.kwargs or {})
+        merged.update(kw)
+        return replace(self, kwargs=merged)
+
+
+class _OnlineFixedLenRequest(PoolingBasicRequestMixin, FixedMaxLenTokenizeParamsMixin):
+    pass
+
+
+class _OnlineEmbeddingRequest(PoolingBasicRequestMixin, EmbeddingTokenizeParamsMixin):
+    padding: Literal["max_length", "do_not_pad"] | None = None
+
+
+def _make_tokenize_params(**overrides: Any) -> _DummyTokenizeParams:
+    return _DummyTokenizeParams(**overrides)
 
 
 def _make_pooling_params(extra_kwargs: dict[str, Any] | None = None) -> MagicMock:
@@ -28,28 +55,36 @@ def _make_pooling_params(extra_kwargs: dict[str, Any] | None = None) -> MagicMoc
     return pp
 
 
-def _make_context(**overrides: Any) -> OfflineInputsContext:
+def _make_model_config(
+    *,
+    max_model_len: int = 512,
+    encoder_config: dict[str, Any] | None = None,
+    pooler_config: Any = None,
+) -> MagicMock:
+    mc = MagicMock(name="ModelConfig")
+    mc.max_model_len = max_model_len
+    mc.encoder_config = encoder_config
+    mc.pooler_config = pooler_config
+    return mc
+
+
+def _make_offline_context(**overrides: Any) -> OfflineInputsContext:
     kwargs: dict[str, Any] = {"pooling_task": "embed"}
     kwargs.update(overrides)
     return OfflineInputsContext(**kwargs)
 
 
-def _make_tokenizer() -> MagicMock:
-    return MagicMock(name="Tokenizer")
+def _make_online_request(**overrides: Any) -> ChatRequestOptionsMixin:
+    return ChatRequestOptionsMixin(**overrides)
 
 
-def _make_model_config() -> MagicMock:
-    return MagicMock(name="ModelConfig")
-
-
-def _build_chat_params(
+def _call_offline_build_chat_params(
     ctx: OfflineInputsContext,
     *,
     params: MagicMock | None = None,
     default_template: str | None = None,
     default_format: str = "string",
-) -> MagicMock:
-    """Call `ctx.build_chat_params` with the real resolver."""
+) -> dict[str, Any]:
     if params is None:
         params = _make_pooling_params()
 
@@ -60,138 +95,328 @@ def _build_chat_params(
             default_template=default_template,
             default_template_content_format=default_format,
         )
-        return chat_params_cls
+        return chat_params_cls.call_args.kwargs
 
 
-class TestBuildTokParams:
-    """Priority: explicit add_special_tokens > tokenization_kwargs > default."""
-
-    def test_no_overrides_returns_default_unchanged(self):
-        default = _make_tokenize_params()
-        result = _make_context().build_tok_params(default)
-        assert result is default
-        default.with_kwargs.assert_not_called()
-
-    def test_tokenization_kwargs_only(self):
-        default = _make_tokenize_params()
-        _make_context(tokenization_kwargs={"max_length": 7}).build_tok_params(default)
-        default.with_kwargs.assert_called_once_with(max_length=7)
-
-    def test_add_special_tokens_none_keeps_tokenization_kwargs(self):
-        default = _make_tokenize_params()
-        _make_context(
-            tokenization_kwargs={"max_length": 7}, add_special_tokens=None
-        ).build_tok_params(default)
-        default.with_kwargs.assert_called_once_with(max_length=7)
-
-    def test_add_special_tokens_true_overrides_tokenization_kwargs(self):
-        default = _make_tokenize_params()
-        _make_context(
-            tokenization_kwargs={"add_special_tokens": False, "max_length": 7},
-            add_special_tokens=True,
-        ).build_tok_params(default)
-        default.with_kwargs.assert_called_once_with(
-            add_special_tokens=True, max_length=7
+def _call_online_build_chat_params(
+    req: ChatRequestOptionsMixin,
+    *,
+    default_template: str | None = None,
+    default_format: str = "string",
+) -> dict[str, Any]:
+    with patch("vllm.entrypoints.pooling.base.protocol.ChatParams") as chat_params_cls:
+        chat_params_cls.return_value = MagicMock(name="ChatParams")
+        req.build_chat_params(
+            default_template=default_template,
+            default_template_content_format=default_format,
         )
-
-    def test_add_special_tokens_false_is_still_applied(self):
-        # Regression guard: the guard is ``is not None``, not truthiness.
-        default = _make_tokenize_params()
-        _make_context(
-            tokenization_kwargs={"add_special_tokens": True},
-            add_special_tokens=False,
-        ).build_tok_params(default)
-        default.with_kwargs.assert_called_once_with(add_special_tokens=False)
-
-    def test_empty_kwargs_and_none_add_special_tokens_fast_path(self):
-        default = _make_tokenize_params()
-        result = _make_context(
-            tokenization_kwargs={}, add_special_tokens=None
-        ).build_tok_params(default)
-        assert result is default
-        default.with_kwargs.assert_not_called()
+        return chat_params_cls.call_args.kwargs
 
 
-class TestBuildChatTemplateKwargs:
-    """Priority: explicit tri-state > self kwargs > params.extra_kwargs."""
+# =============================================================================
+# build_chat_params tests (Online & Offline)
+# Note:
+# - Online requests do not have `params` (`PoolingParams`) or `"auto"` format fallback.
+# - Offline additionally merges `params.extra_kwargs` (`chat_template_kwargs`)
+# below `self.chat_template_kwargs` and resolves `"auto"` format to default.
+# =============================================================================
 
-    def test_default_tristate_does_not_inject(self):
-        # Both tri-state fields default to ``None`` (not ``False``), so
-        # they are not materialised and do not override params.
-        result = _make_context().build_chat_template_kwargs(_make_pooling_params())
-        assert "add_generation_prompt" not in result
-        assert "continue_final_message" not in result
 
-    def test_explicit_none_does_not_inject(self):
-        result = _make_context(
-            add_generation_prompt=None, continue_final_message=None
-        ).build_chat_template_kwargs(_make_pooling_params())
-        assert "add_generation_prompt" not in result
-        assert "continue_final_message" not in result
+class TestOnlineBuildChatParams:
+    """Online (`ChatRequestOptionsMixin.build_chat_params`) tests."""
 
-    def test_explicit_true_overrides_params(self):
-        params = _make_pooling_params(
-            extra_kwargs={"chat_template_kwargs": {"add_generation_prompt": False}}
+    def test_defaults_apply_false_flags(self):
+        req = _make_online_request()
+        kwargs = _call_online_build_chat_params(
+            req,
+            default_template="default_tpl",
+            default_format="string",
         )
-        result = _make_context(add_generation_prompt=True).build_chat_template_kwargs(
-            params
-        )
-        assert result["add_generation_prompt"] is True
+        assert kwargs["chat_template"] == "default_tpl"
+        assert kwargs["chat_template_content_format"] == "string"
+        assert kwargs["chat_template_kwargs"] == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+        assert kwargs["media_io_kwargs"] is None
 
-    def test_explicit_false_overrides_params(self):
-        params = _make_pooling_params(
-            extra_kwargs={"chat_template_kwargs": {"add_generation_prompt": True}}
+    def test_chat_template_kwargs_overrides_defaults_when_tri_state_is_none(self):
+        req = _make_online_request(
+            add_generation_prompt=None,
+            continue_final_message=None,
+            chat_template_kwargs={
+                "add_generation_prompt": True,
+                "custom_arg": "foo",
+            },
         )
-        result = _make_context(add_generation_prompt=False).build_chat_template_kwargs(
-            params
-        )
-        assert result["add_generation_prompt"] is False
+        kwargs = _call_online_build_chat_params(req)
+        assert kwargs["chat_template_kwargs"] == {
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+            "custom_arg": "foo",
+        }
 
-    def test_continue_final_message_alone_is_allowed(self):
-        result = _make_context(continue_final_message=True).build_chat_template_kwargs(
-            _make_pooling_params()
+    def test_explicit_flags_override_chat_template_kwargs_and_defaults(self):
+        req = _make_online_request(
+            add_generation_prompt=False,
+            continue_final_message=True,
+            chat_template_kwargs={
+                "add_generation_prompt": True,
+                "continue_final_message": False,
+            },
         )
-        assert result["continue_final_message"] is True
-        assert "add_generation_prompt" not in result
+        kwargs = _call_online_build_chat_params(req)
+        assert kwargs["chat_template_kwargs"]["add_generation_prompt"] is False
+        assert kwargs["chat_template_kwargs"]["continue_final_message"] is True
 
-    def test_conflict_at_context_level_raises(self):
+    def test_explicit_template_and_media_io_kwargs_are_forwarded(self):
+        media_kwargs = {"image": {"resize": True}}
+        req = _make_online_request(
+            chat_template="req_tpl",
+            media_io_kwargs=media_kwargs,
+        )
+        kwargs = _call_online_build_chat_params(req, default_template="default_tpl")
+        assert kwargs["chat_template"] == "req_tpl"
+        assert kwargs["media_io_kwargs"] == media_kwargs
+
+    def test_conflict_in_explicit_fields_raises(self):
+        req = _make_online_request(
+            add_generation_prompt=True,
+            continue_final_message=True,
+        )
         with pytest.raises(VLLMValidationError):
-            _make_context(
-                add_generation_prompt=True, continue_final_message=True
-            ).build_chat_template_kwargs(_make_pooling_params())
+            _call_online_build_chat_params(req)
 
-    def test_conflict_in_params_extra_kwargs_raises(self):
+    def test_conflict_in_merged_chat_template_kwargs_raises(self):
+        req = _make_online_request(
+            add_generation_prompt=None,
+            continue_final_message=None,
+            chat_template_kwargs={
+                "add_generation_prompt": True,
+                "continue_final_message": True,
+            },
+        )
+        with pytest.raises(VLLMValidationError):
+            _call_online_build_chat_params(req)
+
+
+class TestOfflineBuildChatParams:
+    """Offline (`OfflineInputsContext.build_chat_params`) tests."""
+
+    def test_defaults_apply_false_flags(self):
+        ctx = _make_offline_context()
+        kwargs = _call_offline_build_chat_params(
+            ctx,
+            default_template="default_tpl",
+            default_format="string",
+        )
+        assert kwargs["chat_template"] == "default_tpl"
+        assert kwargs["chat_template_content_format"] == "string"
+        assert kwargs["chat_template_kwargs"] == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+        assert kwargs["media_io_kwargs"] is None
+
+    def test_priority_order_explicit_over_self_kwargs_over_params_over_defaults(self):
         params = _make_pooling_params(
             extra_kwargs={
                 "chat_template_kwargs": {
                     "add_generation_prompt": True,
                     "continue_final_message": True,
+                    "from_params": 1,
                 }
             }
         )
-        with pytest.raises(VLLMValidationError):
-            _make_context(
-                add_generation_prompt=None, continue_final_message=None
-            ).build_chat_template_kwargs(params)
+        ctx = _make_offline_context(
+            add_generation_prompt=None,
+            continue_final_message=False,
+            chat_template_kwargs={
+                "add_generation_prompt": False,
+                "from_self": 2,
+            },
+        )
+        kwargs = _call_offline_build_chat_params(ctx, params=params)
+        assert kwargs["chat_template_kwargs"] == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+            "from_params": 1,
+            "from_self": 2,
+        }
 
-
-class TestBuildChatParams:
-    """`OfflineInputsContext.build_chat_params` -> `ChatParams` assembly."""
-
-    def test_defaults_are_wired_into_chat_params(self):
-        ctx = _make_context()
-        chat_params_cls = _build_chat_params(
+    def test_explicit_template_and_non_auto_format_win(self):
+        ctx = _make_offline_context(
+            chat_template="ctx_tpl",
+            chat_template_content_format="openai",
+        )
+        kwargs = _call_offline_build_chat_params(
             ctx,
             default_template="default_tpl",
             default_format="string",
         )
-        kwargs = chat_params_cls.call_args.kwargs
-        assert kwargs["chat_template"] == "default_tpl"
-        assert kwargs["chat_template_content_format"] == "string"
-        assert kwargs["chat_template_kwargs"] == {}
-        assert kwargs["media_io_kwargs"] is None
+        assert kwargs["chat_template"] == "ctx_tpl"
+        assert kwargs["chat_template_content_format"] == "openai"
 
-    def test_explicit_context_template_wins(self):
-        ctx = _make_context(chat_template="ctx_tpl")
-        chat_params_cls = _build_chat_params(ctx, default_template="default_tpl")
-        assert chat_params_cls.call_args.kwargs["chat_template"] == "ctx_tpl"
+    def test_auto_format_falls_back_to_default_format(self):
+        ctx = _make_offline_context(chat_template_content_format="auto")
+        kwargs = _call_offline_build_chat_params(ctx, default_format="string")
+        assert kwargs["chat_template_content_format"] == "string"
+
+    def test_conflict_at_context_level_raises(self):
+        ctx = _make_offline_context(
+            add_generation_prompt=True,
+            continue_final_message=True,
+        )
+        with pytest.raises(VLLMValidationError):
+            _call_offline_build_chat_params(ctx)
+
+    def test_conflict_in_merged_kwargs_raises(self):
+        params = _make_pooling_params(
+            extra_kwargs={"chat_template_kwargs": {"continue_final_message": True}}
+        )
+        ctx = _make_offline_context(
+            add_generation_prompt=True,
+            continue_final_message=None,
+        )
+        with pytest.raises(VLLMValidationError):
+            _call_offline_build_chat_params(ctx, params=params)
+
+
+# =============================================================================
+# build_tok_params tests (Online & Offline)
+# Note:
+# - Online requests do not have `tokenization_kwargs`.
+# - Offline additionally merges `params.extra_kwargs`
+# (`chat_template_kwargs`) below `self.chat_template_kwargs`.
+# =============================================================================
+
+
+class TestOnlineBuildTokParams:
+    """Online (`build_tok_params`) tests for fixed-len and embedding mixins."""
+
+    def test_fixed_len_defaults_preserve_default_special_tokens(self):
+        req = _OnlineFixedLenRequest()
+        model_cfg = _make_model_config(max_model_len=1024)
+        default_tp = _make_tokenize_params(add_special_tokens=True)
+
+        with patch(
+            "vllm.entrypoints.pooling.base.protocol.replace",
+            side_effect=replace,
+        ):
+            result = req.build_tok_params(model_cfg, default_tp)
+
+        assert result.max_total_tokens == 1024
+        assert result.max_output_tokens == 0
+        assert result.add_special_tokens is True
+        assert result.do_lower_case is False
+        assert result.kwargs is None
+
+    def test_explicit_add_special_tokens_and_truncation_and_padding(self):
+        req = _OnlineFixedLenRequest(
+            add_special_tokens=False,
+            truncate_prompt_tokens=128,
+            truncation_side="left",
+            padding="max_length",
+        )
+        model_cfg = _make_model_config(
+            max_model_len=256,
+            encoder_config={"do_lower_case": True},
+        )
+        default_tp = _make_tokenize_params(add_special_tokens=True)
+
+        with patch(
+            "vllm.entrypoints.pooling.base.protocol.replace",
+            side_effect=replace,
+        ):
+            result = req.build_tok_params(model_cfg, default_tp)
+
+        assert result.add_special_tokens is False
+        assert result.truncate_prompt_tokens == 128
+        assert result.truncation_side == "left"
+        assert result.do_lower_case is True
+        assert result.kwargs == {"padding": "max_length"}
+
+    def test_embedding_chunked_processing_sets_max_embed_len_and_pad_tokens(self):
+        pooler_cfg = MagicMock(
+            enable_chunked_processing=True,
+            max_embed_len=128,
+        )
+        model_cfg = _make_model_config(
+            max_model_len=512,
+            pooler_config=pooler_cfg,
+        )
+        req = _OnlineEmbeddingRequest(padding="max_length")
+        default_tp = _make_tokenize_params()
+
+        with patch(
+            "vllm.entrypoints.pooling.base.protocol.replace",
+            side_effect=replace,
+        ):
+            result = req.build_tok_params(model_cfg, default_tp)
+
+        assert result.max_total_tokens == 128
+        assert result.kwargs == {
+            "padding": "max_length",
+            "pad_prompt_tokens": 128,
+        }
+
+    def test_embedding_non_chunked_uses_max_embed_len_when_set(self):
+        pooler_cfg = MagicMock(
+            enable_chunked_processing=False,
+            max_embed_len=200,
+        )
+        model_cfg = _make_model_config(
+            max_model_len=512,
+            pooler_config=pooler_cfg,
+        )
+        req = _OnlineEmbeddingRequest(padding="max_length")
+        default_tp = _make_tokenize_params()
+
+        with patch(
+            "vllm.entrypoints.pooling.base.protocol.replace",
+            side_effect=replace,
+        ):
+            result = req.build_tok_params(model_cfg, default_tp)
+
+        assert result.max_total_tokens == 200
+        assert result.kwargs == {"padding": "max_length"}
+        assert "pad_prompt_tokens" not in (result.kwargs or {})
+
+
+class TestOfflineBuildTokParams:
+    """Offline (`OfflineInputsContext.build_tok_params`) tests."""
+
+    def test_no_overrides_returns_default_unchanged(self):
+        default_tp = _make_tokenize_params()
+        result = _make_offline_context().build_tok_params(default_tp)
+        assert result is default_tp
+        assert result.kwargs is None
+
+    def test_tokenization_kwargs_only(self):
+        default_tp = _make_tokenize_params()
+        result = _make_offline_context(
+            tokenization_kwargs={"max_length": 32, "truncation": True}
+        ).build_tok_params(default_tp)
+        assert result.kwargs == {"max_length": 32, "truncation": True}
+
+    def test_add_special_tokens_none_keeps_tokenization_kwargs(self):
+        default_tp = _make_tokenize_params()
+        result = _make_offline_context(
+            tokenization_kwargs={"max_length": 32},
+            add_special_tokens=None,
+        ).build_tok_params(default_tp)
+        assert result.kwargs == {"max_length": 32}
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_explicit_add_special_tokens_overrides_tokenization_kwargs(
+        self, flag: bool
+    ):
+        default_tp = _make_tokenize_params()
+        result = _make_offline_context(
+            tokenization_kwargs={"add_special_tokens": not flag, "max_length": 16},
+            add_special_tokens=flag,
+        ).build_tok_params(default_tp)
+        assert result.kwargs == {
+            "add_special_tokens": flag,
+            "max_length": 16,
+        }
