@@ -134,6 +134,41 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
+def _splits_kernel_rows(
+    layer_name: str, cache: torch.Tensor, num_blocks: int, physical_page_size: int
+) -> bool:
+    """Return whether each kernel row of a `[B, H, N, C]` view holds several
+    NIXL pages.
+
+    The runner picks a kernel block size per KV cache group, while NIXL picks
+    one for all groups, so a group can keep rows larger than NIXL's pages. A
+    token-major row (a single head slot, or tokens outside heads as in LBNHC)
+    is byte-identical to consecutive NIXL pages, so the pages tile it densely.
+    Other rows would need a per-group block size, which NIXL does not support.
+    """
+    if cache.ndim != 4 or cache.shape[0] >= num_blocks:
+        return False
+    split, rem = divmod(num_blocks, cache.shape[0])
+    token_stride = cache.stride(2) * cache.element_size()
+    if (
+        rem
+        or cache.shape[2] % split
+        or (cache.shape[1] > 1 and cache.stride(1) > cache.stride(2))
+        or cache.stride(0) * cache.element_size() != split * physical_page_size
+        or token_stride * (cache.shape[2] // split) != physical_page_size
+    ):
+        raise NotImplementedError(
+            f"Layer {layer_name} uses kernel blocks of {cache.shape[2]} tokens, "
+            f"which NIXL cannot split into its {num_blocks} transfer blocks "
+            f"(cache_shape={tuple(cache.shape)}, "
+            f"cache_stride={tuple(cache.stride())}, "
+            f"physical_page_size={physical_page_size}). Lower --block-size so "
+            "every attention backend uses the same kernel block size, or set "
+            "VLLM_KV_CACHE_LAYOUT=LBNHC."
+        )
+    return True
+
+
 # Max slack (s) kept before a remote lease deadline when heartbeating or reading:
 # absorbs clock-offset estimation error and notification/read latency.
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
@@ -1857,7 +1892,14 @@ class NixlBaseConnectorWorker:
                     and storage_is_block_major
                     and is_mla_region
                 )
-                if packed_mla and split_packed_rows:
+                if not self._has_packed_cache and _splits_kernel_rows(
+                    layer_name, cache, num_blocks, physical_page_size
+                ):
+                    # NIXL pages tile a larger, token-major kernel row densely.
+                    region_specs = [
+                        (cache.data_ptr(), physical_page_size, physical_page_size)
+                    ]
+                elif packed_mla and split_packed_rows:
                     # PP>1 prefill stage: register only this layer's page of each row.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
