@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.distributed import parallel_state
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.attention_warmup import (
     mixed_batch_attention_warmup,
@@ -89,23 +90,32 @@ def minimax_m3_msa_warmup(worker: "Worker") -> None:
         ),
         None,
     )
-    if sparse_module is None:
-        return
-    if not (
+    is_sm100 = (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ):
+    )
+    local_has_msa = sparse_module is not None and is_sm100
+
+    # The mixed warmup uses worker.execute_model, which participates in PP
+    # send/recv operations. Every PP rank must make the same warmup decision.
+    pp_group = parallel_state.get_pp_group()
+    eligible_pp_ranks = int(local_has_msa)
+    if pp_group.world_size > 1:
+        eligibility = torch.tensor([eligible_pp_ranks], dtype=torch.int32, device="cpu")
+        pp_group.cpu_all_reduce_(eligibility)
+        eligible_pp_ranks = int(eligibility.item())
+
+    if eligible_pp_ranks == 0:
         return
 
-    logger.info("Warming up MiniMax M3 MSA kernels.")
+    # Build native kernels only on ranks hosting sparse modules on supported platforms.
+    if sparse_module is not None and is_sm100:
+        logger.info("Warming up MiniMax M3 MSA kernels.")
+        kwargs = _msa_prebuild_kwargs(worker.vllm_config, sparse_module)
+        if kwargs is not None:
+            from vllm.third_party.fmha_sm100 import warmup
 
-    # Build every native kernel the configuration can request at once instead
-    # of compiling each one serially on first use.
-    kwargs = _msa_prebuild_kwargs(worker.vllm_config, sparse_module)
-    if kwargs is not None:
-        from vllm.third_party.fmha_sm100 import warmup
-
-        logger.info("MiniMax M3 MSA kernels: %s", warmup(**kwargs))
+            logger.info("MiniMax M3 MSA kernels: %s", warmup(**kwargs))
 
     # Cover sparse prefill (and its CuTe-DSL kernels) through the normal model
-    # path.
+    # path. All PP ranks participate symmetrically if any rank has MSA.
     mixed_batch_attention_warmup(worker)
