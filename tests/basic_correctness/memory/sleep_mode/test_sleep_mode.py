@@ -526,3 +526,81 @@ def test_deep_sleep_fp8_kvcache_with_undefined_remap(
     actual = llm.generate(prompt, sampling_params)
 
     assert expected[0].outputs[0].text == actual[0].outputs[0].text
+
+
+def _kv_allocator_cap(worker) -> dict[str, int | bool | None]:
+    cache = getattr(worker.model_runner, "extensible_kv_cache", None)
+    if cache is None:
+        return {"present": False}
+    free_bytes, _total = torch.accelerator.get_memory_info()
+    return {
+        "present": True,
+        "limit": cache.torch_memory_limit,
+        "lifted": cache._torch_memory_limit_lifted,
+        "physical": cache.physical_bytes,
+        "reserved": torch.accelerator.memory_reserved(),
+        "free": free_bytes,
+    }
+
+
+def _caching_alloc_succeeds(worker, num_bytes: int) -> bool:
+    try:
+        tensor = torch.empty(num_bytes, dtype=torch.uint8, device=worker.device)
+        del tensor
+        return True
+    except torch.OutOfMemoryError:
+        return False
+    finally:
+        torch.accelerator.empty_cache()
+
+
+@create_new_process_for_each_test()
+def test_extensible_kv_cache_cap_released_during_sleep(monkeypatch, gpu_memory_cleared):
+    """Colocated allocation must succeed while sleep holds the KV pages
+    released, and the sizing cap must be back once those pages are restored."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM(
+        "facebook/opt-125m",
+        enable_sleep_mode=True,
+        enable_extensible_kv_cache=True,
+        enforce_eager=True,
+        max_model_len=128,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+    first = llm.generate(prompt, sampling_params)[0].outputs[0].text
+
+    (before,) = llm.collective_rpc(_kv_allocator_cap)
+    assert before["present"]
+    assert before["limit"] is not None
+    assert before["lifted"] is False
+    assert before["physical"] > 0
+
+    # One byte past the cap's headroom. Skip the allocation check when the
+    # freed KV pages could not hold it; the cap state is still checked.
+    headroom = max(before["limit"] - before["reserved"], 0)
+    over = headroom + (64 << 20)
+    cap_binds = (
+        over < before["physical"]
+        and not llm.collective_rpc(_caching_alloc_succeeds, args=(over,))[0]
+    )
+
+    llm.sleep(level=1)
+    (asleep,) = llm.collective_rpc(_kv_allocator_cap)
+    assert asleep["lifted"] is True
+    assert asleep["limit"] is None
+    assert asleep["physical"] == 0
+    if cap_binds and asleep["free"] > over + (128 << 20):
+        assert llm.collective_rpc(_caching_alloc_succeeds, args=(over,)) == [True]
+
+    llm.wake_up(tags=["weights"])
+    (weights_only,) = llm.collective_rpc(_kv_allocator_cap)
+    assert weights_only["lifted"] is True
+    assert weights_only["limit"] is None
+    assert weights_only["physical"] == 0
+
+    llm.wake_up(tags=["kv_cache"])
+    (awake,) = llm.collective_rpc(_kv_allocator_cap)
+    assert awake["lifted"] is False
+    assert awake["limit"] == before["limit"]
+    assert llm.generate(prompt, sampling_params)[0].outputs[0].text == first
