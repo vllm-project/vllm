@@ -56,6 +56,12 @@ steps:
     - vllm/v1/engine/
     - tests/v1/engine/
     - tests/v1/test_tensor_ipc_queue.py
+    # Stream admission (test_async_llm_admitted_streams.py, test_engine_args.py)
+    - vllm/config/scheduler.py
+    - vllm/engine/arg_utils.py
+    - vllm/outputs.py
+    - tests/plugins/vllm_add_dummy_model/
+    - tests/conftest.py
   commands:
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
     - >-
