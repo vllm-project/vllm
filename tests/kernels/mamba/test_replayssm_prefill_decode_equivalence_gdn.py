@@ -224,6 +224,7 @@ _GEOMETRIES = [
     # (num_q_heads, num_v_heads, head_k_dim, head_v_dim)
     pytest.param((2, 4, 64, 64), id="small"),
     pytest.param((16, 32, 128, 128), id="qwen4b"),
+    pytest.param((16, 48, 128, 128), id="qwen4exp"),
 ]
 
 

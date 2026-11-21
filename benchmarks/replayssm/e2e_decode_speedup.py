@@ -7,7 +7,7 @@ and times a long greedy decode (CUDA graphs on) once with the standard kernel an
 once with ReplaySSM, then reports the per-step / throughput speedup. The two modes
 run in separate subprocesses so each gets a clean CUDA context.
 
-GDN models (Qwen3.5) default to the Triton prefill backend, which starts
+GDN models (Qwen3.5, Qwen4Exp) default to the Triton prefill backend, which starts
 instantly; FlashInfer JIT-compiles on first use (slow startup) but never affects
 the decode speedup measured here.
 
@@ -18,6 +18,7 @@ CUDA-graph capture on the pre-release Blackwell FP4 path); pass
 Examples:
     python e2e_decode_speedup.py --model-id nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
     python e2e_decode_speedup.py --model-id Qwen/Qwen3.5-4B --buffer-len 16
+    python e2e_decode_speedup.py --model-id nvidia/Qwen3.8-Flash-Next-NVFP4
     python e2e_decode_speedup.py --dtype auto --buffer-len 16 \
         --model-id nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4   # B300 NVFP4
 
@@ -79,6 +80,12 @@ def parse_args():
         "engine so the override reaches the kernel). Empty = off.",
     )
     p.add_argument(
+        "--mamba-backend",
+        default="triton",
+        choices=["triton", "flashinfer"],
+        help="Mamba SSU backend for both modes. GDN ReplaySSM requires triton.",
+    )
+    p.add_argument(
         "--gdn-prefill-backend",
         default="triton",
         choices=["triton", "flashinfer", "auto"],
@@ -129,7 +136,7 @@ def run_worker(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         # SSM state dtype (applies to both standard and ReplaySSM).
         mamba_ssm_cache_dtype=args.mamba_ssm_cache_dtype,
-        mamba_backend="triton",
+        mamba_backend=args.mamba_backend,
         # Skip the vision tower of multimodal hybrids (Qwen3.5 is a
         # *ForConditionalGeneration model); ignored by text-only Mamba2 models.
         language_model_only=True,
@@ -227,6 +234,8 @@ def run_one_mode(args, mode) -> dict:
         args.dtype,
         "--mamba-ssm-cache-dtype",
         args.mamba_ssm_cache_dtype,
+        "--mamba-backend",
+        args.mamba_backend,
         "--gdn-prefill-backend",
         args.gdn_prefill_backend,
         "--baseline-ssm-config",

@@ -221,41 +221,37 @@ def test_triton_replayssm_spec_decode_validates_config(
 
 
 @pytest.mark.parametrize(
-    ("num_speculative_tokens", "backend", "stochastic_rounding", "error"),
+    ("num_speculative_tokens", "backend", "stochastic_rounding", "buffer_len", "error"),
     [
-        (0, MambaBackendEnum.TRITON, False, None),
-        (2, MambaBackendEnum.TRITON, False, "does not support speculative decoding"),
-        (0, MambaBackendEnum.FLASHINFER, False, "requires --mamba-backend triton"),
-        (0, MambaBackendEnum.TRITON, True, "stochastic-rounding"),
+        (0, MambaBackendEnum.TRITON, False, 32, None),
+        (2, MambaBackendEnum.TRITON, False, 16, "speculative decoding"),
+        (0, MambaBackendEnum.FLASHINFER, False, 16, "--mamba-backend triton"),
+        (0, MambaBackendEnum.TRITON, True, 16, "stochastic-rounding"),
+        (0, MambaBackendEnum.TRITON, False, 64, "--replayssm-buffer-len <= 32"),
     ],
-    ids=["stp", "spec-rejected", "flashinfer-rejected", "stochastic-rejected"],
+    ids=["stp", "spec", "flashinfer", "stochastic-rounding", "long-buffer"],
 )
 def test_gdn_replayssm_validates_config(
-    num_speculative_tokens, backend, stochastic_rounding, error
+    num_speculative_tokens, backend, stochastic_rounding, buffer_len, error
 ):
+    """The Gated DeltaNet layer owns these limits, so every model built on it
+    (Qwen3.5, Qwen4Exp, and their subclasses) is checked, whatever its name."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+    )
+
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            enable_prefix_caching=True,
-            replayssm_buffer_len=16,
-        ),
         num_speculative_tokens=num_speculative_tokens,
-        model_config=SimpleNamespace(
-            supports_replayssm=True,
-            architecture="Qwen3_5ForConditionalGeneration",
-            dtype=torch.bfloat16,
-        ),
+        cache_config=SimpleNamespace(replayssm_buffer_len=buffer_len),
         mamba_config=SimpleNamespace(
             backend=backend, enable_stochastic_rounding=stochastic_rounding
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=False),
-        kv_transfer_config=None,
     )
+    reason = QwenGatedDeltaNetAttention._replayssm_unsupported_reason(config)
     if error:
-        with pytest.raises(ValueError, match=error):
-            VllmConfig.validate_mamba_cached_kernel(config)
+        assert reason is not None and error in reason
     else:
-        VllmConfig.validate_mamba_cached_kernel(config)
+        assert reason is None
 
 
 def _write_json(path: Path, value: object) -> None:

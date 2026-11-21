@@ -210,6 +210,17 @@ def test_registry_inspect_does_not_init_cuda(model_arch):
         ("Qwen3_5MoeForCausalLM", True),
         ("Qwen3_5ForConditionalGeneration", True),
         ("Qwen3_5MoeForConditionalGeneration", True),
+        *(
+            pytest.param(
+                arch,
+                True,
+                marks=pytest.mark.skipif(
+                    not current_platform.is_cuda_alike(),
+                    reason="Qwen4Exp supports CUDA and ROCm only",
+                ),
+            )
+            for arch in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        ),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],

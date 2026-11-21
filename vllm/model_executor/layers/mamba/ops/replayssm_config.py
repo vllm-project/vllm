@@ -38,7 +38,12 @@ def _mamba2_output_only(dstate, L, is_blackwell):
     return 16, 1, _dstate_tile(dstate, 64), _dstate_tile(dstate, 128), 2
 
 
-def _gdn_decode(L, is_blackwell):
+# Longer GDN rings spill registers and replay more than the skipped state
+# store saves: on B200 the decode step is slower than the baseline from L = 64.
+GDN_MAX_BUFFER_LEN = 32
+
+
+def _gdn_decode(is_blackwell):
     # (block_v, num_warps, num_stages, nk); serving-batch optimum per device.
     if is_blackwell:
         return 128, 1, 3, 4
@@ -58,5 +63,5 @@ def get_replayssm_config(kernel: str, **shape) -> tuple:
     if kernel == "mamba2_output_only":
         return _mamba2_output_only(shape["dstate"], shape.get("L", 16), bw)
     if kernel == "gdn_decode":
-        return _gdn_decode(shape.get("L", 16), bw)
+        return _gdn_decode(bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")

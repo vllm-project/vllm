@@ -24,6 +24,7 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule_replayssm,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
@@ -92,11 +93,15 @@ def _run_gdn_standard_decode(
     num_steps: int,
     n_pad: int,
     strided: bool = False,
+    forced_flush_prob: float = 0.0,
     seed: int = 0,
 ) -> None:
     """Drive `num_steps` decode steps; check the ReplaySSM kernel matches the
     baseline packed decode each step (and the checkpoint state at flushes).
-    State follows `state_dtype`; BF16 activations use FP16 ring storage."""
+    State follows `state_dtype`; BF16 activations use FP16 ring storage.
+
+    With `forced_flush_prob`, each row also flushes with that probability
+    before its ring is full, as prefix caching forces on block completion."""
     device = "cuda"
     o_rtol, o_atol = _output_tolerances(act_dtype)
     s_rtol, s_atol = _state_tolerances(act_dtype, state_dtype)
@@ -110,14 +115,14 @@ def _run_gdn_standard_decode(
     dt_bias = torch.randn(num_v_heads, device=device, dtype=act_dtype)
 
     # Sparse state allocation: active rows map to a random permutation of slots
-    # 1.., padding rows map to PAD_SLOT_ID=-1.
+    # 1.., padding rows map to the null block, as the metadata builder pads.
     state_indices = (torch.randperm(num_state_slots - 1, device=device)[:batch] + 1).to(
         torch.int32
     )
     ssm_state_indices = torch.cat(
         [
             state_indices,
-            torch.full((n_pad,), -1, dtype=torch.int32, device=device),
+            torch.full((n_pad,), NULL_BLOCK_ID, dtype=torch.int32, device=device),
         ]
     )
     unused = torch.ones(num_state_slots, dtype=torch.bool, device=device)
@@ -156,7 +161,8 @@ def _run_gdn_standard_decode(
         num_state_slots, num_v_heads, max_cache_len, device=device, dtype=torch.float32
     )
 
-    for step in range(num_steps):
+    write_pos = torch.zeros(padded_batch, device=device, dtype=torch.int32)
+    for _ in range(num_steps):
         if strided:
             proj = torch.randn(
                 padded_batch, qkv_dim + 64, device=device, dtype=act_dtype
@@ -168,10 +174,8 @@ def _run_gdn_standard_decode(
             )
         a = torch.randn(padded_batch, num_v_heads, device=device, dtype=act_dtype)
         b = torch.randn(padded_batch, num_v_heads, device=device, dtype=act_dtype)
-        write_pos = torch.full(
-            (padded_batch,), step % max_cache_len, device=device, dtype=torch.int32
-        )
-        is_flush = (write_pos == max_cache_len - 1).to(torch.int8)
+        forced = torch.rand(padded_batch, device=device) < forced_flush_prob
+        is_flush = ((write_pos == max_cache_len - 1) | forced).to(torch.int8)
 
         out_packed = torch.empty(
             padded_batch, 1, num_v_heads, head_v_dim, device=device, dtype=act_dtype
@@ -213,13 +217,11 @@ def _run_gdn_standard_decode(
         torch.testing.assert_close(
             out_cached[:batch], out_packed[:batch], rtol=o_rtol, atol=o_atol
         )
-        if step % max_cache_len == max_cache_len - 1:
-            torch.testing.assert_close(
-                state_cached[state_indices],
-                state_packed[state_indices],
-                rtol=s_rtol,
-                atol=s_atol,
-            )
+        flushed = state_indices[is_flush[:batch].bool()]
+        torch.testing.assert_close(
+            state_cached[flushed], state_packed[flushed], rtol=s_rtol, atol=s_atol
+        )
+        write_pos = torch.where(is_flush.bool(), 0, write_pos + 1)
 
     # Padding / unused state slots are never written.
     assert torch.equal(state_cached[unused], state_before[unused])
@@ -243,6 +245,8 @@ _GEOMETRIES = [
     pytest.param((2, 4, 64, 64), id="small"),
     pytest.param((16, 32, 128, 128), id="qwen4b"),
     pytest.param((16, 64, 128, 128), id="qwen122b"),
+    # Qwen4Exp: three value heads per key head.
+    pytest.param((16, 48, 128, 128), id="qwen4exp"),
 ]
 
 
@@ -271,6 +275,31 @@ def test_replayssm_standard_decode_gdn_matches_packed(
         num_steps=2 * max_cache_len + 1,
         n_pad=2,
         strided=strided,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+@pytest.mark.parametrize("precision", _PRECISIONS)
+@pytest.mark.parametrize("geometry", _GEOMETRIES[1:])
+def test_replayssm_standard_decode_gdn_forced_flush(
+    precision: tuple[torch.dtype, torch.dtype],
+    geometry: tuple[int, int, int, int],
+):
+    """Prefix caching flushes a partly filled ring on block completion."""
+    state_dtype, act_dtype = precision
+    num_q_heads, num_v_heads, head_k_dim, head_v_dim = geometry
+    _run_gdn_standard_decode(
+        state_dtype=state_dtype,
+        act_dtype=act_dtype,
+        batch=8,
+        num_q_heads=num_q_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        max_cache_len=16,
+        num_steps=40,
+        n_pad=2,
+        forced_flush_prob=0.2,
     )
 
 

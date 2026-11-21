@@ -18,6 +18,9 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    get_replayssm_align_block_size,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -681,9 +684,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # rows as no-ops.
             write_pos_d = self.decode_write_pos_d[: m.num_reqs]
             is_flush_d = self.decode_is_flush_d[: m.num_reqs]
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            cache_config = self.vllm_config.cache_config
+            if cache_config.enable_prefix_caching:
                 replayssm_seq_lens_d = m.seq_lens[: m.num_reqs]
-                replayssm_align_block_size = self.kv_cache_spec.block_size
+                replayssm_align_block_size = get_replayssm_align_block_size(
+                    cache_config, self.kv_cache_spec.block_size
+                )
 
         # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
         # token-padded for FULL graph replay, but the GDN state/query/accepted

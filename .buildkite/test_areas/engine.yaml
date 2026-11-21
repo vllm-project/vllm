@@ -242,6 +242,7 @@ steps:
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/models/qwen3_5.py
     - vllm/models/qwen3_5/
+    - vllm/models/qwen4_exp/
     - vllm/third_party/flash_linear_attention/
     - vllm/v1/attention/backends/gdn_attn.py
     - vllm/model_executor/warmup/kernel_warmup.py
@@ -296,6 +297,7 @@ steps:
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/models/qwen3_5.py
     - vllm/models/qwen3_5/
+    - vllm/models/qwen4_exp/
     - vllm/third_party/flash_linear_attention/
     - vllm/v1/attention/backends/gdn_attn.py
     - vllm/model_executor/warmup/kernel_warmup.py
@@ -350,6 +352,7 @@ steps:
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/models/qwen3_5.py
     - vllm/models/qwen3_5/
+    - vllm/models/qwen4_exp/
     - vllm/third_party/flash_linear_attention/
     - vllm/v1/attention/backends/gdn_attn.py
     - vllm/model_executor/warmup/kernel_warmup.py
