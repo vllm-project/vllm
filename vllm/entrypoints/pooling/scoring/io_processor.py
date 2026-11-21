@@ -511,24 +511,30 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        requests = [
-            ScoringRenderParams(
-                data_1=data_1[i],
-                data_2=data_2[i],
-                params=ctx.pooling_params,
-                lora_requests=seq_lora_requests[i],
-                priorities=seq_priority[i],
-                tok_params=chat_tok_params
-                if isinstance(data_1[i], list)
-                else cmpl_tok_params,
-                chat_params=chat_params,
-                max_tokens_per_query=max_tokens_per_query,
-                max_tokens_per_doc=max_tokens_per_doc,
-                prompt_extras=ctx.prompt_extras,
-                skip_mm_cache=request.skip_mm_cache,
+        requests = []
+        for i in range(num_requests):
+            is_chat_input = isinstance(data_1[i], list)
+            tok_params = (
+                chat_tok_params
+                if (is_chat_input or chat_params.chat_template is not None)
+                else cmpl_tok_params
             )
-            for i in range(num_requests)
-        ]
+
+            requests.append(
+                ScoringRenderParams(
+                    data_1=data_1[i],
+                    data_2=data_2[i],
+                    params=ctx.pooling_params,
+                    lora_requests=seq_lora_requests[i],
+                    priorities=seq_priority[i],
+                    tok_params=tok_params,
+                    chat_params=chat_params,
+                    max_tokens_per_query=max_tokens_per_query,
+                    max_tokens_per_doc=max_tokens_per_doc,
+                    prompt_extras=ctx.prompt_extras,
+                    skip_mm_cache=request.skip_mm_cache,
+                )
+            )
 
         return requests
 
@@ -573,15 +579,20 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):
+                is_chat_input = isinstance(data_1[i], list)
+                tok_params = (
+                    chat_tok_params
+                    if (is_chat_input or chat_params.chat_template is not None)
+                    else cmpl_tok_params
+                )
+
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
                     params=ctx.pooling_params,
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
-                    tok_params=chat_tok_params
-                    if isinstance(data_1[i], list)
-                    else cmpl_tok_params,
+                    tok_params=tok_params,
                     chat_params=chat_params,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,

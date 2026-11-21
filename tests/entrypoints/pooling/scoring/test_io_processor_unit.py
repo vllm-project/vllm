@@ -848,3 +848,116 @@ class TestSavedChatTemplateReplacementAndValidation:
 
         with pytest.raises(VLLMValidationError):
             _call_offline_chat_params(processor, ctx)
+
+
+# =============================================================================
+# CrossEncoder tok_params selection tests (template vs completion vs chat input)
+# =============================================================================
+
+
+class TestCrossEncoderTokParamsSelection:
+    """Plain text pairs with an active chat template should use
+    `default_chat_tok_params` (avoiding double BOS on BOS-adding tokenizers),
+    while template-less plain text pairs use `default_cmpl_tok_params`."""
+
+    @staticmethod
+    def _configure_distinct_tok_params(
+        processor: CrossEncoderIOProcessor,
+    ) -> tuple[TokenizeParams, TokenizeParams]:
+        cmpl_tok = TokenizeParams(max_total_tokens=32).with_kwargs(
+            add_special_tokens=True
+        )
+        chat_tok = TokenizeParams(max_total_tokens=32).with_kwargs(
+            add_special_tokens=False
+        )
+        processor.renderer = SimpleNamespace(
+            default_cmpl_tok_params=cmpl_tok,
+            default_chat_tok_params=chat_tok,
+        )
+        return cmpl_tok, chat_tok
+
+    @pytest.mark.parametrize(
+        ("data_1", "data_2", "chat_template", "expect_chat_tok"),
+        [
+            # Plain text + active chat template -> chat_tok_params
+            (
+                ["a"],
+                ["bc", "a"],
+                "{{ messages[0].content }} {{ messages[1].content }}",
+                True,
+            ),
+            # Plain text + no chat template -> cmpl_tok_params
+            (["a"], ["bc", "a"], None, False),
+            # Chat messages list + no explicit template -> chat_tok_params
+            (
+                [[{"role": "user", "content": "a"}]],
+                [
+                    [{"role": "user", "content": "bc"}],
+                    [{"role": "user", "content": "a"}],
+                ],
+                None,
+                True,
+            ),
+            # Chat messages list + active template -> chat_tok_params
+            (
+                [[{"role": "user", "content": "a"}]],
+                [
+                    [{"role": "user", "content": "bc"}],
+                    [{"role": "user", "content": "a"}],
+                ],
+                "{{ messages[0].content }} {{ messages[1].content }}",
+                True,
+            ),
+        ],
+    )
+    def test_offline_and_online_tok_params_selection(
+        self,
+        llm_reranker_processor: CrossEncoderIOProcessor,
+        data_1: Any,
+        data_2: Any,
+        chat_template: str | None,
+        expect_chat_tok: bool,
+    ):
+        processor = llm_reranker_processor
+        processor.chat_template = None
+        processor.saved_chat_template = None
+        processor.saved_chat_template_kwargs = {}
+        processor.trust_request_chat_template = True
+        cmpl_tok, chat_tok = self._configure_distinct_tok_params(processor)
+        expected_tok = chat_tok if expect_chat_tok else cmpl_tok
+
+        # 1) Offline path
+        offline_ctx = OfflineScoringInputsContext(
+            pooling_task="classify",
+            scoring_data=ScoringData(data_1=data_1, data_2=data_2),
+            pooling_params=PoolingParams(),
+            chat_template=chat_template,
+        )
+        factory, count = processor.get_request_factory_offline(offline_ctx)
+        assert count == len(data_2)
+        offline_items = [cast(ScoringRenderParams, p) for p in factory()]
+        assert len(offline_items) == len(data_2)
+        assert all(item["tok_params"] is expected_tok for item in offline_items)
+
+        # 2) Online path
+        request = _DummyOnlineScoreRequest(chat_template=chat_template)
+        serve_ctx = SimpleNamespace(
+            request=request,
+            pooling_params=PoolingParams(),
+            lora_request=None,
+            priorities=0,
+            prompt_extras=None,
+        )
+        with patch.object(
+            processor,
+            "valid_inputs_online",
+            return_value=ScoringData(data_1=data_1, data_2=data_2),
+        ):
+            online_items = [
+                cast(ScoringRenderParams, p)
+                for p in processor.get_request_factory_online(
+                    cast(PoolingServeContext, serve_ctx)
+                )
+            ]
+        assert len(online_items) == len(data_2)
+        assert all(item["tok_params"] is expected_tok for item in online_items)
