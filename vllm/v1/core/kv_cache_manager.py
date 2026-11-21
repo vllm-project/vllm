@@ -18,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_nul
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     MambaManager,
+    SlidingWindowManager,
     get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import (
@@ -384,6 +385,13 @@ class KVCacheManager:
             return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
+        for group_blocks, hit, manager in zip(
+            computed, per_group_hits, coordinator.single_type_managers
+        ):
+            if hit < num_local and isinstance(manager, SlidingWindowManager):
+                # The connector loads only blocks the request does not share,
+                # so a shared block that a lagging hit ends in would stay stale.
+                del group_blocks[hit // manager.block_size :]
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
@@ -815,8 +823,9 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
-        An external hit can supply the final Mamba state even when the local
-        Mamba group ends before this endpoint. Other groups must cover it.
+        An external hit can supply the final Mamba state, or the window of a
+        sliding-window group, even when that local group ends before this
+        endpoint. Other groups must cover it.
         Pure slicing: refcounts are untouched and `blocks` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
@@ -836,7 +845,7 @@ class KVCacheManager:
                 continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if issubclass(group.manager_cls, MambaManager):
+            if issubclass(group.manager_cls, (MambaManager, SlidingWindowManager)):
                 num_blocks = min(num_blocks, len(group_blocks))
             else:
                 assert num_blocks <= len(group_blocks)

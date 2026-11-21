@@ -754,11 +754,13 @@ def partial_hash_hits_enabled(
     hash_block_size: int,
     dcp_world_size: int = 1,
     manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
+    allow_opt_in_lookups: bool = True,
 ) -> bool:
     """Whether aligned Mamba states support sub-block prefix-cache hits.
 
     If `manager_classes` (one per group) is given, also require every other
-    prefix-cacheable group to support fine-grained lookups.
+    prefix-cacheable group to support fine-grained lookups. Managers whose
+    support is opt-in count only if `allow_opt_in_lookups`.
     """
     if not any(
         is_mamba_prefix_caching_group(group)
@@ -775,7 +777,10 @@ def partial_hash_hits_enabled(
         manager_cls.__name__
         for group, manager_cls in zip(kv_cache_groups, manager_classes)
         if group.prefix_cacheable
-        and not manager_cls.supports_fine_grained_hash_lookup
+        and not (
+            manager_cls.supports_fine_grained_hash_lookup
+            and (allow_opt_in_lookups or not manager_cls.fine_grained_lookup_is_opt_in)
+        )
         and resolve_dcp_kv_block_size(group, dcp_world_size) != hash_block_size
     }
     if unsupported_managers:
@@ -910,6 +915,8 @@ def resolve_cache_hit_alignment_tokens(
         hash_block_size,
         vllm_config.parallel_config.decode_context_parallel_size,
         manager_classes,
+        # Sliding-window fine-grained hits need an explicit unit.
+        allow_opt_in_lookups=vllm_config.cache_config.prefix_match_unit is not None,
     ):
         return hash_block_size
     return scheduler_block_size
