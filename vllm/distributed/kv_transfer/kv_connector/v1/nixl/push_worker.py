@@ -781,32 +781,33 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 f"{len(remote_block_ids[i])} remote blocks"
             )
 
-        # Get descs ids. Pair k writes local region pairs.local[k] into remote
-        # region pairs.remote[k] at its cache group's blocks.
-        stage = self._single_remote_stage(dst_engine_id)
-        pairs = stage.pairs
-        remote_block_descs_ids = self._compute_desc_ids(
-            block_ids=remote_block_ids,
-            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=stage.region_num_blocks,
-            pairs=(pairs.remote, pairs.group),
-            ssm_regions=pairs.remote_ssm_regions,
-        )
-        local_block_descs_ids = self._compute_desc_ids(
-            block_ids=local_block_ids,
-            dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=self.region_num_blocks,
-            pairs=(pairs.local, pairs.group),
-        )
-
-        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
-
         handle = None
         try:
+            # Get descs ids. Pair k writes local region pairs.local[k] into remote
+            # region pairs.remote[k] at its cache group's blocks.
+            stage = self._single_remote_stage(dst_engine_id)
+            pairs = stage.pairs
+            remote_block_descs_ids = self._compute_desc_ids(
+                block_ids=remote_block_ids,
+                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+                region_num_blocks=stage.region_num_blocks,
+                pairs=(pairs.remote, pairs.group),
+                ssm_regions=pairs.remote_ssm_regions,
+            )
+            local_block_descs_ids = self._compute_desc_ids(
+                block_ids=local_block_ids,
+                dst_num_blocks=self.dst_num_blocks[self.engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+                region_num_blocks=self.region_num_blocks,
+                pairs=(pairs.local, pairs.group),
+            )
+
+            if len(local_block_descs_ids) != len(remote_block_descs_ids):
+                raise ValueError("NIXL local and remote descriptor counts differ")
+
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "WRITE",
                 local_xfer_side_handle,

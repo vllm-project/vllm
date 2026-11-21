@@ -59,7 +59,11 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params,
         )
 
-        if params is not None and params.get("do_remote_prefill"):
+        if (
+            params is not None
+            and params.get("do_remote_prefill")
+            and params.get("remote_block_ids")
+        ):
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
             actual = self._get_remote_prefill_token_count(len(token_ids))
@@ -68,7 +72,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                 return count, True
 
         if (
-            params is not None
+            self.is_bidirectional_kv_xfer_enabled
+            and params is not None
             and params.get("do_remote_decode")
             and params.get("remote_block_ids")
             and all(
@@ -231,6 +236,18 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
+            # However, if the required remote fields are absent (e.g. the
+            # request was rejected before prefill produced any transfer
+            # metadata), there is no remote P-node to notify.
+            if not params.get("remote_engine_id"):
+                logger.debug(
+                    "Skipping recv cleanup for %s: no remote transfer "
+                    "metadata (request was likely rejected before prefill "
+                    "completed).",
+                    request.request_id,
+                )
+                params["do_remote_prefill"] = False
+                return False, None
             self._reqs_need_recv[request.request_id] = (request, [], (), False)
             params["do_remote_prefill"] = False
             return False, None

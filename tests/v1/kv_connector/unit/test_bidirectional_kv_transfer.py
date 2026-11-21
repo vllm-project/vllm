@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorMetadata,
     NixlPushConnector,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.forward_context import ForwardContext
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -120,7 +121,7 @@ def _make_connector_with_fake_worker(
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG, block_size=block_size
     )
-    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=32)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,
@@ -412,6 +413,38 @@ def test_add_new_req_to_recv_populates_remote_meta():
     assert rm.remote.host == "decode-host"
     assert rm.remote.port == 5678
     assert rm.local_block_ids == local_block_ids
+
+
+@pytest.mark.parametrize("connector", ["NixlConnector", "NixlPushConnector"])
+def test_incomplete_peer_metadata_is_rejected_before_queueing(connector):
+    scheduler = create_scheduler(create_vllm_config(kv_connector=connector))
+    incomplete = create_request(do_remote_prefill=True)
+    assert incomplete.kv_transfer_params is not None
+    del incomplete.kv_transfer_params["remote_request_id"]
+
+    with pytest.raises(VLLMValidationError, match="remote_request_id"):
+        scheduler.add_request(incomplete)
+
+    assert not scheduler.has_request(incomplete.request_id)
+    assert scheduler.get_num_unfinished_requests() == 0
+
+    local = create_request()
+    scheduler.add_request(local)
+    assert scheduler.schedule().num_scheduled_tokens[local.request_id] > 0
+
+
+def test_invalid_block_metadata_is_rejected_before_bidirectional_pull():
+    config = create_vllm_config(kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG)
+    scheduler = create_scheduler(config)
+    request = _make_p_node_turn2_request(1, config.cache_config.block_size, 64)
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["remote_block_ids"] = [None]
+
+    with pytest.raises(VLLMValidationError, match="remote block"):
+        scheduler.add_request(request)
+
+    assert not scheduler.has_request(request.request_id)
+    assert scheduler.get_num_unfinished_requests() == 0
 
 
 def test_build_connector_meta_recv_entries():
