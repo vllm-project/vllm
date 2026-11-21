@@ -11,6 +11,9 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import TokenizersBackend
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
@@ -19,10 +22,12 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    _qwen3_arg_converter,
     qwen3_config,
 )
 
@@ -43,6 +48,44 @@ def parser(mock_tokenizer):
         mock_tokenizer,
         parser_engine_config=qwen3_config(thinking=False),
     )
+
+
+@pytest.mark.parametrize("entry_point", ["parse", "extract_tool_calls"])
+def test_buffered_parsing_converts_only_complete_arguments(entry_point):
+    conversions = []
+
+    def convert(raw, partial):
+        conversions.append(partial)
+        return _qwen3_arg_converter(raw, partial)
+
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    parser = ParserEngine(
+        tokenizer,
+        parser_engine_config=dataclasses.replace(
+            qwen3_config(thinking=False), arg_converter=convert
+        ),
+    )
+    request = ChatCompletionRequest(
+        model="test", messages=[{"role": "user", "content": "test"}]
+    )
+    value = "a>b<c " * 2000
+    text = (
+        "<tool_call><function=write_file><parameter=content>old</parameter>"
+        f"<parameter=content>{value}</parameter></function></tool_call>"
+    )
+    if entry_point == "parse":
+        _, _, calls = parser.parse(text, request, True)
+        assert calls is not None
+        arguments = calls[0].arguments
+    else:
+        tool_calls = parser.extract_tool_calls(text, request).tool_calls
+        arguments = tool_calls[0].function.arguments
+
+    assert json.loads(arguments) == {"content": value}
+    assert conversions == [False, False]
 
 
 class TestNonStreaming:
