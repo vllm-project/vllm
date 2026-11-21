@@ -13,6 +13,8 @@ import torch
 from PIL import Image, features
 from PIL.BlpImagePlugin import BLPFormatError
 
+import vllm.envs as envs
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import image as image_utils
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.image import ALLOWED_IMAGE_FORMATS, open_image
@@ -218,6 +220,26 @@ def test_image_media_io_load_bytes(tmp_path):
     # Test 5: Empty bytes raise ValueError
     with pytest.raises(ValueError, match="Failed to load image"):
         image_io.load_bytes(b"")
+
+
+def test_image_media_io_rejects_oversized_encoded_inputs(monkeypatch, tmp_path):
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_FILESIZE_MB", 1, raising=False)
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+    image_bytes = buffer.getvalue() + bytes(1 << 20)
+    image_io = ImageMediaIO()
+    encoded = base64.b64encode(image_bytes).decode()
+
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_IMAGE_FILESIZE_MB"):
+        image_io.load_bytes(image_bytes)
+
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_IMAGE_FILESIZE_MB"):
+        image_io.load_base64("image/png", encoded)
+
+    image_path = tmp_path / "oversized.png"
+    image_path.write_bytes(image_bytes)
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_IMAGE_FILESIZE_MB"):
+        image_io.load_file(image_path)
 
 
 def test_image_media_io_load_file(tmp_path):

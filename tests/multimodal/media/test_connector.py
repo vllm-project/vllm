@@ -8,6 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
@@ -19,6 +20,7 @@ import requests
 import torch
 from PIL import Image, ImageChops
 
+import vllm.envs as envs
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.image import convert_image_mode
@@ -243,6 +245,69 @@ async def test_fetch_image_data_url_with_params():
     image_sync = connector.fetch_image(data_url)
     image_async = await connector.fetch_image_async(data_url)
     assert _image_equals(image_sync, image_async)
+
+
+@pytest.mark.asyncio
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+async def test_fetch_image_data_url_enforces_file_size(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_FILESIZE_MB", 1, raising=False)
+
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(buffer, format="PNG")
+    image_bytes = buffer.getvalue() + bytes(1 << 20)
+    image_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}"
+    connector = MediaConnector()
+
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_IMAGE_FILESIZE_MB"):
+        connector.fetch_image(image_url)
+
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_IMAGE_FILESIZE_MB"):
+        await connector.fetch_image_async(image_url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+async def test_fetch_image_http_enforces_file_size(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_FILESIZE_MB", 1, raising=False)
+
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(buffer, format="PNG")
+    image_bytes = buffer.getvalue() + bytes(1 << 20)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(image_bytes)))
+            self.end_headers()
+            try:
+                self.wfile.write(image_bytes)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    connector = MediaConnector()
+    image_url = f"http://127.0.0.1:{server.server_port}/oversized.png"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        with pytest.raises(VLLMValidationError) as exc_info:
+            connector.fetch_image(image_url)
+        assert exc_info.value.parameter == "image_filesize_mb"
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            await connector.fetch_image_async(image_url)
+        assert exc_info.value.parameter == "image_filesize_mb"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 def test_fetch_image_data_url_malformed():

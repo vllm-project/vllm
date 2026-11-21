@@ -601,6 +601,9 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
     def get_max_bytes(self) -> int:
         return int(envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * MiB_bytes)
 
+    def get_max_bytes_parameter(self) -> str:
+        return "audio_filesize_mb"
+
     def _validate_encoded_size(self, size: int) -> None:
         max_bytes = self.get_max_bytes()
         if size > max_bytes:

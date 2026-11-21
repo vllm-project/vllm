@@ -34,13 +34,18 @@ _RESPONSE_READ_CHUNK_SIZE = 64 * KiB_bytes
 class HTTPResponseSizeExceededError(VLLMValidationError):
     """Raised when an HTTP response exceeds a caller-supplied byte ceiling."""
 
-    def __init__(self, max_bytes: int, received_bytes: int) -> None:
+    def __init__(
+        self,
+        max_bytes: int,
+        received_bytes: int,
+        parameter: str = "audio_filesize_mb",
+    ) -> None:
         self.max_bytes = max_bytes
         self.received_bytes = received_bytes
         super().__init__(
             "Maximum file size exceeded: HTTP response exceeded maximum size "
             f"of {max_bytes} bytes (received at least {received_bytes} bytes)",
-            parameter="audio_filesize_mb",
+            parameter=parameter,
             value=received_bytes / MiB_bytes,
         )
 
@@ -105,17 +110,23 @@ def _get_response_size_limit(max_bytes: int | None) -> tuple[int | None, bool]:
 
 
 def _raise_size_exceeded(
-    max_bytes: int, received_bytes: int, media_download_limit: bool
+    max_bytes: int,
+    received_bytes: int,
+    media_download_limit: bool,
+    max_bytes_parameter: str,
 ) -> None:
     if media_download_limit:
         raise MediaDownloadSizeExceededError(max_bytes, received_bytes)
-    raise HTTPResponseSizeExceededError(max_bytes, received_bytes)
+    raise HTTPResponseSizeExceededError(
+        max_bytes, received_bytes, parameter=max_bytes_parameter
+    )
 
 
 def _check_content_length(
     content_length: str | int | None,
     max_bytes: int | None,
     media_download_limit: bool,
+    max_bytes_parameter: str,
 ) -> None:
     if content_length is None or max_bytes is None:
         return
@@ -124,7 +135,9 @@ def _check_content_length(
     except (TypeError, ValueError):
         return
     if parsed_length > max_bytes:
-        _raise_size_exceeded(max_bytes, parsed_length, media_download_limit)
+        _raise_size_exceeded(
+            max_bytes, parsed_length, media_download_limit, max_bytes_parameter
+        )
 
 
 def _append_chunk(
@@ -134,12 +147,15 @@ def _append_chunk(
     max_bytes: int | None,
     media_download_limit: bool,
     request_budget: MediaRequestDownloadBudget | None = None,
+    max_bytes_parameter: str = "audio_filesize_mb",
 ) -> int:
     if not chunk:
         return received_bytes
     received_bytes += len(chunk)
     if max_bytes is not None and received_bytes > max_bytes:
-        _raise_size_exceeded(max_bytes, received_bytes, media_download_limit)
+        _raise_size_exceeded(
+            max_bytes, received_bytes, media_download_limit, max_bytes_parameter
+        )
     if request_budget is not None:
         request_budget.charge(len(chunk))
     chunks.append(chunk)
@@ -150,6 +166,7 @@ def _read_response_bytes(
     response: requests.Response,
     max_bytes: int | None,
     request_budget: MediaRequestDownloadBudget | None = None,
+    max_bytes_parameter: str = "audio_filesize_mb",
 ) -> bytes:
     max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
     if max_bytes is None and request_budget is None:
@@ -159,6 +176,7 @@ def _read_response_bytes(
         response.headers.get("Content-Length"),
         max_bytes,
         media_download_limit,
+        max_bytes_parameter,
     )
     chunks: list[bytes] = []
     received_bytes = 0
@@ -170,6 +188,7 @@ def _read_response_bytes(
             max_bytes,
             media_download_limit,
             request_budget,
+            max_bytes_parameter,
         )
     return b"".join(chunks)
 
@@ -178,12 +197,18 @@ async def _async_read_response_bytes(
     response: aiohttp.ClientResponse,
     max_bytes: int | None,
     request_budget: MediaRequestDownloadBudget | None = None,
+    max_bytes_parameter: str = "audio_filesize_mb",
 ) -> bytes:
     max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
     if max_bytes is None and request_budget is None:
         return await response.read()
 
-    _check_content_length(response.content_length, max_bytes, media_download_limit)
+    _check_content_length(
+        response.content_length,
+        max_bytes,
+        media_download_limit,
+        max_bytes_parameter,
+    )
     chunks: list[bytes] = []
     received_bytes = 0
     async for chunk in response.content.iter_chunked(_RESPONSE_READ_CHUNK_SIZE):
@@ -194,6 +219,7 @@ async def _async_read_response_bytes(
             max_bytes,
             media_download_limit,
             request_budget,
+            max_bytes_parameter,
         )
     return b"".join(chunks)
 
@@ -462,6 +488,7 @@ class HTTPConnection:
         allow_redirects: bool = True,
         max_bytes: int | None = None,
         request_budget: MediaRequestDownloadBudget | None = None,
+        max_bytes_parameter: str = "audio_filesize_mb",
     ) -> bytes:
         with self.get_response(
             url,
@@ -471,7 +498,9 @@ class HTTPConnection:
         ) as r:
             r.raise_for_status()
 
-            return _read_response_bytes(r, max_bytes, request_budget)
+            return _read_response_bytes(
+                r, max_bytes, request_budget, max_bytes_parameter
+            )
 
     @_async_retry
     async def async_get_bytes(
@@ -482,6 +511,7 @@ class HTTPConnection:
         allow_redirects: bool = True,
         max_bytes: int | None = None,
         request_budget: MediaRequestDownloadBudget | None = None,
+        max_bytes_parameter: str = "audio_filesize_mb",
     ) -> bytes:
         async with await self.get_async_response(
             url,
@@ -490,7 +520,9 @@ class HTTPConnection:
         ) as r:
             r.raise_for_status()
 
-            return await _async_read_response_bytes(r, max_bytes, request_budget)
+            return await _async_read_response_bytes(
+                r, max_bytes, request_budget, max_bytes_parameter
+            )
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:

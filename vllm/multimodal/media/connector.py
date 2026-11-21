@@ -410,6 +410,7 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    max_bytes_parameter=media_io.get_max_bytes_parameter(),
                     **budget_kwargs,
                 )
             except Exception as e:
@@ -469,6 +470,7 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    max_bytes_parameter=media_io.get_max_bytes_parameter(),
                     **budget_kwargs,
                 )
             except Exception as e:
