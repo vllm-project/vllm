@@ -74,6 +74,31 @@ def test_gathered_markov_bias_matches_dense_at_full_vocab():
     torch.testing.assert_close(result, expected)
 
 
+@pytest.mark.parametrize("head_dtype", [torch.bfloat16, torch.float32])
+def test_gathered_markov_bias_preserves_head_dtype(default_vllm_config, head_dtype):
+    """An FP32 output head must accept BF16 Markov weights and embeddings."""
+    torch.manual_seed(17)
+    head = DSparkMarkovHead(64, 64, 16, prefix="markov_head").to(torch.bfloat16)
+    with torch.no_grad():
+        head.markov_w1.weight.normal_(std=0.25)
+        head.markov_w2.weight.normal_(std=0.25)
+    markov_embed = head.embed(torch.tensor([1, 3]))
+    logits = torch.randn(2, 64, dtype=head_dtype)
+    values, index = logits.topk(8, dim=-1)
+    original_values = values.clone()
+    dense_bias = markov_embed.float() @ head.markov_w2.weight.float().T
+    expected = (values.float() + 0.5 * dense_bias.gather(1, index)).to(head_dtype)
+    logits.fill_(float("-inf"))
+
+    result = head.apply_bias_gathered(markov_embed, logits, values, index, scale=0.5)
+
+    assert result.dtype == head_dtype
+    torch.testing.assert_close(result.gather(1, index), expected)
+    torch.testing.assert_close(values, original_values)
+    selected = torch.zeros_like(result, dtype=torch.bool).scatter_(1, index, True)
+    assert torch.isneginf(result.masked_select(~selected)).all()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("use_fp64", [False, True])
 def test_dspark_revisited_position_uses_step_seed(use_fp64):
