@@ -37,7 +37,6 @@ def qwen2audio_server_args() -> list[str]:
         "--max-num-seqs",
         "4",
         "--enforce-eager",
-        "--trust-remote-code",
         "--gpu-memory-utilization",
         "0.85",
         "--limit-mm-per-prompt",
@@ -65,7 +64,7 @@ async def qwen2audio_client(qwen2audio_server):
 
 @pytest.fixture(scope="module")
 def qwen2audio_hidden_size() -> int:
-    config = AutoConfig.from_pretrained(QWEN2AUDIO_MODEL, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(QWEN2AUDIO_MODEL)
     return config.text_config.hidden_size
 
 
@@ -124,7 +123,7 @@ def qwen2audio_aligned_content_and_embeds_b64() -> tuple[str, str]:
     RAM) instead of the full 7B model on GPU.
     """
     content = "Describe this audio."
-    tokenizer = AutoTokenizer.from_pretrained(QWEN2AUDIO_MODEL, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(QWEN2AUDIO_MODEL)
 
     index_path = hf_api().hf_hub_download(
         QWEN2AUDIO_MODEL, "model.safetensors.index.json"

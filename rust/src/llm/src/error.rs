@@ -29,6 +29,17 @@ pub enum Error {
          (for example, it runs with --kv-sharing-fast-prefill)"
     )]
     PromptLogprobsUnsupported { parameter: &'static str },
+    /// Without chunked prefill, the request's multimodal items are all encoded
+    /// in one step, and need more encoder cache than the engine has.
+    #[error(
+        "The prompt's multimodal items need {num_embeds} encoder cache tokens, more than the \
+         encoder cache size of {max_embeds}. They must fit together when chunked prefill is \
+         disabled."
+    )]
+    MmEmbedsExceedEncoderCache { num_embeds: u64, max_embeds: u64 },
+    /// The request's multimodal inputs are malformed.
+    #[error("invalid multimodal input: {message}")]
+    InvalidMultimodalInput { message: String },
     /// The request uses a field this implementation does not carry out.
     #[error("`{field}` is not supported")]
     Unsupported { field: &'static str },
