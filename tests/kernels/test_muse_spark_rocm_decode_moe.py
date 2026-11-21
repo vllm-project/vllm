@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse Spark ROCm decode MoE kernels."""
 
-import functools
-
 import pytest
 import torch
 
@@ -14,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 from vllm.models.muse_spark.amd import ulysses_sp as usp
 from vllm.models.muse_spark.amd.muse_moe_runner import MuseSparkAiterExperts
 from vllm.models.muse_spark.amd.ops import decode_moe as dmoe
+from vllm.models.muse_spark.amd.ops.compact_moe import MAX_TOKENS as COMPACT_MAX_TOKENS
 from vllm.platforms import current_platform
 
 from .moe.test_muse_spark_rocm_bf16_moe import (
@@ -98,68 +97,6 @@ if current_platform.is_rocm():
 
     ROCM_GFX950_AITER = on_gfx950() and is_aiter_found_and_supported()
 
-STAGE1 = "flydsl_moe1_afp4_wfp4_bf16_t32x128x256_w2"
-STAGE2 = "flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic_bnt2"
-
-
-def _metadata(kind: str):
-    """AITER MoE metadata as `get_2stage_cfgs` builds it for each kind of
-    config a tuned row can select."""
-    import aiter.fused_moe as fm
-
-    flydsl1 = functools.partial(fm._flydsl_stage1_wrapper, kernelName=STAGE1)
-    flydsl2 = functools.partial(fm._flydsl_stage2_wrapper, kernelName=STAGE2)
-    if kind == "flydsl":
-        return fm.MOEMetadata(flydsl1, flydsl2, 32, 0)
-    if kind in ("fp4", "fp8"):
-        fused = functools.partial(
-            fm._flydsl_stage1_wrapper, kernelName=f"{STAGE1}_{kind}"
-        )
-        return fm.MOEMetadata(fused, flydsl2, 32, 0, fuse_quant=kind)
-    if kind == "cktile_stage2":
-        return fm.MOEMetadata(flydsl1, functools.partial(fm.cktile_moe_stage2), 32, 0)
-    if kind == "one_stage":
-        stage = functools.partial(fm.fused_moe_1stage, kernelName="fmoe_g1u1_fp4")
-        return fm.MOEMetadata(stage, None, 32, 0, True)
-    assert kind == "whole_graph"
-    return fm.MOEMetadata(None, None, 32, 0)
-
-
-@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
-@pytest.mark.parametrize(
-    "kind", ["flydsl", "fp4", "fp8", "cktile_stage2", "one_stage", "whole_graph"]
-)
-def test_decode_moe_launches_only_flydsl_stages_with_bf16_output(kind: str) -> None:
-    """Only a FlyDSL MXFP4 stage pair with bf16 stage-1 rows takes the decode
-    MoE; fused-quant stage 1 (quantized rows and scales), other stage-2
-    kernels, one-stage and whole-graph configs leave the call to the per-route
-    path instead of failing."""
-    from vllm.models.muse_spark.amd import decode_moe
-
-    kernels = decode_moe._flydsl_stage_kernels(_metadata(kind))
-    if kind == "flydsl":
-        assert kernels is not None
-        assert (kernels.stage1, kernels.block_m) == (STAGE1, 32)
-        assert kernels.stage2["return_per_slot"]
-    else:
-        assert kernels is None
-
-
-@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
-@pytest.mark.parametrize("local_experts", [32, 64])
-def test_decode_moe_takes_aiters_flydsl_stages_or_falls_back(
-    local_experts: int,
-) -> None:
-    """For Muse Spark's EP shapes the installed AITER's configs give either
-    FlyDSL stages this path launches or the per-route path."""
-    from vllm.models.muse_spark.amd import decode_moe
-
-    for num_tokens in [1, 8, 64, 256, 512, 1024, decode_moe.MAX_TOKENS]:
-        kernels = decode_moe._stage_kernels(
-            num_tokens, TOP_K, local_experts, HIDDEN, HIDDEN
-        )
-        assert kernels is None or kernels.stage1.startswith("flydsl_moe1_")
-
 
 @pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
 @pytest.mark.parametrize("local_experts", [32, 64])
@@ -188,12 +125,15 @@ def test_stage_kernel_token_counts_cover_every_call_size(
 
 
 def _per_route_and_native(
-    pooled: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor
+    pooled: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    local_experts: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One EP4 rank (rank 1: experts [64, 128)) at Muse Spark shapes: the per-route
-    AITER experts on the repeated pre-expert-normed rows with the per-route
-    finalize, and the decode MoE's experts on the T normed rows with its finalize.
-    Returns `(per_route, native)` `[T, H]` outputs."""
+    """EP rank 1 with `local_experts` local experts at Muse Spark shapes: the
+    per-route AITER experts on the repeated pre-expert-normed rows with the
+    per-route finalize, and the decode MoE's experts on the T normed rows with its
+    finalize. Returns `(per_route, native)` `[T, H]` outputs."""
     from vllm.models.muse_spark.amd import decode_moe
     from vllm.models.muse_spark.amd.ops.fused_norm_expand import fused_rmsnorm_expand
     from vllm.models.muse_spark.common.layers import MuseSparkRMSNormWithInputScale
@@ -201,8 +141,17 @@ def _per_route_and_native(
     num_tokens, hidden_size = pooled.shape
     top_k = topk_ids.shape[1]
     device, dtype = pooled.device, pooled.dtype
+    ep_size = NUM_EXPERTS // local_experts
+    kernels = decode_moe._stage_kernels(
+        num_tokens, top_k, local_experts, hidden_size, hidden_size
+    )
+    if kernels is None:
+        pytest.skip("the installed AITER has no FlyDSL stages for this shape")
     local, expert_map, expert_mask = determine_expert_map(
-        ep_size=4, ep_rank=1, global_num_experts=NUM_EXPERTS, return_expert_mask=True
+        ep_size=ep_size,
+        ep_rank=1,
+        global_num_experts=NUM_EXPERTS,
+        return_expert_mask=True,
     )
     assert expert_map is not None and expert_mask is not None
     expert_map, expert_mask = expert_map.to(device), expert_mask.to(device)
@@ -225,7 +174,7 @@ def _per_route_and_native(
     post_norm.weight.copy_(torch.randn(hidden_size, device=device) * 0.1)
     quant_config.post_expert_norm_fn = post_norm.forward
     config = _moe_config(
-        parallel_config=_parallel_config(ep_size=4),
+        parallel_config=_parallel_config(ep_size=ep_size),
         num_experts=NUM_EXPERTS,
         top_k=top_k,
         hidden_size=hidden_size,
@@ -253,10 +202,6 @@ def _per_route_and_native(
         torch.empty_like(pooled), route_buffer, topk_weights, topk_ids, False
     )
 
-    kernels = decode_moe._stage_kernels(
-        num_tokens, top_k, local, hidden_size, hidden_size
-    )
-    assert kernels is not None
     native = decode_moe.native_routes_moe(
         fused_rmsnorm_expand(pooled, norm_weight, NORM_EPS, 1.0, False, 1),
         topk_weights,
@@ -285,12 +230,16 @@ def rocm_aiter_moe(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
-@pytest.mark.parametrize("num_tokens", [1, 8, 48, 128, 512, 513, 2047])
+@pytest.mark.parametrize("local_experts", [32, 64])
+@pytest.mark.parametrize(
+    "num_tokens", [1, 8, 48, 64, 128, 256, 512, 513, 1024, 2047, 2048]
+)
 @torch.inference_mode()
 def test_native_routes_match_the_per_route_path(
-    rocm_aiter_moe, num_tokens: int
+    rocm_aiter_moe, local_experts: int, num_tokens: int
 ) -> None:
-    """The decode MoE's experts and finalize give the per-route path's output."""
+    """The decode MoE's experts and finalize give the per-route path's output at
+    the EP4 and EP8 shapes, for every call size the decode MoE takes."""
     torch.manual_seed(num_tokens)
     device = torch.device("cuda")
     pooled = torch.randn(num_tokens, HIDDEN, dtype=torch.bfloat16, device=device)
@@ -298,9 +247,15 @@ def test_native_routes_match_the_per_route_path(
         torch.randn(num_tokens, NUM_EXPERTS, device=device), TOP_K, dim=-1
     ).indices.to(torch.int32)
     topk_weights = torch.softmax(torch.randn(num_tokens, TOP_K, device=device), -1)
-    per_route, native = _per_route_and_native(pooled, topk_ids, topk_weights)
+    per_route, native = _per_route_and_native(
+        pooled, topk_ids, topk_weights, local_experts
+    )
     assert torch.isfinite(native).all()
-    torch.testing.assert_close(native, per_route)
+    # The per-route path may take other AITER kernels for its repeated rows,
+    # e.g. a fused-quant stage 1 whose MXFP4 requantization rounds blocks
+    # differently; wrong routes or weights would be off by far more.
+    error = (native.float() - per_route.float()).norm()
+    assert error <= 5e-2 * per_route.float().norm()
 
 
 @pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
@@ -332,6 +287,172 @@ def test_native_routes_with_repeated_experts_and_nan_rows(
     compared = ~repeats & pooled.isfinite().all(dim=1)
     assert compared[0]
     torch.testing.assert_close(native[compared], per_route[compared])
+
+
+# The compact experts and the FlyDSL stages share the quant rules and the output
+# rounding; only fp32 accumulation order and SiLU ulps may differ, and a single
+# requantized block that flips stays well below this.
+COMPACT_REL_L2 = 1e-3
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@pytest.mark.parametrize("local_experts", [32, 64, 128])
+@pytest.mark.parametrize("num_tokens", [1, 8, 24, 64, 65, 192, COMPACT_MAX_TOKENS])
+@torch.inference_mode()
+def test_compact_experts_match_the_flydsl_stages(
+    rocm_aiter_moe, monkeypatch: pytest.MonkeyPatch, local_experts: int, num_tokens: int
+) -> None:
+    """The compact experts give the FlyDSL stages' per-slot outputs on every
+    local route."""
+    from vllm.models.muse_spark.amd import decode_moe
+    from vllm.models.muse_spark.amd.ops.compact_moe import supports_compact_moe
+
+    torch.manual_seed(num_tokens)
+    device = torch.device("cuda")
+    local, expert_map, expert_mask = determine_expert_map(
+        ep_size=NUM_EXPERTS // local_experts,
+        ep_rank=1,
+        global_num_experts=NUM_EXPERTS,
+        return_expert_mask=True,
+    )
+    assert expert_map is not None and expert_mask is not None
+    expert_map, expert_mask = expert_map.to(device), expert_mask.to(device)
+    w13, w2, quant_config = _mxfp4_weights(
+        torch.randn(local, 2 * HIDDEN, HIDDEN, dtype=torch.bfloat16, device=device)
+        / HIDDEN**0.5,
+        torch.randn(local, HIDDEN, HIDDEN, dtype=torch.bfloat16, device=device)
+        / HIDDEN**0.5,
+    )
+    x = torch.randn(num_tokens, HIDDEN, dtype=torch.bfloat16, device=device)
+    topk_ids = torch.topk(
+        torch.randn(num_tokens, NUM_EXPERTS, device=device), TOP_K, dim=-1
+    ).indices.to(torch.int32)
+    w1_scale, w2_scale = quant_config.w1_scale, quant_config.w2_scale
+    assert supports_compact_moe(x, topk_ids, w13, w2, w1_scale, w2_scale)
+    kernels = decode_moe._stage_kernels(num_tokens, TOP_K, local, HIDDEN, HIDDEN)
+    assert kernels is not None
+
+    def experts() -> torch.Tensor:
+        return decode_moe._native_routes_experts(
+            x,
+            topk_ids,
+            w13,
+            w2,
+            w1_scale,
+            w2_scale,
+            expert_mask,
+            expert_map,
+            kernels,
+        )
+
+    routes = expert_map[topk_ids.long()] >= 0
+
+    def rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
+        a, b = a[routes].float(), b[routes].float()
+        assert torch.isfinite(a).all()
+        return ((a - b).norm() / b.norm().clamp_min(1e-30)).item()
+
+    compact = experts()
+    monkeypatch.setattr(decode_moe, "supports_compact_moe", lambda *args: False)
+    flydsl = experts()
+    assert rel_l2(compact, flydsl) < COMPACT_REL_L2
+
+
+def _mxfp4_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Packed E2M1 codes and E8M0 scales of fp32 rows `x` per 32 columns: scale
+    2^ceil(log2(amax / 6)) (2^-126 for an all-zero block), codes rounded to the
+    nearest E2M1 value, ties to the even code; even column in the low nibble."""
+    rows, cols = x.shape
+    blocks = x.view(rows, cols // 32, 32)
+    amax = blocks.abs().amax(dim=-1, keepdim=True)
+    sixth = torch.tensor(1.0 / 6.0, dtype=torch.float32, device=x.device)
+    ratio = torch.clamp(amax, min=6.0 * 2.0**-126) * sixth
+    e8m0 = (ratio.view(torch.int32) + 0x7FFFFF) >> 23
+    scaled = blocks * ((254 - e8m0) << 23).view(torch.float32)
+    values = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x.device
+    ).view(1, 1, 1, 8)
+    dist = (scaled.abs().unsqueeze(-1) - values).abs()
+    nearest = dist == dist.amin(dim=-1, keepdim=True)
+    even = nearest & (torch.arange(8, device=x.device) % 2 == 0)
+    pick = torch.where(even.any(-1, keepdim=True), even, nearest)
+    codes = pick.int().argmax(dim=-1) | ((scaled < 0).int() << 3)
+    codes = codes.view(rows, cols)
+    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).to(torch.uint8)
+    return packed, e8m0.view(rows, cols // 32).to(torch.uint8)
+
+
+def _quant_rule_rows(device: torch.device) -> torch.Tensor:
+    """`[16, 64]` fp32 rows that probe the MXFP4 rule: amax at 6 * 2^k and the
+    next float above it, every E2M1 midpoint, an all-zero block, tiny and large
+    blocks, and random rows."""
+    g = torch.Generator(device="cpu").manual_seed(0)
+    rows = torch.randn(16, 64, generator=g) * 3.0
+    mids = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0])
+    for r, k in enumerate(range(-3, 3)):
+        scale = 2.0**k
+        block = torch.cat([mids, -mids, mids / 2, -mids / 2]) * scale
+        rows[r, :32] = block
+        above = torch.nextafter(torch.tensor(6.0 * scale), torch.tensor(1e9))
+        rows[r, 32:] = torch.cat([block[:-1], above.view(1)])
+    rows[6, :32] = 0.0
+    rows[7, :32] = torch.randn(32, generator=g) * 2.0**-100
+    rows[8, :32] = torch.randn(32, generator=g) * 2.0**100
+    return rows.to(device)
+
+
+if ROCM_GFX950_AITER:
+    from vllm.models.muse_spark.amd.ops import compact_moe
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _quant_rows_probe(x_ptr, q_ptr, s_ptr, BM: tl.constexpr, BN: tl.constexpr):
+        r = tl.arange(0, BM)[:, None]
+        x = tl.load(x_ptr + r * BN + tl.arange(0, BN)[None, :])
+        q, s = compact_moe._quant_rows(x, BM, BN)
+        tl.store(q_ptr + r * (BN // 2) + tl.arange(0, BN // 2)[None, :], q)
+        tl.store(s_ptr + r * (BN // 32) + tl.arange(0, BN // 32)[None, :], s)
+
+    @triton.jit
+    def _silu_mul_quant_probe(
+        g_ptr, u_ptr, q_ptr, s_ptr, BM: tl.constexpr, BN: tl.constexpr
+    ):
+        r = tl.arange(0, BM)[:, None]
+        c = tl.arange(0, BN)[None, :]
+        gate = tl.load(g_ptr + r * BN + c)
+        up = tl.load(u_ptr + r * BN + c)
+        q, s = compact_moe._silu_mul_quant(gate, up, BM, BN)
+        tl.store(q_ptr + r * (BN // 2) + tl.arange(0, BN // 2)[None, :], q)
+        tl.store(s_ptr + r * (BN // 32) + tl.arange(0, BN // 32)[None, :], s)
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@torch.inference_mode()
+def test_compact_quant_rule() -> None:
+    """The compact input quant and the stage-1 epilogue quant give the MXFP4
+    rule's exact scale and code bytes."""
+    device = torch.device("cuda")
+    x = _quant_rule_rows(device)
+    q = torch.empty(16, 32, dtype=torch.uint8, device=device)
+    s = torch.empty(16, 2, dtype=torch.uint8, device=device)
+    _quant_rows_probe[(1,)](x, q, s, BM=16, BN=64)
+    ref_q, ref_s = _mxfp4_reference(x)
+    torch.testing.assert_close(s, ref_s, rtol=0, atol=0)
+    torch.testing.assert_close(q, ref_q, rtol=0, atol=0)
+
+    # SiLU(32) is exactly 32 in fp32, so the epilogue sees 32 * up. Each up
+    # value sits just above a value that bf16 rounds back to an E2M1 midpoint,
+    # so only a product rounded to bf16 before the quant ties to the even code.
+    gate = torch.full((16, 64), 32.0, device=device)
+    target = x.to(torch.bfloat16).float()
+    nudged = target * (1.0 + 2.0**-12)
+    up = nudged / 32.0
+    q.zero_()
+    s.zero_()
+    _silu_mul_quant_probe[(1,)](gate, up, q, s, BM=16, BN=64)
+    ref_q, ref_s = _mxfp4_reference((32.0 * up).to(torch.bfloat16).float())
+    torch.testing.assert_close(s, ref_s, rtol=0, atol=0)
+    torch.testing.assert_close(q, ref_q, rtol=0, atol=0)
 
 
 LOCAL_EXPERTS = 64
