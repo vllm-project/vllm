@@ -511,3 +511,181 @@ def test_fused_post_conv_prep_strided_ba_bitwise() -> None:
     )
     for r, g in zip(ref, got, strict=True):
         torch.testing.assert_close(g, r, rtol=0, atol=0)
+
+
+def _gdn_mtp_step(
+    impl: str,
+    defer: bool,
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    output_gate: torch.Tensor,
+    norm_weight: torch.Tensor,
+    num_k_heads: int,
+) -> torch.Tensor:
+    """One spec-decode step through the fused CUDA op, or through the Triton
+    spec decode kernel plus the gated RMSNorm, as the layer runs mixed batches."""
+    scale, eps = 128**-0.5, 1e-6
+    if impl == "cuda":
+        return ops.fused_gdn_decode_post_conv_mtp(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            state_indices=state_indices,
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=num_accepted_tokens,
+            state=state,
+            output_gate=output_gate,
+            norm_weight=norm_weight,
+            out=torch.empty_like(output_gate),
+            scale=scale,
+            norm_eps=eps,
+            defer_spec_state=defer,
+        )
+    num_tokens = mixed_qkv.size(0)
+    num_v_heads = state.size(1)
+    query, key, value = torch.split(
+        mixed_qkv, [num_k_heads * 128, num_k_heads * 128, num_v_heads * 128], dim=-1
+    )
+    raw, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=A_log,
+        a=a,
+        b=b,
+        dt_bias=dt_bias,
+        q=query.reshape(1, num_tokens, num_k_heads, 128),
+        k=key.reshape(1, num_tokens, num_k_heads, 128),
+        v=value.reshape(1, num_tokens, num_v_heads, 128),
+        initial_state=state,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        scale=scale,
+        use_qk_l2norm_in_kernel=True,
+        defer_spec_state=defer,
+    )
+    return rmsnorm_fn(
+        raw.squeeze(0),
+        norm_weight,
+        None,
+        z=output_gate,
+        eps=eps,
+        norm_before_gate=True,
+        activation="silu",
+    )
+
+
+def _gdn_mtp_steps(num_reqs: int, num_speculative_tokens: int, num_steps: int):
+    """Random spec-decode steps: each accepts a prefix of the previous step's
+    tokens, then runs a new step of random length."""
+    device = "cuda"
+    H, HV = 16, 32
+    max_query_len = num_speculative_tokens + 1
+    query_lens = [1] * num_reqs
+    for step in range(num_steps):
+        num_accepted_tokens = torch.tensor(
+            [1 if step == 0 else int(torch.randint(1, n + 1, ())) for n in query_lens],
+            dtype=torch.int32,
+            device=device,
+        )
+        query_lens = torch.randint(1, max_query_len + 1, (num_reqs,)).tolist()
+        num_tokens = sum(query_lens)
+        cu_seqlens = torch.tensor([0] + query_lens).cumsum(0).to(torch.int32).to(device)
+        yield dict(
+            mixed_qkv=torch.randn(
+                num_tokens, 2 * H * 128 + HV * 128, dtype=torch.bfloat16, device=device
+            ),
+            a=torch.randn(num_tokens, HV, dtype=torch.bfloat16, device=device),
+            b=torch.randn(num_tokens, HV, dtype=torch.bfloat16, device=device),
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=num_accepted_tokens,
+            output_gate=torch.randn(
+                num_tokens, HV, 128, dtype=torch.bfloat16, device=device
+            ),
+        )
+
+
+def _gdn_mtp_setup(num_reqs: int, num_speculative_tokens: int):
+    device = "cuda"
+    H, HV = 16, 32
+    max_query_len = num_speculative_tokens + 1
+    num_entries = num_reqs * max_query_len
+    fixed = dict(
+        A_log=0.5 * torch.randn(HV, dtype=torch.float32, device=device),
+        dt_bias=torch.randn(HV, dtype=torch.float32, device=device),
+        norm_weight=torch.randn(128, dtype=torch.bfloat16, device=device),
+        state_indices=(
+            torch.randperm(num_entries, dtype=torch.int32, device=device) + 1
+        ).view(num_reqs, max_query_len),
+        num_k_heads=H,
+    )
+    state = 0.1 * torch.randn(
+        num_entries + 1, HV, 128, 128, dtype=torch.float32, device=device
+    )
+    return fixed, state
+
+
+def _skip_without_fused_mtp_op() -> None:
+    if not current_platform.is_cuda() or not current_platform.has_device_capability(80):
+        pytest.skip(
+            "fused GDN decode MTP requires a CUDA device of compute capability 8.0+"
+        )
+    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+        pytest.skip("fused GDN decode MTP op is not built")
+
+
+# One request leaves SMs idle, so the CUDA kernel splits V; 16 do not.
+@pytest.mark.parametrize("num_reqs", [1, 3, 16])
+@pytest.mark.parametrize("num_speculative_tokens", [3, 8])
+@torch.inference_mode()
+def test_fused_gdn_decode_post_conv_mtp_defer_spec_state(
+    num_reqs: int, num_speculative_tokens: int
+) -> None:
+    """Deferred stores replay the accepted tokens with the per-token arithmetic,
+    so outputs and the slot-0 state are bit-identical, step after step."""
+    _skip_without_fused_mtp_op()
+    torch.manual_seed(0)
+    fixed, state = _gdn_mtp_setup(num_reqs, num_speculative_tokens)
+    state_defer = state.clone()
+    first_slots = fixed["state_indices"][:, 0].long()
+    for step, inputs in enumerate(_gdn_mtp_steps(num_reqs, num_speculative_tokens, 8)):
+        expected = _gdn_mtp_step("cuda", False, state=state, **fixed, **inputs)
+        actual = _gdn_mtp_step("cuda", True, state=state_defer, **fixed, **inputs)
+        assert torch.equal(actual, expected), f"output differs at step {step}"
+        assert torch.equal(state_defer[first_slots], state[first_slots]), (
+            f"slot-0 state differs at step {step}"
+        )
+
+
+@pytest.mark.parametrize("first_impl", ["cuda", "triton"])
+@torch.inference_mode()
+def test_fused_gdn_decode_post_conv_mtp_defer_spec_state_cross_kernel(
+    first_impl: str,
+) -> None:
+    """A request may run the fused CUDA op in one step and the Triton spec decode
+    kernel in the next (mixed batches). Both read and write the same deferred
+    layout, so alternating them tracks the per-token CUDA reference."""
+    _skip_without_fused_mtp_op()
+    torch.manual_seed(0)
+    num_reqs, num_speculative_tokens = 3, 3
+    fixed, state = _gdn_mtp_setup(num_reqs, num_speculative_tokens)
+    state_defer = state.clone()
+    other = {"cuda": "triton", "triton": "cuda"}
+    impl = first_impl
+    for step, inputs in enumerate(_gdn_mtp_steps(num_reqs, num_speculative_tokens, 8)):
+        expected = _gdn_mtp_step("cuda", False, state=state, **fixed, **inputs)
+        actual = _gdn_mtp_step(impl, True, state=state_defer, **fixed, **inputs)
+        error = (actual.float() - expected.float()).norm()
+        relative = error / expected.float().norm().clamp_min(1e-20)
+        assert relative < 2e-3, (
+            f"step {step} ({impl}) relative L2 {relative.item():.3g} vs per-token CUDA"
+        )
+        impl = other[impl]

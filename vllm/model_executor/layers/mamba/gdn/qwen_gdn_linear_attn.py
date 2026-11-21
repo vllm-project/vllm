@@ -920,6 +920,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         if self.speculative_config is not None:
             logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
+        # The Triton spec decode kernel and the fused CUDA MTP op can store one
+        # state per step instead of one per draft token, deferring the rest to
+        # the next step. They share the record layout, so a request can move
+        # between the fused op and the Triton path from step to step. This
+        # needs an FP32 state, for exactness, and no prefix caching, which
+        # reads the per-token states. On ROCm the fused op is a Triton port
+        # without deferral.
+        self.defer_gdn_spec_state = (
+            (
+                self.gdn_decode_kernel == "triton"
+                or (self.gdn_decode_kernel == "cuda" and not current_platform.is_rocm())
+            )
+            and self.num_spec > 0
+            and not self.cache_config.enable_prefix_caching
+            and self.get_state_dtype()[1] == torch.float32
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -2095,6 +2111,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    defer_spec_state=self.defer_gdn_spec_state,
                 )
             )
         else:
@@ -2603,6 +2620,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert num_accepted_tokens is not None
 
         num_requests = attn_metadata.num_spec_decodes
+        # Only the CUDA op takes defer_spec_state; the ROCm Triton port never defers.
+        defer_kwargs = {"defer_spec_state": True} if self.defer_gdn_spec_state else {}
         fused_mtp_decode_impl()(
             mixed_qkv=mixed_qkv,
             a=a,
@@ -2619,6 +2638,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             scale=self.head_k_dim**-0.5,
             norm_eps=self.layer_norm_epsilon,
             output_gate_activation=self.norm.activation,
+            **defer_kwargs,
         )
 
     def _forward_core_fused_norm_packed(
