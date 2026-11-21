@@ -354,6 +354,9 @@ class WeightCacheKey:
     dp_rank: int = 0
     enable_expert_parallel: bool = False
     expert_placement_strategy: str = "linear"
+    enable_hc_sp_replicated_moe: bool = False
+    """Whole experts on every TP rank instead of TP shards, so weights loaded
+    with one setting have the other's shapes."""
     moe_backend: str = "auto"
     """Kernel backends pick the processed weight layout (e.g. shuffled or
     repacked), so weights processed for one backend are wrong for another."""
@@ -380,6 +383,7 @@ class WeightCacheKey:
         dp_rank: int = 0,
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
+        enable_hc_sp_replicated_moe: bool = False,
         kernel_config: KernelConfig | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
@@ -428,6 +432,7 @@ class WeightCacheKey:
             dp_rank=dp_rank,
             enable_expert_parallel=enable_expert_parallel,
             expert_placement_strategy=expert_placement_strategy,
+            enable_hc_sp_replicated_moe=enable_hc_sp_replicated_moe,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
             linear_backend_per_quant=linear_backend_per_quant,

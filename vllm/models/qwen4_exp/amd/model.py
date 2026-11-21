@@ -161,6 +161,27 @@ _EXTRA_WEIGHTS_MAPPER = WeightsMapper(
 )
 
 
+def _replicated_moe(vllm_config: VllmConfig) -> bool:
+    """Whether `--enable-hc-sp-replicated-moe` gives every rank the whole MoE.
+
+    Refuses what the parallel config cannot see: speculative decoding (the MTP
+    draft builds its decoder layers from the same parallel config),
+    routed-experts capture (its router would see the rank's own rows) and
+    `--monokernel` (its specialized decode reads the experts as TP2 shards and
+    sums the ranks' outputs).
+    """
+    if not vllm_config.parallel_config.enable_hc_sp_replicated_moe:
+        return False
+    flag = "--enable-hc-sp-replicated-moe"
+    if vllm_config.speculative_config is not None:
+        raise ValueError(f"{flag} does not support speculative decoding")
+    if vllm_config.aux_output_config.enable_return_routed_experts:
+        raise ValueError(f"{flag} does not support routed-experts capture")
+    if vllm_config.kernel_config.monokernel:
+        raise ValueError(f"{flag} does not support --monokernel")
+    return True
+
+
 class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
     """Qwen3Next MoE with Qwen4Exp HC validation."""
 
@@ -169,10 +190,20 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         vllm_config: VllmConfig,
         prefix: str = "",
         reduce_results: bool = True,
+        replicated: bool = False,
     ) -> None:
         super().__init__(
-            vllm_config=vllm_config, prefix=prefix, reduce_results=reduce_results
+            vllm_config=vllm_config,
+            prefix=prefix,
+            reduce_results=reduce_results,
+            experts_tp_size=1 if replicated else None,
         )
+        if replicated and self.shared_expert is not None:
+            raise ValueError(
+                "--enable-hc-sp-replicated-moe needs the AITER fused shared expert "
+                "(VLLM_ROCM_USE_AITER=1, VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1):"
+                " a separate shared expert would stay TP-sharded"
+            )
         if self.replicate_shared_expert and not self.is_sequence_parallel:
             # Reduce routed outputs before adding replicated shared outputs.
             # SP then slices the result to avoid summing shared outputs again via RS.
@@ -197,8 +228,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.layer_idx = extract_layer_index(prefix)
+        replicated_moe = _replicated_moe(vllm_config)
+        # MoE SP and replicated experts consume local tokens and return complete
+        # local outputs: the MoE seam has no collective.
         self.use_sequence_parallel = (
-            vllm_config.parallel_config.use_sequence_parallel_moe
+            vllm_config.parallel_config.use_sequence_parallel_moe or replicated_moe
         )
         self.ple: Qwen4ExpPLELayer | None = None
         ple_layer_ids = config.ple_layer_ids
@@ -252,6 +286,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
             vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
             reduce_results=not self.use_hc_sequence_parallel,
+            replicated=replicated_moe,
         )
 
         hc_config = HyperConnectionConfig(
