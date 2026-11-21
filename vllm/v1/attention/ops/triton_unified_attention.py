@@ -16,12 +16,14 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
+    align_kv_strides,
     apply_alibi_to_score,
     apply_softcap,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
     find_seq_idx,
     init_softmax_M,
+    kv_tile_alignment,
     load_qq_bias_tile,
     resolve_seq_and_query_len,
     softmax_step,
@@ -410,7 +412,33 @@ def kernel_unified_attention(
     # window. Enabled by the launcher for plain causal sliding windows only;
     # ``reduce_segments`` must be launched with the same value.
     WINDOW_SEGMENTS: tl.constexpr = False,
+    # K/V stride alignment and the V offset from K (see kv_tile_alignment).
+    v_cache_delta: tl.int64 = 0,
+    K_ALIGN: tl.constexpr = 1,
+    V_ALIGN: tl.constexpr = 1,
 ):
+    (
+        value_cache_ptr,
+        stride_k_cache_0,
+        stride_k_cache_1,
+        stride_k_cache_2,
+        stride_v_cache_0,
+        stride_v_cache_1,
+        stride_v_cache_2,
+    ) = align_kv_strides(
+        key_cache_ptr,
+        value_cache_ptr,
+        v_cache_delta,
+        stride_k_cache_0,
+        stride_k_cache_1,
+        stride_k_cache_2,
+        stride_v_cache_0,
+        stride_v_cache_1,
+        stride_v_cache_2,
+        K_ALIGN,
+        V_ALIGN,
+    )
+
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
         KV_QUANT_MODE <= 3
@@ -1435,6 +1463,10 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
+    k_align, v_align, v_cache_delta = 1, 1, 0
+    if k_scale_cache is not None and not use_td:
+        k_align, v_align, v_cache_delta = kv_tile_alignment(k, v)
+
     kernel_unified_attention[grid](
         output_ptr=out,
         segm_output_ptr=segm_output_ptr,
@@ -1512,6 +1544,9 @@ def unified_attention(
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
         WINDOW_SEGMENTS=window_segments,
+        v_cache_delta=v_cache_delta,
+        K_ALIGN=k_align,
+        V_ALIGN=v_align,
         **launch_kwargs,
     )
 
