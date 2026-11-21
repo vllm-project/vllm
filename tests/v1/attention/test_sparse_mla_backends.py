@@ -5789,6 +5789,112 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     assert calls == [(source, plan, resident_cache)]
 
 
+class _SparseMLACommonBuilder(SparseMLACommonMetadataBuilder[SparseMLACommonMetadata]):
+    metadata_cls = SparseMLACommonMetadata
+
+
+def test_hisparse_prefill_staging_plan_without_dense_prefill_backend(
+    default_vllm_config, dist_init, workspace_init, monkeypatch
+):
+    """NoPE models on fp8_ds_mla have no dense-MHA prefill backend, but the
+    HiSparse MQA prefill path still stages through the host staging plan, so
+    the builder must emit it even when the layer's prefill backend is None."""
+    device = torch.device(DEVICE_TYPE)
+    dtype = torch.bfloat16
+    topk_tokens = 128
+    block_size = 64
+    seq_len = 192
+    batch_spec = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
+        max_model_len=512,
+        num_gpu_blocks=max(2048, cdiv(seq_len, block_size) + 1),
+        block_size=block_size,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
+    )
+    # GLM-5.3-Flash shape: NoPE MLA (qk_rope_head_dim=0) on fp8_ds_mla KV.
+    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        device_buffer_size=2 * topk_tokens,
+    )
+    model_config = vllm_config.model_config
+    model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=0,
+        v_head_dim=256,
+        model_type="deepseek_v2",
+    )
+    model_config.dtype = dtype
+    monkeypatch.setattr(
+        model_config,
+        "get_num_kv_heads",
+        MethodType(lambda self, parallel_config: 1, model_config),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "get_head_size",
+        MethodType(lambda self: 512, model_config),
+    )
+    # The layer dropped its dense-MHA prefill path (as fp8_ds_mla NoPE does).
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(
+            prefill_backend=None,
+            impl=SimpleNamespace(masked_mha_available=False),
+            get_attn_backend=lambda: FlashMLASparseBackend,
+        )
+    )
+
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        vllm_config.cache_config.block_size,
+        device,
+        arange_block_indices=True,
+    )
+    builder = _SparseMLACommonBuilder(
+        kv_cache_spec, ["placeholder"], vllm_config, device
+    )
+    metadata = builder.build(
+        common_prefix_len=0, common_attn_metadata=common_attn_metadata
+    )
+
+    assert metadata.num_prefills == 1
+    assert metadata.prefill is not None
+    assert metadata.prefill.prefill_backend is None
+    assert metadata.prefill.route is SparseMLAPrefillRoute.SPARSE_MQA
+    plan = metadata.prefill.host_staging_plan
+    assert plan is not None
+    assert plan.block_size == block_size
+    num_blocks = cdiv(seq_len, block_size)
+    num_staged_rows = num_blocks * block_size
+    # The staging space keeps a scratch block after the packed prefill rows.
+    assert plan.row_ids.shape == (1, (num_blocks + 1) * block_size)
+    assert (plan.miss_mask[0, :num_staged_rows] == 1).all()
+    assert (plan.miss_mask[0, num_staged_rows:] == 0).all()
+    staged_rows = plan.row_ids[0][plan.miss_mask[0] == 1]
+    expected_rows = torch.cat(
+        [
+            torch.arange(
+                b * block_size, (b + 1) * block_size, dtype=torch.int32, device=device
+            )
+            for b in range(num_blocks)
+        ]
+    )
+    torch.testing.assert_close(staged_rows.sort().values, expected_rows)
+    torch.testing.assert_close(
+        plan.block_table[0, :num_blocks],
+        common_attn_metadata.block_table_tensor[0, :num_blocks],
+    )
+
+
 def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     compute_stream = object()
     prefill_stream = MagicMock()

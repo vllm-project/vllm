@@ -132,6 +132,8 @@ def _compact_sampling_mask_xpu(
     max_num_kept: int,
     rows_per_request: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if logits.dtype != torch.float32:
+        logits = logits.to(torch.float32)
     return torch.ops._xpu_C.compact_sampling_mask(
         logits,
         cu_num_logits,
