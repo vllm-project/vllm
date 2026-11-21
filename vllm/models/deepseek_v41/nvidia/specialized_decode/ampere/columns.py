@@ -33,6 +33,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
+from vllm.distributed.parallel_state import is_fake_distributed
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.platforms import current_platform
 
@@ -57,6 +58,8 @@ def supports_column_gathers(vllm_config: VllmConfig) -> bool:
         current_platform.is_device_capability(80)
         or current_platform.is_device_capability(90)
     ):
+        return False
+    if is_fake_distributed():
         return False
     comm = cast("CudaCommunicator", get_tp_group().device_communicator).ca_comm
     return comm is not None and not comm.disabled and comm.fully_connected

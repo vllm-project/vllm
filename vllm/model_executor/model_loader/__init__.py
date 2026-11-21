@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.model_loader.meta_loader import MetaModelLoader
 from vllm.model_executor.model_loader.modelexpress_loader import (
     ModelExpressModelLoader,
 )
@@ -40,6 +41,7 @@ LoadFormats = Literal[
     "fastsafetensors",
     "instanttensor",
     "ipc_cache",
+    "meta",
     "mistral",
     "modelexpress",
     "npcache",
@@ -58,6 +60,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "fastsafetensors": DefaultModelLoader,
     "instanttensor": DefaultModelLoader,
     "ipc_cache": IpcModelLoader,
+    "meta": MetaModelLoader,
     "mistral": DefaultModelLoader,
     "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
@@ -160,6 +163,7 @@ __all__ = [
     "DefaultModelLoader",
     "DummyModelLoader",
     "IpcModelLoader",
+    "MetaModelLoader",
     "PeerModelLoader",
     "RunaiModelStreamerLoader",
     "ShardedStateLoader",

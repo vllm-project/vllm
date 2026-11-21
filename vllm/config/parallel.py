@@ -537,6 +537,11 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
+    fake_distributed: bool = False
+    """Build the process groups on PyTorch's fake backend: the full topology
+    in one process, with no communication (every collective raises). Set only
+    by static memory estimation; such a worker cannot serve."""
+
     _data_parallel_master_port_list: list[int] = Field(default_factory=list)
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
@@ -1146,6 +1151,7 @@ class ParallelConfig:
             "_coord_store_port",
             "data_parallel_rpc_port",
             "rank",
+            "fake_distributed",
             "master_addr",
             "master_port",
             "node_rank",

@@ -5,6 +5,7 @@
 import torch
 import torch.distributed as dist
 
+from vllm.distributed import is_fake_distributed
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_up
@@ -33,6 +34,7 @@ class BeamAllReduceWorkspace:
             or not 1024 <= hidden_size <= 8192
             or not hasattr(torch.ops._C, "beam_allreduce_norm")
             or not has_flashinfer()
+            or is_fake_distributed()
         ):
             return None
         from flashinfer.comm.mnnvl import (
