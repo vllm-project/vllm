@@ -7,8 +7,8 @@
 # Copyright (c) 2025 Skywork
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from collections.abc import Iterable
-from typing import Annotated, Literal, TypeAlias
+from collections.abc import Hashable, Iterable
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
     supports_pp,
@@ -127,7 +128,9 @@ class SkyworkR1VProcessingInfo(BaseInternVLProcessingInfo):
     info=SkyworkR1VProcessingInfo,
     dummy_inputs=BaseInternVLDummyInputsBuilder,
 )
-class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
+class SkyworkR1VChatModel(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix=dict.fromkeys(
             [
@@ -290,6 +293,142 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
+
+    # -- SupportsEncoderCudaGraph protocol methods (image only) --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            # InternVision uses standard ViT attention (no rotary embeddings,
+            # no variable-length sequence metadata), so the only graph-recorded
+            # buffer is pixel_values_flat itself.
+            buffer_keys=["pixel_values_flat"],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        return "image"
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> tuple[int, int]:
+        # Min: 1 tile -> num_image_token output tokens.
+        min_budget = self.num_image_token
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def _get_tile_counts(self, mm_kwargs: dict[str, Any]) -> list[int]:
+        """Return per-item tile counts as a plain list of ints."""
+        patches = mm_kwargs.get("image_num_patches", [])
+        if isinstance(patches, torch.Tensor):
+            return patches.tolist()
+        return [int(n) for n in patches]
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        return [
+            EncoderItemSpec(
+                input_size=n,
+                output_tokens=n * self.num_image_token,
+            )
+            for n in self._get_tile_counts(mm_kwargs)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values_flat"]
+        patches_list = self._get_tile_counts(mm_kwargs)
+
+        if len(indices) == 0:
+            return {"pixel_values_flat": pixel_values[:0], "image_num_patches": []}
+
+        # Cumulative tile offsets for slicing pixel_values_flat.
+        cum_patches = [0]
+        for n in patches_list:
+            cum_patches.append(cum_patches[-1] + n)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_patches = [patches_list[i] for i in indices]
+        return {
+            "pixel_values_flat": selected_pv,
+            "image_num_patches": selected_patches,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        # Size the buffer to hold the maximum possible tiles for this budget.
+        total_tiles = max(token_budget // self.num_image_token, 1)
+        image_size = (
+            self.config.force_image_size or self.config.vision_config.image_size
+        )
+
+        dummy_pixel_values = torch.randn(
+            total_tiles, 3, image_size, image_size, device=device, dtype=dtype
+        )
+        return EncoderCudaGraphCaptureInputs(
+            values={"pixel_values_flat": dummy_pixel_values},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values_flat": mm_kwargs["pixel_values_flat"]},
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        out = self.extract_feature(values["pixel_values_flat"])
+        return out.view(-1, self.config.text_config.hidden_size)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        out = self.extract_feature(mm_kwargs["pixel_values_flat"])
+        return out.view(-1, self.config.text_config.hidden_size)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
