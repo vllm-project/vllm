@@ -32,6 +32,29 @@ steps:
       - vllm/
       - tests/cuda
 
+- label: ":nvidia: (DGX Spark) [Nightly] Smoke"
+  key: smoke-dgx-spark
+  timeout_in_minutes: 20
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  env:
+    VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+  source_file_dependencies:
+  - vllm/envs.py
+  - vllm/logger.py
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/utils/
+  - examples/basic/offline_inference/generate.py
+  commands:
+    - nvidia-smi
+    # Default startup: torch.compile, CUDA graphs and FA2 on sm_121. GB10 memory
+    # is shared with the host, and an unset utilization resolves to 1.0.
+    - python3 ../examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.6
+
 - label: ":nvidia: (H200 MIG 18GB) CUDAGraph"
   device: h200_18gb
   key: cudagraph

@@ -1,0 +1,15 @@
+# Nemotron-3-Super-120B-A12B-NVFP4.yaml at TP1 without MTP. The ~69 GiB of
+# weights leave too little KV cache at the 0.6 the other DGX Spark configs use.
+# 250 questions keep the eval to a few minutes on one GB10.
+model_name: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+accuracy_threshold: 0.949
+tolerance: 0.05
+num_questions: 250
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+request_timeout_seconds: 3600
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --gpu-memory-utilization 0.75
+  --mamba-backend flashinfer

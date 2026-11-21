@@ -98,6 +98,8 @@ def test_flashinfer_nvfp4_gemm(
         pytest.skip("Only torch.bfloat16 is supported for TRTLLM FP4 GEMM operations")
     if backend == "cute-dsl" and not current_platform.is_device_capability_family(100):
         pytest.skip("FlashInfer cutedsl backend is only supported on SM10x")
+    if backend == "trtllm" and not current_platform.is_device_capability_family(100):
+        pytest.skip("FlashInfer trtllm backend is only supported on SM10x")
     if backend == "b12x" and not current_platform.has_device_capability(120):
         pytest.skip("b12x FP4 GEMM requires SM120+ (CC 12.0+)")
     if backend == "b12x" and not has_flashinfer_b12x_gemm():
