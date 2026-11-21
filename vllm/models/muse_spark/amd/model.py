@@ -257,8 +257,20 @@ class MuseSparkMoE(nn.Module):
         self.ep_size = get_ep_group().device_group.size()
         self.n_routed_experts = config.num_local_experts
         self.n_logical_experts = config.num_local_experts
-        self.n_redundant_experts = 0
-        self.n_physical_experts = self.n_logical_experts
+        parallel_config = vllm_config.parallel_config
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+        if self.enable_eplb and (
+            eplb_config.use_async or eplb_config.communicator == "nixl"
+        ):
+            logger.warning_once(
+                "Async EPLB or the NIXL communicator left Muse Spark rearrangements "
+                "overlapping on MI300X, and serving was 9-68% slower than with EPLB "
+                "off. Rearrangements still complete. On ROCm set --eplb-config to "
+                '{"communicator":"pynccl","use_async":false}.'
+            )
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.n_shared_experts = config.num_shared_experts
 
@@ -337,6 +349,8 @@ class MuseSparkMoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             is_sequence_parallel=self.is_sequence_parallel,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
             router_logits_dtype=self.router_dtype,
             scoring_func="sigmoid",
             e_score_correction_bias=self.expert_bias,

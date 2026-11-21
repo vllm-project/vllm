@@ -208,6 +208,42 @@ def test_unquantized_loader_routes_per_expert_names_to_expert_mapping(
     assert per_expert_calls == [[name for name, _ in individual]]
 
 
+@pytest.mark.parametrize("num_physical", [4, 6])
+def test_consolidated_loader_fills_every_initial_redundant_replica(
+    num_physical: int,
+) -> None:
+    """Slots filled match EplbState.build_initial_global_physical_to_logical_map;
+    without redundant experts that is one call per expert, as before EPLB."""
+    from vllm.distributed.eplb.eplb_state import EplbState
+
+    num_logical = 4
+    calls: list[tuple[str, int, float]] = []
+
+    def weight_loader(*, param, loaded_weight, weight_name, shard_id, expert_id):
+        calls.append((shard_id, expert_id, loaded_weight.item()))
+
+    experts = MuseSparkConsolidatedRoutedExperts.__new__(
+        MuseSparkConsolidatedRoutedExperts
+    )
+    object.__setattr__(
+        experts,
+        "moe_config",
+        SimpleNamespace(num_experts=num_physical, num_logical_experts=num_logical),
+    )
+    object.__setattr__(
+        experts, "w2_weight", SimpleNamespace(weight_loader=weight_loader)
+    )
+
+    w2 = torch.arange(num_logical, dtype=torch.float32).view(num_logical, 1)
+    assert list(experts.load_weights([("w2_weight", w2)])) == ["w2_weight"]
+    placement = EplbState.build_initial_global_physical_to_logical_map(
+        num_logical, num_physical - num_logical
+    )
+    assert sorted(calls) == sorted(
+        ("w2", physical, float(logical)) for physical, logical in enumerate(placement)
+    )
+
+
 def test_router_weight_reload_refolds_and_preserves_planes(monkeypatch) -> None:
     from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.models.muse_spark.amd.model import MuseSparkMoE

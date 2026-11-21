@@ -357,6 +357,9 @@ def FusedMoEFactory(
             bias_vl=bias_vl,
             image_sentinel_lo=image_sentinel_lo,
         )
+    elif eplb_state is not None and router.eplb_state is None:
+        # A caller-built router still needs the layer's EPLB state to map experts.
+        router.eplb_state = eplb_state
 
     if params_dtype is None:
         params_dtype = torch.get_default_dtype()
