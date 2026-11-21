@@ -154,7 +154,7 @@ async fn collect_responses(
         })?;
         // Only the final output matters here; the item events are discarded.
         items.on_event(&event);
-        if let Some(terminal) = TerminalOutput::from_event(event) {
+        if let Some(terminal) = TerminalOutput::from_event(event, false) {
             break terminal;
         }
     };
@@ -199,11 +199,12 @@ struct TerminalOutput {
     kv_transfer_params: Option<serde_json::Value>,
     ec_transfer_params: Option<serde_json::Value>,
     timestamps: RequestTimestamps,
+    first_content_token_ts: Option<f64>,
 }
 
 impl TerminalOutput {
     /// Take the terminal metadata from a `Done` event.
-    fn from_event(event: ChatEvent) -> Option<Self> {
+    fn from_event(event: ChatEvent, streaming: bool) -> Option<Self> {
         match event {
             ChatEvent::Done {
                 // The output items already carry the parser's final blocks.
@@ -213,6 +214,7 @@ impl TerminalOutput {
                 kv_transfer_params,
                 ec_transfer_params,
                 timestamps,
+                first_content_token_ts,
                 ..
             } => Some(Self {
                 usage,
@@ -220,6 +222,7 @@ impl TerminalOutput {
                 kv_transfer_params: kv_transfer_params.map(|params| *params),
                 ec_transfer_params: ec_transfer_params.map(|params| *params),
                 timestamps,
+                first_content_token_ts: first_content_token_ts.filter(|_| streaming),
             }),
             _ => None,
         }
@@ -236,6 +239,7 @@ fn completed_response(
         kv_transfer_params,
         ec_transfer_params,
         timestamps,
+        first_content_token_ts,
     }: TerminalOutput,
     enable_per_request_metrics: bool,
 ) -> ResponsesResponse {
@@ -247,8 +251,13 @@ fn completed_response(
         }),
         output,
         usage: Some(build_usage(&usage)),
-        metrics: enable_per_request_metrics
-            .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count)),
+        metrics: enable_per_request_metrics.then(|| {
+            PerRequestMetrics::from_timestamps(
+                timestamps,
+                usage.output_token_count,
+                first_content_token_ts,
+            )
+        }),
         kv_transfer_params,
         ec_transfer_params,
         ..response
@@ -309,7 +318,7 @@ async fn responses_event_stream(
                 for event in items.on_event(&event) {
                     y.yield_ok(event).await;
                 }
-                if let Some(output) = TerminalOutput::from_event(event) {
+                if let Some(output) = TerminalOutput::from_event(event, true) {
                     terminal = Some(output);
                     break;
                 }
