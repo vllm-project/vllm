@@ -126,10 +126,10 @@ def prepare_mega_gate_routing_metadata(
 
 
 def _use_mega_gate(vllm_config: VllmConfig) -> bool:
-    """Whether MegaMoE layers route with `bf16_mega_gate`, which is SM100-only."""
-    return (
-        vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
-        and current_platform.is_device_capability_family(100)
+    """Whether MegaMoE layers route with `bf16_mega_gate` on this GPU."""
+    return vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
     )
 
 
