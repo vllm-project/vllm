@@ -9,7 +9,10 @@ import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
-from vllm.v1.attention.backends.mla.indexer import build_prefill_chunk_metadata
+from vllm.v1.attention.backends.mla.indexer import (
+    build_prefill_chunk_metadata,
+    slice_prefill_chunk_query,
+)
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
@@ -1192,3 +1195,42 @@ def test_pcp_plan_deinterleave_restores_global_order(
             restored[row_start[row] : row_start[row] + g, 0],
             torch.arange(starts[i], starts[i] + g, dtype=torch.float32),
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_prefill_query_subchunks_slice_whole_chunk_metadata(dcp_world_size):
+    """The prefill planner's query sub-chunks of one request range reuse the
+    metadata built over all its rows; each must equal a direct build."""
+    device = torch.device("cuda")
+    query_lens, seq_lens_list, ratio = [7, 13], [20, 29], 4
+    query_start_loc_cpu = torch.tensor([0, 7, 20], dtype=torch.int32)
+    seq_lens_cpu = torch.tensor(seq_lens_list, dtype=torch.int32)
+    compressed_cpu = seq_lens_cpu // ratio
+    args = dict(
+        start_idx=0,
+        end_idx=2,
+        query_start_loc=query_start_loc_cpu.to(device),
+        query_start_loc_cpu=query_start_loc_cpu,
+        uncompressed_seq_lens=seq_lens_cpu.to(device),
+        compressed_seq_lens=compressed_cpu.to(device),
+        compressed_seq_lens_cpu=compressed_cpu,
+        block_table=torch.zeros((2, 4), dtype=torch.int32, device=device),
+        compress_ratio=ratio,
+        dcp_rank=dcp_world_size - 1,
+        dcp_world_size=dcp_world_size,
+    )
+    whole = build_prefill_chunk_metadata(**args)
+    total = sum(query_lens)
+    for query_slice in (slice(0, 5), slice(5, 12), slice(12, total), slice(18, 40)):
+        direct = build_prefill_chunk_metadata(
+            **args, query_slice=query_slice, skip_kv_gather=query_slice.start > 0
+        )
+        sliced = slice_prefill_chunk_query(whole, query_slice)
+        assert direct is not None and sliced is not None
+        for name in ("token_start", "token_end", "skip_kv_gather", "total_seq_lens"):
+            assert getattr(sliced, name) == getattr(direct, name), name
+        for name in ("cu_seqlen_ks", "cu_seqlen_ke", "token_to_seq", "cu_seq_lens"):
+            torch.testing.assert_close(getattr(sliced, name), getattr(direct, name))
