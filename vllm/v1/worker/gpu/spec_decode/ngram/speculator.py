@@ -62,26 +62,34 @@ def _ngram_scan_kernel(
     ).to(tl.int32)
 
     pos_iota = tl.arange(0, BLOCK_L).to(tl.int64)
-    pos = blk * BLOCK_L + pos_iota  # ascending
+    match_end = blk * BLOCK_L + pos_iota + MIN_N - 1
 
     best_score = tl.zeros([BLOCK_L], dtype=tl.int64)
+    if MIN_N == MAX_N:
+        match_start = match_end - MAX_N + 1
+        match = (match_start >= 0) & (match_start <= seq_len - MAX_N - 1)
+    else:
+        match = match_end < seq_len - 1
 
-    for n_iter in tl.static_range(MIN_N, MAX_N + 1):
-        max_pos_n = seq_len - n_iter - 1
-        match = (pos >= 0) & (pos <= max_pos_n)
-        for j in tl.static_range(0, n_iter):
-            tok = tl.load(
-                token_ids_ptr + row_off + (pos + j),
-                mask=match,
-                other=0,
-            ).to(tl.int32)
-            suf_idx = (MAX_N - n_iter) + j
-            suf_val = tl.sum(tl.where(suf_iota == suf_idx, suffix, 0))
-            match = match & (tok == suf_val)
+    for suffix_offset in tl.static_range(MAX_N):
+        ngram_size = suffix_offset + 1
+        compare_offset = MAX_N - suffix_offset - 1 if MIN_N == MAX_N else suffix_offset
+        token_pos = match_end - compare_offset
+        in_range = True if MIN_N == MAX_N else token_pos >= 0
+        tok = tl.load(
+            token_ids_ptr + row_off + token_pos,
+            mask=match & in_range,
+            other=0,
+        ).to(tl.int32)
+        suf_idx = MAX_N - compare_offset - 1
+        suf_val = tl.sum(tl.where(suf_iota == suf_idx, suffix, 0))
+        match = match & in_range & (tok == suf_val)
 
         # Pack (n, pos) so a single max yields longest-n, rightmost-pos.
-        cand = n_iter * Lp1 + pos + 1
-        best_score = tl.where(match, cand, best_score)
+        if ngram_size >= MIN_N:
+            match_start = match_end - ngram_size + 1
+            cand = ngram_size * Lp1 + match_start + 1
+            best_score = tl.where(match, cand, best_score)
 
     block_best = tl.max(best_score, axis=0)
     tl.store(scratch_ptr + scratch_off, block_best)
