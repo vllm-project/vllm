@@ -35,6 +35,7 @@ use axum::{Json, Router};
 use tower::ServiceExt as _;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+use vllm_engine_core_client::protocol::task::GenerationTask;
 
 use crate::middleware;
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
@@ -112,6 +113,8 @@ struct RouteGates {
     scale_out: bool,
     /// `VLLM_ENABLE_COHERE_API`: Cohere v2 chat routes.
     cohere_api: bool,
+    /// The engine supports the `transcription` task: speech-to-text routes.
+    transcription: bool,
 }
 
 impl RouteGates {
@@ -121,6 +124,7 @@ impl RouteGates {
             runtime_lora_updating: runtime_lora_updating_enabled(),
             scale_out: state.api_server_options.enable_scale_out,
             cohere_api: cohere_api_enabled(),
+            transcription: state.supports_task(GenerationTask::Transcription),
         }
     }
 }
@@ -210,6 +214,15 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         if gates.scale_out {
             router = router.route("/cohere/v2/chat/render", post(not_supported));
         }
+    }
+
+    // Python registers these only for models that support transcription, so
+    // other models answer 404 for them.
+    if gates.transcription {
+        // TODO(#69115): implement the speech-to-text APIs.
+        router = router
+            .route("/v1/audio/transcriptions", post(not_supported))
+            .route("/v1/audio/translations", post(not_supported));
     }
 
     if state.api_server_options.enable_tokenizer_info_endpoint {

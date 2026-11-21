@@ -13,6 +13,7 @@ use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::multimodal::MmModality;
+use vllm_engine_core_client::protocol::task::EngineTask;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 use vllm_llm::{EngineCoreLlm, Llm};
 
@@ -63,6 +64,9 @@ pub struct AppState {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Tasks the engine reported through `get_supported_tasks` at startup.
+    /// They select the task-specific route families, as in Python.
+    supported_tasks: Box<[EngineTask]>,
 }
 
 impl AppState {
@@ -93,7 +97,19 @@ impl AppState {
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
+            supported_tasks: Box::default(),
         }
+    }
+
+    /// Set the tasks the engine reported through `get_supported_tasks`.
+    pub fn with_supported_tasks(mut self, supported_tasks: impl Into<Box<[EngineTask]>>) -> Self {
+        self.supported_tasks = supported_tasks.into();
+        self
+    }
+
+    /// Whether the engine reported `task` through `get_supported_tasks`.
+    pub(crate) fn supports_task(&self, task: impl Into<EngineTask>) -> bool {
+        self.supported_tasks.contains(&task.into())
     }
 
     /// Set HTTP/API-server behavior switches.

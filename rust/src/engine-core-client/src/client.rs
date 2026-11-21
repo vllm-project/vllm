@@ -10,7 +10,7 @@ use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OnceCell, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -24,6 +24,7 @@ use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::EngineCoreRequest;
+use crate::protocol::task::EngineTask;
 use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
@@ -323,6 +324,8 @@ pub struct EngineCoreClient {
     /// Whether a profiling session is awaiting an explicit stop. Held across each
     /// start/stop utility call so a stale stop reply cannot clear a newer session.
     profile_active: Mutex<bool>,
+    /// Tasks reported by `get_supported_tasks`, cached after the first call.
+    supported_tasks: OnceCell<Box<[EngineTask]>>,
 
     /// Runtime used to send messages to the engine and drive all background tasks.
     runtime: BackgroundShutdownRuntime,
@@ -511,6 +514,7 @@ impl EngineCoreClient {
             abort_tx,
             prompt_block_hasher,
             profile_active: Mutex::new(false),
+            supported_tasks: OnceCell::new(),
             runtime,
             output_task,
             input_watch_task,
@@ -1002,6 +1006,23 @@ impl EngineCoreClient {
     /// Return the committed weight version agreed on by every connected engine.
     pub async fn get_weight_version(&self) -> Result<String> {
         self.call_utility_consensus("get_weight_version", ()).await
+    }
+
+    /// Return the model tasks that every connected engine reports.
+    ///
+    /// The first call asks the engines through the `get_supported_tasks`
+    /// utility; later calls return the cached result, since the tasks are fixed
+    /// by the loaded model.
+    pub async fn get_supported_tasks(&self) -> Result<&[EngineTask]> {
+        let tasks = self
+            .supported_tasks
+            .get_or_try_init(|| async {
+                let tasks: Vec<EngineTask> =
+                    self.call_utility_consensus("get_supported_tasks", ()).await?;
+                Ok::<_, Error>(tasks.into_boxed_slice())
+            })
+            .await?;
+        Ok(tasks)
     }
 
     /// Return whether the engine is currently sleeping at any level.
