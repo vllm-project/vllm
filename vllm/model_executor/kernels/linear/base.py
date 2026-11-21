@@ -8,6 +8,26 @@ from typing import Any, ClassVar, Generic, Self, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.utils import refill_derived
+
+
+def store_partial_sum_prescaled(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> None:
+    """With FP16 partial sums, store `tensor` times the 2^-k prescale as
+    `layer.<name>`. A weight reload refills it in place (captured CUDA
+    graphs keep its address)."""
+    if getattr(layer, "partial_sum_scale", 1.0) != 1.0:
+        refill_derived(layer, name, tensor * layer.partial_sum_scale)
+
+
+def partial_sum_prescaled(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> torch.Tensor:
+    """`tensor` times the 2^-k prescale of FP16 partial sums, from the copy
+    stored after loading if there is one."""
+    stored = getattr(layer, name, None)
+    return tensor * layer.partial_sum_scale if stored is None else stored
 
 
 # TODO: extend similarly to oracle/base.py on MOE side, to remove code duplication in
@@ -120,6 +140,10 @@ _LinearConfigT = TypeVar("_LinearConfigT")
 
 class LinearKernel(ABC, Generic[_LinearConfigT]):
     """Base class of every quantized linear kernel."""
+
+    # True if apply_weights honors layer.partial_sum_dtype/partial_sum_scale
+    # (FP16 partial sums of RowParallelLinear, VLLM_TP_FP16_PARTIAL_SUMS).
+    supports_partial_sum_dtype: ClassVar[bool] = False
 
     def __init__(self, config: _LinearConfigT) -> None:
         assert self.can_implement(config)[0]

@@ -14,6 +14,10 @@ steps:
   - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/kernels/linear/base.py
+  - vllm/model_executor/kernels/linear/scaled_mm/
+  - vllm/lora/layers/row_parallel_linear.py
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
