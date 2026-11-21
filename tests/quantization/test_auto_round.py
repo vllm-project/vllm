@@ -15,6 +15,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -26,6 +30,7 @@ from vllm.model_executor.layers.quantization.inc.schemes import (
     INCMxfp4Scheme,
     INCMxfp8Scheme,
     INCWna16Scheme,
+    inc_w4a8_moe,
     inc_wna16_moe,
     resolve_scheme,
 )
@@ -202,6 +207,124 @@ def make_layer_config(**overrides) -> INCLayerConfig:
     }
     kwargs.update(overrides)
     return INCLayerConfig(**kwargs)
+
+
+def make_xpu_wna16_moe_layer(
+    intermediate_size: int = 768, *, hidden_size: int = 2048
+) -> torch.nn.Module:
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+
+    parallel = FusedMoEParallelConfig(
+        tp_size=1,
+        pcp_size=1,
+        dp_size=1,
+        ep_size=1,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=0,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=False,
+        all2all_backend="naive",
+        enable_eplb=False,
+    )
+    layer = torch.nn.Module()
+    layer.moe_config = FusedMoEConfig(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=4,
+        num_logical_experts=4,
+        activation=MoEActivation.SILU,
+        device=torch.device("xpu:0"),
+        routing_method=RoutingMethodType.Default,
+        moe_parallel_config=parallel,
+        in_dtype=torch.bfloat16,
+    )
+    return layer
+
+
+@pytest.fixture
+def ark_moe_backend(monkeypatch):
+    ark = SimpleNamespace(
+        MoeSymmetricGemm=object,
+        moe_w4a8_prepack=object(),
+        moe_gemm_w4a8=object(),
+        moe_gemm_decode=object(),
+    )
+    ark.xpu_lib = ark
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(_ARK_STATE, lambda: (True, None, ark, object()))
+    return ark
+
+
+@pytest.fixture
+def ark_moe_weights(monkeypatch, ark_moe_backend):
+    from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    def remap(
+        *,
+        hidden_states,
+        remapped_hidden_states,
+        rows_per_expert,
+        unpermuted_row_to_permuted_row,
+        topk_ids,
+        **kwargs,
+    ):
+        expert_ids = topk_ids.flatten()
+        order = expert_ids.argsort(stable=True)
+        remapped_hidden_states.copy_(
+            hidden_states.repeat_interleave(topk_ids.shape[1], dim=0)[order]
+        )
+        rows_per_expert.copy_(
+            torch.bincount(expert_ids, minlength=rows_per_expert.numel())
+        )
+        unpermuted_row_to_permuted_row.view(-1)[order] = torch.arange(
+            order.numel(), dtype=torch.int32
+        )
+
+    def gather(output, expert_output, topk_weights, mapping, num_experts):
+        output.copy_(
+            (expert_output[mapping.long()] * topk_weights.unsqueeze(-1)).sum(dim=1)
+        )
+
+    def activate(output, inputs):
+        gate, up = inputs.chunk(2, dim=-1)
+        output.copy_(torch.nn.functional.silu(gate) * up)
+
+    monkeypatch.setattr(
+        torch.ops,
+        "_moe_C",
+        SimpleNamespace(remap_hidden_states=remap, moe_gather=gather),
+    )
+    monkeypatch.setattr(torch.ops._C, "silu_and_mul", activate, raising=False)
+    layer = make_xpu_wna16_moe_layer(128, hidden_size=128)
+    layer.global_num_experts = layer.moe_config.num_experts
+    layer.expert_map = None
+    layer.apply_router_weight_on_input = False
+    layer.activation = layer.moe_config.activation
+    quant_config = MoeWNA16Config.from_config(
+        {"quant_method": "gptq", "bits": 4, "group_size": 32, "sym": True}
+    )
+    method = inc_w4a8_moe.INCARKW4A8MoEMethod(quant_config, layer.moe_config)
+    method.create_weights(
+        cast(RoutedExperts, layer),
+        num_experts=4,
+        hidden_size=128,
+        intermediate_size_per_partition=128,
+        params_dtype=torch.float16,
+        weight_loader=default_weight_loader,
+    )
+    for name, parameter in layer.named_parameters():
+        parameter.data.fill_(1 if name.endswith("scales") else 0)
+    return method, layer
 
 
 def make_block_fp8_raw_config(**overrides) -> dict[str, object]:
@@ -1360,6 +1483,45 @@ def test_wna16_xpu_moe_prefers_ark_when_moe_kernel_available(monkeypatch) -> Non
     assert captured["moe_config"] is layer.moe_config
 
 
+@pytest.mark.parametrize(
+    "backend, w4a8_available, intermediate_size, expected_method",
+    [
+        ("ark", True, 768, inc_w4a8_moe.INCARKW4A8MoEMethod),
+        ("ark", False, 768, inc_wna16_moe.INCARKWNA16MoEMethod),
+        ("ark", True, 800, inc_wna16_moe.INCARKWNA16MoEMethod),
+        ("auto", True, 768, inc_wna16_moe.INCARKWNA16MoEMethod),
+    ],
+    ids=["w4a8", "missing-w4a8", "unsupported-shape", "auto-wna16"],
+)
+def test_wna16_xpu_moe_ark_backend_selection(
+    monkeypatch,
+    ark_moe_backend,
+    backend,
+    w4a8_available,
+    intermediate_size,
+    expected_method,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsWNA16
+
+    monkeypatch.setenv(_BACKEND_ENV, backend)
+    if not w4a8_available:
+        monkeypatch.delattr(ark_moe_backend, "moe_gemm_w4a8")
+    layer = make_xpu_wna16_moe_layer(intermediate_size)
+
+    method = INCWna16Scheme().get_moe_method(
+        make_config(),
+        layer,
+        "model.layers.0.mlp",
+        make_layer_config(group_size=32),
+    )
+
+    assert type(method) is expected_method
+    assert method.experts_cls is XPUExpertsWNA16
+    assert method.quant_config.weight_bits == 4
+    assert method.quant_config.group_size == 32
+    assert method.moe is layer.moe_config
+
+
 def test_wna16_xpu_moe_falls_back_when_ark_lacks_moe_kernel(monkeypatch) -> None:
     expected_method = object()
 
@@ -1422,30 +1584,21 @@ def test_wna16_xpu_moe_ark_backend_requested_but_unavailable_raises(
         )
 
 
-def test_wna16_xpu_moe_w4a16_backend_overrides_available_ark(monkeypatch) -> None:
-    expected_method = object()
+@pytest.mark.parametrize("backend", ["w4a16", "w4a8"])
+@pytest.mark.parametrize("intermediate_size", [768, 800])
+def test_wna16_xpu_moe_onednn_backends_skip_ark(
+    monkeypatch, backend, intermediate_size
+) -> None:
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsWNA16
 
-    class DummyMoeConfig:
-        pass
-
-    class DummyMoEScheme:
-        def __init__(self, layer_config) -> None:
-            self.layer_config = layer_config
-
-        def get_method(self, layer):
-            return expected_method
-
-    monkeypatch.setenv(_BACKEND_ENV, "w4a16")
+    layer = make_xpu_wna16_moe_layer(intermediate_size)
+    monkeypatch.setenv(_BACKEND_ENV, backend)
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(
-        inc_wna16_moe,
-        "INCWNA16MoEScheme",
-        DummyMoEScheme,
+        _ARK_STATE,
+        lambda: pytest.fail(f"{backend} MoE backend override must not query ARK"),
     )
-
-    layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()
 
     method = INCWna16Scheme().get_moe_method(
         make_config(),
@@ -1454,7 +1607,295 @@ def test_wna16_xpu_moe_w4a16_backend_overrides_available_ark(monkeypatch) -> Non
         make_layer_config(group_size=32),
     )
 
-    assert method is expected_method
+    assert method.experts_cls is XPUExpertsWNA16
+    assert method.quant_config.weight_bits == 4
+    assert method.quant_config.group_size == 32
+    assert method.moe is layer.moe_config
+    assert method.moe.intermediate_size_per_partition == intermediate_size
+
+
+@pytest.mark.parametrize(
+    "method_cls",
+    [
+        inc_wna16_moe.INCARKWNA16MoEMethod,
+        inc_w4a8_moe.INCARKW4A8MoEMethod,
+    ],
+    ids=["wna16", "w4a8"],
+)
+@pytest.mark.parametrize("layer_overrides", [False, True])
+def test_wna16_xpu_moe_weight_loading_preserves_activation_config(
+    monkeypatch, method_cls, layer_overrides: bool
+) -> None:
+    monkeypatch.delenv("ARK_MOE_W4A8_EAGER_PREPACK", raising=False)
+    monkeypatch.setattr(
+        torch.ops,
+        "_moe_C",
+        SimpleNamespace(remap_hidden_states=object(), moe_gather=object()),
+    )
+    method = object.__new__(method_cls)
+    method.moe = cast(
+        Any,
+        SimpleNamespace(
+            swiglu_alpha=1.5,
+            swiglu_beta=0.5,
+            swiglu_limit=7.0,
+            activation_situ_beta=1.702,
+            activation_situ_linear_beta=1.0,
+        ),
+    )
+    method.ark = SimpleNamespace(
+        MoeSymmetricGemm=SimpleNamespace(prepare=lambda *args, **kwargs: object())
+    )
+    layer = SimpleNamespace(
+        global_num_experts=1,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        group_size=32,
+        w13_qweight=torch.zeros((1, 64, 16), dtype=torch.uint8),
+        w13_scales=torch.ones((1, 64, 1), dtype=torch.float16),
+        w2_qweight=torch.zeros((1, 32, 16), dtype=torch.uint8),
+        w2_scales=torch.ones((1, 32, 1), dtype=torch.float16),
+    )
+    if layer_overrides:
+        layer.swiglu_alpha = 2.0
+        layer.swiglu_beta = 1.0
+        layer.swiglu_limit = 3.0
+
+    method.process_weights_after_loading(layer)
+
+    assert method.activation_config == ApplyMoEActivationConfig(
+        alpha=2.0 if layer_overrides else 1.5,
+        beta=1.0 if layer_overrides else 0.5,
+        clamp_limit=3.0 if layer_overrides else 7.0,
+        activation_situ_beta=1.702,
+        activation_situ_linear_beta=1.0,
+    )
+
+
+def test_wna16_xpu_moe_ark_backend_requires_supported_kernel(
+    monkeypatch, ark_moe_backend
+) -> None:
+    monkeypatch.delattr(ark_moe_backend, "MoeSymmetricGemm")
+    ark_moe_backend.xpu_lib = SimpleNamespace(
+        moe_w4a8_prepack=ark_moe_backend.moe_w4a8_prepack
+    )
+    layer = make_xpu_wna16_moe_layer()
+    monkeypatch.setenv(_BACKEND_ENV, "ark")
+
+    with pytest.raises(NotImplementedError, match="ARK MoE kernels are unavailable"):
+        INCWna16Scheme().get_moe_method(
+            make_config(),
+            layer,
+            "model.layers.0.mlp",
+            make_layer_config(group_size=32),
+        )
+
+
+@pytest.mark.parametrize("eager_prepack", [False, True], ids=["lazy", "eager"])
+def test_wna16_xpu_moe_w4a8_prepack_cache(
+    monkeypatch, ark_moe_backend, ark_moe_weights, eager_prepack
+) -> None:
+    prepack_calls = []
+    gemm_phases = []
+
+    def prepack(qweight, scales, *, group_size):
+        prepack_calls.append(qweight)
+        return qweight.clone(), scales.clone(), group_size
+
+    def gemm(
+        hidden_states,
+        weights_s8,
+        wscales,
+        rows_per_expert,
+        *,
+        rescale_block_size,
+        phase,
+    ):
+        gemm_phases.append(phase)
+        return hidden_states.new_full(
+            (hidden_states.shape[0], weights_s8.shape[-2]),
+            weights_s8.float().mean().item(),
+        )
+
+    monkeypatch.setattr(ark_moe_backend, "moe_w4a8_prepack", prepack)
+    monkeypatch.setattr(ark_moe_backend, "moe_gemm_w4a8", gemm)
+    monkeypatch.delenv("ARK_MOE_W4A8_EAGER_PREPACK", raising=False)
+    monkeypatch.delenv("ARK_MOE_AUTO_DECODE_MAX_TOKENS", raising=False)
+    if eager_prepack:
+        monkeypatch.setenv("ARK_MOE_W4A8_EAGER_PREPACK", "force")
+    method, layer = ark_moe_weights
+    method.process_weights_after_loading(layer)
+    assert len(prepack_calls) == (2 if eager_prepack else 0)
+    hidden_states = torch.zeros((65, 128), dtype=torch.bfloat16)
+    topk_ids = torch.tensor([[0, 1]]).repeat(65, 1)
+    topk_weights = torch.full((65, 2), 0.5)
+
+    first = method.apply(layer, hidden_states, topk_weights, topk_ids, None, None)
+    second = method.apply(layer, hidden_states, topk_weights, topk_ids, None, None)
+    assert first.shape == hidden_states.shape
+    assert torch.equal(first, second)
+    assert torch.equal(first, torch.full_like(first, 0x88))
+    assert len(prepack_calls) == 2
+
+    layer.w13_qweight.data.fill_(0x11)
+    layer.w2_qweight.data.fill_(0x11)
+    method.process_weights_after_loading(layer)
+    if not eager_prepack:
+        assert method.w13_moe_w4a8_prepacked is None
+        assert method.w2_moe_w4a8_prepacked is None
+    reloaded = method.apply(layer, hidden_states, topk_weights, topk_ids, None, None)
+    assert torch.equal(reloaded, torch.full_like(reloaded, 0x99))
+    assert len(prepack_calls) == 4
+    assert gemm_phases == ["prefill"] * 6
+
+
+@pytest.mark.parametrize(
+    "num_rows, decode_tokens, prefill_tokens, expected_segments",
+    [
+        (63, None, None, [("w4a16", 63)]),
+        (64, None, None, [("w4a16", 64)]),
+        (65, None, None, [("w4a8", 65)]),
+        (65, 65, 0, [("w4a16", 65)]),
+        (2, 0, 2, [("w4a8", 2)]),
+        (5, 2, 3, [("w4a16", 2), ("w4a8", 3)]),
+        (6, 2, 3, [("w4a16", 6)]),
+    ],
+    ids=[
+        "triton-below-threshold",
+        "triton-at-threshold",
+        "triton-above-threshold",
+        "decode-metadata-overrides-workload",
+        "prefill-metadata-overrides-workload",
+        "mixed-row-order",
+        "invalid-counts-fall-back",
+    ],
+)
+def test_wna16_xpu_moe_w4a8_dispatch(
+    monkeypatch,
+    ark_moe_backend,
+    ark_moe_weights,
+    num_rows,
+    decode_tokens,
+    prefill_tokens,
+    expected_segments,
+) -> None:
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+
+    monkeypatch.delenv("ARK_MOE_W4A8_EAGER_PREPACK", raising=False)
+    monkeypatch.delenv("ARK_MOE_AUTO_DECODE_MAX_TOKENS", raising=False)
+    method, layer = ark_moe_weights
+    method.process_weights_after_loading(layer)
+    kernel_calls = []
+
+    def run_kernel(inputs, weights, rows_per_expert, precision):
+        out_features = weights.shape[-2]
+        assert rows_per_expert.sum().item() == inputs.shape[0]
+        kernel_calls.append((precision, inputs.shape[0], out_features))
+        if out_features == 256:
+            return torch.cat((inputs, inputs), dim=-1)
+        return inputs + (256 if precision == "w4a8" else 0)
+
+    def prepack(qweight, scales, *, group_size):
+        return qweight.to(torch.int8), scales, group_size
+
+    def w4a8(inputs, weights, scales, rows_per_expert, *, rescale_block_size, phase):
+        assert weights.dtype == torch.int8
+        assert scales.dtype == torch.float16
+        assert rescale_block_size == layer.group_size
+        assert phase == "prefill"
+        return run_kernel(inputs, weights, rows_per_expert, "w4a8")
+
+    def w4a16(inputs, qweight, rows_per_expert, *, scales, weight_bits, group_size):
+        assert qweight.dtype == torch.uint8
+        assert scales.dtype == torch.float16
+        assert weight_bits == 4
+        assert group_size == layer.group_size
+        return run_kernel(inputs, qweight, rows_per_expert, "w4a16")
+
+    monkeypatch.setattr(ark_moe_backend, "moe_w4a8_prepack", prepack)
+    monkeypatch.setattr(ark_moe_backend, "moe_gemm_w4a8", w4a8)
+    monkeypatch.setattr(ark_moe_backend, "moe_gemm_decode", w4a16)
+    query_lengths = torch.tensor(
+        [1] * num_rows
+        if decode_tokens is None
+        else [1] * (num_rows - prefill_tokens)
+        + ([prefill_tokens] if prefill_tokens else []),
+        dtype=torch.int32,
+    )
+    metadata_kwargs: dict[str, Any] = {
+        "num_actual_tokens": num_rows,
+        "max_query_len": query_lengths.max().item(),
+        "query_start_loc": torch.cat(
+            (
+                torch.zeros(1, dtype=torch.int32),
+                query_lengths.cumsum(0, dtype=torch.int32),
+            )
+        ),
+        "max_seq_len": 128,
+        "seq_lens": query_lengths + 16,
+        "block_table": torch.zeros((len(query_lengths), 1), dtype=torch.int32),
+        "slot_mapping": torch.arange(num_rows),
+    }
+    metadata: FlashAttentionMetadata | TritonAttentionMetadata
+    if decode_tokens is None:
+        metadata = TritonAttentionMetadata(
+            **metadata_kwargs,
+            seq_threshold_3D=0,
+            num_par_softmax_segments=1,
+            softmax_segm_output=torch.empty(0),
+            softmax_segm_max=torch.empty(0),
+            softmax_segm_expsum=torch.empty(0),
+            causal=True,
+        )
+    else:
+        metadata = FlashAttentionMetadata(
+            **metadata_kwargs,
+            num_decode_tokens=decode_tokens,
+            num_prefill_tokens=prefill_tokens,
+        )
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata=cast(Any, {"attn": metadata}),
+        slot_mapping={},
+    )
+    hidden_states = torch.arange(1, num_rows + 1, dtype=torch.bfloat16)
+    hidden_states = hidden_states.unsqueeze(1).expand(-1, 128).contiguous()
+    row_ids = torch.arange(num_rows)
+    topk_ids = torch.stack((row_ids % 4, (row_ids + 1) % 4), dim=1)
+    topk_weights = torch.full((num_rows, 2), 0.5)
+
+    with override_forward_context(context):
+        output = method.apply(layer, hidden_states, topk_weights, topk_ids, None, None)
+
+    assert kernel_calls == [
+        (precision, segment_rows * 2, out_features)
+        for precision, segment_rows in expected_segments
+        for out_features in (256, 128)
+    ]
+    expected = torch.nn.functional.silu(hidden_states) * hidden_states
+    start = 0
+    for precision, segment_rows in expected_segments:
+        if precision == "w4a8":
+            expected[start : start + segment_rows] += 256
+        start += segment_rows
+    assert output.shape == hidden_states.shape
+    assert output.dtype == hidden_states.dtype
+    assert torch.equal(output, expected)
+
+
+@pytest.mark.parametrize(
+    "value, world_size, expected", [("1", 1, False), ("force", 1, True), ("1", 2, True)]
+)
+def test_wna16_xpu_moe_w4a8_eager_prepack_tp1(
+    monkeypatch, value, world_size, expected
+) -> None:
+    monkeypatch.setenv("ARK_MOE_W4A8_EAGER_PREPACK", value)
+    monkeypatch.setattr(inc_w4a8_moe, "_tensor_parallel_world_size", lambda: world_size)
+
+    assert inc_w4a8_moe._w4a8_eager_prepack_enabled() is expected
 
 
 def test_inc_resolve_scheme_selects_mxfp8() -> None:
@@ -2855,3 +3296,51 @@ def test_e2e_selects_w4a8_for_every_linear(vllm_runner, monkeypatch) -> None:
             assert all(i % 8 == 0 and o % 8 == 0 for i, o in shapes), shapes
 
         vllm_model.apply_model(check_model)
+
+
+@requires_w4a8_kernel
+@pytest.mark.parametrize("backend", ["w4a16", "w4a8"])
+def test_e2e_onednn_backends_use_default_xpu_moe(
+    vllm_runner, monkeypatch, backend
+) -> None:
+    """Explicit non-ARK backends retain native INT4 MoE and real generation."""
+    monkeypatch.setenv(_BACKEND_ENV, backend)
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "INCModel/Qwen3-30B-A3B-12L-W4A16-test",
+        dtype="bfloat16",
+        max_model_len=512,
+        max_num_seqs=16,
+        max_num_batched_tokens=512,
+        enforce_eager=True,
+        attention_backend="TRITON_ATTN",
+        gpu_memory_utilization=0.35,
+    ) as vllm_model:
+
+        def check_model(model):
+            from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+                XPUExpertsWNA16,
+            )
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQMoEMethod,
+            )
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Method,
+            )
+
+            methods = [
+                module.quant_method
+                for module in model.modules()
+                if isinstance(module, RoutedExperts)
+            ]
+            assert methods, "model has no routed experts"
+            for method in methods:
+                assert isinstance(method, (AutoGPTQMoEMethod, MoeWNA16Method))
+                assert method.experts_cls is XPUExpertsWNA16
+                assert method.quant_config.weight_bits == 4
+
+        vllm_model.apply_model(check_model)
+        output = vllm_model.generate_greedy(["The capital of France is"], max_tokens=8)
+
+    assert output[0][1].strip()
