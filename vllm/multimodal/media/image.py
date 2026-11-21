@@ -16,7 +16,7 @@ from vllm.utils.import_utils import has_torchcodec_image_decoding
 from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
-    check_torch_archive_size,
+    load_torch_payload,
     safe_to_dense,
 )
 
@@ -196,11 +196,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
-        check_torch_archive_size(data, parameter="image_embeds")
-        buffer = BytesIO(data)
-        with check_sparse_tensor_invariants_threadsafe():
-            tensor = torch.load(buffer, weights_only=True)
-            return safe_to_dense(tensor, parameter="image_embeds")
+        return load_torch_payload(data, parameter="image_embeds")
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:
