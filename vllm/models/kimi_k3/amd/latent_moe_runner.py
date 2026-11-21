@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineLinearMethod
+from vllm.models.kimi_k3.amd import akr_moe
 from vllm.models.kimi_k3.amd.ops import latent_norm_up_proj  # noqa: F401
 
 if TYPE_CHECKING:
@@ -92,6 +93,12 @@ class ROCmLatentMoERunner(MoERunner):
         )
         self._logged_sharded_tail = False
         self._quantized_routed_input: bool | None = None
+        # amd_kernels (akr_moe): the latent AR + norm + up-proj kernel for this runner's
+        # tail (None: stock tail) and whether the final TP all-reduce is left to the
+        # next layer's fused all-reduce + AttnRes (the layer then returns the TP
+        # partial).
+        self._akr_tail = None
+        self._akr_defer_final = False
 
     def _shard_up_proj_tail(
         self,
@@ -110,6 +117,11 @@ class ROCmLatentMoERunner(MoERunner):
 
         transform = self.routed_output_transform
         assert transform is not None
+
+        if self._akr_tail is not None and akr_moe.tail_stock_experts(
+            self, fused_output, shared_output
+        ):
+            return self._akr_final_reduce(shared_output, trunc_size)
 
         latent = tensor_model_parallel_all_reduce(fused_output)
 
@@ -133,9 +145,7 @@ class ROCmLatentMoERunner(MoERunner):
                 shared_output,
                 shard_start,
             )
-            return self._maybe_reduce_final_output(
-                shared_output, trunc_size, output_is_reduced=False
-            )
+            return self._akr_final_reduce(shared_output, trunc_size)
 
         if transform.norm is not None:
             latent = transform.norm(latent)
@@ -145,6 +155,19 @@ class ROCmLatentMoERunner(MoERunner):
         # beta-add epilogue so folding in the shared partial costs no kernel.
         hidden_shard.addmm_(latent, up_proj_shard.t())
 
+        return self._akr_final_reduce(shared_output, trunc_size)
+
+    def _akr_final_reduce(
+        self, shared_output: torch.Tensor, trunc_size: int | None
+    ) -> torch.Tensor:
+        """The tail's final TP all-reduce, unless the decoder layer defers it (then the
+        TP partial is returned and the next fused all-reduce + AttnRes sums it)."""
+        if self._akr_defer_final:
+            return (
+                shared_output[..., :trunc_size]
+                if trunc_size is not None
+                else shared_output
+            )
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
         )

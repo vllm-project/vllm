@@ -17,6 +17,36 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+AmdKernelsRoute = Literal[
+    "gemm",
+    "moe",
+    "kda",
+    "attention",
+    "indexer",
+    "norm",
+    "collectives",
+    "draft",
+    "sampling",
+    "overlap",
+]
+
+
+@config
+class AmdKernelsConfig:
+    """Kimi-K3.1 layers on `amd_kernels` (ROCm gfx950)."""
+
+    enabled: bool = True
+    """Use `amd_kernels` where it is installed and the shapes fit."""
+
+    disabled_routes: list[AmdKernelsRoute] = Field(default_factory=list)
+    """Routes that keep the stock kernels."""
+
+    def compute_hash(self) -> str:
+        factors = get_hash_factors(self, {"disabled_routes"})
+        factors["disabled_routes"] = sorted(set(self.disabled_routes))
+        return hash_factors(factors)
+
+
 @config
 class IrOpPriorityConfig:
     """Configuration for vLLM IR op priority for dispatching/lowering during the
@@ -314,6 +344,9 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X). A deployment that cannot run it is refused at startup."""
 
+    amd_kernels: AmdKernelsConfig = Field(default_factory=AmdKernelsConfig)
+    """Kimi-K3.1 on `amd_kernels`; see `AmdKernelsConfig`."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
@@ -481,11 +514,13 @@ class KernelConfig:
             "enable_rocm_segmented_attn_autotune",
             "enable_rocm_aiter_gemm_warmup",
             "ir_op_priority",  # handled separately below
+            "amd_kernels",  # handled separately below
         }
         if self.linear_backend_per_quant is None:
             ignored_factors.add("linear_backend_per_quant")
         factors = get_hash_factors(self, ignored_factors)
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
+        factors["amd_kernels"] = self.amd_kernels.compute_hash()
         return hash_factors(factors)
 
     @field_validator(

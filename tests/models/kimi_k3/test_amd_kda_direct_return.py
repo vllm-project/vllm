@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from types import SimpleNamespace
 
 import torch
@@ -65,7 +66,9 @@ def test_k3_kda_forward_returns_output_projection_storage() -> None:
         use_strided_f_b=False,
         o_proj=_TupleProjection(projected),
         _forward=fill_core_output,
+        _akr_decode=None,  # the amd_kernels fused decode route is off
     )
+    attention._fb_proj = functools.partial(KimiK3DeltaAttention._fb_proj, attention)
 
     output = KimiK3DeltaAttention.forward(attention, hidden_states, torch.arange(4))
 
