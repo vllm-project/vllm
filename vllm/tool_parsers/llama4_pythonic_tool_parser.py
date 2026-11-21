@@ -71,7 +71,11 @@ class Llama4PythonicToolParser(ToolParser):
         # as Llama 4 model sometime will output those tokens
         if model_output.startswith("<|python_start|>"):
             model_output = model_output[len("<|python_start|>") :]
-            model_output = model_output.replace("<|python_end|>", "")
+        # Strip <|python_end|> regardless of the start token: Llama 4 may emit
+        # the end token without a leading start token, and the streaming path
+        # strips it unconditionally. Leaving it in makes ast.parse raise and the
+        # whole tool call is silently dropped.
+        model_output = model_output.replace("<|python_end|>", "")
 
         is_tool_call_pattern = False
         try:

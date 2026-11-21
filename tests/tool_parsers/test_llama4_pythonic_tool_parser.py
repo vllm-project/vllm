@@ -200,6 +200,14 @@ TEST_CASES = [
         ],
         id="parallel_calls_nonstreaming",
     ),
+    pytest.param(
+        False,
+        # <|python_end|> emitted without a leading <|python_start|> must still
+        # be stripped; otherwise ast.parse fails and the call is dropped.
+        "[get_weather(city='LA', metric='C')]<|python_end|>",
+        [SIMPLE_FUNCTION_CALL],
+        id="end_token_without_start_nonstreaming",
+    ),
 ]
 
 
