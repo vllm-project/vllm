@@ -11,6 +11,7 @@ import logging
 import multiprocessing
 import os
 import subprocess
+import threading
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 _NUMACTL_ARGS_ENV = "_VLLM_INTERNAL_NUMACTL_ARGS"
 _NUMACTL_PYTHON_EXECUTABLE_ENV = "_VLLM_INTERNAL_NUMACTL_PYTHON_EXECUTABLE"
 _MPOL_DEFAULT = 0
+_NUMA_SUBPROCESS_LOCK = threading.RLock()
 
 
 @cache
@@ -611,12 +613,13 @@ def configure_subprocess(
             dp_local_rank,
             numactl_args,
         )
-    python_executable = os.fsdecode(multiprocessing.spawn.get_executable())
-    with (
-        _set_numa_wrapper_env(numactl_args, python_executable),
-        _mp_set_executable(executable, debug_str),
-    ):
-        yield
+    with _NUMA_SUBPROCESS_LOCK:
+        python_executable = os.fsdecode(multiprocessing.spawn.get_executable())
+        with (
+            _set_numa_wrapper_env(numactl_args, python_executable),
+            _mp_set_executable(executable, debug_str),
+        ):
+            yield
 
 
 def _get_numactl_executable() -> tuple[str, str]:
