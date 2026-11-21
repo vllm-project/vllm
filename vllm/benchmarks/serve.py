@@ -32,7 +32,7 @@ import time
 import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -43,6 +43,7 @@ import numpy as np
 from tqdm.asyncio import tqdm
 
 from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samples
+from vllm.benchmarks.lib import steady_state
 from vllm.benchmarks.lib.endpoint_request_func import (
     ASYNC_REQUEST_FUNCS,
     OPENAI_COMPATIBLE_BACKENDS,
@@ -848,6 +849,9 @@ async def benchmark(
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
     probe_request_rate: float = 0.0,
+    steady_state_threshold: float = 0.95,
+    steady_state_min_window: float | None = None,
+    no_steady_state: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -1515,6 +1519,23 @@ async def benchmark(
 
     print("=" * 50)
 
+    ss = steady_state.for_run(
+        outputs,
+        max_concurrency=max_concurrency,
+        request_rate=request_rate,
+        ramp_up=ramp_up_strategy is not None,
+        self_timed=self_timed,
+        enabled=not no_steady_state,
+        threshold=steady_state_threshold,
+        min_window_s=steady_state_min_window,
+        duration_s=benchmark_duration,
+        percentiles=selected_percentiles,
+        is_pooling=not isinstance(metrics, BenchmarkMetrics),
+    )
+    if ss is not None:
+        steady_state.print_metrics(ss)
+    result["steady_state"] = asdict(ss) if ss is not None else None
+
     if profile:
         print("Stopping profiler...")
         profile_output = await async_request_profile(
@@ -1692,6 +1713,28 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "for headers to be passed with each request. These headers override "
         "per backend constants and values set via environment variable, and "
         "will be overridden by other arguments (such as request ids).",
+    )
+    parser.add_argument(
+        "--steady-state-threshold",
+        type=float,
+        default=0.95,
+        help="Fraction of --max-concurrency at which the steady-state window "
+        "opens. Range: (0, 1]. Steady-state metrics cover the time from when "
+        "this many requests are first in flight until they last drop below "
+        "it, which excludes the startup burst and the drain. Used only with "
+        "--max-concurrency and a constant --request-rate inf.",
+    )
+    parser.add_argument(
+        "--steady-state-min-window",
+        type=float,
+        default=None,
+        help="Minimum steady-state window in seconds; a shorter window gets a "
+        "warning. Default: max(10, 0.1 * benchmark duration).",
+    )
+    parser.add_argument(
+        "--no-steady-state",
+        action="store_true",
+        help="Do not compute steady-state metrics.",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -2074,6 +2117,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS))
     if args.max_concurrency is not None and args.max_concurrency <= 0:
         raise ValueError("--max-concurrency must be greater than 0")
+    if not 0 < args.steady_state_threshold <= 1:
+        raise ValueError(
+            "--steady-state-threshold must be in (0, 1], "
+            f"got {args.steady_state_threshold}"
+        )
+    if args.steady_state_min_window is not None and args.steady_state_min_window < 0:
+        raise ValueError(
+            "--steady-state-min-window must be >= 0, "
+            f"got {args.steady_state_min_window}"
+        )
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -2314,6 +2367,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ssl_context=ssl_context,
         self_timed=args.self_timed,
         probe_request_rate=args.probe_request_rate,
+        steady_state_threshold=args.steady_state_threshold,
+        steady_state_min_window=args.steady_state_min_window,
+        no_steady_state=args.no_steady_state,
     )
 
     # Save config and results to json
