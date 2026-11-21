@@ -157,6 +157,26 @@ struct sm90_fp8_config_M128 {
 };
 
 template <typename InType, typename OutType, bool EnableBias>
+struct sm90_fp8_config_M256_N2048 {
+  // M in (64, 256], N in [1, 2048]
+  // Small tiles without a cluster: the default tiles give too few CTAs to fill
+  // the GPU when N is small (e.g. 32 CTAs for N = 2048, M = 256).
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _64, _128>;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using Cutlass3xGemm = conditional_t<
+      EnableBias,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogueBias,
+                               TileShape, ClusterShape, KernelSchedule,
+                               EpilogueSchedule>,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogue, TileShape,
+                               ClusterShape, KernelSchedule, EpilogueSchedule>>;
+};
+
+template <typename InType, typename OutType, bool EnableBias>
 struct sm90_fp8_config_M64_N1280 {
   // M in (16, 64], N in [1 1280]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
@@ -301,6 +321,9 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
                                            EnableBias>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
       typename sm90_fp8_config_M128<InType, OutType, EnableBias>::Cutlass3xGemm;
+  using Cutlass3xGemmM256_N2048 =
+      typename sm90_fp8_config_M256_N2048<InType, OutType,
+                                          EnableBias>::Cutlass3xGemm;
 
   using Cutlass3xGemmM64_N1280 =
       typename sm90_fp8_config_M64_N1280<InType, OutType,
@@ -335,6 +358,10 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
     }
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64_N8192>(
         out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
+  } else if (m <= 256 && n <= 2048) {
+    // m in (64, 256], n in [1, 2048]
+    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM256_N2048>(
+        out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   } else if (m <= 128) {
     // m in (64, 128]
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM128>(
