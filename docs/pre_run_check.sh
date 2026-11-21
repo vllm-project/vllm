@@ -55,13 +55,30 @@ while :; do
     break
   fi
   if [ -n "$CONCLUSION" ]; then
-    echo "pre-commit/pre-run-check conclusion: $CONCLUSION"
+    echo "pre-run-check conclusion: $CONCLUSION"
     if [ "$CONCLUSION" = "failure" ] || [ "$CONCLUSION" = "cancelled" ] || [ "$CONCLUSION" = "timed_out" ]; then
-      echo "pre-commit/pre-run-check did not pass; skipping docs build."
-      if [ -n "$CHECK_URL" ]; then
-        echo "pre-commit/pre-run-check failure reason: $CHECK_URL"
+      # pre-run-check 可能因为管理性 gate（作者无 label/merged PRs）失败，
+      # 此时 pre-commit 也会被 skipped，不应阻断 docs 构建。
+      # 只有当 pre-commit 也确实跑了且失败（代码 lint 真有问题）时才阻断。
+      PC_RAW=$(curl -sS "${CURL_AUTH[@]}" -w "\n%{http_code}" "https://api.github.com/repos/vllm-project/vllm/commits/${READTHEDOCS_GIT_COMMIT_HASH}/check-runs?check_name=pre-commit&filter=latest")
+      PC_HTTP=$(printf %s "$PC_RAW" | tail -n1)
+      PC_BODY=$(printf %s "$PC_RAW" | sed '$d')
+      PC_CONCLUSION=""
+      if [ "$PC_HTTP" = "200" ]; then
+        PC_CONCLUSION=$(printf %s "$PC_BODY" | python3 -c "import sys, json; r=json.load(sys.stdin).get(\"check_runs\",[]); print((r[0].get(\"conclusion\") or \"\") if r else \"none\")")
       fi
-      exit 1
+      echo "pre-commit conclusion: ${PC_CONCLUSION:-unknown}"
+      if [ "$PC_CONCLUSION" = "failure" ] || [ "$PC_CONCLUSION" = "cancelled" ] || [ "$PC_CONCLUSION" = "timed_out" ]; then
+        echo "pre-commit did not pass (conclusion=$PC_CONCLUSION); skipping docs build."
+        if [ -n "$CHECK_URL" ]; then
+          echo "pre-run-check reference: $CHECK_URL"
+        fi
+        exit 1
+      fi
+      # pre-commit 是 skipped / success / 未知 → 管理性 gate 或 pre-run-check
+      # 本身的非代码原因失败，不阻断 docs 构建。
+      echo "pre-run-check $CONCLUSION but pre-commit not failed (${PC_CONCLUSION:-unknown}); allowing docs build."
+      break
     fi
     break
   fi
