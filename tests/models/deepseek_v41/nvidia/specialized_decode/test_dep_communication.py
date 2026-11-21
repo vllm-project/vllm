@@ -39,7 +39,7 @@ def test_local_mhc_cluster_entry():
         with torch.cuda.graph(graph):
             output = call(*args)
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(output[0] == 0.5)
         assert torch.all(output[1] == 1)
         assert torch.all(output[2] == 0.5)
