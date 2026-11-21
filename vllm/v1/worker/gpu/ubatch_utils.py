@@ -31,7 +31,9 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
+    create_blas_handles,
     create_sm_control_context,
+    find_model_streams,
     maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.ubatching import (
@@ -367,6 +369,7 @@ class UBatchRunner:
                 pynccl_comm.bind_stream(self.comm_stream)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
+        self._model_streams: list[torch.cuda.Stream] | None = None
         current_platform.prepare_ubatch_streams(
             self.device,
             (current_stream(), self.capture_stream, self.comm_stream),
@@ -512,6 +515,11 @@ class UBatchRunner:
         assert len(ubatch_slices) == self.num_ubatches
 
         compute_stream = self.capture_stream if for_capture else current_stream()
+        blas_streams = [compute_stream, self.comm_stream]
+        if for_capture:
+            if self._model_streams is None:
+                self._model_streams = find_model_streams(model)
+            blas_streams += self._model_streams
         ubatch_contexts = make_ubatch_contexts(
             num_micro_batches=self.num_ubatches,
             comm_stream=self.comm_stream,
@@ -533,15 +541,7 @@ class UBatchRunner:
                 torch.accelerator.set_device_index(self.device.index)
                 if for_capture:
                     # Allocate cuBLAS workspaces before capture.
-                    for stream in (compute_stream, self.comm_stream):
-                        with torch.cuda.stream(stream):
-                            torch.cuda.current_blas_handle()
-                            if current_platform.is_rocm():
-                                # hipBLASLt handles are per thread and stream and
-                                # only a GEMM creates one; creating it in capture
-                                # fails.
-                                x = torch.zeros(1, 1, dtype=dtype, device=self.device)
-                                torch.mm(x, x)
+                    create_blas_handles(blas_streams, dtype)
                 with ubatch_context:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
