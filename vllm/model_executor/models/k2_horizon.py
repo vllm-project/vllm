@@ -704,6 +704,9 @@ class K2HorizonAttention(nn.Module):
 
 
 class K2HorizonMoVAAttention(nn.Module):
+    # [num_experts, kv_size, hidden_size], set by stack_v_experts().
+    v_experts_weight: torch.Tensor | None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -788,6 +791,7 @@ class K2HorizonMoVAAttention(nn.Module):
                 for value in range(num_experts)
             ]
         )
+        self.register_buffer("v_experts_weight", None, persistent=False)
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -872,6 +876,34 @@ class K2HorizonMoVAAttention(nn.Module):
             block_shape=None,
         )
 
+    def stack_v_experts(self) -> None:
+        """Stack the value-expert weights once and make the experts views of it.
+
+        In-place weight reloads then update the stacked tensor without moving
+        it, so captured CUDA graphs stay valid. Quantized or CPU-offloaded
+        experts keep being stacked in every forward.
+        """
+        if not all(
+            isinstance(expert.quant_method, UnquantizedLinearMethod)
+            for expert in self.v_experts
+        ):
+            return
+        weights = [expert.weight for expert in self.v_experts]
+        if any(
+            w.device.type == "cpu" or getattr(w, "_vllm_is_uva_offloaded", False)
+            for w in weights
+        ):
+            return
+        stacked = self.v_experts_weight
+        if stacked is not None and all(
+            w.data_ptr() == s.data_ptr() for w, s in zip(weights, stacked)
+        ):
+            return
+        stacked = torch.stack([w.data for w in weights])
+        for w, s in zip(weights, stacked):
+            w.data = s
+        self.v_experts_weight = stacked
+
     def compute_mova_v_sparse(self, hidden_states):
         router_logits, _ = self.v_router(hidden_states)
 
@@ -883,9 +915,11 @@ class K2HorizonMoVAAttention(nn.Module):
             scaling_factor=self.router_scaling_factor,
         )
 
-        w1 = torch.stack(
-            [expert.weight for expert in self.v_experts], dim=0
-        ).contiguous()
+        w1 = self.v_experts_weight
+        if w1 is None:
+            w1 = torch.stack(
+                [expert.weight for expert in self.v_experts], dim=0
+            ).contiguous()
 
         v = fused_mova_impl(
             config=self.fused_mova_config,
@@ -1429,6 +1463,11 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
 
         return loaded_params
 
+    def process_weights_after_loading(self) -> None:
+        for module in self.modules():
+            if isinstance(module, K2HorizonMoVAAttention):
+                module.stack_v_experts()
+
 
 class K2HorizonForCausalLM(
     nn.Module, SupportsPP, SupportsLoRA, SupportsEagle, SupportsEagle3, MixtureOfExperts
@@ -1541,6 +1580,9 @@ class K2HorizonForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.process_weights_after_loading()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
