@@ -270,7 +270,9 @@ class PCPManager:
             rank 2:          2           5
             rank 3:              3   4
 
-        Decodes, and prefills too short to fill all eight, are replicated instead.
+        Decodes are replicated when decode sharding is off. Under DCP, a prefill is
+        also replicated when the last of its 2*PCP chunks would be empty; a PCP-only
+        run always splits prefills and skips the empty chunks.
         """
         decode_ordinal = 0
         num_chunks = 2 * self.pcp_world_size
