@@ -31,7 +31,7 @@ VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
     *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 5120, 5137]],
-    *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
+    *[(2048, i) for i in [1, 8, 64, *VEC_HIDDEN_SIZES, 1028, 4100, 5120, 5137]],
     *[(4096, i) for i in [1, 64, 5137]],
 ]
 
@@ -45,6 +45,34 @@ CUDA_DEVICES = [
 ]
 
 EPS = 1e-6
+
+
+@pytest.mark.parametrize("large_batch", [False, True])
+@pytest.mark.parametrize("hidden_size", [2048, 2051])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("add_residual", [False, True])
+@pytest.mark.parametrize("weight_scale", [0.0, 2**-20])
+@torch.inference_mode()
+def test_rms_norm_dynamic_int8_preserves_small_scales(
+    default_vllm_config, large_batch, hidden_size, dtype, add_residual, weight_scale
+):
+    """Fusion must retain standalone INT8's zero and small per-token scales."""
+    num_tokens = 4 * current_platform.num_compute_units() if large_batch else 1
+    x = torch.ones((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    residual = x.clone() if add_residual else None
+    layer = RMSNorm(hidden_size, EPS, dtype=dtype).cuda()
+    layer.weight.fill_(weight_scale)
+    y, expected_residual = ref_rms_norm(layer, x, residual)
+    expected_q, expected_scale, _ = ops.scaled_int8_quant(y)
+    actual_residual = residual.clone() if residual is not None else None
+    actual_q, actual_scale = ops.rms_norm_dynamic_per_token_quant(
+        x, layer.weight, EPS, torch.int8, residual=actual_residual
+    )
+    assert torch.all(expected_scale < torch.finfo(torch.float32).eps)
+    torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
+    if add_residual:
+        torch.testing.assert_close(actual_residual, expected_residual, rtol=0, atol=0)
 
 
 def _is_valid_config(

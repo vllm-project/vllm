@@ -8,6 +8,7 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 import vllm.ir.ops
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -19,10 +20,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
-    kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
-    kNvfp4Dynamic,
+    kInt8DynamicTokenSym,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
@@ -32,6 +32,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import (
+    QUANT_OPS,
     MatcherQuantFP8,
 )
 
@@ -155,17 +156,6 @@ def empty_i64(*args: Any, **kwargs: Any) -> torch.Tensor:
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
-QUANT_OPS: dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-}
-if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
-
 
 class FusedRMSQuantKey(NamedTuple):
     """Named tuple for identifying the type of RMSNorm + quant fusion.
@@ -204,6 +194,166 @@ if hasattr(torch.ops._C, "rms_norm_per_block_quant"):
     FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, True)] = _rms_norm_per_block_quant  # noqa: E501
     FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, False)] = _rms_norm_per_block_quant  # noqa: E501
     FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, True)] = _rms_norm_per_block_quant  # noqa: E501
+
+
+if hasattr(torch.ops._C, "rms_norm_dynamic_per_token_quant"):
+    _rms_norm_dynamic_quant = torch.ops._C.rms_norm_dynamic_per_token_quant.default
+    FUSED_OPS[FusedRMSQuantKey(kInt8DynamicTokenSym, False)] = _rms_norm_dynamic_quant
+    FUSED_OPS[FusedRMSQuantKey(kInt8DynamicTokenSym, True)] = _rms_norm_dynamic_quant
+
+
+class RMSNormInt8QuantPattern:
+    """Match native RMSNorm and dynamic symmetric INT8 quantization."""
+
+    @staticmethod
+    def supported(match: pm.Match) -> bool:
+        from torch._inductor import config as inductor_config
+
+        import vllm.envs as envs
+
+        if envs.VLLM_BATCH_INVARIANT or inductor_config.emulate_precision_casts:
+            return False
+        result = match.kwargs["result"].meta["val"]
+        scale = match.kwargs["scale"].meta["val"]
+        if not (
+            result.is_contiguous()
+            and scale.is_contiguous()
+            and result.dtype == torch.int8
+            and scale.dtype == torch.float32
+            and result.ndim == scale.ndim == 2
+            and statically_known_true(scale.shape[1] == 1)
+        ):
+            return False
+        for node in match.nodes:
+            if node.target not in (_RMS_NORM_OP, _FUSED_ADD_RMS_NORM_OP):
+                continue
+            args = fx.map_arg(node.args, lambda n: n.meta["val"])
+            x = args[0]
+            weight = args[1] if node.target == _RMS_NORM_OP else args[2]
+            if (
+                x.ndim != 2
+                or x.device.type != "cuda"
+                or x.dtype not in (torch.bfloat16, torch.float16)
+                or not isinstance(x.shape[-1], int)
+                or x.shape[-1] <= 0
+                or x.stride(-1) != 1
+                or weight is None
+                or weight.dtype != x.dtype
+                or weight.ndim != 1
+                or not weight.is_contiguous()
+                or weight.shape[0] != x.shape[-1]
+                or any(t.device != x.device for t in (weight, result, scale))
+            ):
+                return False
+            # The CUDA vector path uses vec4 loads without realignment.
+            if not all(
+                statically_known_true(t.storage_offset() % 4 == 0)
+                for t in (x, weight, result)
+            ):
+                return False
+            if statically_known_true(x.shape[0] == 0):
+                return False
+            if x.dtype == torch.bfloat16 and not current_platform.has_device_capability(
+                80
+            ):
+                return False
+            if not (
+                statically_known_true(result.shape[0] == x.shape[0])
+                and statically_known_true(result.shape[1] == x.shape[1])
+                and statically_known_true(scale.shape[0] == x.shape[0])
+            ):
+                return False
+            op = (
+                vllm.ir.ops.rms_norm
+                if node.target == _RMS_NORM_OP
+                else vllm.ir.ops.fused_add_rms_norm
+            )
+            if node.target == _FUSED_ADD_RMS_NORM_OP:
+                residual = args[1]
+                if (
+                    residual.ndim != 2
+                    or residual.device != x.device
+                    or residual.dtype != x.dtype
+                    or not residual.is_contiguous()
+                    or residual.stride(-1) != 1
+                    or not statically_known_true(residual.storage_offset() % 4 == 0)
+                    or not statically_known_true(residual.shape[0] == x.shape[0])
+                    or not statically_known_true(residual.shape[1] == x.shape[1])
+                ):
+                    return False
+            return op.dispatch(*args).provider == "native"
+        return False
+
+    @classmethod
+    def register(cls, pm_pass: PatternMatcherPass) -> None:
+        quant_op = QUANT_OPS[kInt8DynamicTokenSym]
+        fused_op = FUSED_OPS[FusedRMSQuantKey(kInt8DynamicTokenSym, False)]
+
+        def pattern(input, weight, result, scale, epsilon):
+            y = vllm.ir.ops.rms_norm(input, weight, epsilon)
+            output = auto_functionalized(
+                quant_op,
+                result=result,
+                input=y,
+                scale=scale,
+                azp=None,
+            )
+            return output[1], output[2]
+
+        def replacement(input, weight, result, scale, epsilon):
+            output = auto_functionalized(
+                fused_op,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=epsilon,
+                scale_ub=None,
+                residual=None,
+            )
+            return output[1], output[2]
+
+        def add_pattern(input, weight, residual, result, scale, epsilon):
+            y, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                input, residual, weight, epsilon
+            )
+            output = auto_functionalized(
+                quant_op,
+                result=result,
+                input=y,
+                scale=scale,
+                azp=None,
+            )
+            return output[1], output[2], residual_out
+
+        def add_replacement(input, weight, residual, result, scale, epsilon):
+            output = auto_functionalized(
+                fused_op,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=epsilon,
+                scale_ub=None,
+                residual=residual,
+            )
+            return output[1], output[2], output[3]
+
+        inputs = [empty_bf16(5, 256), empty_bf16(256)]
+        outputs = [empty_bf16(5, 256).to(torch.int8), empty_fp32(5, 1)]
+        for search, replace, examples in (
+            (add_pattern, add_replacement, [*inputs, empty_bf16(5, 256), *outputs]),
+            (pattern, replacement, [*inputs, *outputs]),
+        ):
+            pm.register_replacement(
+                search,
+                replace,
+                examples,
+                pm.fwd_only,
+                pm_pass,
+                extra_check=cls.supported,
+                scalar_workaround={"epsilon": 1e-6},
+            )
 
 
 class RMSNormQuantPattern:
@@ -782,6 +932,13 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             pass_name="rmsnorm_quant_fusion_pass"
         )
 
+        if (
+            current_platform.is_cuda()
+            and kInt8DynamicTokenSym in QUANT_OPS
+            and FusedRMSQuantKey(kInt8DynamicTokenSym, False) in FUSED_OPS
+        ):
+            RMSNormInt8QuantPattern.register(self.patterns)
+
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
@@ -844,6 +1001,7 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     def uuid(self) -> str:
         return self.hash_source(
             self,
+            RMSNormInt8QuantPattern,
             RMSNormGroupQuantPattern,
             RMSNormQuantPattern,
             RMSNormStaticQuantPattern,

@@ -160,10 +160,15 @@ __device__ void compute_dynamic_per_token_scales(
       } else {
         scale = block_absmax_val_maybe;
       }
-      // token scale computation
-      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-      s_token_scale = scale;                 // Shared memory store
-      all_token_scales[blockIdx.x] = scale;  // Global output store
+      if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+        // Match dynamic_scaled_int8_quant, including zero and tiny rows.
+        all_token_scales[blockIdx.x] = scale / qmax;
+        s_token_scale = scale == 0.0f ? 0.0f : qmax / scale;
+      } else {
+        scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+        s_token_scale = scale;
+        all_token_scales[blockIdx.x] = scale;
+      }
     }
     __syncthreads();
 
@@ -448,10 +453,15 @@ __device__ void compute_dynamic_per_token_scales(
       } else {
         scale = block_absmax_val_maybe;
       }
-      // token scale computation
-      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-      s_token_scale = scale;                 // shared memory store
-      all_token_scales[blockIdx.x] = scale;  // global output store
+      if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+        // INT8 consumes the inverse; FP8 consumes the scale itself.
+        all_token_scales[blockIdx.x] = scale / qmax;
+        s_token_scale = scale == 0.0f ? 0.0f : qmax / scale;
+      } else {
+        scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+        s_token_scale = scale;
+        all_token_scales[blockIdx.x] = scale;
+      }
     }
     __syncthreads();
 
