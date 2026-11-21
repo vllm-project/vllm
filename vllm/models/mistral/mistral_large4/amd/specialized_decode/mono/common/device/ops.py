@@ -38,13 +38,17 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
+from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.device.arch import (
+    GFX942,
+)
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.plan.execution import (
     THREADS,
     WAVES,
 )
 
-# gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16. SC1 alone is device
-# scope (past the per-XCD caches); SC0 | SC1 is system scope (peers over XGMI).
+# gfx94x / gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16. SC1 alone is
+# device scope (past the per-XCD caches); SC0 | SC1 is system scope (peers over
+# XGMI).
 CM_DEV = 16
 
 
@@ -199,8 +203,11 @@ def xshfl(v, off):
 
 
 def xred(v, off, op):
-    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap."""
-    if off < 16:
+    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap.
+    gfx942 has no permlane swap: it reads lane ^ off with a shuffle instead. The
+    lanes then see op(a, b) or op(b, a), the same value for the commutative ops
+    used here (add, max)."""
+    if off < 16 or GFX942:
         return op(v, xshfl(v, off))
     is_f = isinstance(v, fx.Float32)
     x = v.bitcast(fx.Int32) if is_f else fx.Int32(v)
@@ -261,8 +268,8 @@ def row_shr(v, lane, k):
 
 def _xpartner(v, off, lane):
     """Lane `lane ^ off`'s v: DPP within a row, v_permlane*_swap across rows
-    (`xshfl` takes `shuffle_xor` there)."""
-    if off < 16:
+    (`xshfl` takes `shuffle_xor` there, and gfx942 everywhere)."""
+    if off < 16 or GFX942:
         return xshfl(v, off)
     a, b = permlane_swap(off, v, v)
     return ((lane & off) != 0).select(a, b)
@@ -375,7 +382,56 @@ def rows_to_lds(tid, src, rows, row_words, dst, dst_row):
 
 
 def mfma_bf16(a, b, c):
+    """16x16x32 bf16 MFMA: lane l holds K 8 (l // 16) .. + 8 of its row in `a`
+    and of its column in `b`. gfx942 has only the 16x16x16 one: it runs two,
+    on elements 0 .. 3 and 4 .. 7 of every lane, which cover all 32 K."""
+    if GFX942:
+        a16 = fx.Vector(a).bitcast(fx.Int16)
+        b16 = fx.Vector(b).bitcast(fx.Int16)
+        for h in range(2):
+            ah = fx.Vector.from_elements([a16[4 * h + i] for i in range(4)], fx.Int16)
+            bh = fx.Vector.from_elements([b16[4 * h + i] for i in range(4)], fx.Int16)
+            c = fx.Vector(
+                rocdl.mfma_f32_16x16x16bf16_1k(T.vec(4, T.f32), [ah, bh, c, 0, 0, 0])
+            )
+        return c
     return fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+
+
+def _pair_i64(lo, hi):
+    return fx.Vector.from_elements([fx.Int32(lo), fx.Int32(hi)], fx.Int32).bitcast(
+        fx.Int64
+    )[0]
+
+
+def mfma_f8f8_k128(a, b, c):
+    """One 16x16x128 FP8 x FP8 product, unscaled: `a` and `b` are a lane's 32
+    bytes (8 dwords) of its row and column, in the same K order. gfx950 runs
+    one scaled MFMA with unit (E8M0 127) scales; gfx942 four 16x16x32 FP8
+    MFMAs on dword pairs (0, 1) .. (6, 7). Either way every K of the 128 pairs
+    with itself, which is all the product needs."""
+    if GFX942:
+        for j in range(4):
+            c = fx.Vector(
+                rocdl.mfma_f32_16x16x32_fp8_fp8(
+                    T.vec(4, T.f32),
+                    [
+                        _pair_i64(a[2 * j], a[2 * j + 1]),
+                        _pair_i64(b[2 * j], b[2 * j + 1]),
+                        c,
+                        0,
+                        0,
+                        0,
+                    ],
+                )
+            )
+        return c
+    one = fx.Int32(127)
+    return fx.Vector(
+        rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+            T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one]
+        )
+    )
 
 
 def row_sum(red, r, t, waves=None):
@@ -416,12 +472,27 @@ def load_ptr64(table, i):
     return (fx.Int64(uniform(pw[1])) << 32) | fx.Int64(fx.Uint32(uniform(pw[0])))
 
 
+def _fp8x2_bf16_word(w, hi):
+    """Two fp8 of a dword (bytes 0, 1, or 2, 3 when `hi`) -> one dword of their
+    bf16, the first low, for gfx942: v_cvt_pk_f32_fp8, then the top halves of
+    the two f32 (exact: a bf16 holds every FNUZ e4m3 value)."""
+    p = fx.Vector(rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), fx.Int32(w), hi))
+    return fx.Int32(
+        rocdl.perm_b32(
+            p[1].bitcast(fx.Int32), p[0].bitcast(fx.Int32), fx.Int32(0x07060302)
+        )
+    )
+
+
 def fp8x8_bf16_pk(words):
     """Eight fp8 of two dwords -> bf16 MFMA operand (exact) by
     v_cvt_scalef32_pk_bf16_fp8 (scale 1), two values an instruction."""
     out = []
     for w in words:
         for hi in (False, True):
+            if GFX942:
+                out.append(_fp8x2_bf16_word(w, hi))
+                continue
             p = rocdl.cvt_scalef32_pk_bf16_fp8(
                 T.bf16x2, as_ir_value(fx.Int32(w)), as_ir_value(fx.Float32(1.0)), hi
             )
@@ -567,6 +638,8 @@ def f8_word(k):
 
 def fp8_to_bf16x8(word0, word1):
     """Convert two dwords of eight FP8 values to a BF16 vector."""
+    if GFX942:
+        return fp8x8_bf16_pk((word0, word1))
     one = as_ir_value(fx.Float32(1.0))
     parts = []
     for word in (word0, word1):
@@ -582,6 +655,7 @@ def fp8_to_bf16x8(word0, word1):
 
 def mxfp8_to_bf16x8(word0, word1, scale):
     """Convert two dwords of eight FP8 values with one E8M0 block scale to BF16."""
+    assert not GFX942, "MXFP8 needs gfx950's scaled conversions"
     scale = as_ir_value(scale)
     parts = []
     for word in (word0, word1):
@@ -597,6 +671,7 @@ def mxfp8_to_bf16x8(word0, word1, scale):
 
 def mxfp4_to_bf16x8(word, scale):
     """Convert one packed dword of eight scaled E2M1 values to BF16."""
+    assert not GFX942, "MXFP4 needs gfx950's scaled conversions"
     parts = []
     for select in range_constexpr(4):
         pair = fx.Vector(

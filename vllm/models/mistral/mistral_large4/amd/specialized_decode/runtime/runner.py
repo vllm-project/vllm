@@ -39,7 +39,7 @@ from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.runti
 
 from .spec import DecodeConfig
 from .variants import load_variant
-from .weights import KINDS, LayerKind, MoeLayer, build_moe_layer, moe_kinds
+from .weights import GFX942, KINDS, LayerKind, MoeLayer, build_moe_layer, moe_kinds
 
 logger = init_logger(__name__)
 
@@ -156,7 +156,7 @@ class MonoRunner:
         """The kernel's latent cache dtype, from the bound caches: `bf16` or
         `fp8` (E4M3, ATOM layout)."""
         # vLLM allocates an fp8 cache as uint8 and views it as fp8 per call
-        fp8 = {torch.float8_e4m3fn, torch.uint8}
+        fp8 = {torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.uint8}
         dtypes = {lw.attn.attn.kv_cache.dtype for lw in self.moe}
         if dtypes == {torch.bfloat16}:
             return "bf16"
@@ -181,14 +181,19 @@ class MonoRunner:
                 f"block table covers {index_max_seq} < max_model_len "
                 f"{self.max_model_len}"
             )
+        # gfx950: MXFP4 a4w4 experts on the scaled FP4 MFMA; gfx942: block-FP8
+        # experts in place (`weights._routed_experts_fp8`)
+        native_fp4 = not GFX942
         build_kwargs = dict(
             heads=heads, npes=npes, topk=cfg.topk,
             launches_per_step=len(self.moe), index_max_seq=index_max_seq,
             index_request_width=cfg.q, index_page_size=page,
             index_block_table_stride=block_table_stride, index_cache_dtype="fp8",
-            expert_mxfp4=True, atom_experts=True, attention_weight="fp8_block128",
-            kv_cache_layout="atom", kv_cache_dtype=kv_cache_dtype, native_fp4_mfma=True,
-            rope_dtype="fp32", uv_scale_rows=128, separate_shared=True,
+            expert_mxfp4=native_fp4, atom_experts=native_fp4,
+            aiter_fp8_experts=GFX942, attention_weight="fp8_block128",
+            kv_cache_layout="atom", kv_cache_dtype=kv_cache_dtype,
+            native_fp4_mfma=native_fp4, rope_dtype="fp32", uv_scale_rows=128,
+            separate_shared=True,
         )  # fmt: skip
         scratch_bytes: dict[tuple[bool, bool], int] = {}
         sym_bytes = 0
@@ -202,7 +207,7 @@ class MonoRunner:
                 inter = v.geometry_config.ml4_tp_config(npes).inter
                 scr, sym_l = v.layout.layout(
                     rows, heads, npes, cfg.topk, with_indexer, index_max_seq,
-                    inter=inter, native_fp4_mfma=True,
+                    inter=inter, native_fp4_mfma=native_fp4,
                 )  # fmt: skip
                 builds.append((rows, kind, v, inter, with_indexer))
                 key = (nope, kvs)

@@ -34,7 +34,7 @@ one memory round trip: no store drain, no separate flag, no second load.
 
 GEMVs run on the matrix cores: weights are host-packed (`pack_fp8` /
 `pack_bf16`) so one wave loads 16 rows x 64 k as one contiguous 1 KB, FP8 is
-widened exactly to bf16 and fed to `mfma_f32_16x16x32_bf16` with the samples
+widened exactly to bf16 and fed to a 16x16x32 bf16 MFMA (`mfma_bf16`) with the samples
 as the N dimension.  Each 64-k chunk's partial is scaled by its f32 block
 scale (times any activation scale / route weight) into the accumulator, so the
 math is exact block-scaled FP8 on bf16 activations.  Weight loads that do not
@@ -58,6 +58,10 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 
+from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.device.arch import (
+    GFX942,
+    LDS_BYTES,
+)
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.device.ops import (
     bpermute_i32,
     div_rn,
@@ -65,6 +69,7 @@ from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.devic
     fp8_pack4,
     mem_realtime,
     memrealtime,
+    mfma_f8f8_k128,
     read_lane_i32,
     spin_pause,
     wave_umax_dpp,
@@ -78,6 +83,9 @@ from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.devic
 )
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.device.ops import (
     fp8_to_bf16x8 as _fp8_to_bf16x8,
+)
+from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.device.ops import (
+    mfma_bf16 as _mfma_bf16,
 )
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.device.ops import (
     mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
@@ -121,6 +129,7 @@ from .geometry_config import (
     EPS,
     FP8_MAX,
     HIDDEN,
+    INDEX_FP8_MAX,
     INDEX_ROPE,
     INTER,
     KV_LORA,
@@ -204,6 +213,11 @@ from .layout import (
     ug_split,
 )
 
+# The index K writer's scale is 2 ** (exponent(amax) - INDEX_FP8_EXP), plus
+# one above a 1.75 mantissa: INDEX_FP8_MAX = 1.75 * 2 ** INDEX_FP8_EXP.
+INDEX_FP8_EXP = round(math.log2(INDEX_FP8_MAX / 1.75))
+assert INDEX_FP8_MAX == 1.75 * 2**INDEX_FP8_EXP
+
 # ------------------------------------------------- selection tree, per token
 # ``layout``'s ``index_lists``/``index_levels`` size the tree a BUILD carries;
 # these four size the part a TOKEN runs, on its traced ``bound``.  A token below
@@ -276,6 +290,11 @@ def build_ml4_monokernel(
     index_cache_dtype: str = "bf16",
     expert_mxfp4: bool = False,
     atom_experts: bool = False,
+    # FP8 experts read in place from aiter's block-scale MoE storage
+    # (`shuffle_weight` 16x16: a 64-k chunk holds k 16 (lane // 16) .. + 16 of
+    # row lane % 16 in each lane), so the FP8 activations sit in LDS in natural
+    # K order instead of `f8_word` order.
+    aiter_fp8_experts: bool = False,
     attention_weight: AttentionWeight | str = AttentionWeight.FP8_BLOCK128,
     kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
     kv_cache_dtype: str = "bf16",
@@ -334,6 +353,10 @@ def build_ml4_monokernel(
     assert not cache_fp8 or use_atom_kv_cache
     assert not atom_experts or expert_mxfp4
     assert not native_fp4_mfma or atom_experts
+    assert not aiter_fp8_experts or not expert_mxfp4
+    assert not GFX942 or not expert_mxfp4, (
+        "MXFP4 experts need gfx950's scaled conversions and MFMA"
+    )
     attention_k_chunks_per_unit = 1 if attention_bf16 else 2
     SPLIT_KEYS = sparse_keys_per_task(S, heads)
     assert topk % SPLIT_KEYS == 0 and 1 <= S <= 12
@@ -405,11 +428,10 @@ def build_ml4_monokernel(
     N_SPLIT = topk // SPLIT_KEYS
     QB_ROWS = H * (NOPE_DIM + Q_PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
-    # The index-Q row space is fixed at 256 tiles.  TP8 produces half from
-    # q_b CTAs; TP4 produces all of them, one per CTA.
-    assert not with_indexer or (
-        INDEX_Q_ROWS // INDEX_TILE == BLOCKS and N_QB in (BLOCKS // 2, BLOCKS)
-    )
+    # The index-Q row space is fixed at 256 tiles, one per CTA: the q_b CTAs
+    # produce the first N_QB (TP4: all of them, TP8: a quarter), the others
+    # the rest.
+    assert not with_indexer or (INDEX_Q_ROWS // INDEX_TILE == BLOCKS and N_QB <= BLOCKS)
     QB_PER_HEAD = (NOPE_DIM + Q_PE_DIM) // Q_B_TILE
     N_UK = H * KV_LORA // UK_TILE
     UK_PER_HEAD = KV_LORA // UK_TILE
@@ -438,7 +460,12 @@ def build_ml4_monokernel(
     # 16 N columns and uses 4 of them. Raising the tile trades LDS for weight
     # traffic; it is bit-identical, because the samples are independent output
     # columns and each one's K chunks accumulate in the same order either way.
-    SAMPLE_TILE = min(S, qkv_sample_tile)
+    # gfx942: four 6144-wide bf16 rows (48 KB) is all its 64 KB of LDS holds
+    # next to the reductions, so wider steps also stage the q_b and index_q
+    # input four samples at a time (``X_TILE``), over the same weight registers.
+    SAMPLE_TILE = min(S, 4 if GFX942 else qkv_sample_tile)
+    X_TILE = SAMPLE_TILE if GFX942 else S
+    assert not (attention_ptpc and X_TILE < S)
     # Per-sample strides of the MoE FP8 activation tile and its block scales,
     # in LDS.  ``HIDDEN // 4`` (1536) and ``XQ_GROUPS`` (192) are both multiples
     # of the 32 LDS banks, so when the up/gate MFMA's B column is the SAMPLE --
@@ -509,7 +536,7 @@ def build_ml4_monokernel(
     )
     X_WORDS = max(
         SAMPLE_TILE * HIDDEN // 2,
-        S
+        X_TILE
         * HIDDEN
         // 2,  # ML4: q_b and index_q stage the full normed hidden (no q-LoRA)
         S * XQ_X_STRIDE,
@@ -567,10 +594,11 @@ def build_ml4_monokernel(
     # not in that tuple, so the overrun used to take the engine down instead --
     # and `fused_indexer_refusal` has no width check to catch it earlier, so
     # the fused path at an unsupported width was a crash, not a fallback.
-    if WORK_WORDS > 40960:
+    LDS_WORDS = LDS_BYTES // 4
+    if WORK_WORDS > LDS_WORDS:
         raise ValueError(
-            f"static LDS {WORK_WORDS * 4} B exceeds the gfx950 per-workgroup "
-            f"budget of 163840 B at S={S}"
+            f"static LDS {WORK_WORDS * 4} B exceeds the per-workgroup budget "
+            f"of {LDS_WORDS * 4} B at S={S}"
         )
 
     base, first, acc = {}, {}, 0
@@ -1410,10 +1438,8 @@ def build_ml4_monokernel(
                             b = fx.ptr_load(
                                 xs + (bw + sp * 16), result_type=v4f
                             ).bitcast(fx.BFloat16)
-                        c = fx.Vector(
-                            rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c])
-                        )
-                if const_expr(fmt == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
+                        c = _mfma_bf16(a, b, c)
+                if const_expr(fmt == "f8f8"):  # one 128-k FP8 x FP8 product, unscaled
                     a = fx.Vector.from_elements(
                         [wv[h][e] for h in range(2) for e in range(4)], fx.Int32
                     )
@@ -1426,12 +1452,7 @@ def build_ml4_monokernel(
                     b = fx.Vector.from_elements(
                         [bv[h][e] for h in range(2) for e in range(4)], fx.Int32
                     )
-                    one = fx.Int32(127)
-                    c = fx.Vector(
-                        rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                            T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one]
-                        )
-                    )
+                    c = mfma_f8f8_k128(a, b, c)
                 if const_expr(fmt == "native_mxfp4"):
                     raw, weight_scale, activation_scale_word = wv
                     activation_scale = lds_ld(misc, activation_scale_word).bitcast(
@@ -1493,9 +1514,7 @@ def build_ml4_monokernel(
                     b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(
                         fx.BFloat16
                     )
-                    c = fx.Vector(
-                        rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c])
-                    )
+                    c = _mfma_bf16(a, b, c)
                 if const_expr(coef is None):
                     acc = [acc[e] + c[e] for e in range(4)]
                 else:
@@ -1545,11 +1564,27 @@ def build_ml4_monokernel(
                         )
                     emit(rl, n, tot)
 
-        def emit_out(stride):
+        def emit_out(stride, base=0):
             def f(rl, n, v):
-                lds_st(outs, n * stride + rl, v)
+                lds_st(outs, (base + n) * stride + rl, v)
 
             return f
+
+        def gemv_x_tiles(name, units, stride, mark=None):
+            """One row group of the q_b / index_q GEMV over the packed bf16 mailbox
+            `name` (S rows of HIDDEN), staged `X_TILE` samples at a time against
+            the same issued `units` (a callable: issued after the first staging).
+            Each output column is one sample, so the tiling is bit-identical."""
+            for sb in range_constexpr(0, S, X_TILE):
+                cnt = min(X_TILE, S - sb)
+                stage_x_pairs(name, cnt * HIDDEN, lambda k, sb=sb: sb * HIDDEN + k)
+                if const_expr(sb == 0 and mark is not None):
+                    stamp(mark[0], mark[1], 2)
+                gpu.barrier()
+                if const_expr(callable(units)):
+                    units = units()
+                acc = mma_units([fx.Float32(0.0) for _ in range(4)], units)
+                reduce_rows(1, acc, emit_out(stride, sb), cnt)
 
         def pick(values, index):
             value = values[0]
@@ -1894,7 +1929,7 @@ def build_ml4_monokernel(
                 for i in range_constexpr(nxw):
                     wd = (
                         tid + i * THREADS
-                        if const_expr(native_fp4_mfma)
+                        if const_expr(native_fp4_mfma or aiter_fp8_experts)
                         else f8_word((tid + i * THREADS) * 4)
                     )
                     lds_st(
@@ -1911,14 +1946,16 @@ def build_ml4_monokernel(
 
         def st_f8(k, q0, q1):
             """LDS FP8 activation bytes k, k + 1 (k even, held by this lane; lane ^ 1 holds
-            k ^ 2) in `f8_word` order.  Call from the whole wave."""
+            k ^ 2) in `f8_word` order (natural order for `aiter_fp8_experts`).  Call
+            from the whole wave."""
             w = (
                 fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False))
                 & 0xFFFF
             )
             nb = _xshfl(w, 1)
+            wd = k // 4 if const_expr(aiter_fp8_experts) else f8_word(k)
             if lane % 2 == 0:
-                lds_st(xs, f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
+                lds_st(xs, wd, (w | (nb << 16)).bitcast(fx.Float32))
 
         def st_mxfp8(k, q0, q1):
             """Store one row-major MXFP8 pair for the scaled MFMA."""
@@ -2543,13 +2580,14 @@ def build_ml4_monokernel(
                                 wave_max(fx.max(fmath.absf(v0), fmath.absf(v1))),
                                 fx.Float32(1.0e-4),
                             )
-                            # exp2(ceil(log2(amax / 448))) as an exact statement
-                            # about the exponent field: amax = m * 2**a with
-                            # m <= 1.75 gives 2**(a - 8), m > 1.75 gives
-                            # 2**(a - 7).  No divide, no log2, so no 1-ulp slip
-                            # across a power of two -- which would halve a row.
+                            # exp2(ceil(log2(amax / INDEX_FP8_MAX))) as an exact
+                            # statement about the exponent field: INDEX_FP8_MAX
+                            # = 1.75 * 2**d, so amax = m * 2**a with m <= 1.75
+                            # gives 2**(a - d), m > 1.75 gives 2**(a - d + 1).
+                            # No divide, no log2, so no 1-ulp slip across a
+                            # power of two -- which would halve a row.
                             bits = amax.bitcast(fx.Int32)
-                            exponent = ((bits >> 23) & fx.Int32(0xFF)) - 8
+                            exponent = ((bits >> 23) & fx.Int32(0xFF)) - INDEX_FP8_EXP
                             exponent = exponent + (
                                 (bits & fx.Int32(0x7FFFFF)) > fx.Int32(0x600000)
                             ).select(fx.Int32(1), fx.Int32(0))
@@ -2558,8 +2596,8 @@ def build_ml4_monokernel(
                             )
                             qs = (exponent << 23).bitcast(fx.Float32)
                             inv = ((fx.Int32(254) - exponent) << 23).bitcast(fx.Float32)
-                            q0 = fx.min(fx.max(v0 * inv, -FP8_MAX), FP8_MAX)
-                            q1 = fx.min(fx.max(v1 * inv, -FP8_MAX), FP8_MAX)
+                            q0 = fx.min(fx.max(v0 * inv, -INDEX_FP8_MAX), INDEX_FP8_MAX)
+                            q1 = fx.min(fx.max(v1 * inv, -INDEX_FP8_MAX), INDEX_FP8_MAX)
                             page, row = index_page_cell(s, row_position(s))
                             pair = fx.Int32(
                                 rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)
@@ -2640,7 +2678,7 @@ def build_ml4_monokernel(
                     QB_NKC,
                     HIDDEN,
                     128,
-                    attention_b_word(n_sel() * HIDDEN + kc * 64),
+                    attention_b_word(n_sel(X_TILE) * HIDDEN + kc * 64),
                 )
 
             pre = [u_qb(c) for c in range(QB_UNITS)]
@@ -2653,15 +2691,12 @@ def build_ml4_monokernel(
                 qb_scales = stage_x_pairs_ptpc(
                     "q_an", S, Q_LORA, lambda k: k, retain_bf16=with_indexer
                 )
-            else:
-                stage_x_pairs("q_an", S * HIDDEN, lambda k: k)
-            stamp("q_b", t, 2)
-            gpu.barrier()
-            acc = run_units(u_qb, QB_UNITS, QB_UNITS, pre)
-            if const_expr(attention_ptpc):
+                stamp("q_b", t, 2)
+                gpu.barrier()
+                acc = run_units(u_qb, QB_UNITS, QB_UNITS, pre)
                 reduce_rows(1, acc, emit_ptpc(Q_B_TILE, t * Q_B_TILE, r_sqb, qb_scales))
             else:
-                reduce_rows(1, acc, emit_out(Q_B_TILE))
+                gemv_x_tiles("q_an", pre, Q_B_TILE, mark=("q_b", t))
             stamp("q_b", t, 3)
             gpu.barrier()
             head = t // QB_PER_HEAD
@@ -2718,9 +2753,6 @@ def build_ml4_monokernel(
                 gpu.barrier()
                 iq_t = t
                 stamp("index_q", iq_t, 0)
-                # ML4: the indexer query reads LayerNorm(normed x), not this CTA's staged q_b input -- re-stage it.
-                stage_x_pairs("iq_an", S * HIDDEN, lambda k: k)
-                gpu.barrier()
 
                 def u_index_q(c):
                     kc = (wave * QB_UNITS + c) * 2
@@ -2731,11 +2763,13 @@ def build_ml4_monokernel(
                         kc,
                         QB_NKC,
                         HIDDEN,
-                        (n_sel() * HIDDEN + kc * 64) // 2,
+                        (n_sel(X_TILE) * HIDDEN + kc * 64) // 2,
                     )
 
-                iq_acc = run_units(u_index_q, QB_UNITS, QB_UNITS)
-                reduce_rows(1, iq_acc, emit_out(INDEX_TILE))
+                # ML4: the indexer query reads LayerNorm(normed x), not this CTA's staged q_b input -- re-stage it.
+                gemv_x_tiles(
+                    "iq_an", lambda: [u_index_q(c) for c in range(QB_UNITS)], INDEX_TILE
+                )
                 stamp("index_q", iq_t, 3)
                 gpu.barrier()
                 if tid < S * INDEX_TILE // 4:
@@ -2776,7 +2810,7 @@ def build_ml4_monokernel(
                         kc,
                         QB_NKC,
                         HIDDEN,
-                        (n_sel() * HIDDEN + kc * 64) // 2,
+                        (n_sel(X_TILE) * HIDDEN + kc * 64) // 2,
                     )
 
                 pre = [u_index_q_extra(c) for c in range(QB_UNITS)]
@@ -2785,11 +2819,7 @@ def build_ml4_monokernel(
                     lambda s: (mb("iq_an"), (s * HIDDEN + HIDDEN - 2) // 2),
                     mark=("index_q", iq_task),
                 )
-                stage_x_pairs("iq_an", S * HIDDEN, lambda k: k)
-                stamp("index_q", iq_task, 2)
-                gpu.barrier()
-                iq_acc = run_units(u_index_q_extra, QB_UNITS, QB_UNITS, pre)
-                reduce_rows(1, iq_acc, emit_out(INDEX_TILE))
+                gemv_x_tiles("iq_an", pre, INDEX_TILE, mark=("index_q", iq_task))
                 stamp("index_q", iq_task, 3)
                 gpu.barrier()
                 if const_expr(SHARD_INDEX_Q):
@@ -3058,11 +3088,7 @@ def build_ml4_monokernel(
                             kv = fx.Vector.from_elements(kv_values, fx.Float32).to(
                                 fx.BFloat16
                             )
-                        score_frag = fx.Vector(
-                            rocdl.mfma_f32_16x16x32_bf16(
-                                T.vec(4, T.f32), [qv, kv, score_frag]
-                            )
-                        )
+                        score_frag = _mfma_bf16(qv, kv, score_frag)
                     partial = fx.Float32(0.0)
                     for e in range_constexpr(4):
                         index_head = head_group * 16 + (lane // 16) * 4 + e
@@ -4097,9 +4123,7 @@ def build_ml4_monokernel(
                     b = fx.ptr_load(
                         xs + (hn * QS + kst * 16 + (lane // 16) * 4), result_type=v4f
                     ).bitcast(fx.BFloat16)
-                    c = fx.Vector(
-                        rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c])
-                    )
+                    c = _mfma_bf16(a, b, c)
                 if const_expr(SPLIT_KEYS == 64) or wave < 4:
                     fx.ptr_store(c, red + (wave * 64 + lane) * 4)
                 gpu.barrier()
@@ -4158,12 +4182,8 @@ def build_ml4_monokernel(
                         b1 = fx.Vector.from_elements(w_hi, fx.Int32).bitcast(
                             fx.BFloat16
                         )
-                        c0 = fx.Vector(
-                            rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b0, c0])
-                        )
-                        c1 = fx.Vector(
-                            rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b1, c1])
-                        )
+                        c0 = _mfma_bf16(a, b0, c0)
+                        c1 = _mfma_bf16(a, b1, c1)
                     if lane < 32:
                         for e in range_constexpr(4):
                             hh = split_acc_head(head_group, lane // 16, e)
@@ -4831,12 +4851,13 @@ def build_ml4_monokernel(
             # Same number of rounds either way: ``2 * S`` (sample) rounds become
             # ``2 * S`` (group) rounds, of which only ``ug_n`` carry work.
             # Per-sample schedule: TOP_K * UG_C tasks (top-8: == inter; ug_task_rounds assumed that).
+            # They need not fill whole CTA rounds: TP8's 384 leave the last
+            # round to the first UG_TASKS % G CTAs of the rotation.
             UG_TASKS = TOP_K * UG_C
-            assert moe_dedup or UG_TASKS % G == 0, (
-                "the per-sample up/gate schedule needs whole CTA rounds"
-            )
-            UG_ROUNDS = UG_ROUTED * UG_C // G if moe_dedup else UG_TASKS // G
-            for task_round in range_constexpr(UG_ROUNDS):
+            UG_ROUNDS = UG_ROUTED * UG_C // G if moe_dedup else (UG_TASKS + G - 1) // G
+            ug_carry: dict[str, list] = {}
+
+            def ug_round(task_round):
                 u = fx.Int32(u0 + task_round * G)
                 c = u % UG_C
                 has_sh = u < UG_C
@@ -5043,10 +5064,10 @@ def build_ml4_monokernel(
                             _uniform(lds_ld(grp, GRP_EXP + group)), None, live
                         )
                     else:
-                        cur = ug_ahead  # type: ignore[has-type]  # noqa: F821  (bound by the previous unrolled round)
+                        cur = ug_carry.pop("ahead")  # issued by the previous round
                     if const_expr(task_round + 1 < UG_ROUNDS):
                         ahead = group + G // UG_C
-                        ug_ahead = ug8_units(  # noqa: F841
+                        ug_carry["ahead"] = ug8_units(
                             _uniform(lds_ld(grp, GRP_EXP + ahead)), None, ahead < ug_n
                         )
                 else:
@@ -5143,6 +5164,14 @@ def build_ml4_monokernel(
                         stamp("ug", sample * expert_inter + u, 4)  # mid mailbox write
                 if const_expr(task_round + 1 < UG_ROUNDS):
                     gpu.barrier()
+
+            for task_round in range_constexpr(UG_ROUNDS):
+                if const_expr(moe_dedup or (task_round + 1) * G <= UG_TASKS):
+                    ug_round(task_round)
+                else:
+                    # CTA-uniform: the round's barriers stay matched
+                    if fx.Int32(u0 + task_round * G) < UG_TASKS:
+                        ug_round(task_round)
 
         # ======== 10. mid FP8 quant + expert down + route weighting + MoE TP reduce
         # 2 row groups x (sample tile * 9 slots * 4) chunks: 4 waves per group.
