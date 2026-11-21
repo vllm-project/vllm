@@ -265,6 +265,12 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
                 spec.draft_model_config.hf_text_config, target.max_model_len
             )
         config_cls.adapt_draft_model_config(spec)
+        # Draft RoPE comes from the draft config only (#61231).
+        if spec.method in ("eagle", "eagle3", "dflash"):
+            SpeculativeConfig._maybe_log_draft_rope(
+                spec.draft_model_config,
+                target,
+            )
         config_cls.resolve_num_speculative_tokens(spec)
         if spec.num_speculative_tokens is None:
             raise ValueError(
