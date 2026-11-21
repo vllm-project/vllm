@@ -6,6 +6,7 @@
 """
 
 import itertools
+import json
 from unittest.mock import patch
 
 import numpy as np
@@ -20,6 +21,7 @@ from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.interface import DeviceCapability
 from vllm.platforms.rocm import RocmPlatform, on_mi3xx
+from vllm.utils.flashinfer import has_flashinfer_sm120_fp8_fmha
 from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend
@@ -475,7 +477,93 @@ def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
         },
     )()
     try:
-        with pytest.raises(ValueError, match="requires either"):
+        with pytest.raises(ValueError, match="requires one of"):
             MMEncoderAttention(4, 64)
+    finally:
+        vllm_config.model_config = old_model_config
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_sm120_fp8_fmha(),
+    reason="FlashInfer SM120 FP8 FMHA requires an SM 12.0 GPU",
+)
+@pytest.mark.parametrize("static_scales", [False, True])
+@pytest.mark.parametrize("head_size", [64, 72])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
+def test_mha_attn_varlen_forward_flashinfer_sm120_fp8(
+    default_vllm_config,
+    tmp_path,
+    head_size: int,
+    dtype: torch.dtype,
+    static_scales: bool,
+):
+    """Compare packed SM120 FP8 ViT attention with a BF16/FP16 reference."""
+    num_heads = 4
+    var_seq_len = [128, 193, 511]
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
+
+    total_len = sum(var_seq_len)
+    # Keep Q/K/V as non-contiguous views, matching interleaved ViT QKV.
+    qkv = torch.randn(1, total_len, 3, num_heads, head_size)
+    q, k, v = qkv.unbind(dim=2)
+    scale_path = None
+    if static_scales:
+        scale_path = tmp_path / "scales.json"
+        fp8_max = torch.finfo(current_platform.fp8_dtype()).max
+        scales = {n: x.abs().max().item() / fp8_max for n, x in zip("qkv", (q, k, v))}
+        scale_path.write_text(json.dumps({"visual.blocks.0.attn": scales}))
+
+    vllm_config = get_current_vllm_config()
+    old_model_config = vllm_config.model_config
+    vllm_config.model_config = type(
+        "MinimalModelConfig",
+        (),
+        {
+            "multimodal_config": MultiModalConfig(
+                mm_encoder_attn_backend=AttentionBackendEnum.FLASH_ATTN,
+                mm_encoder_attn_dtype="fp8",
+                mm_encoder_fp8_scale_path=str(scale_path) if scale_path else None,
+            ),
+        },
+    )()
+    try:
+        cu_seqlens = torch.tensor(
+            [0] + list(itertools.accumulate(var_seq_len)), dtype=torch.int32
+        )
+        max_seqlen = torch.tensor(max(var_seq_len), dtype=torch.int32, device="cpu")
+        scale = 1.0 / head_size**0.5
+
+        attn = MMEncoderAttention(
+            num_heads, head_size, scale=scale, prefix="visual.blocks.0.attn"
+        )
+        assert attn.fp8_enabled and attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
+        attn.process_weights_after_loading()
+        # Static scales reach the kernel as floats, so its launch does not sync.
+        assert (attn._fp8_scale_floats is not None) == static_scales
+        output = attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+
+        ref_output = torch.cat(
+            [
+                ref_attention(q_i, k_i, v_i, scale=scale)
+                for q_i, k_i, v_i in zip(
+                    torch.split(q, var_seq_len, dim=1),
+                    torch.split(k, var_seq_len, dim=1),
+                    torch.split(v, var_seq_len, dim=1),
+                )
+            ],
+            dim=1,
+        )
+        diff = (output.float() - ref_output.float()).abs()
+        cosine = torch.nn.functional.cosine_similarity(
+            output.float().flatten(), ref_output.float().flatten(), dim=0
+        )
+
+        assert output.shape == ref_output.shape
+        assert output.dtype == dtype
+        assert cosine.item() >= 0.99
+        assert diff.mean().item() <= 0.03
+        assert diff.max().item() <= 0.30
     finally:
         vllm_config.model_config = old_model_config

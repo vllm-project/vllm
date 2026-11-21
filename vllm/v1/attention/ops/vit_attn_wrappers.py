@@ -159,6 +159,113 @@ def vit_aiter_fp8_attn_wrapper(
     )
 
 
+def flashinfer_sm120_fp8_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    host_scales: list[float] | None,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    from flashinfer.attention.cute_dsl import sm120_fmha_fp8_ragged_prefill
+
+    q_len = q.size(1)
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+    # The kernel takes max_seqlen and its scales as Python numbers. Static
+    # scales come in as `host_scales`; dynamic ones are read back from the
+    # GPU, one sync per layer.
+    with gpu_sync_allowed():
+        max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+        if host_scales is None:
+            host_scales = torch.cat(
+                [q_scale.view(1), k_scale.view(1), v_scale.view(1)]
+            ).tolist()
+    q_s, k_s, v_s = host_scales
+
+    q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    if torch.cuda.is_current_stream_capturing():
+        # Same as the FA wrapper: graph replay pads with empty sequences.
+        output = torch.zeros(q.shape, dtype=output_dtype, device=q.device)
+    else:
+        output = torch.empty(q.shape, dtype=output_dtype, device=q.device)
+    sm120_fmha_fp8_ragged_prefill(
+        q,
+        k,
+        v,
+        output,
+        cu_seqlens,
+        cu_seqlens,
+        max_seqlen_q=max_seqlen,
+        is_causal=False,
+        sm_scale=scale * q_s * k_s,
+        v_scale=v_s,
+    )
+    return einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
+
+
+def flashinfer_sm120_fp8_attn_wrapper_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    host_scales: list[float] | None,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty(q.shape, dtype=output_dtype, device=q.device)
+
+
+direct_register_custom_op(
+    op_name="flashinfer_sm120_fp8_attn_wrapper",
+    op_func=flashinfer_sm120_fp8_attn_wrapper,
+    fake_impl=flashinfer_sm120_fp8_attn_wrapper_fake,
+)
+
+
+def vit_flashinfer_sm120_fp8_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    host_scales: list[float] | None,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops.vllm.flashinfer_sm120_fp8_attn_wrapper(
+        q,
+        k,
+        v,
+        q_scale,
+        k_scale,
+        v_scale,
+        host_scales,
+        batch_size,
+        output_dtype,
+        scale,
+        cu_seqlens,
+        max_seqlen,
+    )
+
+
 def triton_attn_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
