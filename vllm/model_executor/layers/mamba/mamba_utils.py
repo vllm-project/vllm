@@ -110,10 +110,14 @@ class MambaStateDtypeCalculator:
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
-        if mamba_ssm_cache_dtype == "auto":
+        if mamba_ssm_cache_dtype != "auto":
+            temporal_state_dtype = STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype]
+        elif mamba_cache_dtype != "auto":
             temporal_state_dtype = conv_state_dtype
         else:
-            temporal_state_dtype = STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype]
+            # Decode rounds the state to this dtype on every token; in 16 bits
+            # that loses slow decay, so decode drifts from the fp32 prefill.
+            temporal_state_dtype = torch.float32
 
         return (conv_state_dtype, temporal_state_dtype)
 
@@ -133,9 +137,10 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType = "auto",
     ) -> tuple[torch.dtype, torch.dtype]:
-        return cls._mamba_state_dtype(
-            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
-        )
+        conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+        if mamba_ssm_cache_dtype == "auto":
+            return (conv_state_dtype, conv_state_dtype)
+        return (conv_state_dtype, STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype])
 
     @classmethod
     def kda_state_dtype(
