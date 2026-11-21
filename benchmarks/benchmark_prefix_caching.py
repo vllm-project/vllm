@@ -152,7 +152,7 @@ def repeat_and_sort_requests(
 ) -> list[str]:
     repeated_requests = requests * repeat_count
     if sort:
-        repeated_requests.sort(key=lambda x: x[1])
+        repeated_requests.sort(key=lambda request: request.prompt_len)
     else:
         random.shuffle(repeated_requests)
     return [req.prompt for req in repeated_requests]
