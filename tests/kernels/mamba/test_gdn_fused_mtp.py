@@ -110,6 +110,7 @@ def _build_layer(
         prefix=PREFIX,
         enable_packed_recurrent_decode=False,
         disable_tp_for_ba_proj=False,
+        beta_scale=1.0,
         tp_size=1,
         num_k_heads=H,
         num_v_heads=HV,

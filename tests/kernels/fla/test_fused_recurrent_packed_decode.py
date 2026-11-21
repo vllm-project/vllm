@@ -20,14 +20,16 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
 @pytest.mark.parametrize(
-    "batch,num_key_heads,num_value_heads,dtype,state_dtype",
+    "batch,num_key_heads,num_value_heads,dtype,state_dtype,K,V,beta_scale",
     [
-        (32, 4, 8, torch.float16, torch.float16),
-        (32, 4, 8, torch.bfloat16, torch.bfloat16),
-        (32, 4, 8, torch.float32, torch.float32),
-        (1, 16, 64, torch.bfloat16, torch.float32),
-        (9, 4, 12, torch.bfloat16, torch.float32),
-        (1, 4, 12, torch.bfloat16, torch.bfloat16),
+        (32, 4, 8, torch.float16, torch.float16, 128, 128, 1.0),
+        (32, 4, 8, torch.bfloat16, torch.bfloat16, 128, 128, 1.0),
+        (32, 4, 8, torch.float32, torch.float32, 128, 128, 1.0),
+        (1, 16, 64, torch.bfloat16, torch.float32, 128, 128, 1.0),
+        (9, 4, 12, torch.bfloat16, torch.float32, 128, 128, 1.0),
+        (1, 4, 12, torch.bfloat16, torch.bfloat16, 128, 128, 1.0),
+        (4, 30, 30, torch.bfloat16, torch.float32, 96, 192, 2.0),
+        (4, 30, 30, torch.bfloat16, torch.bfloat16, 96, 192, 2.0),
     ],
 )
 def test_fused_recurrent_packed_decode_matches_reference(
@@ -37,6 +39,9 @@ def test_fused_recurrent_packed_decode_matches_reference(
     num_key_heads: int,
     num_value_heads: int,
     state_dtype: torch.dtype,
+    K: int,
+    V: int,
+    beta_scale: float,
 ):
     generator = torch.Generator(device=DEVICE).manual_seed(0)
 
@@ -44,8 +49,6 @@ def test_fused_recurrent_packed_decode_matches_reference(
     B = batch
     H = num_key_heads
     HV = num_value_heads
-    K = 128
-    V = 128
     qkv_dim = 2 * (H * K) + (HV * V)
 
     device = torch.device(DEVICE)
@@ -96,7 +99,7 @@ def test_fused_recurrent_packed_decode_matches_reference(
         x <= 20.0, torch.log1p(torch.exp(torch.clamp(x, max=20.0))), x
     )
     g = (-torch.exp(A_log.float()) * softplus_x).unsqueeze(1)
-    beta = torch.sigmoid(b.float()).unsqueeze(1)
+    beta = torch.sigmoid(b.float()).unsqueeze(1) * beta_scale
 
     out_ref, state_ref = fused_recurrent_gated_delta_rule(
         q=q,
@@ -115,6 +118,7 @@ def test_fused_recurrent_packed_decode_matches_reference(
     # Packed path: fused gating + recurrent directly from packed mixed_qkv.
     fused_recurrent_gated_delta_rule_packed_decode(
         mixed_qkv=mixed_qkv,
+        beta_scale=beta_scale,
         a=a,
         b=b,
         A_log=A_log,

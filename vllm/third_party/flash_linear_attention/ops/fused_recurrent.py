@@ -280,6 +280,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     SPLIT_BATCH_HEAD_GRID: tl.constexpr,
+    BETA_SCALE: tl.constexpr,
 ):
     if SPLIT_BATCH_HEAD_GRID:
         i_v, i_hv, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -328,6 +329,8 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
     g_val = -tl.exp(A_log_val) * softplus_x
     beta_val = tl.sigmoid(b_val)
+    if BETA_SCALE != 1.0:
+        beta_val *= BETA_SCALE
 
     b_h *= exp(g_val)
     b_v -= tl.sum(b_h * b_k[None, :], 1)
@@ -352,6 +355,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     out: torch.Tensor,
     ssm_state_indices: torch.Tensor,
     use_qk_l2norm_in_kernel: bool = False,
+    beta_scale: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if mixed_qkv.ndim != 2:
         raise ValueError(
@@ -500,6 +504,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
+        BETA_SCALE=beta_scale,
         num_warps=num_warps,
         num_stages=num_stages,
     )
