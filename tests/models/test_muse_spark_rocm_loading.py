@@ -251,6 +251,9 @@ def test_aiter_kv_workspace_only_for_cache_readers(
     monkeypatch, default_vllm_config, sharing, bypass
 ) -> None:
     from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.layers.attention.attention import (
+        set_default_quant_scales,
+    )
     from vllm.v1.attention.backends.rocm_aiter_fa import (
         AiterFlashAttentionImpl,
         AiterFlashAttentionMetadataBuilder,
@@ -259,11 +262,13 @@ def test_aiter_kv_workspace_only_for_cache_readers(
 
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
+    set_default_quant_scales(layer, register_buffer=True)
     layer.impl = AiterFlashAttentionImpl.__new__(AiterFlashAttentionImpl)
     layer.impl.sliding_window = (-1, -1)
     layer.impl.num_heads = 1
     layer.impl.num_kv_heads = 1
     layer.impl.head_size = 64
+    layer.impl.use_fp8_extend_query = False
     layer.impl.alibi_slopes = None
     layer.impl.sinks = None
     layer.impl._fast_verify = False
