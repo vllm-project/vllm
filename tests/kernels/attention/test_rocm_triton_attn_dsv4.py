@@ -3,6 +3,7 @@
 
 import functools
 import itertools
+from collections import defaultdict
 from types import SimpleNamespace
 
 import pytest
@@ -676,6 +677,121 @@ def test_sparse_attn_decode_bf16_split_k_matches_ragged(
         num_splits=num_splits,
     )
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_split_decode_arch
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "indices_bytes"),
+    [("auto", 1 << 31), ("mxfp4_mla", 1 << 20)],
+    ids=["bf16-indices-2GiB", "mxfp4_mla-indices-1MiB"],
+)
+@torch.inference_mode()
+def test_sparse_mla_decode_warmup_covers_split_k(
+    monkeypatch, kv_cache_dtype: str, indices_bytes: int
+) -> None:
+    """After the layer's registered warmup, split-K decodes compile nothing.
+
+    The split count follows the batch and its selected KV length while serving.
+    ROCm also keys a variant on whether a pointer's storage fits in 2 GB, and
+    Triton on whether an int divides by 16: the warmup sees the KV cache
+    reservation, which the extensible KV cache re-binds to a view of the
+    committed blocks, and the indices view the metadata builder's buffer.
+    """
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
+    from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as ops_mod
+    from vllm.v1.attention.ops.mxfp4_mla import row_bytes
+
+    kernels = (
+        ops_mod._sparse_attn_decode_ragged_bf16_partial_kernel,
+        ops_mod._sparse_attn_decode_reduce_kernel,
+    )
+    for kernel in kernels:
+        monkeypatch.setattr(kernel, "device_caches", defaultdict(kernel.create_binder))
+    device_index = torch.accelerator.current_device_index()
+    caches = [kernel.device_caches[device_index][0] for kernel in kernels]
+
+    device = torch.device("cuda")
+    num_heads = 16
+    is_mxfp4 = kv_cache_dtype == "mxfp4_mla"
+    width = row_bytes(NOPE_ONLY_HEAD_DIM) if is_mxfp4 else NOPE_ONLY_HEAD_DIM
+    cache_dtype = torch.uint8 if is_mxfp4 else torch.bfloat16
+
+    def kv_cache_in(storage_bytes: int, num_blocks: int) -> torch.Tensor:
+        # Kernel block size 1: the flat row count is the block count.
+        storage = torch.empty(storage_bytes, dtype=torch.uint8, device=device)
+        kv_cache = storage[: num_blocks * width * cache_dtype.itemsize]
+        return kv_cache.view(cache_dtype).view(num_blocks, 1, width).zero_()
+
+    # The committed view differs from the reservation in storage size and in
+    # whether 16 divides its row count.
+    reserved, committed = kv_cache_in(1 << 32, 4096), kv_cache_in(1 << 24, 4093)
+    paged_kv_indices = torch.empty(indices_bytes // 4, dtype=torch.int32, device=device)
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = NOPE_ONLY_HEAD_DIM
+    impl.kv_cache_dtype = kv_cache_dtype
+    impl.scale = NOPE_ONLY_HEAD_DIM**-0.5
+    impl.sinks = None
+    impl.q_concat_buffer = torch.zeros(
+        13, num_heads, NOPE_ONLY_HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    impl.paged_kv_indices_bytes = indices_bytes
+
+    registry = JitWarmupRegistry(None)
+    with registry.activate():
+        impl.register_decode_warmup(reserved, kv_cache_dtype)
+    registry.warmup()
+    warmed = [len(cache) for cache in caches]
+
+    # Decode as forward_mqa does, at every split count the heuristic can pick.
+    split_counts = ops_mod.rocm_sparse_decode_bf16_split_counts()
+    for kv_cache in (reserved, committed):
+        kv = flat_kv_row_view(kv_cache, kv_cache.shape[1])[0].unsqueeze(1)
+        for num_tokens in (1, 13):
+            rows = [list(range(700))] * num_tokens
+            indices, indptr = _ragged_from_rows(rows, device)
+            metadata = SimpleNamespace(
+                attn_out_dtype=torch.bfloat16,
+                num_prefills=0,
+                num_decodes=num_tokens,
+                num_decode_tokens=num_tokens,
+                max_query_len=1,
+                max_seq_len=2048,
+                topk_tokens=2048,
+                paged_kv_indices=paged_kv_indices[: indices.numel()].copy_(indices),
+                paged_kv_indptr=indptr,
+            )
+            q = sparse_mod.AiterMLAHelper.get_mla_padded_q(
+                num_heads, impl.q_concat_buffer[:num_tokens]
+            )
+            for count in split_counts:
+                monkeypatch.setattr(
+                    sparse_mod,
+                    "rocm_sparse_decode_bf16_num_splits",
+                    lambda *args, count=count: count,
+                )
+                impl._forward_mla(SimpleNamespace(), q, kv, metadata)
+    assert [len(cache) for cache in caches] == warmed
+    # The partial kernel in both KV pointer classes, the combine once.
+    assert warmed == [2 * len(split_counts), len(split_counts)]
+
+
+@requires_split_decode_arch
+def test_sparse_decode_bf16_split_counts_reach_heuristic_max() -> None:
+    """The warmed split counts end at the largest the heuristic returns."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as ops_mod
+
+    counts = {
+        ops_mod.rocm_sparse_decode_bf16_num_splits(num_queries, num_heads, sparse_len)
+        for num_queries in range(1, 129)
+        for num_heads in (16, 32, 64, 128)
+        for sparse_len in (512, 544, 600, 1024, 1100, 2048, 8192)
+    }
+    split_counts = set(ops_mod.rocm_sparse_decode_bf16_split_counts())
+    assert counts - {1} <= split_counts
+    assert max(counts) == max(split_counts)
 
 
 def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
