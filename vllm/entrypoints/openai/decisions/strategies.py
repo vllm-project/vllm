@@ -86,7 +86,8 @@ class ReadContext:
 @dataclass(frozen=True, slots=True)
 class DecisionLimits:
     max_questions: int
-    max_options: int
+    #: None means that option count is bounded by the rendered prompt length.
+    max_options: int | None
     #: Whether a read scores each option by its label's token, so a question
     #: has at most as many options as its type has labels.
     labeled: bool = True
@@ -901,7 +902,7 @@ class JointSchemaStrategy(ReadStrategy):
         )
 
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=len(LABELS))
+        return DecisionLimits(max_questions=64, max_options=None, labeled=False)
 
     def render_state(self, state: Any) -> str:
         return self._render(state)

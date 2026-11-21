@@ -311,6 +311,34 @@ def serving(engine, strategy) -> ServingStructuredDecisions:
     return ServingStructuredDecisions(models, strategy)
 
 
+def test_option_limits_follow_strategy_answering_scheme(engine_and_renderer):
+    engine, online_renderer = engine_and_renderer
+    context = ReadContext(engine, online_renderer, None, "auto", {})
+    next_token = NextTokenStrategy(context)
+    joint_schema = JointSchemaStrategy(context)
+
+    request = StructuredDecisionRequest(
+        state="state",
+        questions={
+            "wide": {
+                "type": "choice",
+                "criteria": {str(i): None for i in range(27)},
+            }
+        },
+    )
+
+    next_token_limits = next_token.limits()
+    assert next_token_limits.max_options == len(LABELS)
+    assert next_token_limits.labeled is True
+    with pytest.raises(StructuredDecisionError, match="at most 26 options"):
+        parse_questions(request, next_token_limits)
+
+    joint_schema_limits = joint_schema.limits()
+    assert joint_schema_limits.max_options is None
+    assert joint_schema_limits.labeled is False
+    assert len(parse_questions(request, joint_schema_limits)[0].options) == 27
+
+
 @pytest.fixture
 def serving_and_engine(engine_and_renderer):
     engine, online_renderer = engine_and_renderer
