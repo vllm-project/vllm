@@ -42,6 +42,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_dcp: bool = False
     use_rswa: bool = False
     use_hisparse: bool = False
+    use_alibi: bool = False
 
     def __repr__(self):
         return (
@@ -63,7 +64,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_pcp={self.use_pcp}, "
             f"use_dcp={self.use_dcp}, "
             f"use_rswa={self.use_rswa}, "
-            f"use_hisparse={self.use_hisparse})"
+            f"use_hisparse={self.use_hisparse}, "
+            f"use_alibi={self.use_alibi})"
         )
 
 
@@ -120,6 +122,7 @@ def get_attn_backend(
     attn_type: str | None = None,
     num_heads: int | None = None,
     has_sliding_window: bool = False,
+    use_alibi: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     if kv_cache_dtype is not None:
@@ -182,6 +185,7 @@ def get_attn_backend(
         use_hisparse=(
             use_sparse and vllm_config.attention_config.hisparse_config is not None
         ),
+        use_alibi=use_alibi,
     )
 
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over

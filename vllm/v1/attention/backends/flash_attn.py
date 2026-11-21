@@ -488,6 +488,13 @@ class FlashAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_alibi(cls, kv_cache_dtype: CacheDType | None = None) -> bool:
+        # ALiBi layers run on FA2, which has no quantized KV cache on CUDA.
+        if kv_cache_dtype is None or not is_quantized_kv_cache(kv_cache_dtype):
+            return True
+        return flash_attn_supports_kv_cache_dtype(kv_cache_dtype, requires_alibi=True)
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         return True
 

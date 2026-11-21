@@ -149,6 +149,32 @@ def test_flashinfer_bf16_query_with_checkpoint_q_scale(
     )
 
 
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="fp8 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("max_tokens", [4])
+def test_alibi_with_fp8_kv_cache(vllm_runner, example_prompts, max_tokens: int) -> None:
+    """The automatically selected backend must apply ALiBi with an FP8 KV cache."""
+    outputs = []
+    for kv_cache_dtype in ("auto", "fp8"):
+        with vllm_runner(
+            "bigscience/bloom-560m",
+            max_model_len=1024,
+            enforce_eager=True,
+            kv_cache_dtype=kv_cache_dtype,
+        ) as vllm_model:
+            outputs.append(
+                vllm_model.generate_greedy_logprobs(example_prompts, max_tokens, 8)
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="auto_kv_cache",
+        name_1="fp8_kv_cache",
+    )
+
+
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="test for the CPU backend.")
 @pytest.mark.parametrize(

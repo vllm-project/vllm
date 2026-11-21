@@ -1015,6 +1015,7 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
         "compute_capability": compute_cap,
         "is_mla": is_mla_backend or check_method_overrides(class_node, "is_mla"),
         "supports_sink": check_method_overrides(class_node, "supports_sink"),
+        "supports_alibi": check_method_overrides(class_node, "supports_alibi"),
         "supports_non_causal": check_method_overrides(
             class_node, "supports_non_causal"
         ),
@@ -1330,6 +1331,8 @@ def _expand_flash_attn_variants(
         fa2["_sort_key"] = "FLASH_ATTN"
         fa2["_sort_order"] = 0
         fa2["supports_sink"] = fa_features["fa2"]["supports_sink"]
+        # ALiBi layers are routed to FA2.
+        fa2["supports_alibi"] = True
         fa2["kv_cache_dtypes"] = _apply_fp8_support(
             backend["kv_cache_dtypes"], fa_features["fa2"]["supports_fp8"]
         )
@@ -1342,6 +1345,7 @@ def _expand_flash_attn_variants(
         if fa_features["fa3"]["compute_capability"]:
             fa3["compute_capability"] = fa_features["fa3"]["compute_capability"]
         fa3["supports_sink"] = fa_features["fa3"]["supports_sink"]
+        fa3["supports_alibi"] = False
         fa3["kv_cache_dtypes"] = _apply_fp8_support(
             backend["kv_cache_dtypes"], fa_features["fa3"]["supports_fp8"]
         )
@@ -1358,6 +1362,7 @@ def _expand_flash_attn_variants(
             if fa_features["fa4"].get("compute_capability"):
                 fa4["compute_capability"] = fa_features["fa4"]["compute_capability"]
             fa4["supports_sink"] = fa_features["fa4"]["supports_sink"]
+            fa4["supports_alibi"] = False
             fa4["kv_cache_dtypes"] = _apply_fp8_support(
                 backend["kv_cache_dtypes"], fa_features["fa4"]["supports_fp8"]
             )
@@ -1594,6 +1599,7 @@ _COL_KV_DTYPES: TableColumn = (
 _COL_BLOCK_SIZES: TableColumn = ("Block Sizes", lambda b: b["block_sizes"])
 _COL_HEAD_SIZES: TableColumn = ("Head Sizes", lambda b: b["head_sizes"])
 _COL_SINK: TableColumn = ("Sink", lambda b: bool_to_emoji(b["supports_sink"]))
+_COL_ALIBI: TableColumn = ("ALiBi", lambda b: bool_to_emoji(b["supports_alibi"]))
 _COL_NON_CAUSAL: TableColumn = (
     "Non-Causal",
     lambda b: bool_to_emoji(b["supports_non_causal"]),
@@ -1631,6 +1637,8 @@ def _build_columns(is_mla: bool, has_versions: bool) -> list[TableColumn]:
         cols.append(_COL_VERSION)
     cols.extend([_COL_DTYPES, _COL_KV_DTYPES, _COL_BLOCK_SIZES, _COL_HEAD_SIZES])
     cols.append(_COL_SINK)
+    if not is_mla:
+        cols.append(_COL_ALIBI)
     cols.append(_COL_NON_CAUSAL)
     if is_mla:
         cols.append(_COL_SPARSE)

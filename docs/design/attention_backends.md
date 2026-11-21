@@ -160,6 +160,7 @@ Priority is **1 = highest** (tried first).
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
 | **Head Sizes** | Supported attention head sizes |
 | **Sink** | Attention sink support (for StreamingLLM) |
+| **ALiBi** | ALiBi positional bias support (e.g. BLOOM, Falcon-RW) |
 | **Non-Causal** | Non-causal (bidirectional) attention support for decoder models |
 | **Sparse** | Sparse attention support (MLA only) |
 | **MM Prefix** | Multimodal prefix full attention support |
