@@ -1115,6 +1115,14 @@ class RoutedExperts(PluggableLayer):
 
                 # Unified loading logic for fused and non-fused experts
                 loaded_experts = experts_shard.unbind()
+                num_logical = self.moe_config.num_logical_experts
+                if is_fused and len(loaded_experts) == num_logical:
+                    # EPLB starts redundant expert i as a copy of logical
+                    # expert i % num_logical.
+                    loaded_experts += tuple(
+                        loaded_experts[i % num_logical]
+                        for i in range(self.moe_config.num_experts - num_logical)
+                    )
                 for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
                     success = param.weight_loader(
                         param=param,

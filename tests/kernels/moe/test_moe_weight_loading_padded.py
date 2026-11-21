@@ -571,11 +571,16 @@ class TestLoadWeightsExpertMapping:
         quant_method="tensor",
         layer_name="model.layers.0.mlp.experts",
         is_gated=True,
+        num_redundant_experts=0,
     ):
         experts = torch.nn.Module()
         experts.layer_name = layer_name
         experts.shared_expert_online_loader = None
-        experts.moe_config = SimpleNamespace(is_act_and_mul=is_gated)
+        experts.moe_config = SimpleNamespace(
+            is_act_and_mul=is_gated,
+            num_logical_experts=16,
+            num_experts=16 + num_redundant_experts,
+        )
         experts.get_expert_mapping = lambda **_: mapping
         experts.is_fused_checkpoint_transposed = transposed
         experts._orient_fused_weight = RoutedExperts._orient_fused_weight
@@ -703,6 +708,26 @@ class TestLoadWeightsExpertMapping:
         ]
         for call, expected in zip(calls, [*up_proj, *down_proj]):
             torch.testing.assert_close(call[3], expected, rtol=0, atol=0)
+
+    def test_stacked_tensors_load_redundant_experts(self):
+        """A stacked tensor holds logical experts only, EPLB copies need them too."""
+        gate_up = torch.arange(16 * 4 * 3).reshape(16, 4, 3)
+        down = torch.arange(16 * 3 * 2).reshape(16, 3, 2)
+        calls = self._load(
+            self._mapping(num_redundant_experts=4),
+            [("gate_up_proj", gate_up), ("down_proj", down)],
+            num_redundant_experts=4,
+        )
+        assert [call[:3] for call in calls] == [
+            *(("w13_weight", "w1", expert) for expert in range(20)),
+            *(("w13_weight", "w3", expert) for expert in range(20)),
+            *(("w2_weight", "w2", expert) for expert in range(20)),
+        ]
+        logical = [*range(16), *range(4)]
+        w1, w3 = gate_up.chunk(2, dim=1)
+        expected = [t[i] for t in (w1, w3, down) for i in logical]
+        for call, tensor in zip(calls, expected):
+            torch.testing.assert_close(call[3], tensor, rtol=0, atol=0)
 
     @pytest.mark.parametrize(
         "suffix,quant_method,transposed",
