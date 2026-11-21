@@ -26,7 +26,13 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     FFN,
     WHOLE,
     DecodeConfig,
+    dsa_model,
     layer_kinds,
+)
+from vllm.models.kimi_k3.amd.specialized_decode.runtime.dsa import (
+    DsaM1Layer,
+    dsa_reasons,
+    width_served,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     FailStop,
@@ -46,7 +52,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
 logger = init_logger(__name__)
 
-Kernel = WholeLayer | FfnLayer | MlaOpsLayer
+Kernel = WholeLayer | FfnLayer | MlaOpsLayer | DsaM1Layer
 
 
 class Step(NamedTuple):
@@ -175,11 +181,36 @@ class SpecializedDecode:
             wrapper = backbone.layers[ffn[0]].self_attn.mla_attn
             runner.mla_prefix = wrapper.mla_attn.layer_name
         mla_kernel = FfnLayer if m1 else MlaOpsLayer
+        dsa_widths = []
+        if dsa_model(backbone.config):
+            why = list(
+                dict.fromkeys(
+                    r for i in ffn for r in dsa_reasons(runner, backbone.layers[i])
+                )
+            )
+            if tp_agree(not why, tp.cpu_group):
+                dsa_widths = [w for w in config.widths if width_served(runner, w)]
+            else:
+                logger.info(
+                    "Kimi-K3 specialized decode: the DSA layers run vLLM's "
+                    "attention ops (%s)",
+                    "; ".join(why or ["another TP rank's DSA layers"]),
+                )
+            if dcp.world_size == 1 and config.q > 1:
+                # speculative DCP1 serves every step with the DSA path
+                # (``runtime.step_reasons``)
+                missed = [w for w in config.widths if w not in dsa_widths]
+                why = [f"the DSA path at widths {missed}"] if missed else []
+                agree(why, tp.cpu_group, "DCP1 without M1")
         self.kernels: dict[int, dict[int, Kernel]] = {
             w: {
-                i: (WholeLayer if kind == WHOLE else mla_kernel)(
-                    backbone.layers[i], runner, w
-                )
+                i: (
+                    WholeLayer
+                    if kind == WHOLE
+                    else DsaM1Layer
+                    if w in dsa_widths
+                    else mla_kernel
+                )(backbone.layers[i], runner, w)
                 for i, kind in kinds.items()
             }
             for w in config.widths
@@ -204,11 +235,13 @@ class SpecializedDecode:
         self._kv: tuple | None = None
         m1c = [w for w in config.widths if m1c_at(runner, w)]
         mla = f"M1 (M1c in K2 at widths {m1c})" if m1c else "M1"
+        if dsa_widths:
+            mla = f"DSA sparse attention in K2 at widths {dsa_widths}"
         logger.info(
             "Kimi-K3 specialized decode: %d layers (MLA: %s), widths %s, %d "
             "builds; other steps run vLLM's decode",
             len(kinds),
-            mla if m1 else "vLLM's ops",
+            mla if m1 or dsa_widths else "vLLM's ops",
             list(config.widths),
             len(builds),
         )
