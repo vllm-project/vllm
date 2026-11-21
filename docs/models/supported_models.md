@@ -743,6 +743,14 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
+    `Inkling2ForConditionalGeneration` also loads checkpoints whose routed
+    experts were requantized with [LLM Compressor](../features/quantization/llm_compressor/README.md)
+    (compressed-tensors W4A16 with or without zero points, W8A16, W4A8, W8A8
+    INT8, FP8 dynamic and FP8 block; the other layers stay BF16). The
+    quantization method is detected from `config.json`, and these experts run
+    on Humming expert GEMMs.
+
+!!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
 
 !!! note

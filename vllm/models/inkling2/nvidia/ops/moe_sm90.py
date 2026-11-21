@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling2 routed experts on Hopper: Humming expert GEMMs (bf16
-activations, NVFP4 / MXFP8 weights) in place of the TRT-LLM-gen ones.
+activations, NVFP4 / MXFP8 weights) in place of the TRT-LLM-gen ones. The
+compressed-tensors experts (`moe_ct`) run them on Blackwell too.
 
 Rows stay in the flat (token * topk + slot) order: the gate/up GEMM
 gathers each row's token, the down GEMM reads and writes row by row, and
@@ -163,7 +164,10 @@ class HummingExperts:
     Args:
         weights: Per projection (`w13`, `w2`), the row-major checkpoint
             weights `[E, N, K / pack]`, block scales `[E, N, K / group]`
-            and, for NVFP4, the per-expert global scales `[E]` (else None).
+            and, for NVFP4, the per-expert global scales `[E]` (else None);
+            or, for other checkpoint formats (`nvfp4` is then ignored), a
+            Humming source weight schema and its tensors by name, with a
+            leading expert dim.
         shapes: `(N, K)` of each projection.
         nvfp4: NVFP4 (else MXFP8) weights.
         input_schema: Quantized input contract, or None for BF16 activations.
@@ -172,12 +176,13 @@ class HummingExperts:
 
     def __init__(
         self,
-        weights: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
+        weights: dict[str, tuple],
         shapes: tuple[tuple[int, int], tuple[int, int]],
         nvfp4: bool,
         input_schema: "HummingInputSchema | None" = None,
     ) -> None:
         from vllm.utils.humming import (
+            BaseWeightSchema,
             GemmType,
             HummingInputSchema,
             ModeloptMxfp8WeightSchema,
@@ -191,14 +196,19 @@ class HummingExperts:
         self.tunings: dict[str, list] = {}
         self.tuning_strs: dict[str, str] = {}
         for name, (n, k) in zip(("w13", "w2"), shapes):
-            weight, scale, global_scale = weights[name]
-            num_experts = weight.shape[0]
-            tensors = {"weight": weight, "weight_scale": scale}
-            if nvfp4:
-                source = ModeloptNvfp4WeightSchema()
-                tensors["weight_scale_2"] = global_scale
+            source: BaseWeightSchema
+            if len(weights[name]) == 2:
+                source, tensors = weights[name]
+                weight = tensors[source.weight_key]
             else:
-                source = ModeloptMxfp8WeightSchema()
+                weight, scale, global_scale = weights[name]
+                tensors = {"weight": weight, "weight_scale": scale}
+                if nvfp4:
+                    source = ModeloptNvfp4WeightSchema()
+                    tensors["weight_scale_2"] = global_scale
+                else:
+                    source = ModeloptMxfp8WeightSchema()
+            num_experts = weight.shape[0]
             schema, tensors = source.convert_humming(
                 tensors=tensors,
                 shape_n_stacks=[n],
@@ -271,6 +281,7 @@ class HummingExperts:
             inputs=inputs,
             weight=tensors["weight"],
             weight_scale=tensors.get("weight_scale"),
+            zero_point=tensors.get("zero_point"),
             weight_scale_2=tensors.get("weight_scale_2"),
             outputs=out,
             locks=self.locks,
