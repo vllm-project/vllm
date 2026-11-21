@@ -70,7 +70,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     StoreLayout,
     StoreShardId,
     TokenMajorStoreLayout,
-    group_compact_kernel_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -102,8 +101,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
     group_kernel_blocks,
 )
 
@@ -142,6 +143,61 @@ def _store_spec_family(spec: KVCacheSpec) -> Literal["attention", "mamba"] | Non
 
 def _group_layer_specs(group: KVCacheGroup) -> tuple[KVCacheSpec, ...]:
     return tuple(group.kv_cache_specs[name] for name in group.layer_names)
+
+
+def _view_padded_manager_blocks(
+    cache: torch.Tensor,
+    num_blocks: int,
+    spec: KVCacheSpec,
+    allocation: KVCacheTensor,
+    layer_index: int,
+) -> torch.Tensor:
+    """Coalesce kernel-page padding only for complete allocator-owned views."""
+    page_size = getattr(spec, "page_size_padded", None)
+    if (
+        page_size is None
+        or allocation.block_stride != page_size
+        or not spec.has_layer_views
+        or getattr(spec, "dtype", None) != cache.dtype
+        or cache.ndim != 4
+        or num_blocks <= 0
+    ):
+        return cache
+    ratio, remainder = divmod(cache.shape[0], num_blocks)
+    if ratio <= 1 or remainder or spec.block_size % ratio or page_size % ratio:
+        return cache
+
+    itemsize = cache.element_size()
+    shape_bytes = compute_layer_kv_cache_shape_bytes(
+        spec, num_blocks, spec.block_size // ratio
+    )
+    kernel_stride = page_size // ratio
+    kernel_bytes = math.prod(shape_bytes[1:])
+    if (
+        (*cache.shape[:-1], cache.shape[-1] * itemsize) != shape_bytes
+        or cache.stride(0) * itemsize != kernel_stride
+        or cache.stride(-1) != 1
+        or kernel_bytes >= kernel_stride
+        or not is_non_overlapping_and_dense(cache[0])
+    ):
+        return cache
+
+    # Match the allocator's complete layer placement, not an offset component.
+    offset = allocation.offset + layer_index * allocation.layer_stride
+    span = (ratio - 1) * kernel_stride + kernel_bytes
+    if (
+        cache.storage_offset() * itemsize != offset
+        or (
+            len(allocation.layers) > 1
+            and allocation.layer_stride < num_blocks * page_size
+        )
+        or offset + (num_blocks - 1) * page_size + span > allocation.size
+        or allocation.size > cache.untyped_storage().nbytes()
+    ):
+        return cache
+
+    # Include internal padding, but stop at the last kernel page's live bytes.
+    return cache.view(torch.uint8).as_strided((num_blocks, span), (page_size, 1))
 
 
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
@@ -1642,27 +1698,10 @@ class MooncakeStoreWorker:
         self._reuse_pd_transfer_engine = (
             extra_config.get("reuse_pd_transfer_engine") is True
         )
-        shared_engine: Any | None = None
-        if self._reuse_pd_transfer_engine:
-            shared = _reused_transfer_engine()
-            shared_engine = shared.engine.get_engine()
-            local_hostname = f"{shared.hostname}:{shared.rpc_port}"
-            store_config = replace(
-                store_config, metadata_server="", protocol=shared.protocol
-            )
-            logger.info(
-                "Mooncake store reusing MooncakeConnector TransferEngine at %s (%s)",
-                local_hostname,
-                shared.protocol,
-            )
-        else:
-            local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
         self.store_service = MooncakeStoreService(self.store)
-        setup_mooncake_store(
-            self.store, store_config, local_hostname, engine=shared_engine
-        )
+        self._setup_store(store_config)
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
@@ -1790,6 +1829,24 @@ class MooncakeStoreWorker:
                 self._lookup_key_prefixes,
                 self._record_kv_connector_operation,
             )
+
+    def _setup_store(self, config: MooncakeStoreConfig) -> None:
+        """Initialize this worker's Store transport."""
+        shared_engine: Any | None = None
+        if self._reuse_pd_transfer_engine:
+            shared = _reused_transfer_engine()
+            shared_engine = shared.engine.get_engine()
+            local_hostname = f"{shared.hostname}:{shared.rpc_port}"
+            config = replace(config, metadata_server="", protocol=shared.protocol)
+            logger.info(
+                "Mooncake store reusing MooncakeConnector TransferEngine at %s (%s)",
+                local_hostname,
+                shared.protocol,
+            )
+        else:
+            local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
+
+        setup_mooncake_store(self.store, config, local_hostname, engine=shared_engine)
 
     def _select_store_layout(
         self, extra_config: dict[str, Any]
@@ -2102,7 +2159,9 @@ class MooncakeStoreWorker:
 
     def register_kv_caches(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: dict[
+            str, torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
+        ],
     ) -> None:
         """Register KV cache tensors and start transfer threads."""
         if self._capacity_only:
@@ -2111,88 +2170,21 @@ class MooncakeStoreWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # A layer's cache is one tensor, or a list of state tensors that share
-        # one raw storage (Mamba).
-        def _layer_views(v: torch.Tensor | list[torch.Tensor]) -> list[torch.Tensor]:
-            assert isinstance(v, torch.Tensor | list)
-            return [v] if isinstance(v, torch.Tensor) else v
-
         self.num_blocks = self._kv_cache_config.num_blocks
-        use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
         register_kv = not self._reuse_pd_transfer_engine
         if not register_kv:
             logger.info(
                 "Mooncake store skipping KV registration; "
                 "MooncakeConnector already registered the device buffers."
             )
-
-        if not use_group_regions:
-            store_layer_names = {
-                layer_name
-                for group in self._kv_cache_groups
-                for layer_name in group.layer_names
-            }
-            seen_storage_ptrs: set[int] = set()
-            # Kernel-block views: RankLocalStoreLayout groups them itself,
-            # after checking that each manager block is one gapless byte run.
-            cache_by_layer = {
-                layer_name: _layer_views(cache)
-                for layer_name, cache in kv_caches.items()
-                if layer_name in store_layer_names
-            }
-            cache_tensors = [
-                cache for views in cache_by_layer.values() for cache in views
-            ]
-            for cache in cache_tensors:
-                cache_storage = cache.untyped_storage()
-                base_addr = cache_storage.data_ptr()
-                if base_addr in seen_storage_ptrs:
-                    continue
-                seen_storage_ptrs.add(base_addr)
-                region_len = cache_storage.nbytes()
-                if register_kv:
-                    ret = self.store.register_buffer(base_addr, region_len)
-                    if ret != 0:
-                        logger.error(
-                            "register_buffer failed for addr %#x len %d: %d",
-                            base_addr,
-                            region_len,
-                            ret,
-                        )
-                    else:
-                        self._device_regions[base_addr] = region_len
-            for group_id, (group, db) in enumerate(
-                zip(self._kv_cache_groups, self.token_dbs, strict=True)
-            ):
-                group_views = [
-                    cache_by_layer[name]
-                    for name in group.layer_names
-                    if name in cache_by_layer
-                ]
-                if self.store_tp_size is not None:
-                    if len(group_views) != len(group.layer_names):
-                        raise ValueError(
-                            "Missing KV cache tensors for TP-shared cache group "
-                            f"{group_id}"
-                        )
-                    group_tensors = [views[0] for views in group_views]
-                else:
-                    group_tensors = [cache for views in group_views for cache in views]
-                group_tensors = group_tensors or cache_tensors
-                if not isinstance(db.store_layout, RankLocalStoreLayout):
-                    group_tensors = [
-                        group_kernel_blocks(cache, self.num_blocks)
-                        for cache in group_tensors
-                    ]
-                db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
-
-        registered_buffers: dict[int, int] = {}
-        num_host_segments = 0
-        num_device_segments = 0
+        registered_buffers: set[int] = set()
+        placements = {
+            (layer_name, allocation.host_resident): (allocation, layer_index)
+            for allocation in self._kv_cache_config.kv_cache_tensors
+            for layer_index, layer_name in enumerate(allocation.layers)
+        }
 
         for group, db in zip(self._kv_cache_groups, self.token_dbs, strict=True):
-            if not use_group_regions:
-                continue
             missing_layers = [
                 layer_name
                 for layer_name in group.layer_names
@@ -2202,92 +2194,92 @@ class MooncakeStoreWorker:
                 raise ValueError(
                     f"Missing transferable KV caches for layers: {missing_layers}"
                 )
-            group_caches = [
-                (layer_name, kv_caches[layer_name]) for layer_name in group.layer_names
-            ]
-
-            seen_group_ptrs: set[int] = set()
-            addrs: list[int] = []
-            block_lens: list[int] = []
-            for layer_name, value in group_caches:
-                cache = _layer_views(value)[0]
-                is_host_resident = group.host_resident
-                if is_host_resident:
-                    num_blocks = self._kv_cache_config.hisparse_host_num_blocks
-                    assert num_blocks is not None
-                else:
-                    num_blocks = self._kv_cache_config.num_blocks
-                cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
-                cache_storage = cache.untyped_storage()
-                if is_host_resident:
-                    base_addr = cache.data_ptr()
-                    region_len = cache.nbytes
-                else:
-                    base_addr = cache_storage.data_ptr()
-                    region_len = cache_storage.nbytes()
-                if region_len % num_blocks != 0:
-                    raise ValueError(
-                        f"KV cache region for {layer_name} has size {region_len}, "
-                        f"which is not divisible by its {num_blocks} blocks."
+            num_blocks = (
+                self._kv_cache_config.hisparse_host_num_blocks
+                if group.host_resident
+                else self.num_blocks
+            )
+            assert num_blocks is not None
+            cache_tensors: list[torch.Tensor] = []
+            layout_tensors: list[torch.Tensor] = []
+            padded_views: dict[
+                tuple[int, torch.Size, tuple[int, ...], torch.dtype], torch.Tensor
+            ] = {}
+            for layer_name in group.layer_names:
+                value = kv_caches[layer_name]
+                components = [value] if isinstance(value, torch.Tensor) else value
+                if not isinstance(components, (list, tuple)) or not all(
+                    isinstance(cache, torch.Tensor) for cache in components
+                ):
+                    raise TypeError(f"Unsupported KV cache components for {layer_name}")
+                layer_tensors = [cache for cache in components if cache.numel()]
+                cache_tensors.extend(layer_tensors)
+                placement = placements.get((layer_name, group.host_resident))
+                if (
+                    isinstance(db.store_layout, RankLocalStoreLayout)
+                    and len(layer_tensors) == 1
+                    and placement is not None
+                ):
+                    allocation, layer_index = placement
+                    cache = layer_tensors[0]
+                    padded = _view_padded_manager_blocks(
+                        cache,
+                        num_blocks,
+                        group.kv_cache_specs[layer_name],
+                        allocation,
+                        layer_index,
                     )
-
-                registered_len = registered_buffers.get(base_addr)
-                if registered_len is None:
-                    if register_kv:
-                        ret = self.store.register_buffer(base_addr, region_len)
-                        if ret != 0:
-                            mem_kind = "host" if is_host_resident else "device"
-                            raise RuntimeError(
-                                "Mooncake register_buffer failed for addr "
-                                f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
-                            )
-                        if not is_host_resident:
-                            self._device_regions[base_addr] = region_len
-                    registered_buffers[base_addr] = region_len
-                elif registered_len != region_len:
-                    raise ValueError(
-                        f"KV cache views at {base_addr:#x} expose inconsistent "
-                        f"region sizes: {registered_len} and {region_len}."
-                    )
-
-                regions: list[tuple[int, int]] = []
-                if not block_compact:
-                    for head_idx in range(cache.shape[1]):
-                        head_cache = cache[:, head_idx]
-                        assert is_non_overlapping_and_dense(head_cache[0])
-                        regions.append(
-                            (
-                                head_cache.data_ptr(),
-                                head_cache.stride(0) * head_cache.element_size(),
-                            )
+                    if padded is not cache:
+                        key = (
+                            cache.data_ptr(),
+                            cache.shape,
+                            cache.stride(),
+                            cache.dtype,
                         )
-                elif cache.stride(0) * cache.element_size() * num_blocks == region_len:
-                    regions.append((base_addr, region_len // num_blocks))
-                else:
-                    regions.append(
-                        (cache.data_ptr(), cache.stride(0) * cache.element_size())
+                        padded_views[key] = padded
+                layout_tensors.extend(
+                    layer_tensors[:1]
+                    if self.store_tp_size is not None
+                    else layer_tensors
+                )
+            # Normalize identical KV-sharing views together, even if an alias
+            # appears before its allocated target in layer order.
+            if padded_views:
+                layout_tensors = [
+                    padded_views.get(
+                        (cache.data_ptr(), cache.shape, cache.stride(), cache.dtype),
+                        cache,
                     )
-
-                for region_addr, block_len in regions:
-                    if region_addr in seen_group_ptrs:
-                        continue
-                    seen_group_ptrs.add(region_addr)
-                    addrs.append(region_addr)
-                    block_lens.append(block_len)
-                    if is_host_resident:
-                        num_host_segments += 1
-                    else:
-                        num_device_segments += 1
-
-            db.set_kv_caches_base_addr(addrs)
-            db.set_block_len(block_lens)
+                    for cache in layout_tensors
+                ]
+            # Rank-local layouts group kernel blocks while describing each
+            # component's regions. Other layouts expect manager-block views.
+            if not isinstance(db.store_layout, RankLocalStoreLayout):
+                layout_tensors = [
+                    group_kernel_blocks(cache, num_blocks) for cache in layout_tensors
+                ]
+            db.store_layout.register_kv_caches(layout_tensors, num_blocks)
+            if not register_kv:
+                continue
+            for cache in cache_tensors:
+                storage = cache.untyped_storage()
+                base_addr = storage.data_ptr()
+                if base_addr in registered_buffers:
+                    continue
+                ret = self.store.register_buffer(base_addr, storage.nbytes())
+                if ret != 0:
+                    raise RuntimeError(
+                        f"Mooncake register_buffer failed for addr "
+                        f"{base_addr:#x} len {storage.nbytes()}: {ret}"
+                    )
+                registered_buffers.add(base_addr)
+                if not group.host_resident:
+                    self._device_regions[base_addr] = storage.nbytes()
 
         logger.info(
-            "Registered KV caches: num_groups=%d, num_segments=%d (host=%d, device=%d)",
+            "Registered KV caches: num_groups=%d, num_buffers=%d",
             len(self.token_dbs),
-            num_host_segments + num_device_segments,
-            num_host_segments,
-            num_device_segments,
+            len(registered_buffers),
         )
 
         # Start transfer threads
@@ -2376,7 +2368,7 @@ class MooncakeStoreWorker:
         assert self.load_async, "load_async must be True for better performance."
 
     def wait_for_save(self, metadata: MooncakeStoreConnectorMetadata):
-        """Issue async stores with CUDA event synchronization.
+        """Issue async stores with device event synchronization.
 
         Runs after the forward launch for compute-I/O overlap.
         """
@@ -2391,7 +2383,7 @@ class MooncakeStoreWorker:
         current_event = None
         for request in metadata.requests:
             if request.can_save:
-                current_event = torch.cuda.Event()
+                current_event = torch.Event()
                 current_event.record()
                 break
 

@@ -470,8 +470,8 @@ def _span_mask(spans, nbytes: int) -> torch.Tensor:
 def test_store_values_round_trip_every_layout(request, model, layout):
     """Through the planner's real layout, each group's value for a block holds
     every byte of its layers' views of that block, reads and writes only that
-    block, and restores it exactly. Without padding the value is the group's
-    whole block, as before; with Mamba padding it is exactly the states."""
+    block, and restores it exactly. Values contain exactly the group's tensor
+    bytes, even when block strides span other layers or padding."""
     if (
         current_platform.is_rocm()
         and model == "mla"
@@ -540,13 +540,9 @@ def test_store_values_round_trip_every_layout(request, model, layout):
         assert not (owned & ~value).any(), "value misses bytes of the group"
         # Each piece ends at the last byte the group uses in it.
         assert all(owned[a - base + n - 1] for a, n in zip(addrs, sizes))
-        if len(groups) == 1 and layout != KVCacheLayout.BHLNC:
-            # A single group stores whole blocks, as before. (A BHLNC head's
-            # block stride spans every head, so only the head's block is.)
-            assert store_layout.block_len == store_layout.block_stride
-        if not layout.is_block_outermost:
-            # Exactly the group's bytes: no padding, no other group's slots.
-            assert torch.equal(value, owned) and sum(sizes) == owned.sum()
+        # Separate strides and lengths must exclude padding and other groups
+        # for block-outermost layouts too, without duplicating any owned bytes.
+        assert torch.equal(value, owned) and sum(sizes) == owned.sum()
 
         # Clobber everything but the other blocks, then load the saved value.
         saved = [ctypes.string_at(a, n) for a, n in zip(addrs, sizes)]
@@ -558,7 +554,9 @@ def test_store_values_round_trip_every_layout(request, model, layout):
         raw.copy_(before)
 
 
-def test_recv_skips_swa_blocks_before_window():
+def test_recv_skips_swa_blocks_before_window(
+    register_mooncake_store_caches,
+):
     """Producer stored every block for both groups; consumer must only fetch
     SWA blocks within the sliding window, not the head."""
     full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
@@ -578,10 +576,8 @@ def test_recv_skips_swa_blocks_before_window():
     md1 = KeyMetadata("m", 0, 0, 0, 0, group_id=1)
     db_full = ChunkedTokenDatabase(md0, chunk_size=16, hash_block_size=16)
     db_swa = ChunkedTokenDatabase(md1, chunk_size=16, hash_block_size=16)
-    db_full.set_kv_caches_base_addr([0])
-    db_full.set_block_len([1024])
-    db_swa.set_kv_caches_base_addr([1 << 20])
-    db_swa.set_block_len([1024])
+    register_mooncake_store_caches(db_full.store_layout, [1024])
+    register_mooncake_store_caches(db_swa.store_layout, [1024])
 
     requested_keys: list[str] = []
 
@@ -631,8 +627,6 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     keys each chunk by its ending fine hash, including a partial tail."""
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
     db = ChunkedTokenDatabase(md, chunk_size=16, hash_block_size=4)
-    db.set_kv_caches_base_addr([0])
-    db.set_block_len([512])
     fine_hashes = [BlockHash(bytes([i + 1]) * 4) for i in range(8)]
 
     # 8 fine-grained hashes (32 tokens at hash_block_size=4) → 2 group chunks.
@@ -677,7 +671,9 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     return req
 
 
-def test_sub_block_partial_tail_offload_reads_cow_block():
+def test_sub_block_partial_tail_offload_reads_cow_block(
+    register_mooncake_store_caches,
+):
     """Sub-block prompt (the 900/128/1536 shape, scaled to 12/4/16): the
     partial tail is offloaded for both groups under the boundary sub-hash. The
     full-attention block is read from the request block table; the mamba block
@@ -719,8 +715,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
             chunk_size=16,
             hash_block_size=4,
         )
-        db.set_kv_caches_base_addr([g_idx * 10_000])
-        db.set_block_len([512])
+        register_mooncake_store_caches(db.store_layout, [512])
         token_dbs.append(db)
 
     send = KVCacheStoreSendingThread(
@@ -758,13 +753,19 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     fa_key = token_dbs[0].store_layout.key_for(0, partial_hash)
     mamba_key = token_dbs[1].store_layout.key_for(0, partial_hash)
     assert set(store.puts) == {fa_key, mamba_key}
-    # FA reads block_ids[0][0] = block 1: addr = base(0) + 1 * 512.
-    assert store.puts[fa_key] == [512]
+    # FA reads block_ids[0][0] = block 1.
+    assert store.puts[fa_key] == [
+        token_dbs[0].store_layout.kv_caches_base_addr[0] + 512
+    ]
     # Mamba reads the CoW block 7, not block_ids[1][0]=2.
-    assert store.puts[mamba_key] == [10_000 + mamba_cow_block * 512]
+    assert store.puts[mamba_key] == [
+        token_dbs[1].store_layout.kv_caches_base_addr[0] + mamba_cow_block * 512
+    ]
 
 
-def test_offload_syncs_event_before_put():
+def test_offload_syncs_event_before_put(
+    register_mooncake_store_caches,
+):
     """An offload-carrying meta synchronizes its CoW-fence event before the
     store put reads the blocks, then completes in one pass and drains the
     completion counter."""
@@ -800,8 +801,7 @@ def test_offload_syncs_event_before_put():
             chunk_size=16,
             hash_block_size=4,
         )
-        db.set_kv_caches_base_addr([g_idx * 10_000])
-        db.set_block_len([512])
+        register_mooncake_store_caches(db.store_layout, [512])
         token_dbs.append(db)
 
     send = KVCacheStoreSendingThread(
@@ -838,7 +838,9 @@ def test_offload_syncs_event_before_put():
     event.synchronize.assert_called_once()
 
 
-def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
+def test_sub_block_partial_tail_offload_covers_smaller_group_blocks(
+    register_mooncake_store_caches,
+):
     """The K3-shaped 900/128/1536 scenario scaled to 12/4/16, with a
     full-attention group whose block (4) is smaller than the lcm (16): the
     offload must persist every FA block up to the boundary — the normal save
@@ -883,8 +885,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
             chunk_size=block_size,
             hash_block_size=4,
         )
-        db.set_kv_caches_base_addr([g_idx * 10_000])
-        db.set_block_len([512])
+        register_mooncake_store_caches(db.store_layout, [512])
         token_dbs.append(db)
 
     send = KVCacheStoreSendingThread(
@@ -918,16 +919,24 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     # block-end hashes; mamba (block 16): the partial boundary block under
     # the boundary sub-hash, read from the CoW target.
     expected = {
-        token_dbs[0].store_layout.key_for(0, hs[0]): [1 * 512],
-        token_dbs[0].store_layout.key_for(0, hs[1]): [2 * 512],
-        token_dbs[1].store_layout.key_for(0, hs[1]): [10_000 + mamba_cow_block * 512],
+        token_dbs[0].store_layout.key_for(0, hs[0]): [
+            token_dbs[0].store_layout.kv_caches_base_addr[0] + 512
+        ],
+        token_dbs[0].store_layout.key_for(0, hs[1]): [
+            token_dbs[0].store_layout.kv_caches_base_addr[0] + 2 * 512
+        ],
+        token_dbs[1].store_layout.key_for(0, hs[1]): [
+            token_dbs[1].store_layout.kv_caches_base_addr[0] + mamba_cow_block * 512
+        ],
     }
     assert store.puts == expected
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("num_lookahead", [0, 1, 5])
-def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
+def test_worker_lookup_hits_sub_block_partial_tail(
+    register_mooncake_store_caches, num_lookahead
+):
     """worker.lookup must query sub-block keys when partial hash hits are on.
 
     Regression test: `lookup` hard-coded `fine_grained = False`, so the
@@ -979,9 +988,8 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
     assert worker.coord.num_hash_lookahead_tokens == num_lookahead
     assert worker.coord.enable_partial_hash_hits
 
-    for g_idx, db in enumerate(worker.token_dbs):
-        db.set_kv_caches_base_addr([g_idx * 10_000])
-        db.set_block_len([512])
+    for db in worker.token_dbs:
+        register_mooncake_store_caches(db.store_layout, [512])
 
     send_thread = KVCacheStoreSendingThread(
         store_service=MooncakeStoreService(store),
@@ -1017,7 +1025,9 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
     assert worker.lookup(num_tokens=prompt_len + 1, block_hashes=hs).hit_length == 8
 
 
-def test_worker_setup_tolerates_finer_scratch_group():
+def test_worker_setup_tolerates_finer_scratch_group(
+    register_mooncake_store_caches,
+):
     """Setup and lookup must tolerate a non-prefix-cacheable scratch group.
 
     Regression: GLM-5.3-Flash carries a kpool-tail scratch group whose block
@@ -1088,9 +1098,8 @@ def test_worker_setup_tolerates_finer_scratch_group():
     assert len(worker.token_dbs) == 2
     assert all(db.hash_block_size == 8 for db in worker.token_dbs)
 
-    for g_idx, db in enumerate(worker.token_dbs):
-        db.set_kv_caches_base_addr([g_idx * 10_000])
-        db.set_block_len([512])
+    for db in worker.token_dbs:
+        register_mooncake_store_caches(db.store_layout, [512])
 
     send_thread = KVCacheStoreSendingThread(
         store_service=MooncakeStoreService(store),
@@ -1253,47 +1262,50 @@ class _LeaseTrackingStore(_DictStore):
         return super().batch_is_exist(keys)
 
 
-def _full_plus_mamba_worker(store, *, partial_hash_hits=False):
-    """Full-attention + align-mode Mamba worker on `store`."""
-    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = mamba_layer(
-        block_size=16,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-        enable_prefix_caching=True,
-    )
-    cfg = KVCacheConfig(
-        num_blocks=8,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=8 * full.page_size_bytes,
-                layers=["L0"],
-                layer_stride=8 * full.page_size_bytes,
-                block_stride=full.page_size_bytes,
-            ),
-            KVCacheTensor(
-                size=8 * mamba.spec.page_size_bytes,
-                layers=["L1"],
-                layer_stride=8 * mamba.spec.page_size_bytes,
-                block_stride=mamba.spec.page_size_bytes,
-            ),
-        ],
-        kv_cache_groups=[
-            make_kv_cache_group(["L0"], full),
-            make_kv_cache_group(["L1"], mamba),
-        ],
-        # The hit alignment the engine core resolves for 4-token hash units.
-        **({"cache_hit_alignment_tokens": 4} if partial_hash_hits else {}),
-    )
-    vllm_config = _minimal_vllm_config(cache_block_size=16)
-    if partial_hash_hits:
-        # Hash unit 4 < Mamba block 16 enables partial hash hits.
-        vllm_config.cache_config.prefix_match_unit = 4
-    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
-    for g_idx, db in enumerate(worker.token_dbs):
-        db.set_kv_caches_base_addr([g_idx * 10_000])
-        db.set_block_len([512])
-    return worker
+@pytest.fixture
+def _full_plus_mamba_worker(register_mooncake_store_caches):
+    def create(store, *, partial_hash_hits=False):
+        """Full-attention + align-mode Mamba worker on `store`."""
+        full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+        mamba = mamba_layer(
+            block_size=16,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            enable_prefix_caching=True,
+        )
+        cfg = KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=8 * full.page_size_bytes,
+                    layers=["L0"],
+                    layer_stride=8 * full.page_size_bytes,
+                    block_stride=full.page_size_bytes,
+                ),
+                KVCacheTensor(
+                    size=8 * mamba.spec.page_size_bytes,
+                    layers=["L1"],
+                    layer_stride=8 * mamba.spec.page_size_bytes,
+                    block_stride=mamba.spec.page_size_bytes,
+                ),
+            ],
+            kv_cache_groups=[
+                make_kv_cache_group(["L0"], full),
+                make_kv_cache_group(["L1"], mamba),
+            ],
+            # The hit alignment the engine core resolves for 4-token hash units.
+            **({"cache_hit_alignment_tokens": 4} if partial_hash_hits else {}),
+        )
+        vllm_config = _minimal_vllm_config(cache_block_size=16)
+        if partial_hash_hits:
+            # Hash unit 4 < Mamba block 16 enables partial hash hits.
+            vllm_config.cache_config.prefix_match_unit = 4
+        worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+        for db in worker.token_dbs:
+            register_mooncake_store_caches(db.store_layout, [512])
+        return worker
+
+    return create
 
 
 def _store_keys(worker, g_idx, block_hash):
@@ -1314,7 +1326,9 @@ def _store_full_history(worker, store):
     return hs
 
 
-def test_lookup_leases_every_probed_key_by_default():
+def test_lookup_leases_every_probed_key_by_default(
+    _full_plus_mamba_worker,
+):
     """Without the flag, the lookup leases every candidate it finds, including
     the Mamba states at earlier block boundaries."""
     store = _LeaseTrackingStore()
@@ -1327,7 +1341,7 @@ def test_lookup_leases_every_probed_key_by_default():
     assert set(_store_keys(worker, 1, hs[0])) <= set(store.lease_calls[0])
 
 
-def test_selective_lease_leases_only_loaded_keys(monkeypatch):
+def test_selective_lease_leases_only_loaded_keys(_full_plus_mamba_worker, monkeypatch):
     """The lookup probes the whole prefix lease-free and leases only what the
     hit loads: every full-attention block and the Mamba state at the tail."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
@@ -1349,7 +1363,9 @@ def test_selective_lease_leases_only_loaded_keys(monkeypatch):
     assert stats["lookup_lease_error_count"] == 0
 
 
-def test_selective_lease_leases_shorter_hit_after_eviction(monkeypatch):
+def test_selective_lease_leases_shorter_hit_after_eviction(
+    _full_plus_mamba_worker, monkeypatch
+):
     """A tail state evicted between probe and lease shortens the hit, and the
     shorter hit is leased in a second call."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
@@ -1367,7 +1383,9 @@ def test_selective_lease_leases_shorter_hit_after_eviction(monkeypatch):
     )
 
 
-def test_selective_lease_returns_no_hit_while_evictions_continue(monkeypatch):
+def test_selective_lease_returns_no_hit_while_evictions_continue(
+    _full_plus_mamba_worker, monkeypatch
+):
     """When every lease round finds an eviction, the lookup reports no hit
     rather than a hit whose tail was never leased."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
@@ -1382,7 +1400,9 @@ def test_selective_lease_returns_no_hit_while_evictions_continue(monkeypatch):
     assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 0
 
 
-def test_selective_lease_treats_error_results_as_failed_lease(monkeypatch):
+def test_selective_lease_treats_error_results_as_failed_lease(
+    _full_plus_mamba_worker, monkeypatch
+):
     """Per-key error codes from the lease RPC report no hit and an error,
     instead of shortening the hit as evictions would."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
@@ -1395,7 +1415,9 @@ def test_selective_lease_treats_error_results_as_failed_lease(monkeypatch):
     assert worker.get_kv_connector_stats().reduce()["lookup_lease_error_count"] == 1
 
 
-def test_selective_lease_reports_no_hit_when_lease_raises(monkeypatch):
+def test_selective_lease_reports_no_hit_when_lease_raises(
+    _full_plus_mamba_worker, monkeypatch
+):
     """A lease RPC that raises reports no hit, as a failed lookup does."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
     store = _LeaseTrackingStore()
@@ -1410,7 +1432,9 @@ def test_selective_lease_reports_no_hit_when_lease_raises(monkeypatch):
     assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 0
 
 
-def test_selective_lease_covers_every_key_the_load_reads(monkeypatch):
+def test_selective_lease_covers_every_key_the_load_reads(
+    _full_plus_mamba_worker, monkeypatch
+):
     """Every key the receive thread reads for the hit was leased by the
     lookup, so the two key walks cannot drift apart."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
@@ -1455,7 +1479,7 @@ def test_selective_lease_covers_every_key_the_load_reads(monkeypatch):
     assert set(read_keys) <= set(store.lease_calls[0])
 
 
-def test_selective_lease_with_partial_hash_hits(monkeypatch):
+def test_selective_lease_with_partial_hash_hits(_full_plus_mamba_worker, monkeypatch):
     """With sub-block hash units, the lease keys the partial tail chunk by its
     stored boundary, exactly as it was saved."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
@@ -1493,7 +1517,7 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
     assert sorted(store.lease_calls[0]) == sorted(store._data)
 
 
-def test_selective_lease_requires_probe_support(monkeypatch):
+def test_selective_lease_requires_probe_support(_full_plus_mamba_worker, monkeypatch):
     """Enabling the flag on a Mooncake without `batch_probe_key` fails at
     startup instead of silently leasing every key."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")

@@ -25,22 +25,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, group_kernel_bl
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
-def group_compact_kernel_blocks(
-    cache: torch.Tensor, num_blocks: int
-) -> tuple[torch.Tensor, bool]:
-    """Group a layer cache to `num_blocks` manager blocks and report whether
-    each manager block is one gapless byte run (moves as one region).
-
-    Decided on the kernel-block view, before grouping: a manager block is a run
-    of consecutive kernel blocks, so it is compact whenever each kernel block
-    is. The grouped `cache[0]` alone cannot tell: tail padding in every
-    kernel block makes it non-dense although no other block's data sits in the
-    gaps.
-    """
-    compact = is_non_overlapping_and_dense(cache[0])
-    return group_kernel_blocks(cache, num_blocks), compact
-
-
 def _schema_fingerprint(parts: tuple[object, ...]) -> str:
     return hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
 
@@ -171,8 +155,15 @@ class StoreLayout:
         raise NotImplementedError
 
 
+class _TensorRegion(NamedTuple):
+    base: int
+    stride: int
+    length: int
+    storage: tuple[int, int]  # Registered storage address and size.
+
+
 class RankLocalStoreLayout(StoreLayout):
-    """Historical rank-local Store payload layout."""
+    """Rank-local Store payload described by logical KV tensor regions."""
 
     def __init__(
         self,
@@ -184,9 +175,7 @@ class RankLocalStoreLayout(StoreLayout):
         self._key_prefix = PoolKey.build_prefix(metadata)
         self.kv_caches_base_addr: list[int] = []
         self.block_stride: list[int] = []
-        # Bytes at the start of each block that are stored: up to the last
-        # byte of the group's data, skipping e.g. the padding of a Mamba state
-        # up to the attention page size.
+        # Bytes transferred per region per manager block, independent of block stride.
         self.block_len: list[int] = []
 
     @property
@@ -212,79 +201,67 @@ class RankLocalStoreLayout(StoreLayout):
             for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
         )
 
-    def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
-        self.kv_caches_base_addr = base_addrs
-
-    def set_block_len(self, block_lens: list[int]) -> None:
-        self.block_stride = block_lens
-        self.block_len = list(block_lens)
-
     def register_kv_caches(
-        self,
-        kv_caches: Sequence[torch.Tensor],
-        num_blocks: int,
+        self, kv_caches: Sequence[torch.Tensor], num_blocks: int
     ) -> None:
-        # Map each region's base address to its entry in the parallel lists.
-        region_index: dict[int, int] = {}
-        base_addrs: list[int] = []
-        block_strides: list[int] = []
-        block_lens: list[int] = []
+        """Describe each tensor's dense regions with separate strides and sizes."""
+        if num_blocks <= 0:
+            raise ValueError("num_blocks must be positive")
+        regions: list[_TensorRegion] = []
 
-        def add_region(addr: int, block_stride: int, block_len: int) -> None:
-            assert 0 < block_len <= block_stride
-            index = region_index.get(addr)
-            if index is None:
-                region_index[addr] = len(base_addrs)
-                base_addrs.append(addr)
-                block_strides.append(block_stride)
-                block_lens.append(block_len)
-            else:
-                # Several views can share a region (e.g. the layers of a
-                # block-outermost buffer); keep the bytes up to the last one.
-                block_lens[index] = max(block_lens[index], block_len)
+        def append_regions(cache: torch.Tensor) -> None:
+            if not is_non_overlapping_and_dense(cache[0]):
+                for index in range(cache.shape[1]):
+                    append_regions(cache[:, index])
+                return
+            base = cache.data_ptr()
+            stride = cache.stride(0) * cache.element_size()
+            length = cache[0].numel() * cache.element_size()
+            if num_blocks > 1 and stride < length:
+                raise ValueError("KV cache blocks must not overlap")
+            storage = cache.untyped_storage()
+            if base + (num_blocks - 1) * stride + length > (
+                storage.data_ptr() + storage.nbytes()
+            ):
+                raise ValueError("KV cache descriptor exceeds its backing storage")
+            regions.append(
+                _TensorRegion(
+                    base, stride, length, (storage.data_ptr(), storage.nbytes())
+                )
+            )
 
         for cache in kv_caches:
-            cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
-            storage = cache.untyped_storage()
-            storage_addr = storage.data_ptr()
-            storage_len = storage.nbytes()
-            # Up to the last byte of this layer's block: a grouped manager
-            # block can be compact yet gapped by kernel-block tail padding.
-            block = cache[0]
-            block_bytes = (
-                sum((n - 1) * s for n, s in zip(block.shape, block.stride())) + 1
-            ) * cache.element_size()
-            if not block_compact:
-                # One region per head, copying only that head's block (in a
-                # block-outermost buffer the block stride spans every head).
-                for head_idx in range(cache.shape[1]):
-                    head_cache = cache[:, head_idx]
-                    assert is_non_overlapping_and_dense(head_cache[0])
-                    add_region(
-                        head_cache.data_ptr(),
-                        head_cache.stride(0) * head_cache.element_size(),
-                        head_cache[0].numel() * head_cache.element_size(),
+            if not cache.numel():
+                continue
+            if cache.ndim == 0 or cache.shape[0] % num_blocks:
+                raise ValueError("KV cache block count must divide into manager blocks")
+            append_regions(group_kernel_blocks(cache, num_blocks))
+
+        # KV-sharing layers reuse their target's tensor: drop identical regions.
+        unique = list(dict.fromkeys(regions))
+        if not unique:
+            raise ValueError("KV cache group has no non-empty components")
+
+        # Preserve payload order; coalesce only within a registered storage.
+        merged: list[_TensorRegion] = []
+        for region in unique:
+            if merged:
+                previous = merged[-1]
+                if (
+                    previous.storage == region.storage
+                    and previous.stride == region.stride
+                    and previous.base + previous.length == region.base
+                    and previous.length + region.length <= previous.stride
+                ):
+                    merged[-1] = previous._replace(
+                        length=previous.length + region.length
                     )
-            elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
-                # Block-outermost buffer: each block holds every layer, so the
-                # whole storage is one region. In block 0 this layer's data
-                # starts at cache.data_ptr() - storage_addr and spans
-                # block_bytes, so the block is used up to that end; the
-                # region keeps the end of its last layer.
-                add_region(
-                    storage_addr,
-                    storage_len // num_blocks,
-                    cache.data_ptr() - storage_addr + block_bytes,
-                )
-            else:
-                add_region(
-                    cache.data_ptr(),
-                    cache.stride(0) * cache.element_size(),
-                    block_bytes,
-                )
-        self.kv_caches_base_addr = base_addrs
-        self.block_stride = block_strides
-        self.block_len = block_lens
+                    continue
+            merged.append(region)
+
+        self.kv_caches_base_addr = [region.base for region in merged]
+        self.block_stride = [region.stride for region in merged]
+        self.block_len = [region.length for region in merged]
 
     def prepare_values(
         self,
@@ -292,17 +269,14 @@ class RankLocalStoreLayout(StoreLayout):
         block_ids: list[int],
         shard_ids: Sequence[StoreShardId],
     ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        """Build descriptors for block-aligned chunks within one manager block."""
         if not chunks:
             return [], [], []
         assert len(chunks) == len(shard_ids) and all(
             shard_id == 0 for shard_id in shard_ids
         )
         base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
-        length = len(self.block_stride)
-        stride = np.asarray(
-            [self.block_stride[i % length] for i in range(base.shape[0])],
-            dtype=np.int64,
-        )
+        length = len(self.block_len)
         blen = np.asarray(
             [self.block_len[i % length] for i in range(base.shape[0])],
             dtype=np.int64,
@@ -311,16 +285,23 @@ class RankLocalStoreLayout(StoreLayout):
         starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
         spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
         assert np.all(spans % self.hash_block_size == 0)
+        assert np.all(starts % self.block_size == 0), (
+            "Store chunks must start at a manager block boundary"
+        )
+        assert np.all((spans > 0) & (spans <= self.block_size)), (
+            "Store chunks must be non-empty and stay within one manager block"
+        )
         bids = np.fromiter(
             (block_ids[i] for i in (starts // self.block_size).tolist()),
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * stride[None, :]
-        block_counts = (spans + self.block_size - 1) // self.block_size
-        # A chunk spanning several consecutive blocks also copies the
-        # padding between them.
-        sizes = stride[None, :] * (block_counts[:, None] - 1) + blen[None, :]
+        strides = np.asarray(
+            [self.block_stride[i % len(self.block_stride)] for i in range(base.size)],
+            dtype=np.int64,
+        )
+        addrs = base[None, :] + bids[:, None] * strides[None, :]
+        sizes = np.broadcast_to(blen, addrs.shape)
         return addrs.tolist(), sizes.tolist(), bids.tolist()
 
 
