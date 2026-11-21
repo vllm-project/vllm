@@ -78,6 +78,9 @@ enum Granite4Event {
 /// contents are the arguments (the `# test granite behavior` case in Python).
 pub struct Granite4ToolParser {
     buffer: String,
+    /// The start marker consumed since the last committed event, returned by
+    /// `reset()`.
+    uncommitted_marker: String,
     mode: Granite4Mode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -88,6 +91,7 @@ impl Granite4ToolParser {
     fn new(_tools: &[Tool]) -> Self {
         Self {
             buffer: String::new(),
+            uncommitted_marker: String::new(),
             mode: Granite4Mode::Text,
             active_tool_index: None,
             emitted_tool_count: 0,
@@ -148,7 +152,9 @@ impl Granite4ToolParser {
         self.mode = Granite4Mode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        let mut text = std::mem::take(&mut self.uncommitted_marker);
+        text.push_str(&std::mem::take(&mut self.buffer));
+        text
     }
 }
 
@@ -166,7 +172,13 @@ impl ToolParser for Granite4ToolParser {
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_granite4_event(input, &mut self.mode)
         })? {
+            let is_start = matches!(event, Granite4Event::ToolCallStart);
             self.apply_event(event, output)?;
+            if is_start {
+                self.uncommitted_marker.push_str(&self.buffer[..consumed_len]);
+            } else {
+                self.uncommitted_marker.clear();
+            }
             self.buffer.drain(..consumed_len);
         }
 
@@ -535,6 +547,15 @@ mod tests {
         let error = parser.finish().unwrap_err();
 
         expect!["incomplete Granite4 tool call"].assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn granite4_reset_returns_start_marker_after_parse_error() {
+        let mut parser = Granite4ToolParser::new(&test_tools());
+        parser.parse_chunk("<tool_call> ").unwrap();
+        parser.parse_chunk("is how I call tools.").unwrap_err();
+
+        assert_eq!(parser.reset(), "<tool_call> is how I call tools.");
     }
 
     #[test]
