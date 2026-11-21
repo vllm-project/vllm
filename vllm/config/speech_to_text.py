@@ -53,6 +53,14 @@ class SpeechToTextParams:
     extra_args: dict[str, str | int | float | list[str | int | float]] | None = None
     """Request extensions supplied through vllm_xargs."""
 
+    use_beam_search: bool = False
+    """Whether the request decodes with beam search. Models that cannot honor
+    it should raise `ValueError` from `get_generation_prompt`."""
+
+    max_completion_tokens: int | None = None
+    """Client cap on generated tokens per audio chunk; `None` when the request
+    leaves the cap to the server."""
+
 
 @config
 class SpeechToTextConfig:

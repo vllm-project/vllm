@@ -70,6 +70,8 @@ Implement the prompt construction via [get_generation_prompt][vllm.model_executo
 
 For transcription requests, `stt_params.extra_args` contains the optional `vllm_xargs` dictionary, which is also passed to `SamplingParams.extra_args`. Models can read request-specific frontend or prompt options here and should validate the options they consume. An omitted dictionary is `None`. Multipart clients can send `vllm_xargs` as a JSON string. These options apply to the request; do not use them to mutate the shared model configuration.
 
+`stt_params.use_beam_search` and `stt_params.max_completion_tokens` carry the request's decoding options. If your model cannot honor one, raise `ValueError` from `get_generation_prompt`; the server returns HTTP 400 before generation starts.
+
 There are two common patterns:
 
 #### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
