@@ -368,3 +368,27 @@ def test_extract_tool_calls_streaming_partial_args_with_name_delta(jamba_tool_pa
                 streamed_arguments += arguments
 
     assert json.loads(streamed_arguments) == {"city": "Dallas", "state": "TX"}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['{"value": -2e-3}', '{"value": 5e-1}', '{"values": [1.5e3, -2e-3]}'],
+)
+def test_extract_tool_calls_streaming_scientific_notation(
+    jamba_tool_parser, jamba_tokenizer, arguments
+):
+    """An exponent must not corrupt the digits streamed before it."""
+    model_output = (
+        f'<tool_calls>[{{"name": "calculate", "arguments": {arguments}}}]</tool_calls>'
+    )
+
+    streamed_arguments = ""
+    for delta_message in stream_delta_message_generator(
+        jamba_tool_parser, jamba_tokenizer, model_output
+    ):
+        if delta_message.tool_calls:
+            arguments_delta = delta_message.tool_calls[0].function.arguments
+            if arguments_delta:
+                streamed_arguments += arguments_delta
+
+    assert json.loads(streamed_arguments) == json.loads(arguments)

@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction_streaming
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.granite_20b_fc_tool_parser import Granite20bFCToolParser
 
 
 class TestGranite20bFcToolParser(ToolParserTests):
@@ -74,3 +79,25 @@ class TestGranite20bFcToolParser(ToolParserTests):
             },
             xfail_nonstreaming={},
         )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['{"value": 12e-3}', '{"value": -2e-3}', '{"values": [1.5e3, 12e-3]}'],
+)
+def test_streaming_scientific_notation(
+    default_tokenizer: TokenizerLike, arguments: str
+) -> None:
+    """An exponent must not corrupt the digits streamed before it."""
+    parser = Granite20bFCToolParser(default_tokenizer)
+    deltas = [
+        '<function_call> {"name": "calculate", "arguments": ',
+        *f"{arguments}}}",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(parser, deltas)
+
+    assert len(reconstructor.tool_calls) == 1
+    streamed = reconstructor.tool_calls[0].function.arguments
+    streamed += parser.get_remaining_unstreamed_args()
+    assert json.loads(streamed) == json.loads(arguments)
