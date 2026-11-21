@@ -255,6 +255,12 @@ class ParallelConfig:
     prefill_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that split prefill sequence computation. PCP expands
     the process world size but does not increase the KV-cache shard count."""
+    pcp_whole_prefill_max_tokens: int = Field(default=0, ge=0)
+    """Under PCP without DCP, give a prefill of at most this many scheduled
+    tokens whole to one rank instead of splitting it across all ranks, so it
+    needs no context pass. Such prefills are handed out one per rank at a
+    time; a step with fewer of them than ranks, or with lengths too uneven
+    to balance, splits them as usual. 0 (the default) always splits."""
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor, prefill-context, and data parallel sizes."""
