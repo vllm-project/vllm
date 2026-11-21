@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from collections import deque
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -114,6 +115,38 @@ class StepTimingCollector:
             self._step = None
 
 
+class CopyEventPool:
+    """Reuses the events that order and complete `AsyncOutput`'s D2H copy.
+
+    Without the pool every step creates and destroys two events: the copy event
+    and the one `Stream.wait_stream()` creates internally. Each is a driver
+    call, and destroying an event can block behind other threads that hold the
+    driver lock: while a KV connector posted many CUDA IPC copies, the destroy
+    was observed to take 20-37 ms on the execute-model thread, and in DP
+    lockstep every rank waited for that rank.
+
+    Each output takes a (ready, copy) pair and returns it once `get_output()`
+    has synchronized on the copy event. By then the copy stream has passed its
+    wait on the ready event and recorded the copy event, so neither event is
+    re-recorded while anything still waits on it. `acquire()` runs on the
+    execute-model thread and `release()` on the thread that consumes outputs;
+    deque `append()` and `pop()` are atomic.
+    """
+
+    def __init__(self) -> None:
+        self._free: deque[tuple[torch.Event, torch.Event]] = deque()
+
+    def acquire(self) -> tuple[torch.Event, torch.Event]:
+        try:
+            return self._free.pop()
+        except IndexError:
+            # Blocking (sleep) copy event to avoid busy-polling the driver lock.
+            return torch.Event(), torch.Event(blocking=True)
+
+    def release(self, events: tuple[torch.Event, torch.Event]) -> None:
+        self._free.append(events)
+
+
 class AsyncOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
@@ -126,6 +159,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         pending_aux_output: "PendingAuxOutput | None",
         num_drafted_tokens_per_req: torch.Tensor | None = None,
         num_verified_tokens_per_req: torch.Tensor | None = None,
+        event_pool: CopyEventPool | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -136,8 +170,15 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.pending_aux_output = pending_aux_output
         self.num_drafted_tokens_per_req = num_drafted_tokens_per_req
         self.num_verified_tokens_per_req = num_verified_tokens_per_req
-        # Blocking (sleep) event to avoid busy-polling the accelerator driver lock.
-        self.copy_event = torch.Event(blocking=True)
+        self._event_pool = event_pool
+        ready_event: torch.Event | None = None
+        if event_pool is None:
+            # Blocking (sleep) event to avoid busy-polling the accelerator driver
+            # lock.
+            self.copy_event = torch.Event(blocking=True)
+        else:
+            self._events = event_pool.acquire()
+            ready_event, self.copy_event = self._events
         self._has_fault: torch.Tensor | None = None
         self._has_fault_gpu: torch.Tensor | None = None
         if check_ep_fault:
@@ -145,7 +186,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self._has_fault_gpu = get_ep_all2all_manager().query_fault()
 
         with stream(copy_stream, main_stream):
-            copy_stream.wait_stream(main_stream)
+            if ready_event is None:
+                copy_stream.wait_stream(main_stream)
+            else:
+                ready_event.record(main_stream)
+                copy_stream.wait_event(ready_event)
 
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
             self.logprobs_tensors: LogprobsTensors | None = None
@@ -191,6 +236,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self._event_pool is not None:
+            # The copies are done: a later output may re-record these events.
+            self._event_pool.release(self._events)
+            self._event_pool = None
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
