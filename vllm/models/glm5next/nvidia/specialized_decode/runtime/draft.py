@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.models.glm5next.nvidia.ops.fused_eh_norm import fused_eh_norm
 
 from ..linear import MAX_TOKENS as PROJECTION_MAX_TOKENS
-from ..linear import planned_step
+from ..linear import _RoutedApply, planned_step
 from ..policy import Policy
 from .decode import (
     DSA_PROJECTIONS,
@@ -76,14 +76,24 @@ class SpecializedDraft(LayerStages):
 
             for layer in self.layers:
                 IndexerStage(layer.self_attn.indexer)
+        self.dsa = {}
         if self.policy.enabled("dsa_attn"):
             from ..dsa_attention import DsaAttentionStage
 
             for layer in self.layers:
-                DsaAttentionStage(
+                stage = DsaAttentionStage(
                     layer.self_attn,
                     self.policy.tokens("dsa_value_up", "cute"),
                 )
+                proj = layer.self_attn.o_proj
+                method = proj.quant_method
+                if (
+                    proj.input_is_parallel
+                    and proj.bias is None
+                    and isinstance(method, _RoutedApply)
+                    and method.projection.split_k is not None
+                ):
+                    self.dsa[layer.layer_idx] = stage, method.projection.split_k
         self.mega: dict[int, Any] = {}
         if self.policy.enabled("moe"):
             self.mega = self._build_mega(prefill_q=self.q)
@@ -169,6 +179,22 @@ class SpecializedDraft(LayerStages):
             return self.ar_norm(x, residual, norm.weight.data)
         return norm(x, residual)
 
+    def _prefill_attention(self, layer, x, step, rows):
+        tokens = x.shape[0]
+        stages = self.dsa.get(layer.layer_idx)
+        if stages is not None and self.partial(tokens):
+            stage, projection = stages
+            md = step.metadata[stage.mla.layer_name]
+            if tokens in projection.kernels and stage.supports(md, tokens):
+                values = stage.attention_values(
+                    step.positions, x, get_forward_context(), md, rows
+                )
+                # Keep the original split-K reduction order on the selected rows.
+                out = x.new_empty((values.shape[0], projection.weight.shape[0]))
+                return projection.run(values, out, tactic_tokens=tokens), True
+        out, partial = self.attention(layer, x, step)
+        return out[rows], partial
+
     def run(
         self, mtp, step: Step, input_ids, inputs_embeds, previous_hidden_states, rows
     ):
@@ -214,12 +240,13 @@ class SpecializedDraft(LayerStages):
                 x = mtp.eh_proj(x)
             residual = x
             x = layer.input_layernorm(x)
-            x, partial = self.attention(layer, x, step)
             if step.q > 1 and rows is not None:
                 rows = rows[: tokens // step.q]
-                x, residual = x[rows], residual[rows]
+                x, partial = self._prefill_attention(layer, x, step, rows)
+                residual = residual[rows]
             else:
                 rows = None
+                x, partial = self.attention(layer, x, step)
             x, residual = self.reduced_norm(
                 x, partial, residual, layer.post_attention_layernorm
             )

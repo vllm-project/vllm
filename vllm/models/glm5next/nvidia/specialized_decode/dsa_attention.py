@@ -359,6 +359,8 @@ def head_gemv(
     out: torch.Tensor,
     scale: torch.Tensor | None = None,
     cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    *,
+    tactic_tokens: int | None = None,
 ):
     """`out[t, h] = x[t, h] @ weight[h]` with `x` [M, H, I] BF16 (any token
     stride) and `weight` [H, I, J] BF16 (J contiguous); `out` [M, H, J] is
@@ -370,6 +372,7 @@ def head_gemv(
         weight: [H, I, J] BF16 weights.
         out: [M, H, J] BF16 or FP8 output.
         scale: the static FP8 scale of an FP8 `out`.
+        tactic_tokens: token count whose reduction layout to retain.
         cache: optionally (kv [M, L] BF16, kv_cache [blocks, block size, L] FP8,
             slots int64, k_scale), written as `concat_and_cache_mla`.
 
@@ -401,7 +404,8 @@ def head_gemv(
             Int32(raw.shape[1]), Int64(raw.stride(0)), Int64(raw.stride(1)),
             Int32(min(slots.shape[0], m)),
         )  # fmt: skip
-    tile, rpt = TACTICS.get((rows, cols), {}).get(m, (64, 8))
+    tactic_tokens = m if tactic_tokens is None else tactic_tokens
+    tile, rpt = TACTICS.get((rows, cols), {}).get(tactic_tokens, (64, 8))
     strides = (weight.stride(0), weight.stride(1))
     args = (_flat(weight), _flat(x), out.view(-1), scale, *kv_args)
     st = stream(dev)
@@ -466,7 +470,6 @@ class DsaAttentionStage:
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):
         from vllm.forward_context import get_forward_context
-        from vllm.platforms import current_platform
 
         from .linear import planned
 
@@ -478,6 +481,14 @@ class DsaAttentionStage:
         md = context.attn_metadata[mla.layer_name]
         if not self.supports(md, m):
             return self.stock(positions, hidden_states, llama_4_scaling)
+        values = self.attention_values(positions, hidden_states, context, md)
+        return self.wrapper.o_proj(values)[0]
+
+    def attention_values(self, positions, hidden_states, context, md, output_rows=None):
+        from vllm.platforms import current_platform
+
+        m = hidden_states.shape[0]
+        mla = self.mla
         w = self.wrapper
         qkv = w.fused_qkv_a_proj(hidden_states)[0]
         q_c, kv_c = norm(
@@ -500,12 +511,15 @@ class DsaAttentionStage:
         self.impl.record_logical_topk_ready()
         kv_cache = mla.kv_cache.view(current_platform.fp8_dtype())
         latent, _ = self.impl.forward_mqa(q_fp8, kv_cache, md, mla)
-        out = torch.empty(
-            (m, self.heads, self.w_uv.shape[2]), dtype=q.dtype, device=q.device
-        )
         latent = latent.view(m, self.heads, -1)
+        if output_rows is not None:
+            latent = latent[output_rows]
+        rows = latent.shape[0]
+        out = torch.empty(
+            (rows, self.heads, self.w_uv.shape[2]), dtype=q.dtype, device=q.device
+        )
         if m in self.value_up_tokens:
-            head_gemv(latent, self.w_uv, out)
+            head_gemv(latent, self.w_uv, out, tactic_tokens=m)
         else:
             torch.bmm(latent.transpose(0, 1), mla.W_UV, out=out.transpose(0, 1))
-        return w.o_proj(out.view(m, -1))[0]
+        return out.view(rows, -1)
