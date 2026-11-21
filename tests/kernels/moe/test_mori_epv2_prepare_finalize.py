@@ -12,9 +12,13 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+import vllm.config.parallel as parallel_cfg
 import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
 import vllm.utils.import_utils as import_utils
-from vllm.config.parallel import resolve_mori_all2all
+from vllm.config.parallel import (
+    resolve_mori_all2all,
+    warn_if_mori_fp4_combine_ignored,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
 )
@@ -409,6 +413,36 @@ def test_mori_picks_epv2_where_supported(
 
 
 @pytest.mark.parametrize(
+    "fp4_combine,backend,ep_v2,moe_backend,reason",
+    [
+        ("1", "mori", True, "aiter", "MoRI EPv2"),
+        ("1", "mori", False, "aiter_mega_moe", "aiter_mega_moe"),
+        ("1", "mori_high_throughput", None, "aiter_mega_moe", "aiter_mega_moe"),
+        ("1", "mori", False, "aiter", None),
+        ("1", "mori_high_throughput", None, "aiter", None),
+        ("0", "mori", True, "aiter_mega_moe", None),
+        (None, "mori", True, "aiter_mega_moe", None),
+    ],
+)
+def test_mori_fp4_combine_warns_when_ignored(
+    monkeypatch, fp4_combine, backend, ep_v2, moe_backend, reason
+):
+    if fp4_combine is None:
+        monkeypatch.delenv("VLLM_MORI_FP4_COMBINE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_MORI_FP4_COMBINE", fp4_combine)
+    logger = Mock()
+    monkeypatch.setattr(parallel_cfg, "logger", logger)
+    parallel_config = _parallel_config(all2all_backend=backend, mori_ep_v2=ep_v2)
+    warn_if_mori_fp4_combine_ignored(parallel_config, moe_backend)
+    if reason is None:
+        logger.warning_once.assert_not_called()
+    else:
+        logger.warning_once.assert_called_once()
+        assert reason in logger.warning_once.call_args.args[1]
+
+
+@pytest.mark.parametrize(
     "modules,version,usable",
     [
         ({"mori", "mori.cco", "mori.ops.dispatch_combine_v2"}, "1.2.4", True),
@@ -425,17 +459,15 @@ def test_mori_epv2_needs_a_recent_mori(monkeypatch, modules, version, usable):
     assert (import_utils.mori_epv2_unavailable_reason() is None) is usable
 
 
-@pytest.mark.parametrize(
-    "backend,internode,max_tokens,kernel",
-    [
-        ("mori", False, 4096, "IntraNode"),
-        ("mori", True, 256, "InterNodeV1LL"),
-        ("mori", True, 257, "InterNodeV1"),
-        ("mori_high_throughput", True, 128, "InterNodeV1"),
-        ("mori_low_latency", True, 4096, "InterNodeV1LL"),
-    ],
-)
-def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, kernel):
+def _mori_epv1_kwargs(
+    monkeypatch,
+    *,
+    backend="mori",
+    internode=False,
+    arch="gfx950",
+    max_tokens=4096,
+    fp4_combine=None,
+):
     from vllm.distributed.device_communicators import all2all
 
     kernel_types = SimpleNamespace(
@@ -448,15 +480,21 @@ def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, ke
     monkeypatch.setitem(
         sys.modules,
         "vllm.platforms.rocm",
-        SimpleNamespace(on_gfx942=lambda: False, on_gfx950=lambda: True),
+        SimpleNamespace(
+            on_gfx942=lambda: arch == "gfx942", on_gfx950=lambda: arch == "gfx950"
+        ),
     )
     monkeypatch.delenv(
         "VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD", raising=False
     )
+    if fp4_combine is None:
+        monkeypatch.delenv("VLLM_MORI_FP4_COMBINE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_MORI_FP4_COMBINE", fp4_combine)
     manager = object.__new__(all2all.MoriAll2AllManager)
     manager.internode = internode
     manager._all2all_backend = backend
-    kwargs = manager._make_all2all_kwargs(
+    return manager._make_all2all_kwargs(
         rank=0,
         num_ep_ranks=16,
         input_dtype=torch.bfloat16,
@@ -468,4 +506,60 @@ def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, ke
         num_local_experts=16,
         num_experts_per_token=8,
     )
+
+
+@pytest.mark.parametrize(
+    "backend,internode,max_tokens,kernel",
+    [
+        ("mori", False, 4096, "IntraNode"),
+        ("mori", True, 256, "InterNodeV1LL"),
+        ("mori", True, 257, "InterNodeV1"),
+        ("mori_high_throughput", True, 128, "InterNodeV1"),
+        ("mori_low_latency", True, 4096, "InterNodeV1LL"),
+    ],
+)
+def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, kernel):
+    kwargs = _mori_epv1_kwargs(
+        monkeypatch, backend=backend, internode=internode, max_tokens=max_tokens
+    )
     assert kwargs["kernel_type"] == kernel
+
+
+@pytest.mark.parametrize(
+    "fp4_combine,quant_type",
+    [(None, "none"), ("0", "none"), ("1", "fp4_blockwise")],
+)
+@pytest.mark.parametrize("backend", ["mori", "mori_high_throughput"])
+def test_mori_epv1_fp4_combine_quant_type(
+    monkeypatch, backend, fp4_combine, quant_type
+):
+    kwargs = _mori_epv1_kwargs(monkeypatch, backend=backend, fp4_combine=fp4_combine)
+    assert kwargs["quant_type"] == quant_type
+    assert kwargs["kernel_type"] == "IntraNode"
+
+
+@pytest.mark.parametrize(
+    "internode,arch",
+    [(True, "gfx950"), (False, "gfx942"), (True, "gfx942")],
+)
+def test_mori_epv1_fp4_combine_rejects_unsupported(monkeypatch, internode, arch):
+    with pytest.raises(ValueError, match="requires single-node MoRI on gfx950"):
+        _mori_epv1_kwargs(
+            monkeypatch,
+            backend="mori_high_throughput",
+            internode=internode,
+            arch=arch,
+            fp4_combine="1",
+        )
+
+
+@pytest.mark.parametrize("internode,arch", [(True, "gfx950"), (False, "gfx942")])
+def test_mori_epv1_fp4_combine_off_skips_guard(monkeypatch, internode, arch):
+    kwargs = _mori_epv1_kwargs(
+        monkeypatch,
+        backend="mori_high_throughput",
+        internode=internode,
+        arch=arch,
+        fp4_combine="0",
+    )
+    assert kwargs["quant_type"] == "none"
