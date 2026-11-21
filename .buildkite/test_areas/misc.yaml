@@ -1082,11 +1082,13 @@ steps:
     - vllm/distributed/device_communicators/
     - vllm/model_executor/determinism
     - vllm/model_executor/layers
+    - vllm/models/common/ops/fused_allreduce_rms_norm.py
     - vllm/v1/attention
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    - pytest -v -s v1/determinism/test_fused_allreduce_rms_norm_batch_invariant.py
     - VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k "bs1_vs_bsN or without_batch_invariance_should_fail"
     - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
     - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
