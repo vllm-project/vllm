@@ -80,6 +80,13 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         ):
             return None
 
+        # Drop the <think> text when it shares the delta with other tokens; it
+        # is absent when special tokens were skipped during detokenization.
+        if self.start_token_id in delta_token_ids:
+            start_index = delta_text.find(self.start_token)
+            if start_index != -1:
+                delta_text = delta_text[start_index + len(self.start_token) :]
+
         # No <think> in previous or delta, also need to check for </think>.
         # Because the model may have generated </think> without <think>
         if self.end_token_id in delta_token_ids:
