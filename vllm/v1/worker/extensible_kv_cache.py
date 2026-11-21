@@ -121,6 +121,10 @@ class ExtensibleKVCache:
         # Bytes torch's caching allocator may reserve, set once the cache is
         # sized; None leaves it unlimited.
         self.torch_memory_limit: int | None = None
+        # Cap saved while sleep or a KV discard lifts it. The flag stays set
+        # when that cap was None, so a second lift does not forget the first.
+        self._torch_memory_limit_lifted = False
+        self._lifted_torch_memory_limit: int | None = None
         self.buffer = ExtensibleTensor(
             self.size,
             device=device,
@@ -383,6 +387,30 @@ class ExtensibleKVCache:
         fraction = 1.0 if num_bytes is None else min(num_bytes / total, 1.0)
         # torch.accelerator has no per-process memory fraction.
         torch.cuda.set_per_process_memory_fraction(fraction, self.buffer.device)
+
+    def suspend_torch_memory_limit(self) -> None:
+        """Lift the process-wide allocator cap until
+        `resume_torch_memory_limit`.
+
+        A repeated call keeps the cap recorded by the first call.
+        """
+        if self._torch_memory_limit_lifted:
+            return
+        limit = self.torch_memory_limit
+        self._lifted_torch_memory_limit = limit
+        self._torch_memory_limit_lifted = True
+        if limit is not None:
+            self.set_torch_memory_limit(None)
+
+    def resume_torch_memory_limit(self) -> None:
+        """Restore the allocator cap lifted by `suspend_torch_memory_limit`."""
+        if not self._torch_memory_limit_lifted:
+            return
+        limit = self._lifted_torch_memory_limit
+        self._torch_memory_limit_lifted = False
+        self._lifted_torch_memory_limit = None
+        if limit is not None:
+            self.set_torch_memory_limit(limit)
 
     def free(self) -> None:
         # The process may start another engine, which must not inherit the cap.

@@ -20,6 +20,8 @@ Key benefits:
 
 Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard the model parameters and the KV cache, and back up the rest of what the model allocated on the GPU while loading, like rope scaling tensors, in CPU memory. The content of the parameters and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to update the model's weights, where the previous weights are not needed, e.g. RLHF weight update. Level 2 sleep is also useful when there is not enough CPU memory to back up the model weights, e.g. when a colocated trainer already uses CPU memory for offloading its own state; since the parameters are not backed up, restore them after waking up with `collective_rpc("reload_weights")`.
 
+With the extensible KV cache, warmup caps PyTorch's caching allocator for the whole process. Level 1 and level 2 sleep, and `release_kv_cache_memory()`, lift that cap after the cache's physical pages are released, so colocated code can allocate the freed memory. `wake_up()` or `wake_up(tags=["kv_cache"])` commits those pages again and restores the cap. Waking only the weights leaves the cap lifted, because the KV pages are still released. An engine that is not asleep keeps the cap.
+
 ### What level 2 keeps
 
 Level 2 discards only what is rebuilt on wake, which is what the weight update writes.

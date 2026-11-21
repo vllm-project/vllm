@@ -853,6 +853,11 @@ class LLM(
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
+        Levels 1 and 2 also lift the extensible KV cache's process-wide
+        PyTorch allocator cap until `wake_up` restores the KV cache, so
+        colocated code can allocate the memory sleep freed. Waking only the
+        weights leaves the cap lifted.
+
         Args:
             level: The sleep level.
                 - Level 0: Pause scheduling but continue accepting requests.
@@ -882,6 +887,8 @@ class LLM(
 
         Requires a completed `sleep(level=0)` and resident executor memory.
         Restore with `wake_up(tags=["kv_cache"])`; kept requests are recomputed.
+        An extensible KV cache lifts its allocator cap as well, and that
+        wake restores it.
 
         Args:
             reset_connector: Also reset the KV connector's cache; see

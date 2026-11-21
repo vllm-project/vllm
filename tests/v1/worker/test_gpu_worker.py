@@ -1099,15 +1099,187 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
 
     log: list[str] = []
     monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: False)
-    kv_cache = SimpleNamespace(release_physical=lambda: log.append("release"))
+    kv_cache = SimpleNamespace(
+        release_physical=lambda: log.append("release"),
+        suspend_torch_memory_limit=lambda: log.append("suspend"),
+    )
     worker = SimpleNamespace(
         model_runner=SimpleNamespace(extensible_kv_cache=kv_cache),
         sleep_mode_backend=SimpleNamespace(discard=lambda tags: log.append("pool")),
     )
     Worker.discard(worker, ("kv_cache",))
-    assert log == ["release", "pool"]
+    assert log == ["release", "suspend", "pool"]
     Worker.discard(worker, ("weights",))
-    assert log == ["release", "pool", "pool"]
+    assert log == ["release", "suspend", "pool", "pool"]
+
+
+def _allocator_cap_worker(monkeypatch: pytest.MonkeyPatch, *, with_cache: bool):
+    """A Worker whose extensible KV cache records allocator-cap changes.
+
+    `release_physical` and `recommit` are stubs; the cap methods are the
+    real ones, talking to a mocked caching allocator.
+    """
+    from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
+    from vllm.v1.worker.gpu_worker import Worker
+
+    fractions: list[float] = []
+    order: list[object] = []
+    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: False)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda *args: (80 << 30, 100 << 30)
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_per_process_memory_fraction",
+        lambda fraction, device: fractions.append(fraction),
+    )
+
+    cache = None
+    if with_cache:
+        cache = object.__new__(ExtensibleKVCache)
+        cache.torch_memory_limit = None
+        cache._torch_memory_limit_lifted = False
+        cache._lifted_torch_memory_limit = None
+        buffer = SimpleNamespace(device=torch.device("cpu"), physical_bytes=4 << 30)
+        cache.buffer = buffer
+        cache.set_torch_memory_limit(25 << 30)
+        fractions.clear()
+
+        def release_physical() -> None:
+            order.append("release")
+            buffer.physical_bytes = 0
+
+        def recommit() -> None:
+            order.append("recommit")
+            buffer.physical_bytes = 4 << 30
+
+        # Stubs so the test can see order. The cap methods stay the real ones.
+        cache.release_physical = release_physical  # type: ignore[method-assign]
+        cache.recommit = recommit  # type: ignore[method-assign]
+
+    model_config = SimpleNamespace(
+        enable_nccl_comm_suspend=False,
+        sleep_preserve_parameter_names=[],
+    )
+    runner = SimpleNamespace(
+        extensible_kv_cache=cache,
+        model=torch.nn.Linear(1, 1, bias=False),
+        get_draft_model=lambda: None,
+    )
+    worker = object.__new__(Worker)
+    worker.model_runner = runner
+    worker.model_config = model_config
+    worker.vllm_config = SimpleNamespace(model_config=model_config)
+    worker._sleep_mode_backend = SimpleNamespace(
+        suspend=lambda discardable: order.append(("suspend", set(discardable))),
+        resume=lambda tags: order.append(("resume", tags)),
+        discard=lambda tags: order.append(("discard", tuple(tags))),
+    )
+    return worker, cache, fractions, order
+
+
+@pytest.mark.parametrize("level", [1, 2])
+def test_sleep_lifts_extensible_kv_cache_cap_until_kv_wake(
+    monkeypatch: pytest.MonkeyPatch, level: int
+):
+    """Both sleep levels release the pages and then lift the cap. A
+    weights-only wake leaves it lifted; waking the KV cache restores it
+    after the pages are recommitted. A second sleep does not drop the
+    saved cap."""
+    worker, cache, fractions, order = _allocator_cap_worker(
+        monkeypatch, with_cache=True
+    )
+    worker.sleep(level=level)
+    assert order[0] == "release"
+    kind, discardable = order[1]
+    assert kind == "suspend"
+    assert bool(discardable) is (level == 2)
+    assert fractions == [1.0]
+    assert cache.torch_memory_limit is None
+
+    worker.sleep(level=level)
+    assert fractions == [1.0]
+
+    worker.wake_up(tags=["weights"])
+    assert "recommit" not in order
+    assert cache.torch_memory_limit is None
+
+    worker.wake_up(tags=["kv_cache"])
+    assert order[-2:] == [("resume", ["kv_cache"]), "recommit"]
+    assert fractions == [1.0, 0.25]
+    assert cache.torch_memory_limit == 25 << 30
+    assert not cache._torch_memory_limit_lifted
+
+
+def test_full_wake_restores_the_allocator_cap_after_recommit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker, cache, fractions, order = _allocator_cap_worker(
+        monkeypatch, with_cache=True
+    )
+    worker.sleep(level=1)
+    order.clear()
+    fractions.clear()
+    worker.wake_up()
+    assert order == [("resume", None), "recommit"]
+    assert fractions == [0.25]
+    assert cache.torch_memory_limit == 25 << 30
+
+
+def test_sleep_without_an_extensible_kv_cache_leaves_the_allocator(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker, _cache, fractions, order = _allocator_cap_worker(
+        monkeypatch, with_cache=False
+    )
+    worker.sleep(level=1)
+    worker.wake_up()
+    worker.discard(("kv_cache",))
+    assert fractions == []
+    assert "release" not in order
+    assert [item[0] for item in order] == ["suspend", "resume", "discard"]
+
+
+def test_discarding_the_kv_cache_lifts_the_cap_until_wake(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """release_kv_cache_memory frees the same pages sleep does."""
+    worker, cache, fractions, order = _allocator_cap_worker(
+        monkeypatch, with_cache=True
+    )
+    worker.discard(("weights",))
+    assert fractions == []
+    worker.discard(("kv_cache",))
+    assert order[-2:] == ["release", ("discard", ("kv_cache",))]
+    assert fractions == [1.0]
+    assert cache.torch_memory_limit is None
+    worker.wake_up(tags=["kv_cache"])
+    assert cache.torch_memory_limit == 25 << 30
+    assert fractions == [1.0, 0.25]
+
+
+def test_reload_while_asleep_does_not_restore_the_allocator_cap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A weight reload while the cache is released must not put the cap
+    back. Wake of the KV cache does that."""
+    worker, cache, fractions, order = _allocator_cap_worker(
+        monkeypatch, with_cache=True
+    )
+    worker.sleep(level=2)
+    fractions.clear()
+    worker._kv_cache_reclaimable = True
+    worker.model_runner.get_model = lambda: worker.model_runner.model
+    worker.model_runner.reload_weights = lambda *args: order.append("reload")
+    with patch.object(gpu_worker, "set_current_vllm_config", nullcontext):
+        worker.reload_weights()
+    assert order[-1] == "reload"
+    assert fractions == []
+    assert cache.torch_memory_limit is None
+    worker.wake_up(tags=["kv_cache"])
+    assert fractions == [0.25]
+    assert cache.torch_memory_limit == 25 << 30
 
 
 @create_new_process_for_each_test("spawn")

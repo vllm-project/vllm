@@ -361,10 +361,12 @@ class Worker(WorkerBase):
         if has_kv_transfer_group():
             get_kv_transfer_group().unregister_kv_caches()
         # An extensible KV cache lives outside the allocator pool; keep its
-        # reservation so views and graphs stay valid.
+        # reservation so views and graphs stay valid. The sizing cap is
+        # process-wide, so lift it once those pages are released.
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None:
             extensible_kv_cache.release_physical()
+            extensible_kv_cache.suspend_torch_memory_limit()
         self.sleep_mode_backend.suspend(discardable)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
@@ -393,6 +395,7 @@ class Worker(WorkerBase):
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None and wake_kv_cache:
             extensible_kv_cache.recommit()
+            extensible_kv_cache.resume_torch_memory_limit()
         if has_kv_transfer_group() and wake_kv_cache:
             get_kv_transfer_group().restore_kv_caches()
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
@@ -403,10 +406,11 @@ class Worker(WorkerBase):
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:
             get_kv_transfer_group().unregister_kv_caches()
-        # Outside the allocator pool, like in sleep.
+        # Outside the allocator pool, like in sleep. Lift the same cap.
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None and "kv_cache" in tags:
             extensible_kv_cache.release_physical()
+            extensible_kv_cache.suspend_torch_memory_limit()
         self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
