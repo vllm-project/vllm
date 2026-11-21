@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the sparse MLA backends and utilities."""
 
+import dataclasses
 import math
 import os
 import subprocess
@@ -165,6 +166,7 @@ ROCM_PORTABLE_TESTS = {
     "test_sparse_backend_prefill_correctness",
     "test_rocm_fused_v32_dense_prefill_matches_mqa",
     "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+    "test_rocm_sparse_mla_decode_follows_device_query_lens",
     "test_split_indexer_prefill_chunks",
     "test_split_indexer_prefill_chunks_single_request_overflow",
     "test_sparse_mla_common_impl_resolves_buffer_lazily",
@@ -215,6 +217,13 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 SPARSE_BACKEND_BATCH_SPECS["large_decode_over_topk"] = BatchSpec(
     seq_lens=[256, 384], query_lens=[1, 1]
 )
+
+# Adaptive verification with K=3: the device admits 3/0/2/3 drafts while the
+# CPU spreads the same budget as 2 per request.
+ADAPTIVE_VERIFY_BATCH_SPECS = {
+    "adaptive_verify": BatchSpec(seq_lens=[200, 37, 150, 64], query_lens=[4, 1, 3, 4])
+}
+ADAPTIVE_VERIFY_CPU_QUERY_LENS = [3, 3, 3, 3]
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -821,6 +830,7 @@ def test_sparse_backend_decode_correctness(
     v_head_dim: int,
     monkeypatch,
     block_stride_rows: int | None = None,
+    cpu_query_lens: list[int] | None = None,
 ):
     if qk_rope_head_dim == 0 and (
         backend_cls != FlashMLASparseBackend
@@ -883,7 +893,10 @@ def test_sparse_backend_decode_correctness(
         ):
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
 
-    batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
+    batch_spec = (
+        SPARSE_BACKEND_BATCH_SPECS.get(batch_name)
+        or ADAPTIVE_VERIFY_BATCH_SPECS[batch_name]
+    )
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
     use_nvfp4_ds_mla_quantization = kv_cache_dtype == "nvfp4_ds_mla"
 
@@ -1126,6 +1139,23 @@ def test_sparse_backend_decode_correctness(
         slot = int(common_attn_metadata.slot_mapping[-1])
         query_row = kv_cache[slot // block_size, 0, slot % block_size].zero_()
 
+    if cpu_query_lens is not None:
+        # Adaptive verification spreads drafts evenly on CPU, while the device
+        # query_start_loc records each request's actual admitted count.
+        assert sum(cpu_query_lens) == sum(batch_spec.query_lens)
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=max(batch_spec.query_lens) - 1,
+            enable_adaptive_verification=True,
+        )
+        cpu_query_start_loc = common_attn_metadata.query_start_loc_cpu.clone()
+        cpu_query_start_loc[1 : len(cpu_query_lens) + 1] = torch.tensor(
+            cpu_query_lens, dtype=cpu_query_start_loc.dtype
+        ).cumsum(0)
+        common_attn_metadata = dataclasses.replace(
+            common_attn_metadata, query_start_loc_cpu=cpu_query_start_loc
+        )
+
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
     prefill_backend = get_mla_prefill_backend(vllm_config)(
@@ -1245,6 +1275,34 @@ def test_sparse_backend_decode_correctness(
         )
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Adaptive verification on ROCm sparse MLA"
+)
+@pytest.mark.parametrize("kv_cache_dtype", SPARSE_KV_CACHE_DTYPES)
+def test_rocm_sparse_mla_decode_follows_device_query_lens(
+    default_vllm_config, dist_init, workspace_init, monkeypatch, kv_cache_dtype
+):
+    """ML4-shaped adaptive verification follows device, not CPU, request lengths."""
+    test_sparse_backend_decode_correctness(
+        default_vllm_config,
+        dist_init,
+        ROCMAiterMLASparseBackend,
+        "adaptive_verify",
+        kv_cache_dtype,
+        4,
+        SPARSE_BLOCK_SIZES[0],
+        workspace_init,
+        1.0,
+        1.0,
+        128,
+        128,
+        64,
+        128,
+        monkeypatch,
+        cpu_query_lens=ADAPTIVE_VERIFY_CPU_QUERY_LENS,
+    )
 
 
 @pytest.mark.parametrize(
