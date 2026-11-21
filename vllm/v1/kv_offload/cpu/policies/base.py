@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
@@ -140,3 +140,11 @@ class CachePolicy(ABC):
     def mark_non_evictable(self, key: OffloadKey) -> None:
         """Called when a chunk's ref_cnt transitions from 0."""
         return
+
+    def key_order_snapshot(self) -> Callable[[], list[OffloadKey]]:
+        """Copy the resident keys; the returned call orders them, MRU first.
+
+        Lists the cache to a peer importing it. Only the copy runs under the
+        manager lock; the returned call may run on another thread.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot list its keys")

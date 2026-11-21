@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 
 from typing_extensions import override
@@ -99,6 +99,11 @@ class CPUOffloadingManager(OffloadingManager):
         self.counts: OrderedDict[OffloadKey, int] | None = (
             OrderedDict() if store_threshold >= 2 else None
         )
+
+    @property
+    def num_chunks(self) -> int:
+        """Chunk slots in this tier."""
+        return self._num_chunks
 
     # --- chunk pool ---
 
@@ -215,6 +220,10 @@ class CPUOffloadingManager(OffloadingManager):
         if not chunk.is_ready:
             return LookupResult.HIT_PENDING
         return LookupResult.HIT
+
+    def key_snapshot(self) -> Callable[[], list[OffloadKey]]:
+        """See CachePolicy.key_order_snapshot. Includes keys being written."""
+        return self._policy.key_order_snapshot()
 
     @override
     def get_load_source(

@@ -49,6 +49,14 @@ Abort Flow (timeout path)
 3. Client receives AbortAckMsg and reports the load job as failed.
 4. If AbortAckMsg itself times out, the client fails the job anyway.
 
+Key Listing (bulk import)
+-------------------------
+
+ListKeysMsg asks for a page of the server's primary-tier keys; CURSOR 0
+snapshots them. ListKeysRespMsg returns the page and NEXT_CURSOR (-1 when
+done), or ERROR when the server no longer holds the listing. The client then
+moves the keys with normal lookup → fetch rounds; listing pins nothing.
+
 Message Format
 --------------
 
@@ -320,6 +328,53 @@ class AbortFetchMsg:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, AbortFetchMsg.KV_REQUEST_ID, str)
         _require_non_neg_int(msg, AbortFetchMsg.ROUND_SEQ)
+
+
+class ListKeysMsg:
+    """Client → Server: one page (at most LIMIT keys) of listing LIST_ID,
+    from offset CURSOR into its snapshot; CURSOR 0 takes a new snapshot."""
+
+    TYPE = "list_keys"
+    LIST_ID = "list_id"
+    CURSOR = "cursor"
+    LIMIT = "limit"
+
+    @staticmethod
+    def validate(msg: dict) -> None:
+        """Raise ValueError if any field has an invalid type or value."""
+        _require(msg, ListKeysMsg.LIST_ID, str)
+        _require_non_neg_int(msg, ListKeysMsg.CURSOR)
+        _require_pos_int(msg, ListKeysMsg.LIMIT)
+
+
+class ListKeysRespMsg:
+    """Server → Client: KEYS (most recently used first) of listing LIST_ID,
+    and NEXT_CURSOR, -1 on the last page. An optional ERROR means the listing
+    cannot continue and is incomplete."""
+
+    TYPE = "list_keys_resp"
+    LIST_ID = "list_id"
+    KEYS = "keys"
+    NEXT_CURSOR = "next_cursor"
+    ERROR = "error"
+
+    @staticmethod
+    def validate(msg: dict, max_keys: int) -> None:
+        """Raise ValueError if any field has an invalid type or value, or
+        KEYS holds more than max_keys."""
+        _require(msg, ListKeysRespMsg.LIST_ID, str)
+        _require_list(msg, ListKeysRespMsg.KEYS)
+        if len(msg[ListKeysRespMsg.KEYS]) > max_keys:
+            raise ValueError(f"keys: more than {max_keys}")
+        next_cursor = msg.get(ListKeysRespMsg.NEXT_CURSOR)
+        if not isinstance(next_cursor, int) or next_cursor < -1:
+            raise ValueError(f"next_cursor: invalid value {next_cursor!r}")
+        for key in msg[ListKeysRespMsg.KEYS]:
+            if not isinstance(key, bytes | bytearray):
+                raise ValueError(f"keys: invalid key {key!r}")
+        error = msg.get(ListKeysRespMsg.ERROR)
+        if error is not None and not isinstance(error, str):
+            raise ValueError(f"error: expected str, got {type(error).__name__}")
 
 
 class AbortAckMsg:

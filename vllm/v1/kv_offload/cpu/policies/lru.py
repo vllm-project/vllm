@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import heapq
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
+import numpy as np
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
@@ -103,6 +104,20 @@ class LRUCachePolicy(CachePolicy):
     @override
     def get(self, key: OffloadKey) -> ChunkStatus | None:
         return self.chunks.get(key)
+
+    @override
+    def key_order_snapshot(self) -> Callable[[], list[OffloadKey]]:
+        ranks = dict(self._ranks)
+
+        def order() -> list[OffloadKey]:
+            # numpy: a Python sort of a large tier takes seconds.
+            keys = list(ranks)
+            values = ranks.values()
+            major = np.fromiter((rank[0] for rank in values), np.int64, len(keys))
+            minor = np.fromiter((rank[1] for rank in values), np.int64, len(keys))
+            return [keys[i] for i in np.lexsort((minor, major))[::-1].tolist()]
+
+        return order
 
     @override
     def insert(

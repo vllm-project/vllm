@@ -254,6 +254,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler.reset_cache()
         return True
 
+    def on_rpc(self, payload: bytes) -> bytes | None:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.on_rpc(payload)
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_scheduler is not None:
             return self.connector_scheduler.get_stats()
