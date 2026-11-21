@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 import torch
+from transformers import LlamaConfig
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
@@ -142,6 +143,43 @@ def test_custom_compile_config(
 
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
+
+
+@pytest.mark.parametrize(
+    "mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE]
+)
+def test_compile_warmup_uses_planned_graph_sizes(
+    mode, vllm_runner, monkeypatch, caplog_vllm, tmp_path
+):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    ).save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=32,
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=mode,
+            prefill_cudagraph_capture_token_sizes=[8],
+            decode_cudagraph_capture_request_sizes=[32],
+            compile_sizes=[8, 16, 32],
+        ),
+    ):
+        warmup = "Compile and warming up model for size "
+        assert warmup + "8" not in caplog_vllm.messages
+        assert warmup + "16" in caplog_vllm.messages
+        warmed_32 = warmup + "32" in caplog_vllm.messages
+        assert warmed_32 == (mode == CUDAGraphMode.PIECEWISE)
 
 
 @create_new_process_for_each_test("spawn")
