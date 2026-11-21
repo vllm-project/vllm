@@ -21,17 +21,18 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-"xpu"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 
-# Parse available devices from ZE_AFFINITY_MASK (e.g. "2,3") or default to "0,1,...".
-# compute_gpu_id indexes into this list to assign devices per-instance.
+# Build mask-local device indices. If ZE_AFFINITY_MASK=6,7, then
+# --device-ids 0,1 selects physical devices 6 and 7.
 if [[ -n "${ZE_AFFINITY_MASK:-}" ]]; then
-  IFS=',' read -r -a AVAILABLE_DEVICES <<< "${ZE_AFFINITY_MASK}"
+  IFS=',' read -r -a SHARED_DEVICES <<< "${ZE_AFFINITY_MASK}"
+  NUM_AVAILABLE_DEVICES=${#SHARED_DEVICES[@]}
 else
-  # Default: devices 0 .. (PREFILLER_TP_SIZE + DECODER_TP_SIZE - 1)
-  AVAILABLE_DEVICES=()
-  for ((i=0; i<PREFILLER_TP_SIZE + DECODER_TP_SIZE; i++)); do
-    AVAILABLE_DEVICES+=("$i")
-  done
+  NUM_AVAILABLE_DEVICES=$((PREFILLER_TP_SIZE + DECODER_TP_SIZE))
 fi
+AVAILABLE_DEVICES=()
+for ((i=0; i<NUM_AVAILABLE_DEVICES; i++)); do
+  AVAILABLE_DEVICES+=("$i")
+done
 
 compute_gpu_id() {
   local start=$1
@@ -74,7 +75,6 @@ launch_baseline() {
   BASELINE_GPU_ID=$(compute_gpu_id 0 1)
 
   BASELINE_BASE_CMD="
-  ZE_AFFINITY_MASK=$BASELINE_GPU_ID \
   VLLM_WORKER_MULTIPROC_METHOD=spawn \
   VLLM_ENABLE_V1_MULTIPROCESSING=1 vllm serve $MODEL_NAME \
       --host ${BASELINE_HOST} \
@@ -82,6 +82,7 @@ launch_baseline() {
       --max-model-len ${MAX_MODEL_LEN}\
       --seed 42 \
       -tp 1 \
+      --device-ids ${BASELINE_GPU_ID} \
       --block-size ${BLOCK_SIZE} \
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
       --dtype float16 \
@@ -102,7 +103,6 @@ launch_pd() {
   sleep 2
 
   echo "Starting prefill on GPU ${PREFILL_GPU_ID}, port ${PREFILL_PORT}"
-  ZE_AFFINITY_MASK="${PREFILL_GPU_ID}" \
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=200 \
   VLLM_NIXL_SIDE_CHANNEL_HOST="${PREFILL_HOST}" \
   VLLM_NIXL_SIDE_CHANNEL_PORT="${PREFILL_NIXL_SIDE_PORT}" \
@@ -117,11 +117,11 @@ launch_pd() {
     --enforce-eager \
     --dtype float16 \
     -tp "${PREFILLER_TP_SIZE}" \
+    --device-ids "${PREFILL_GPU_ID}" \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
     --kv-transfer-config "${kv_config}" &
 
   echo "Starting decode on GPU ${DECODE_GPU_ID}, port ${DECODE_PORT}"
-  ZE_AFFINITY_MASK="${DECODE_GPU_ID}" \
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=200 \
   VLLM_WORKER_MULTIPROC_METHOD=spawn \
   VLLM_ENABLE_V1_MULTIPROCESSING=1 \
@@ -133,6 +133,7 @@ launch_pd() {
     --block-size "${BLOCK_SIZE}" \
     --enforce-eager \
     -tp "${DECODER_TP_SIZE}" \
+    --device-ids "${DECODE_GPU_ID}" \
     --dtype float16 \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
     --kv-transfer-config "${kv_config}" &
