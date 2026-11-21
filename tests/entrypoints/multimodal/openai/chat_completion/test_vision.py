@@ -7,7 +7,7 @@ import httpx
 import openai
 import pytest
 import pytest_asyncio
-from PIL import Image
+from PIL import Image, ImageDraw
 from transformers import AutoProcessor
 
 from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
@@ -532,6 +532,36 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
             f"  content: {content!r}\n"
             f"  required (all groups, >=1 per group): {required_terms}"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_transparent_image_reads_as_white_background(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    """Transparent pixels must reach the model as white, not their stored black."""
+    transparent = Image.new("RGBA", (336, 336), (0, 0, 0, 0))
+    ImageDraw.Draw(transparent).ellipse((84, 84, 252, 252), fill=(0, 0, 0, 255))
+    on_white = Image.alpha_composite(
+        Image.new("RGBA", transparent.size, "white"), transparent
+    )
+
+    results = []
+    for image_url in (
+        encode_image_url(transparent, image_mode=None),
+        encode_image_url(on_white),
+    ):
+        chat_completion = await client.chat.completions.create(
+            model=model_name,
+            messages=dummy_messages_from_image_url(image_url),
+            max_completion_tokens=10,
+            temperature=0.0,
+        )
+        results.append(
+            (chat_completion.choices[0].message.content, chat_completion.usage)
+        )
+
+    assert results[0] == results[1]
 
 
 @pytest.mark.asyncio

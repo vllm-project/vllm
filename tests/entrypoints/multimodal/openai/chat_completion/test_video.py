@@ -13,6 +13,7 @@ from vllm.multimodal.utils import encode_video_url, fetch_video
 from vllm.platforms import current_platform
 
 MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+QWEN3_VL_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 MAXIMUM_VIDEOS = 3
 
 TEST_VIDEO_URLS = [
@@ -20,6 +21,11 @@ TEST_VIDEO_URLS = [
     f"{VLLM_S3_BUCKET_URL}/multimodal_asset/vtest.avi",
     f"{VLLM_S3_BUCKET_URL}/multimodal_asset/Megamind.avi",
 ]
+
+# ROCm: Allow more time to download videos from external sources.
+VIDEO_ENV_OVERRIDES = (
+    {"VLLM_VIDEO_FETCH_TIMEOUT": "120"} if current_platform.is_rocm() else {}
+)
 
 
 @pytest.fixture(scope="module")
@@ -39,14 +45,9 @@ def server():
         "--trust-request-mm-kwargs",
     ]
 
-    # ROCm: Allow more time to download videos from external sources.
-    env_overrides = {}
-    if current_platform.is_rocm():
-        env_overrides = {
-            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-        }
-
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict=VIDEO_ENV_OVERRIDES
+    ) as remote_server:
         yield remote_server
 
 
@@ -546,3 +547,39 @@ async def test_omitted_media_cache_miss_names_every_item(
         ),
     ):
         await client.chat.completions.create(model=model_name, messages=messages)
+
+
+@pytest.fixture(scope="module")
+def qwen3_vl_server():
+    args = [
+        "--max-model-len",
+        "16384",
+        "--max-num-seqs",
+        "2",
+        "--enforce-eager",
+        "--limit-mm-per-prompt",
+        json.dumps({"video": 1}),
+    ]
+
+    with RemoteOpenAIServer(
+        QWEN3_VL_MODEL_NAME, args, env_dict=VIDEO_ENV_OVERRIDES
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_qwen3_vl_single_video(qwen3_vl_server):
+    async with qwen3_vl_server.get_async_client() as client:
+        chat_completion = await client.chat.completions.create(
+            model=QWEN3_VL_MODEL_NAME,
+            messages=dummy_messages_from_video_url(TEST_VIDEO_URLS[0]),
+            max_completion_tokens=10,
+            temperature=0.0,
+        )
+
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
+    assert choice.message.content
+    assert chat_completion.usage == openai.types.CompletionUsage(
+        completion_tokens=10, prompt_tokens=6876, total_tokens=6886
+    )
