@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.reasoning import ReasoningParser
+from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -114,6 +116,268 @@ def _to_token_ids(tokenizer, texts: tuple[str | int, ...]) -> list[int]:
         else _single_token(tokenizer, t)
         for t in texts
     ]
+
+
+@pytest.mark.parametrize("mode", ["uncommitted", "committed", "mask"])
+@pytest.mark.parametrize("close_tail", [None, 1, 2, 3])
+def test_kimi_reopened_draft_keeps_first_constraint(tokenizer, mode, close_tail):
+    close = tokenizer.encode("<|close|>think<|sep|>")
+    reopen = tokenizer.encode("<|open|>think<|sep|>")
+    prefix = tokenizer.encode(".") + close
+    split = 0 if close_tail is None else len(prefix) - close_tail
+    draft = prefix[split:] + reopen
+    manager, request = _build_harness(
+        tokenizer,
+        "xgrammar",
+        reasoning_ended=False,
+        num_spec_tokens=len(draft) if mode == "mask" else 0,
+    )
+    manager.reasoner_cls = KimiK3ReasoningParser
+    assert request.structured_output_request is not None
+    request.append_output_token_ids(tokenizer.encode("Plan") + prefix[:split])
+    if mode == "committed":
+        request.append_output_token_ids(draft)
+    try:
+        bounds = manager._get_constraint_bounds(
+            request, draft, spec_tokens_committed=mode == "committed"
+        )
+        boundary = len(prefix) - split
+        assert bounds.grammar_start == bounds.constraint_start == boundary
+        assert request.structured_output_request.reasoning_ended is False
+        if mode == "mask":
+            mask = manager.grammar_bitmask(
+                {request.request_id: request},
+                [request.request_id],
+                {request.request_id: draft},
+            )
+            assert mask is not None
+            token = reopen[0]
+            assert not (int(mask[boundary, token // 32]) & (1 << (token % 32)))
+            accepted = prefix[split:] + tokenizer.encode("{}")
+            request.append_output_token_ids(accepted)
+            assert manager.accept_tokens(request, accepted)
+            assert request.structured_output_request.reasoning_ended is True
+    finally:
+        manager.clear_backend()
+
+
+@pytest.fixture(scope="module", params=["gpt2", "atomic", "unequal"])
+def kimi_boundary_model(request, tmp_path_factory):
+    from transformers import AutoConfig
+
+    path = tmp_path_factory.mktemp("kimi-boundary")
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    if request.param != "gpt2":
+        tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": ["<|open|>", "<|close|>", "<|sep|>"]
+                if request.param == "atomic"
+                else ["<|open|>"]
+            }
+        )
+    tokenizer.save_pretrained(path)
+    config = AutoConfig.from_pretrained(TOKENIZER)
+    config.vocab_size = len(tokenizer)
+    config.save_pretrained(path)
+    return str(path)
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("thinking", [False, True])
+def test_kimi_boundary_matches_every_prefix(kimi_boundary_model, committed, thinking):
+    manager = StructuredOutputManager(
+        VllmConfig(
+            model_config=ModelConfig(model=kimi_boundary_model),
+            device_config=DeviceConfig(device="cpu"),
+            structured_outputs_config=StructuredOutputsConfig(
+                backend="xgrammar", reasoning_parser="kimi_k3"
+            ),
+        )
+    )
+    tokenizer = manager.tokenizer
+    kwargs = {"chat_template_kwargs": {"thinking": thinking}}
+    reasoner = KimiK3ReasoningParser(tokenizer, **kwargs)
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+    )
+    open_text, close_text = "<|open|>think<|sep|>", "<|close|>think<|sep|>"
+    texts = [
+        " plain reasoning",
+        close_text + open_text,
+        "." + close_text + open_text + "." + close_text,
+        open_text + "." + close_text + "<|open|>response",
+        close_text * 2 + open_text * 2,
+        "<|close|>response<|sep|>" + open_text,
+    ]
+    history = tokenizer.encode(" earlier") * 4096 + tokenizer.encode(open_text)
+    try:
+        for text in texts:
+            tokens = tokenizer.encode(text)
+            # Every split tests a marker crossing the committed/draft boundary.
+            for split in range(len(tokens) + 1):
+                before, remaining = history + tokens[:split], tokens[split:]
+                for length in range(len(remaining) + 1):
+                    draft = remaining[:length]
+                    req = Request(
+                        request_id="boundary",
+                        prompt_token_ids=before,
+                        sampling_params=params,
+                        pooling_params=None,
+                        reasoning_ended=False,
+                        reasoning_parser_kwargs=kwargs,
+                    )
+                    if committed:
+                        req.append_output_token_ids(draft)
+                    # Definition of A: earliest ended nonempty prefix wins,
+                    # regardless of what a later draft suffix would do.
+                    expected = next(
+                        (
+                            i
+                            for i in range(1, length + 1)
+                            if reasoner.is_reasoning_end_streaming(
+                                before + draft[:i], draft[:i]
+                            )
+                        ),
+                        length + 1,
+                    )
+                    bounds = manager._get_constraint_bounds(req, draft, committed)
+                    assert bounds == (expected, expected), (text, split, length)
+                    assert list(req.all_token_ids) == before + (
+                        draft if committed else []
+                    )
+                    assert req.structured_output_request.reasoning_ended is False
+    finally:
+        manager.clear_backend()
+
+
+def test_kimi_context_free_end_keeps_first_close(kimi_boundary_model):
+    tokenizer = AutoTokenizer.from_pretrained(kimi_boundary_model)
+    reasoner = KimiK3ReasoningParser(tokenizer)
+    close = tokenizer.encode("<|close|>think<|sep|>")
+    reopen = tokenizer.encode("<|open|>think<|sep|>")
+    draft = tokenizer.encode(".") + close + reopen
+    assert not reasoner.is_reasoning_end(draft)
+    if len(close) != len(reopen):
+        assert reasoner.find_reasoning_end(draft) is None
+        return
+    assert reasoner.find_reasoning_end(draft) == ReasoningEnd(len(close), False)
+    assert reasoner.find_reasoning_end(tokenizer.encode(" still thinking")) == (
+        ReasoningEnd(len(tokenizer.encode(" still thinking")), False)
+    )
+    # Without the history, a suffix could complete an earlier close.
+    for n in range(1, len(close)):
+        assert reasoner.find_reasoning_end(close[n:] + reopen) is None
+
+
+@pytest.fixture(scope="module")
+def boundary_parser_model(tmp_path_factory):
+    from transformers import AutoConfig
+
+    path = tmp_path_factory.mktemp("boundary-parsers")
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": [
+                "<think>",
+                "</think>",
+                "<|START_THINKING|>",
+                "<|END_THINKING|>",
+                "<|CHATBOT_TOKEN|>",
+                "<mm:think>",
+                "</mm:think>",
+                "]~b]",
+                "<ifm|think>",
+                "</ifm|think>",
+                "<ifm|tool_calls>",
+                "<|open|>",
+                "<|close|>",
+                "<|sep|>",
+            ]
+        }
+    )
+    tokenizer.save_pretrained(path)
+    config = AutoConfig.from_pretrained(TOKENIZER)
+    config.vocab_size = len(tokenizer)
+    config.save_pretrained(path)
+    return str(path)
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize(
+    "parser,opening,closing,kwargs",
+    [
+        ("deepseek_r1", "<think>", "</think>", {}),
+        ("deepseek_v3", "<think>", "</think>", {"thinking": True}),
+        ("hy_v3", "<think>", "</think>", {"reasoning_effort": "high"}),
+        ("step3", "<think>", "</think>", {}),
+        ("cohere_command3", "<|START_THINKING|>", "<|END_THINKING|>", {}),
+        ("cohere_command4", "<|START_THINKING|>", "<|END_THINKING|>", {}),
+        ("minimax_m2_append_think", "<think>", "</think>", {}),
+        ("minimax_m3", "<mm:think>", "</mm:think>", {}),
+        ("k2_horizon", "<ifm|think>", "</ifm|think>", {}),
+        ("kimi_k3", "<|open|>think<|sep|>", "<|close|>think<|sep|>", {}),
+    ],
+)
+def test_single_token_checks_preserve_first_boundary(
+    boundary_parser_model, parser, opening, closing, kwargs, committed
+):
+    """Singleton deltas must preserve the earliest full-delta boundary."""
+    manager = StructuredOutputManager(
+        VllmConfig(
+            model_config=ModelConfig(model=boundary_parser_model),
+            device_config=DeviceConfig(device="cpu"),
+            structured_outputs_config=StructuredOutputsConfig(
+                backend="xgrammar", reasoning_parser=parser
+            ),
+        )
+    )
+    tokenizer = manager.tokenizer
+    opened, closed, plain = map(tokenizer.encode, (opening, closing, "."))
+    history = closed + opened + plain * 5
+    cases = [(history, []), (history, plain * 32)]
+    for split in range(len(closed)):
+        for tail in ([], plain, opened, opened + closed, opened[:1], plain * 32):
+            cases.append((history + closed[:split], closed[split:] + tail))
+    rng = random.Random(68112)
+    chunks = [plain, opened, closed, closed[:-1], opened[:-1]]
+    for _ in range(200):
+        draft = [t for _ in range(rng.randrange(1, 9)) for t in rng.choice(chunks)]
+        cases.append((history, draft))
+    parser_kwargs = {"chat_template_kwargs": kwargs}
+    try:
+        for before, draft in cases:
+            req = Request(
+                request_id="boundary",
+                prompt_token_ids=before,
+                sampling_params=SamplingParams(
+                    structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+                ),
+                pooling_params=None,
+                reasoning_ended=False,
+                reasoning_parser_kwargs=parser_kwargs,
+            )
+            if committed:
+                req.append_output_token_ids(draft)
+            assert manager.reasoner_cls is not None
+            reference = manager.reasoner_cls(tokenizer, **parser_kwargs)
+            expected = next(
+                (
+                    i
+                    for i in range(1, len(draft) + 1)
+                    if reference.is_reasoning_end_streaming(
+                        before + draft[:i], draft[:i]
+                    )
+                ),
+                len(draft) + 1,
+            )
+            assert manager._get_constraint_bounds(req, draft, committed) == (
+                expected,
+                expected,
+            ), (parser, before, draft, committed)
+            assert list(req.all_token_ids) == before + (draft if committed else [])
+            assert req.structured_output_request.reasoning_ended is False
+    finally:
+        manager.clear_backend()
 
 
 def _wait_for_grammar(request: Request) -> None:

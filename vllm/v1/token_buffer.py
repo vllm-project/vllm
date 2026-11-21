@@ -159,8 +159,8 @@ def token_slice(tokens: Sequence[int], start: int, stop: int) -> Sequence[int]:
 class TokenIdsView(Sequence[int]):
     """`tokens` followed by `suffix`, shortened from the end by pop().
 
-    Copied into a list only when read element-wise, so a caller that ignores
-    it, or searches it with rfind_tokens, doesn't copy `tokens`.
+    Indexing reads only the requested tokens. Iteration and membership
+    checks materialize and cache the full view as a list.
     """
 
     def __init__(self, tokens: Sequence[int], suffix: Iterable[int] = ()) -> None:
@@ -186,7 +186,28 @@ class TokenIdsView(Sequence[int]):
     def __getitem__(self, index: slice) -> list[int]: ...
 
     def __getitem__(self, index: int | slice) -> int | list[int]:
-        return self._as_list()[index]
+        if self._list is not None:
+            return self._list[index]
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self._len)
+            split = len(self._tokens)
+            if step == 1:
+                result = list(self._tokens[start : min(stop, split)])
+                if stop > split:
+                    result.extend(self._suffix[max(0, start - split) : stop - split])
+                return result
+            return [
+                self._tokens[i] if i < split else self._suffix[i - split]
+                for i in range(start, stop, step)
+            ]
+        if index < 0:
+            index += self._len
+        if not 0 <= index < self._len:
+            raise IndexError(index)
+        num_tokens = len(self._tokens)
+        if index < num_tokens:
+            return self._tokens[index]
+        return self._suffix[index - num_tokens]
 
     def __iter__(self) -> Iterator[int]:
         return iter(self._as_list())
