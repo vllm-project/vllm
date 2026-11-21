@@ -149,6 +149,27 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
 
   int32_t m = a.size(0), n = b.size(1), k = a.size(1);
 
+  // The SM90 TMA mainloop needs the SFA M extent to be a multiple of 4, so pad
+  // the activation scales for misaligned M, as the SM100 caller does.
+  int32_t m_sf = m;
+  std::optional<torch::stable::Tensor> a_scales_pad;
+  void const* a_scales_data = a_scales.data_ptr();
+  if constexpr (!swap_ab) {
+    if (m % 4 != 0) {
+      m_sf = (m + 3) & ~3;
+      int64_t num_groups = a_scales.numel() / m;
+      a_scales_pad = torch::stable::new_empty(
+          a_scales, {num_groups * m_sf},
+          torch::headeronly::ScalarType::Float);
+      cudaMemcpy2DAsync(a_scales_pad->data_ptr(), m_sf * sizeof(float),
+                        a_scales.data_ptr(), m * sizeof(float),
+                        m * sizeof(float), num_groups,
+                        cudaMemcpyDeviceToDevice,
+                        get_current_cuda_stream(a.get_device()));
+      a_scales_data = a_scales_pad->data_ptr();
+    }
+  }
+
   StrideA a_stride;
   StrideB b_stride;
   StrideC c_stride;
@@ -163,14 +184,14 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
 
   LayoutSFA layout_SFA = swap_ab
       ? ScaleConfig::tile_atom_to_shape_SFA(make_shape(n, m, k, 1))
-      : ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, 1));
+      : ScaleConfig::tile_atom_to_shape_SFA(make_shape(m_sf, n, k, 1));
   LayoutSFB layout_SFB = swap_ab
       ? ScaleConfig::tile_atom_to_shape_SFB(make_shape(n, m, k, 1))
       : ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, 1));
 
   auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB const*>(b.data_ptr());
-  auto a_scales_ptr = static_cast<ElementBlockScale const*>(a_scales.data_ptr());
+  auto a_scales_ptr = static_cast<ElementBlockScale const*>(a_scales_data);
   auto b_scales_ptr = static_cast<ElementBlockScale const*>(b_scales.data_ptr());
 
   typename GemmKernel::MainloopArguments mainloop_args{};
@@ -207,7 +228,9 @@ void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::stable::Tensor& out,
                                               torch::stable::Tensor const& b,
                                               torch::stable::Tensor const& a_scales,
                                               torch::stable::Tensor const& b_scales) {
-  bool swap_ab = (a.size(0) % 4) != 0;
+  // swapAB wins for small M (measured on H100 NVL for M <= 64); misaligned
+  // larger M runs the non-swapAB path with padded activation scales.
+  bool swap_ab = a.size(0) <= 64;
   if (!swap_ab) {
     cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
         OutType, 1, 128, 128, Shape<_128, _128, _128>,
