@@ -973,13 +973,10 @@ def rebuild_mm_uuids_from_mm_data(
         "Expected all vision_chunk items to be dicts"
     )
     vision_chunks = cast(list[dict[str, Any]], vision_chunks)
-    vision_chunk_uuids = [
-        uuid_val for item in vision_chunks if (uuid_val := item.get("uuid")) is not None
-    ]
 
-    if vision_chunk_uuids:
-        mm_uuids = dict(mm_uuids)
-        mm_uuids["vision_chunk"] = vision_chunk_uuids
+    # One entry per item; None means the item is hashed by content.
+    mm_uuids = dict(mm_uuids)
+    mm_uuids["vision_chunk"] = [item.get("uuid") for item in vision_chunks]
 
     return mm_uuids
 
@@ -1111,6 +1108,15 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
+    def _resolve_content_format(self, params: ChatParams) -> ChatTemplateContentFormat:
+        return resolve_chat_template_content_format(
+            chat_template=params.chat_template,
+            tools=params.chat_template_kwargs.get("tools"),
+            given_format=params.chat_template_content_format,
+            tokenizer=self.get_tokenizer(),
+            model_config=self.model_config,
+        )
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -1128,13 +1134,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             model_config,
-            content_format=resolve_chat_template_content_format(
-                chat_template=params.chat_template,
-                tools=params.chat_template_kwargs.get("tools"),
-                given_format=params.chat_template_content_format,
-                tokenizer=tokenizer,
-                model_config=model_config,
-            ),
+            content_format=self._resolve_content_format(params),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
@@ -1251,13 +1251,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             model_config,
-            content_format=resolve_chat_template_content_format(
-                chat_template=params.chat_template,
-                tools=params.chat_template_kwargs.get("tools"),
-                given_format=params.chat_template_content_format,
-                tokenizer=tokenizer,
-                model_config=model_config,
-            ),
+            content_format=self._resolve_content_format(params),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
         )

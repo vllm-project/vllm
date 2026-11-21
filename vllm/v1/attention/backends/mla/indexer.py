@@ -1197,6 +1197,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         out.copy_(local_seq_lens)
         return out
 
+    def should_build_custom_decode_rows(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> bool:
+        """Whether build() takes this step's flattened decode rows from
+        _build_decode_rows instead of its default path. A builder that returns
+        True overrides _build_decode_rows and returns False on varlen decode
+        and DCP steps.
+        """
+        return False
+
+    def _build_decode_rows(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_decodes: int,
+        num_decode_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build a decode step's flattened rows when
+        should_build_custom_decode_rows is True: write one row per decode token
+        into decode_seq_lens_buffer (compressed lengths, padding rows 0),
+        expanded_block_table_buffer and decode_lens_buffer, plus
+        per_req_decode_lens_buffer, and return the
+        (seq_lens, block_table, decode_lens) views for num_decode_tokens rows.
+        """
+        raise NotImplementedError
+
     def _prepare_decode_tensors(
         self,
         seq_lens: torch.Tensor,
@@ -1681,7 +1706,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         decode_metadata = None
         if num_decodes > 0:
             assert num_decode_tokens <= self.expanded_block_table_buffer.shape[0]
-            if not self.supports_varlen:
+            custom_rows = self.should_build_custom_decode_rows(common_attn_metadata)
+            if not (self.supports_varlen or custom_rows):
                 torch.diff(
                     common_attn_metadata.query_start_loc[: num_decodes + 1],
                     out=self.decode_lens_buffer[:num_decodes],
@@ -1785,6 +1811,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     global_seq_lens_for_decode = self.global_decode_seq_lens_buffer[
                         :num_decode_tokens
                     ]
+            elif custom_rows:
+                seq_lens, block_table, decode_lens = self._build_decode_rows(
+                    common_attn_metadata, num_decodes, num_decode_tokens
+                )
+                requires_padding = False
             else:
                 seq_lens, block_table, decode_lens, batch_size, requires_padding = (
                     self._prepare_decode_tensors(
@@ -1817,7 +1848,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
-            if self.compress_ratio > 1:
+            if self.compress_ratio > 1 and not custom_rows:
                 if seq_lens_is_buffer_view:
                     seq_lens //= self.compress_ratio
                 else:

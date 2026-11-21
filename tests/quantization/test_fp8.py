@@ -15,6 +15,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.config.cache import CacheConfig
@@ -148,10 +149,14 @@ def test_humming_fp8_matches_checkpoint_forward(
 )
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_deepseek_v41_mxfp8_scale_loading(
-    dist_init, default_vllm_config, monkeypatch, tp_rank, scale_dtype
+    default_vllm_config, monkeypatch, tmp_path, tp_rank, scale_dtype
 ):
     """Expand linear scales before TP slicing, including padded shared experts."""
+    from transformers import LlamaConfig
+
     from vllm.model_executor.layers import linear as linear_module
     from vllm.model_executor.layers.linear import (
         ColumnParallelLinear,
@@ -161,7 +166,10 @@ def test_deepseek_v41_mxfp8_scale_loading(
     from vllm.models.deepseek_v41 import quant_config as quant_module
     from vllm.models.deepseek_v41.nvidia import model as model_module
 
-    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    default_vllm_config.model_config = ModelConfig(
+        model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+    )
     quant_config = quant_module.DeepseekV4FP8Config(
         is_checkpoint_fp8_serialized=True, weight_block_size=[32, 32]
     )
@@ -888,12 +896,13 @@ def test_scaled_fp8_quant(dtype) -> None:
 #
 # this is the case for marlin as well as per-tensor Fp8MoEMethod
 @pytest.mark.parametrize("use_marlin", [False])  # skip True
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_fp8_reloading(
     default_vllm_config,
     method_cls,
     weight_block_size,
     use_marlin,
-    dist_init,
     monkeypatch,
 ):
     # NOTE(rob): this test fails when using DeepGEMM because the

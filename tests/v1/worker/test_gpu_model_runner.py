@@ -12,7 +12,11 @@ from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import MultipleOf
@@ -244,7 +248,7 @@ def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     cache_config = vllm_config.cache_config
-    cache_config.mamba_cache_mode = "align"
+    cache_config.enable_prefix_caching = True
     forward_context = vllm_config.compilation_config.static_forward_context
     for i, alignment in enumerate(prefill_checkpoint_alignments):
         forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
@@ -353,7 +357,7 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     )
     cache_config = SimpleNamespace(
         block_size=16,
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
         mamba_page_size_padded=None,
         user_specified_block_size=True,
         kv_cache_dtype_skip_layers=None,
@@ -381,13 +385,13 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     encoder_cache = EncoderCache()
     encoder_cache.mm_features["req-with-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-0",
             mm_position=PlaceholderRange(offset=0, length=2),
         ),
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-1",
             mm_position=PlaceholderRange(offset=2, length=3),
@@ -395,7 +399,7 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     ]
     encoder_cache.mm_features["req-no-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-2",
             mm_position=PlaceholderRange(offset=0, length=1),
@@ -454,7 +458,7 @@ def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
     for req_id, modality, length in [("req-a", "video", 1), ("req-b", "image", 2)]:
         encoder_cache.mm_features[req_id] = [
             MultiModalFeatureSpec(
-                data=None,
+                data=MultiModalKwargsItem.dummy(),
                 modality=modality,
                 identifier=f"{req_id}-0",
                 mm_position=PlaceholderRange(offset=0, length=length),
