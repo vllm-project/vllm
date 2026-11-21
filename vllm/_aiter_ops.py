@@ -2334,6 +2334,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
+        VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4: Routes the MXFP4 MoE calls the
+            FlyDSL a8w4 experts op supports to it (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2411,6 +2413,7 @@ class rocm_aiter_ops:
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
     # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
+    _FLYDSL_MOE_A8W4 = envs.VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2444,6 +2447,7 @@ class rocm_aiter_ops:
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
             envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
         )
+        cls._FLYDSL_MOE_A8W4 = envs.VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -4192,6 +4196,29 @@ class rocm_aiter_ops:
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
+    @functools.cache
+    def _flydsl_moe_a8w4_module() -> Any | None:
+        try:
+            return importlib.import_module("aiter.ops.flydsl.moe_a8w4_experts")
+        except Exception as e:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4 is set, but the AITER FlyDSL "
+                "a8w4 experts op could not be imported (%s); using aiter.fused_moe.",
+                e,
+            )
+            return None
+
+    @classmethod
+    @if_aiter_supported
+    def flydsl_moe_a8w4(cls) -> Any | None:
+        """The `aiter.ops.flydsl.moe_a8w4_experts` module if
+        VLLM_ROCM_USE_AITER_FLYDSL_MOE_A8W4 and the AITER MoE are on and it
+        imports, else None."""
+        if not (cls._FLYDSL_MOE_A8W4 and cls.is_fused_moe_enabled()):
+            return None
+        return cls._flydsl_moe_a8w4_module()
 
     @staticmethod
     @functools.cache
