@@ -8,6 +8,9 @@ the request's grammar is never rewritten and frontends that skip Python
 request validation get the same behavior.
 """
 
+import time
+from unittest.mock import patch
+
 import pytest
 from mistral_common.protocol.instruct.tool_calls import Tool, ToolChoiceEnum
 from transformers import AutoTokenizer
@@ -145,3 +148,24 @@ def test_compile_grammar_uses_lark_semantics(backend: XgrammarBackend):
     assert compiled.is_terminated() or compiled.accept_tokens(
         "req", [backend.tokenizer.eos_token_id]
     )
+
+
+def test_validation_rejects_oversized_lark_grammar():
+    grammar = 'start: "a"\n' + ("#" + "x" * 1024 + "\n") * 65
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
+    with pytest.raises(VLLMValidationError, match="maximum size"):
+        validate_xgrammar_grammar(params)
+
+
+def test_compile_lark_uses_compilation_timeout(backend: XgrammarBackend):
+    def slow_compile(_: str):
+        time.sleep(10)
+
+    with (
+        patch("vllm.envs.VLLM_REGEX_COMPILATION_TIMEOUT_S", 1),
+        patch.object(
+            backend.full_vocab_compiler, "compile_lark", side_effect=slow_compile
+        ),
+        pytest.raises(ValueError, match="timed out"),
+    ):
+        backend.compile_grammar(StructuredOutputOptions.GRAMMAR, LARK_GRAMMAR)
