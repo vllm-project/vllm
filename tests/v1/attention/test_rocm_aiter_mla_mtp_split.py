@@ -135,6 +135,7 @@ def _builder(
         _use_triton_verify=False,
         _triton_verify_qlens=(),
         _fp8_v_scale_fix_qlens=frozenset(),
+        _use_asm_rows_dcp_verify=False,
         # Derived once in the real constructor, so derive it once here too.
         _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
             kernel_block_size
