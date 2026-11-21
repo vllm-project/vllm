@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .op import exp, log
@@ -326,7 +327,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     x = a_val + dt_bias_val
     softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
     g_val = -tl.exp(A_log_val) * softplus_x
-    beta_val = tl.sigmoid(b_val).to(b.dtype.element_ty).to(tl.float32)
+    beta_val = tl.sigmoid(b_val)
 
     b_h *= exp(g_val)
     b_v -= tl.sum(b_h * b_k[None, :], 1)
@@ -439,6 +440,26 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
     BV = min(triton.next_power_of_2(V), 32)
+    if (
+        K == V == 128
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100, device_id=dev.index)
+    ):
+        # Tuned on GB300; validated on GB200 and with 148 SMs.
+        # MRv2 decode warmup/graph capture compiles the reachable BV variants.
+        if B * HV <= 64:
+            BV = 4
+        elif initial_state.dtype == torch.float32:
+            BV = 8
+    elif (
+        K == V == 128
+        and initial_state.dtype == torch.float32
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90, device_id=dev.index)
+    ):
+        # Tuned on H200: with an FP32 state BV=4 is fastest at every measured shape.
+        # No BF16-state tile wins everywhere on SM90, so BF16 keeps 32.
+        BV = 4
     num_stages = 3
     num_warps = 1
 

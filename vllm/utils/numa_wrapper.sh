@@ -16,10 +16,11 @@ if ! command -v numactl >/dev/null 2>&1; then
 fi
 
 case "${_VLLM_INTERNAL_NUMACTL_ARGS}" in
-    *[![:alnum:]\ \-\_=,./]*)
+    *[![:alnum:]\ _=,./-]*)
         echo "Invalid characters in _VLLM_INTERNAL_NUMACTL_ARGS" >&2
         exit 1
         ;;
 esac
 
+# shellcheck disable=SC2086  # word splitting is intentional: this expands into multiple numactl flags
 exec numactl ${_VLLM_INTERNAL_NUMACTL_ARGS} "${_VLLM_INTERNAL_NUMACTL_PYTHON_EXECUTABLE}" "$@"

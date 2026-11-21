@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file provides a disaggregated prefilling proxy demo to demonstrate an
+"""This file provides a disaggregated prefilling proxy demo to demonstrate an
 example usage of XpYd disaggregated prefilling.
 We can launch multiple vllm instances (2 for prefill and 2 for decode), and
 launch this proxy demo through:

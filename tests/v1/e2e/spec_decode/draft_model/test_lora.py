@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script contains:
+"""This script contains:
 1. test lora with speculative decoding for batch inference
 """
 
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.lora.request import LoRARequest
@@ -18,7 +18,7 @@ from ..utils import assert_request_outputs_match
 
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
 
-LORA_TEST_PROMPT_MAP["premjatin/qwen-linear-algebra-coder"] = """
+LORA_TEST_PROMPT_MAP["vllm-project/qwen-linear-algebra-coder"] = """
 ### INSTRUCTION:
 You are an AI assistant that generates Python code to solve linear
 algebra problems.
@@ -45,7 +45,7 @@ SEED = 42
             "eagle3",
             "Qwen/Qwen3-1.7B",
             "AngelSlim/Qwen3-1.7B_eagle3",
-            "premjatin/qwen-linear-algebra-coder",
+            "vllm-project/qwen-linear-algebra-coder",
             1,
         )
     ],
@@ -58,15 +58,13 @@ def test_batch_inference_correctness(
     model_setup: tuple[str, str, str, str, int],
     vllm_runner,
 ):
-    """
-    Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
+    """Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
     Should be the same and no failure when doing batch inference.
     model_setup: (method, model_name, spec_model_name, lora_path, tp_size)
     """
     with monkeypatch.context() as m:
-        # Disable randomness
-        if current_platform.is_cuda():
-            m.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
+        m.setattr(envs, "VLLM_BATCH_INVARIANT", True)
         set_random_seed(SEED)
         m.setattr(torch.backends.cudnn, "benchmark", False)
         m.setattr(torch.backends.cudnn, "deterministic", True)
@@ -83,7 +81,6 @@ def test_batch_inference_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             max_model_len=2048,
             max_num_seqs=4,
@@ -101,7 +98,6 @@ def test_batch_inference_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config={
                 "method": method,

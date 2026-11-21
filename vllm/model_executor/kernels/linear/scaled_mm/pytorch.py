@@ -7,7 +7,11 @@ import torch
 
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
@@ -24,9 +28,29 @@ def _get_num_tokens(output_shape: list) -> int:
     return math.prod(output_shape[:-1])
 
 
+def _rocm_torch_fp8_scaled_mm_supported() -> bool:
+    from vllm.platforms.rocm import on_gfx12x, on_gfx942, on_gfx950, on_gfx1250
+
+    return on_gfx942() or on_gfx950() or on_gfx12x() or on_gfx1250()
+
+
+def _supports_torch_fp8_scaled_mm() -> bool:
+    if current_platform.is_cpu():
+        return True
+    if current_platform.is_xpu():
+        return True
+    if not current_platform.is_cuda_alike():
+        return False
+
+    # TODO: Use torch.cuda.is_scaled_mm_supported once it is in the supported
+    # PyTorch baseline.
+    if current_platform.is_rocm():
+        return _rocm_torch_fp8_scaled_mm_supported()
+    return current_platform.supports_fp8()
+
+
 class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """
-    Base class for FP8 linear kernels using Torch.
+    """Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for
     specific device capabilities and torch versions.
     """
@@ -35,17 +59,10 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
-            return False, "requires ROCm, CUDA, CPU or XPU."
+        if _supports_torch_fp8_scaled_mm():
+            return True, None
 
-        if compute_capability is not None and compute_capability < 89:
-            return False, "requires compute capability 89 and above."
-
-        return True, None
+        return False, "requires a platform with torch FP8 scaled-MM support."
 
     def get_output_padding(self) -> int | None:
         # Note: we pad the input because torch._scaled_mm is more performant
@@ -73,6 +90,11 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
             return False, "requires per tensor activation and weight scales."
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
 
     def apply_scaled_mm(
         self,
@@ -111,13 +133,8 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import get_cdna_version, on_rdna4
-
-        if get_cdna_version() <= 2 and not on_rdna4():
-            return False, "requires CDNA3+ or RDNA4"
-
-        if compute_capability is not None and compute_capability < 94:
-            return False, "requires compute capability 94 and above."
+        if not _supports_torch_fp8_scaled_mm():
+            return False, "requires platform with torch FP8 scaled-MM support."
 
         return True, None
 
@@ -250,14 +267,14 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 
 
 class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
-    """FP8 block-scaled linear kernel using ``torch._scaled_mm``.
+    """FP8 block-scaled linear kernel using `torch._scaled_mm`.
 
-    Implements the block-scaled path of ``torch._scaled_mm``, which
-    dispatches on the shapes of the scale tensors. For ``A = [M, K]`` and
-    ``B = [K, N]`` (both fp8) the op's block path requires, with float32
+    Implements the block-scaled path of `torch._scaled_mm`, which
+    dispatches on the shapes of the scale tensors. For `A = [M, K]` and
+    `B = [K, N]` (both fp8) the op's block path requires, with float32
     scales:
-      * 1x128 activation: ``scale_a = [M, ceil(K / 128)]``
-      * 128x128 weight:   ``scale_b = [ceil(K / 128), ceil(N / 128)]``
+      * 1x128 activation: `scale_a = [M, ceil(K / 128)]`
+      * 128x128 weight:   `scale_b = [ceil(K / 128), ceil(N / 128)]`
     """
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
@@ -280,7 +297,7 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         # torch._scaled_mm DeepSeek-style (1x128, 128x128) block scaling is
         # only implemented for SM90 (Hopper) on NVIDIA CUDA. See PyTorch's
         # _check_deepseek_support():
-        # https://github.com/pytorch/pytorch/blob/33812ece06e2b0d597f73fbe41de03a83f9109f9/aten/src/ATen/native/cuda/ScaledBlas.cpp#L804-L820 # noqa: E501
+        # https://github.com/pytorch/pytorch/blob/33812ece06e2b0d597f73fbe41de03a83f9109f9/aten/src/ATen/native/cuda/ScaledBlas.cpp#L804-L820
         if current_platform.is_cuda():
             is_sm90 = (
                 compute_capability == 90
@@ -290,8 +307,10 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
             if not is_sm90:
                 return (
                     False,
-                    "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
-                    "requires compute capability 90 (Hopper).",
+                    (
+                        "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
+                        "requires compute capability 90 (Hopper)."
+                    ),
                 )
         return True, None
 
@@ -326,7 +345,7 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         # torch._scaled_mm implemented by cuBLASLt requires the M dimension to be a
         # multiple of 4; pad A (and its column-major scale) up and slice back.
-        # https://docs.nvidia.com/cuda/cublas/index.html?highlight=128%2520element%25201D%2520and%2520128x128%25202D#scaling-factors-layouts  # noqa: E501
+        # https://docs.nvidia.com/cuda/cublas/index.html?highlight=128%2520element%25201D%2520and%2520128x128%25202D#scaling-factors-layouts
         M = A.shape[0]
         pad = (-M) % 4 if current_platform.is_cuda() else 0
         if pad:

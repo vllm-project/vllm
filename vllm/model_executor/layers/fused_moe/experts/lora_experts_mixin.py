@@ -3,12 +3,19 @@
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 
 
+def _row_map_kwargs(row_map: torch.Tensor | None) -> dict[str, torch.Tensor]:
+    # Only the XPU punica wrapper accepts row_map: it lets the kernels read and
+    # write rows in the experts' grouped layout instead of (token, topk) order.
+    return {} if row_map is None else {"row_map": row_map}
+
+
 class LoRAExpertsMixin:
-    """
-    Mixin for FusedMoEExpertsModular subclasses that natively handle
+    """Mixin for FusedMoEExpertsModular subclasses that natively handle
     MoELoRAContext inside their apply() implementation.
 
     Mixing this class in:
@@ -23,6 +30,7 @@ class LoRAExpertsMixin:
     state is on lora_context or passed as arguments.
     """
 
+    moe_config: FusedMoEConfig
     _lora_context: MoELoRAContext | None = None
 
     def set_lora_context(self, ctx: MoELoRAContext) -> None:
@@ -47,6 +55,7 @@ class LoRAExpertsMixin:
         top_k_num: int,
         add_inputs: bool = True,
         swap_w13_slices: bool = False,
+        row_map: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -71,8 +80,13 @@ class LoRAExpertsMixin:
             # concat swap afterwards.
             w13_lora_a_stacked = w13_lora_a_stacked[::-1]
             w13_lora_b_stacked = w13_lora_b_stacked[::-1]
-        return lora_context.punica_wrapper.add_lora_w13(
-            y,
+        interleave_w13 = (
+            lora_context.w13_num_slices == 2
+            and self.moe_config.activation == MoEActivation.SWIGLUOAI
+        )
+        lora_output = torch.zeros_like(y) if interleave_w13 else y
+        result = lora_context.punica_wrapper.add_lora_w13(
+            lora_output,
             x,
             w13_lora_a_stacked,
             w13_lora_b_stacked,
@@ -90,9 +104,19 @@ class LoRAExpertsMixin:
             lora_context.w13_num_slices,
             lora_context.fully_sharded,
             lora_context.use_tuned_config,
-            add_inputs=add_inputs,
+            add_inputs=add_inputs or interleave_w13,
             token_lora_mapping=lora_context.local_token_lora_mapping,
+            **_row_map_kwargs(row_map),
         )
+        if interleave_w13:
+            # Map gate/up slices onto even/odd output channels without a copy.
+            gate_up_delta = lora_output.unflatten(-1, (2, -1))
+            gate_up_output = y.unflatten(-1, (-1, 2)).transpose(-1, -2)
+            if add_inputs:
+                gate_up_output.add_(gate_up_delta)
+            else:
+                gate_up_output.copy_(gate_up_delta)
+        return result
 
     def apply_w2_lora(
         self,
@@ -110,6 +134,7 @@ class LoRAExpertsMixin:
         w2: torch.Tensor,
         top_k_num: int,
         add_inputs: bool = True,
+        row_map: torch.Tensor | None = None,
     ) -> None:
         w2_lora_b_stacked = lora_context.w2_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
@@ -140,4 +165,5 @@ class LoRAExpertsMixin:
             lora_context.tp_rank,
             lora_context.use_tuned_config,
             add_inputs=add_inputs,
+            **_row_map_kwargs(row_map),
         )
