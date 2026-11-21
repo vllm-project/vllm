@@ -490,7 +490,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
             return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
-        return RequestOffloadingContext()
+        return RequestOffloadingContext(cascade_stores=dest is not None)
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
