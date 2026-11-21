@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from types import UnionType
+from types import MethodType, UnionType
 from typing import (
     TYPE_CHECKING,
     Literal,
@@ -466,6 +466,28 @@ def maybe_disable_dynamic_rope_update(
                     getattr(module, f"{prefix}inv_freq").copy_(inv_freq)
                 rope_types[layer_type] = "default"
         module.rope_type = rope_types if per_layer else rope_types[None]
+
+
+def maybe_precompute_gemma3n_sparsity(model: nn.Module, device: torch.device) -> None:
+    """Cache Gemma3n's constant Gaussian quantile outside the inference path."""
+    from transformers.models.gemma3n.modeling_gemma3n import Gemma3nTextMLP
+
+    def gaussian_topk(module: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
+        multiplier = module.get_buffer("_vllm_std_multiplier").to(inputs.dtype)
+        mean = inputs.mean(dim=-1, keepdim=True)
+        std = inputs.std(dim=-1, keepdim=True, unbiased=False)
+        return nn.functional.relu(inputs - (mean + std * multiplier))
+
+    for module in model.modules():
+        if not isinstance(module, Gemma3nTextMLP) or module.activation_sparsity <= 0:
+            continue
+        # Creating CUDA tensors and validating Normal's parameters syncs the host.
+        sparsity = torch.tensor(
+            module.activation_sparsity, dtype=torch.float32, device=device
+        )
+        multiplier = torch.distributions.Normal(0, 1).icdf(sparsity)
+        module.register_buffer("_vllm_std_multiplier", multiplier, persistent=False)
+        module._gaussian_topk = MethodType(gaussian_topk, module)
 
 
 class _PreambleDone(Exception):
