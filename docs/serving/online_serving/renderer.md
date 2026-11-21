@@ -56,9 +56,9 @@ Choose returned multimodal data with the **proto `mm_payload` field**:
 The JSON body's `mm_payload` and `return_mm_kwargs` fields do not select the
 gRPC output mode. `MM_PAYLOAD_NONE` is useful for routing on the prompt layout;
 its media cannot be forwarded directly to `Inference.Generate` without tensor
-data. Metadata-only mode is not implemented yet
-([#65018](https://github.com/vllm-project/vllm/issues/65018)); unknown enum
-values are rejected. The existing typed `Render.RenderChat` RPC keeps its
+data. Metadata-only mode is currently available on the Python HTTP render routes
+([#65018](https://github.com/vllm-project/vllm/pull/65018)). The Rust gRPC
+service rejects unknown enum values. The existing typed `Render.RenderChat` RPC keeps its
 `omit_media_kwargs` boolean unchanged.
 
 The response returns prompt token IDs, an effective structured-output

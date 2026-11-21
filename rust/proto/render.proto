@@ -47,7 +47,7 @@ enum MmPayload {
   MM_PAYLOAD_TENSORS = 1;
   // Keep hashes and placeholder ranges, without inline kwargs tensors.
   MM_PAYLOAD_NONE = 2;
-  // Metadata-only payload support follows in #65018.
+  // TODO: MM_PAYLOAD_METADATA, matching Python's mm_payload: "metadata" (#65018).
 }
 
 message RenderRequest {
