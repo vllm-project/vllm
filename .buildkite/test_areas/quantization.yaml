@@ -15,6 +15,7 @@ steps:
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/utils.py
   - vllm/transformers_utils/model_arch_config_convertor.py
+  - vllm/v1/attention/backends/turboquant_attn.py
   - vllm/models/deepseek_v41/quant_config.py
   - vllm/utils/humming.py
   - tests/quantization

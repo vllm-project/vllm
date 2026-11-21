@@ -782,3 +782,59 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+
+# ============================================================================
+# Chunked-prefill continuation batched with a fresh prompt (end-to-end)
+# ============================================================================
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_chunked_prefill_continuation_keeps_context(vllm_runner, monkeypatch):
+    """End-to-end: the last chunk of a needle prompt is co-scheduled with a
+    longer fresh prompt and must still see the needle in its cached prefix."""
+    from vllm import SamplingParams, TokensPrompt
+
+    # In-process engine so all prompts are queued before the first step.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    budget, needle_len, tail = 1024, 512, 16
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        kv_cache_dtype="turboquant_k8v4",
+        max_model_len=2048,
+        max_num_batched_tokens=budget,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+    ) as runner:
+        llm = runner.get_llm()
+        tok = llm.get_tokenizer()
+        head, end = tok.apply_chat_template(
+            [{"role": "user", "content": "@@"}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        ).split("@@")
+        filler = tok.encode("The grass is green. The sky is blue. " * 200)
+
+        def prompt(text, question, n_tokens):
+            pre = tok.encode(head + text)
+            post = tok.encode(question + end)
+            ids = pre + filler[: n_tokens - len(pre) - len(post)] + post
+            assert len(ids) == n_tokens
+            return TokensPrompt(prompt_token_ids=ids)
+
+        code = "7310462"
+        question = " What is the secret code? Answer with the number only."
+        needle = prompt(f"The secret code is {code}.", question, needle_len)
+        # Step 1: `first` + all but the last `tail` tokens of `needle`.
+        first = prompt("", " Summarize.", budget - (needle_len - tail))
+        # Step 2: the tail of `needle` plus a fresh prompt longer than `needle`,
+        # so max_query_len == max_seq_len for that step.
+        longer = prompt("", " Summarize.", needle_len + 64)
+        outs = llm.generate(
+            [first, needle, longer],
+            SamplingParams(temperature=0.0, max_tokens=16),
+            use_tqdm=False,
+        )
+        assert code in outs[1].outputs[0].text
