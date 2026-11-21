@@ -250,13 +250,20 @@ class RequestState:
 
         # Streaming input queue
         self.streaming_input = stream_input
+        # Wait for the first output before merging a chunk the core may drop.
+        self.pending_prompt_update: StreamingUpdate | None = None
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
 
-    def apply_streaming_update(self, update: StreamingUpdate) -> None:
-        # Apply the update to the request state.
+    def start_streaming_update(self, update: StreamingUpdate) -> None:
         self.streaming_input = not update.final
+        self.pending_prompt_update = update
+        if self.stats is not None:
+            self.stats.arrival_time = update.arrival_time
+        self.is_prefilling = True
+
+    def extend_streaming_prompt(self, update: StreamingUpdate) -> None:
         # TODO also include relevant output tokens in new prompt here
         #     (match scheduler behavior).
         if update.prompt:
@@ -269,9 +276,6 @@ class RequestState:
             self.prompt_token_ids = gc_untrack(update.prompt_token_ids or [])
         assert self.prompt_token_ids is not None
         self.prompt_len = len(self.prompt_token_ids)
-        if self.stats is not None:
-            self.stats.arrival_time = update.arrival_time
-        self.is_prefilling = True
 
     @classmethod
     def from_new_request(
@@ -363,7 +367,14 @@ class RequestState:
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         error: RequestError | None = None,
+        *,
+        streaming_update_dropped: bool = False,
     ) -> RequestOutput | PoolingRequestOutput | None:
+        if (update := self.pending_prompt_update) is not None:
+            if not streaming_update_dropped:
+                self.extend_streaming_prompt(update)
+            self.pending_prompt_update = None
+
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
@@ -720,9 +731,9 @@ class OutputProcessor:
             arrival_time=request.arrival_time,
         )
 
-        # Apply request updates now if the last input already completed.
+        # Start the next turn immediately if the previous turn already finished.
         if req_state.input_chunk_queue is None:
-            req_state.apply_streaming_update(update)
+            req_state.start_streaming_update(update)
             req_state.input_chunk_queue = deque()
         else:
             # Queue the streaming update otherwise.
@@ -857,6 +868,7 @@ class OutputProcessor:
                 kv_transfer_params,
                 ec_transfer_params,
                 error=request_error,
+                streaming_update_dropped=engine_core_output.streaming_update_dropped,
             ):
                 if streaming_chunk_boundary:
                     request_output.finished = False
@@ -873,7 +885,7 @@ class OutputProcessor:
                 if streaming_chunk_boundary:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
-                        req_state.apply_streaming_update(update)
+                        req_state.start_streaming_update(update)
                     else:
                         req_state.input_chunk_queue = None
                 else:
