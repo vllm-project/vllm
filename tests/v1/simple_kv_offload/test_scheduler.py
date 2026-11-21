@@ -2788,6 +2788,7 @@ def _make_hybrid_attention_mamba_scheduler(
     lazy: bool = False,
     enable_prefix_caching: bool = True,
     enable_kv_cache_events: bool = False,
+    user_specified_block_size: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
     attention_spec = AttentionSpec(
@@ -2857,6 +2858,8 @@ def _make_two_group_scheduler(
     )
     vllm_config = _make_cp_vllm_config(dcp_world_size=dcp_world_size)
     vllm_config.cache_config.prefix_cache_retention_interval = 0
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.user_specified_block_size = user_specified_block_size
     vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     if enable_kv_cache_events:
         vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
@@ -3641,3 +3644,247 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
         without_ring, max_batched
     )
     assert target_with == target_without
+
+
+def test_hybrid_scheduler_rejects_user_specified_block_size() -> None:
+    """SimpleCPUOffloadScheduler must reject hybrid configs with explicit block size."""
+    block_size = 4 * BLOCK_SIZE
+    with pytest.raises(
+        ValueError,
+        match="does not support hybrid models with an explicit",
+    ):
+        _make_hybrid_attention_mamba_scheduler(
+            num_cpu_blocks=16,
+            num_gpu_blocks=24,
+            block_size=block_size,
+            user_specified_block_size=True,
+        )
+
+
+def test_offload_io_stats_tracks_stores_and_loads() -> None:
+    """SimpleCPUOffloadScheduler tracks cumulative stored blocks and loaded tokens."""
+    fix = make_scheduler(num_cpu_blocks=16, num_gpu_blocks=32, num_groups=2, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    stats = sched.get_offload_io_stats()
+    assert stats.total_stored_blocks == 0
+    assert stats.total_loaded_tokens == 0
+
+    num_blocks = 4
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    swa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=1)
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, swa_blocks))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    block_ids = kv_blocks.get_block_ids()
+    sched.request_finished_all_groups(req, block_ids)
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert meta.store_event >= 0
+    simulate_store_completion(sched, meta.store_event)
+
+    stats = sched.get_offload_io_stats()
+    assert stats.total_stored_blocks > 0
+    stored_blocks = stats.total_stored_blocks
+
+    req2 = Request(
+        request_id="req-stats-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens > 0
+
+    stats = sched.get_offload_io_stats()
+    assert stats.total_stored_blocks == stored_blocks
+    assert stats.total_loaded_tokens == hit_tokens
+@pytest.mark.parametrize("retention_interval", [None, 0])
+@pytest.mark.parametrize("chunk_size,prefill_lookahead", [(64, 1), (1024, 1), (1, 3)])
+@pytest.mark.parametrize(
+    "draft_sliding_window,draft_sharded",
+    [(True, False), (False, False), (False, True)],
+    ids=["swa", "replicated_full", "sharded_full"],
+)
+def test_eager_store_matches_gpu_cacheable_prefix(
+    retention_interval: int | None,
+    chunk_size: int,
+    prefill_lookahead: int,
+    draft_sliding_window: bool,
+    draft_sharded: bool,
+) -> None:
+    """Preserve GPU hits for replicated SWA and DCP-sharded full-attention drafts."""
+    block_size = 64
+    scheduler_block_size = 8 * block_size
+    draft_block_size = scheduler_block_size if draft_sharded else block_size
+    prompt_len = 16 * scheduler_block_size + draft_block_size + prefill_lookahead
+    kv_cache_config = _make_kv_cache_config(256, num_groups=2)
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        group.kv_cache_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
+            dcp_sharded=group_id == 0 or draft_sharded,
+        )
+    for tensor in kv_cache_config.kv_cache_tensors:
+        tensor.size *= block_size // BLOCK_SIZE
+        tensor.layer_stride *= block_size // BLOCK_SIZE
+        tensor.block_stride *= block_size // BLOCK_SIZE
+    if draft_sliding_window:
+        kv_cache_config.kv_cache_groups[1].kv_cache_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
+            sliding_window=scheduler_block_size,
+            extra_retained_tokens=prefill_lookahead - 1,
+            dcp_sharded=False,
+        )
+    kv_cache_config.kv_cache_groups[1].is_eagle_group = True
+    kv_cache_config.prefix_cache_retention_interval = retention_interval
+    vllm_config = _make_cp_vllm_config(dcp_world_size=8)
+    vllm_config.model_config.max_model_len = 16384
+    speculative_config = Mock(spec=SpeculativeConfig)
+    speculative_config.num_speculative_tokens = 3
+    speculative_config.use_eagle.return_value = True
+    speculative_config.use_eagle_block_drop.return_value = True
+    speculative_config.use_multi_module_mtp.return_value = prefill_lookahead > 1
+    attach_speculator_config(
+        speculative_config,
+        MultiModuleMTPSpeculatorConfig
+        if prefill_lookahead > 1
+        else MTPSpeculatorConfig,
+    )
+    vllm_config.speculative_config = speculative_config
+    scheduler = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=kv_cache_config.kv_cache_tensors[0].size,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=block_size,
+    )
+    gpu_manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=16384,
+        max_in_flight_tokens=chunk_size,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=block_size,
+        dcp_world_size=8,
+        use_eagle=True,
+        num_prefill_lookahead=prefill_lookahead,
+    )
+    scheduler.bind_gpu_block_pool(gpu_manager.block_pool)
+    request = Request(
+        request_id="dcp-draft-source",
+        prompt_token_ids=list(range(prompt_len)),
+        sampling_params=SamplingParams(max_tokens=2),
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+    # Follow allocate -> connector metadata -> compute completion, including
+    # one decode step so the final prefill blocks can be offloaded.
+    while request.num_computed_tokens <= prompt_len:
+        if request.num_computed_tokens == prompt_len:
+            request.append_output_token_ids([prompt_len])
+        num_new_tokens = min(
+            chunk_size, request.num_tokens - request.num_computed_tokens
+        )
+        new_blocks = gpu_manager.allocate_slots(
+            request, num_new_tokens, num_lookahead_tokens=3
+        )
+        assert new_blocks is not None
+        if request.num_computed_tokens == 0:
+            scheduler.update_state_after_alloc(
+                request, gpu_manager.get_blocks(request.request_id), 0
+            )
+            output = make_scheduler_output(
+                {request.request_id: num_new_tokens},
+                new_reqs={request.request_id: new_blocks.get_block_ids()},
+            )
+        else:
+            output = make_scheduler_output(
+                {request.request_id: num_new_tokens},
+                cached_req_new_blocks={request.request_id: new_blocks.get_block_ids()},
+            )
+        store_meta = scheduler.build_connector_meta(output)
+        request.num_computed_tokens += num_new_tokens
+        if store_meta.store_event >= 0:
+            simulate_store_completion(scheduler, store_meta.store_event)
+
+    matching_request = Request(
+        request_id="dcp-draft-load",
+        prompt_token_ids=request.prompt_token_ids,
+        sampling_params=request.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=request._block_hasher,
+    )
+    expected_hit = (
+        15 if draft_sliding_window and retention_interval is not None else 16
+    ) * scheduler_block_size
+    assert gpu_manager.get_computed_blocks(matching_request)[1] == expected_hit
+    scheduler.request_finished(request, [])
+    gpu_manager.free(request)
+    assert gpu_manager.block_pool.reset_prefix_cache()
+
+    hit_tokens, is_async = scheduler.get_num_new_matched_tokens(
+        matching_request, num_computed_tokens=0
+    )
+    assert hit_tokens is not None
+    assert (hit_tokens, is_async) == (expected_hit, True)
+
+    assert (
+        gpu_manager.allocate_slots(
+            matching_request,
+            num_new_tokens=0,
+            num_external_computed_tokens=hit_tokens,
+            delay_cache_blocks=True,
+        )
+        is not None
+    )
+    load_blocks = gpu_manager.get_blocks(matching_request.request_id)
+    scheduler.update_state_after_alloc(matching_request, load_blocks, hit_tokens)
+    load_meta = scheduler.build_connector_meta(
+        make_scheduler_output(
+            {matching_request.request_id: 0},
+            new_reqs={matching_request.request_id: load_blocks.get_block_ids()},
+        )
+    )
+    # SWA loads only the eight-block tail after null padding; a sharded full
+    # draft must load every prefix block, with the same DCP geometry as the target.
+    num_draft_blocks = 8 if draft_sliding_window else hit_tokens // draft_block_size
+    assert load_meta.load_gpu_blocks == [
+        block.block_id
+        for block in (
+            *load_blocks.blocks[0],
+            *load_blocks.blocks[1][-num_draft_blocks:],
+        )
+    ]
+    assert (
+        len(load_meta.load_gpu_blocks)
+        == hit_tokens // scheduler_block_size + num_draft_blocks
+    )
+    target_hashes = [
+        make_block_hash_with_group_id(matching_request.block_hashes[(i + 1) * 8 - 1], 0)
+        for i in range(hit_tokens // scheduler_block_size)
+    ]
+    draft_hashes = [
+        make_block_hash_with_group_id(
+            matching_request.block_hashes[(i + 1) * draft_block_size // block_size - 1],
+            1,
+        )
+        for i in range(
+            hit_tokens // draft_block_size - num_draft_blocks,
+            hit_tokens // draft_block_size,
+        )
+    ]
+    assert [
+        scheduler.cpu_block_pool.blocks[bid].block_hash
+        for bid in load_meta.load_cpu_blocks
+    ] == target_hashes + draft_hashes
