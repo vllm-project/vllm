@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
@@ -139,6 +140,8 @@ class InputBatch:
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
         is_padding: bool = True,
+        for_capture: bool = False,
+        cg_mode: "CUDAGraphMode | None" = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -188,9 +191,15 @@ class InputBatch:
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        # Copy so set_dummy_context can add context in place without touching
-        # num_scheduled_tokens.
+        # For FULL graphs, FA3 combine kernel tile scheduler is frozen at
+        # capture time. Scheduler choice depends on max_query_len; using the
+        # per-request average (ceil(num_tokens/num_reqs)) causes scheduler
+        # mismatch when replaying a single large request. Use num_tokens as
+        # the upper bound to ensure scheduler matches replay reality (#62626).
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
+        if for_capture and cg_mode == CUDAGraphMode.FULL:
+            seq_lens_cpu_upper_bound[:] = num_tokens
+
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
