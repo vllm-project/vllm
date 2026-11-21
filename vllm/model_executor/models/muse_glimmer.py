@@ -34,17 +34,24 @@ adapter/projection stack.
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
+from transformers.models.muse_glimmer.image_processing_muse_glimmer import (
+    smart_resize,
+)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import (
+    ImageDummyOptions,
+    MultiModalDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.distributed import (
     divide,
     get_pp_group,
@@ -81,8 +88,10 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -116,6 +125,70 @@ def _text_config(config):
 
 def _muse_glimmer_has_vision(config) -> bool:
     return hasattr(config, "vision_config")
+
+
+def _get_canvas_with_most_tokens(
+    max_tokens: int,
+    factor: int,
+    overrides: ImageDummyOptions | VideoDummyOptions | None = None,
+    do_resize: bool = True,
+) -> ImageSize:
+    if overrides is None or not (overrides.width or overrides.height):
+        height = next(
+            h for h in range(math.isqrt(max_tokens), 0, -1) if max_tokens % h == 0
+        )
+        return ImageSize(width=factor * (max_tokens // height), height=factor * height)
+
+    max_width = overrides.width or factor * max_tokens
+    max_height = overrides.height or factor * max_tokens
+    if not do_resize:
+        ph, pw = max(
+            (
+                (ph, min(max_tokens // ph, max_width // factor))
+                for ph in range(1, min(max_tokens, max_height // factor) + 1)
+            ),
+            key=lambda grid: grid[0] * grid[1],
+            default=(1, 1),
+        )
+        return ImageSize(width=factor * max(pw, 1), height=factor * ph)
+
+    def num_tokens(width: int, height: int) -> int:
+        height, width = smart_resize(height, width, factor, max_tokens)
+        return (height // factor) * (width // factor)
+
+    best, best_tokens = ImageSize(width=factor, height=factor), 0
+    if overrides.width and overrides.height:
+        best = ImageSize(width=max_width, height=max_height)
+        best_tokens = num_tokens(*best)
+    grids = sorted(
+        (
+            (ph, pw)
+            for ph in range(1, min(max_tokens, max_height // factor + 1) + 1)
+            for pw in range(1, min(max_tokens // ph, max_width // factor + 1) + 1)
+        ),
+        key=lambda grid: grid[0] * grid[1],
+        reverse=True,
+    )
+    for ph, pw in grids:
+        if ph * pw <= best_tokens:
+            break
+        h_lo = max((ph - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_height))
+        h_hi = min(ph * factor, max_height)
+        w_lo = max((pw - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_width))
+        w_hi = min(pw * factor, max_width)
+        if h_lo > h_hi or w_lo > w_hi:
+            continue
+        candidates = [(w, h) for w in (w_lo, w_hi) for h in (h_lo, h_hi)]
+        candidates += [
+            (w, min(h_hi, max(h_lo, round(ph * w / pw)))) for w in (w_lo, w_hi)
+        ]
+        candidates += [
+            (min(w_hi, max(w_lo, round(pw * h / ph))), h) for h in (h_lo, h_hi)
+        ]
+        for width, height in candidates:
+            if (tokens := num_tokens(width, height)) > best_tokens:
+                best, best_tokens = ImageSize(width=width, height=height), tokens
+    return best
 
 
 IMAGE_TOKEN = "<|patch|>"
@@ -163,41 +236,73 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        processor = self.get_hf_processor()
-        image_processor = processor.image_processor
-        video_processor = processor.video_processor
-        num_frames = self.get_num_frames_with_most_features(
-            seq_len, mm_counts.get("video", 0)
+        mm_kwargs = self._get_effective_mm_processor_kwargs({})
+        _, max_tokens = self._get_max_tokens(
+            mm_kwargs, seq_len, mm_counts.get("video", 0)
         )
-        return {
-            "image": int(image_processor.max_image_tokens),
-            "video": (
-                num_frames
-                // int(video_processor.temporal_patch_size)
-                * int(video_processor.max_video_frame_tokens)
-            ),
+        return max_tokens
+
+    def _get_max_tokens(
+        self,
+        mm_kwargs: Mapping[str, Any],
+        seq_len: int,
+        num_videos: int,
+        *,
+        use_hints: bool = True,
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        video_kwargs = mm_kwargs["videos_kwargs"]
+        group_tokens = {
+            "image": int(mm_kwargs["images_kwargs"]["max_image_tokens"]),
+            "video": int(video_kwargs["max_video_frame_tokens"]),
+        }
+        num_frames = self._get_num_frames(
+            seq_len, num_videos, video_kwargs, use_hints=use_hints
+        )
+        num_groups = num_frames // int(video_kwargs["temporal_patch_size"])
+        return group_tokens, {
+            **group_tokens,
+            "video": num_groups * group_tokens["video"],
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_hf_processor().image_processor
-        grid_size = math.isqrt(int(image_processor.max_image_tokens))
-        side = (
-            int(image_processor.patch_size)
-            * int(image_processor.merge_size)
-            * grid_size
+        image_kwargs = self._get_effective_mm_processor_kwargs({})["images_kwargs"]
+        return _get_canvas_with_most_tokens(
+            int(image_kwargs["max_image_tokens"]),
+            int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
         )
-        return ImageSize(width=side, height=side)
 
     def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        return self._get_num_frames(seq_len, num_videos, video_kwargs)
+
+    def _get_num_frames(
+        self,
+        seq_len: int,
+        num_videos: int,
+        video_kwargs: Mapping[str, Any],
+        *,
+        use_hints: bool = True,
+    ) -> int:
         video_processor = self.get_hf_processor().video_processor
+        mm_config = self.ctx.get_mm_config()
+        temporal_patch_size = int(video_kwargs["temporal_patch_size"])
         num_videos = max(num_videos, 1)
         groups = max(
             1,
-            seq_len // num_videos // int(video_processor.max_video_frame_tokens),
+            seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
         )
-        temporal_patch_size = int(video_processor.temporal_patch_size)
-        max_groups = max(1, int(video_processor.num_frames) // temporal_patch_size)
-        return min(groups, max_groups) * temporal_patch_size
+        num_frames = groups * temporal_patch_size
+        media_io_kwargs = mm_config.media_io_kwargs
+        loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
+        if loader_frames >= 0:
+            max_frames = max(int(video_processor.num_frames), loader_frames)
+            num_frames = min(num_frames, round_up(max_frames, temporal_patch_size))
+        video_options = mm_config.limit_per_prompt.get("video")
+        if use_hints and video_options and video_options.num_frames:
+            num_frames = min(
+                num_frames, round_up(video_options.num_frames, temporal_patch_size)
+            )
+        return num_frames
 
 
 class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessingInfo]):
@@ -212,27 +317,33 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        processor = self.info.get_hf_processor()
-        video_processor = processor.video_processor
-        image_width, image_height = self.info.get_image_size_with_most_features()
-        video_grid = math.isqrt(int(video_processor.max_video_frame_tokens))
-        video_size = (
-            int(video_processor.patch_size)
-            * int(video_processor.merge_size)
-            * video_grid
+        mm_kwargs = self.info._get_effective_mm_processor_kwargs({})
+        image_kwargs = mm_kwargs["images_kwargs"]
+        video_kwargs = mm_kwargs["videos_kwargs"]
+        image_size = _get_canvas_with_most_tokens(
+            int(image_kwargs["max_image_tokens"]),
+            int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
+            mm_options.get("image"),
+            image_kwargs.get("do_resize") is not False,
+        )
+        video_size = _get_canvas_with_most_tokens(
+            int(video_kwargs["max_video_frame_tokens"]),
+            int(video_kwargs["patch_size"]) * int(video_kwargs["merge_size"]),
+            mm_options.get("video"),
+            video_kwargs.get("do_resize") is not False,
         )
         return {
             "image": self._get_dummy_images(
-                width=image_width,
-                height=image_height,
+                width=image_size.width,
+                height=image_size.height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=video_size,
-                height=video_size,
-                num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts.get("video", 0)
+                width=video_size.width,
+                height=video_size.height,
+                num_frames=self.info._get_num_frames(
+                    seq_len, mm_counts.get("video", 0), video_kwargs
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),
@@ -250,7 +361,33 @@ class MuseGlimmerMultiModalProcessor(
     ) -> BatchFeature:
         # vLLM samples video frames before processing
         hf_kwargs = {**hf_kwargs, "do_sample_frames": False}
-        return super()._call_hf_processor(hf_data, hf_kwargs)
+        processed = super()._call_hf_processor(hf_data, hf_kwargs)
+        max_group_tokens, max_tokens = self.info._get_max_tokens(
+            self.info._get_effective_mm_processor_kwargs({}),
+            self.info.ctx.model_config.max_model_len,
+            1,
+            use_hints=False,
+        )
+        merge_length = self.info.get_hf_config().vision_config.merge_size ** 2
+        for modality in ("image", "video"):
+            grid_thw = processed.get(f"{modality}_grid_thw")
+            if grid_thw is None:
+                continue
+            for num_groups, grid_height, grid_width in grid_thw.tolist():
+                group_tokens = grid_height * grid_width // merge_length
+                if (
+                    group_tokens > max_group_tokens[modality]
+                    or num_groups * group_tokens > max_tokens[modality]
+                ):
+                    raise ValueError(
+                        f"The {modality} has {num_groups * group_tokens} tokens "
+                        f"({group_tokens} per temporal group), but Muse-Glimmer "
+                        f"profiles at most {max_tokens[modality]} "
+                        f"({max_group_tokens[modality]} per group) at startup. "
+                        "Reduce its size or frame count, or for videos raise "
+                        "`num_frames` in `--media-io-kwargs`."
+                    )
+        return processed
 
     def _get_mm_fields_config(
         self,
