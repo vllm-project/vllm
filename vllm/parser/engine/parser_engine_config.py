@@ -119,6 +119,12 @@ class ParserEngineConfig:
     # a terminal prefix. Requires ``arg_converter`` and ``stream_arg_deltas``.
     arg_value_extender: Callable[[str], ArgValueExtender | None] | None = None
 
+    # Terminals that are emitted as plain text, with no transition, when they
+    # sit between quote characters (' " `) in reasoning or content, e.g.
+    # `</think>`. Models quote mentions of their own markers, and the marker is
+    # the same token as the real delimiter. Costs one character of lookahead.
+    quote_guarded_terminals: frozenset[str] = field(default_factory=frozenset)
+
     # Special tokens exempt from auto-drop but not state-machine terminals.
     preserve_tokens: frozenset[str] = field(default_factory=frozenset)
 
