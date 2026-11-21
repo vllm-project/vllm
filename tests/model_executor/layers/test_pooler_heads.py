@@ -5,6 +5,7 @@
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.layers.pooler.seqwise.heads import (
     ClassifierPoolerHead,
@@ -166,7 +167,11 @@ class TestEmbeddingPoolerHead:
         meta = _make_metadata(params)
         out = head(x, meta)
         assert out.shape == (_BATCH, 4)
-        assert torch.equal(out, proj(x)[..., :4])
+        if envs.VLLM_BATCH_INVARIANT:
+            projected = torch.cat([proj(row) for row in x.split(1)])
+        else:
+            projected = proj(x)
+        assert torch.equal(out, projected[..., :4])
 
     def test_matryoshka_then_activation(self):
         head = EmbeddingPoolerHead(activation=PoolerNormalize())
