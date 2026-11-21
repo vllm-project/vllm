@@ -885,7 +885,15 @@ class LoRAModelManager:
                 if lora:
                     has_replacement = True
             if not has_replacement:
-                continue
+                fused_lora = None
+                if not module_name.endswith(".experts"):
+                    fused_lora = self._get_lora_layer_weights(lora_model, module_name)
+                # Dummy LoRAs are created already packed.
+                if fused_lora is None or fused_lora.is_packed:
+                    continue
+                replacement_loras = self._split_fused_lora(
+                    module_name, fused_lora, new_module_names
+                )
             for i in range(len(replacement_loras)):
                 if replacement_loras[i]:
                     continue
@@ -1268,6 +1276,27 @@ class LoRAModelManager:
             if text_name is not None:
                 org_module_name = text_name
         return lora_model.get_lora(org_module_name)
+
+    def _split_fused_lora(
+        self, module_name: str, lora: LoRALayerWeights, slice_names: list[str]
+    ) -> list[LoRALayerWeights | None]:
+        """Split a LoRA on a packed module's fused weight into one LoRA per
+        slice: `lora_b` is cut along its output rows and every slice keeps
+        `lora_a`, so the update is unchanged."""
+        sizes = getattr(self.modules[module_name].base_layer, "output_sizes", None)
+        if sizes is None or len(sizes) != len(slice_names):
+            raise ValueError(f"LoRA weights on {module_name!r} cannot be split.")
+        if sum(sizes) != lora.lora_b.shape[0]:
+            raise ValueError(
+                f"LoRA on {module_name!r} has {lora.lora_b.shape[0]} output rows, "
+                f"but its slices {slice_names} have {sum(sizes)}."
+            )
+        return [
+            LoRALayerWeights(
+                name, lora.rank, lora.lora_alpha, lora.lora_a, lora_b, lora.scaling
+            )
+            for name, lora_b in zip(slice_names, lora.lora_b.split(sizes))
+        ]
 
     def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:
         for module in module_names:

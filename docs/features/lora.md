@@ -481,3 +481,5 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+
+A packed layer such as `qkv_proj` accepts an adapter trained either on its split modules (`q_proj`, `k_proj`, `v_proj`) or on the fused module itself; a LoRA on the fused module is split across the slices when the adapter loads.
