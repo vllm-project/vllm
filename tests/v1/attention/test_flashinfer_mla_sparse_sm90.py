@@ -595,7 +595,8 @@ def test_shardq_reads_rank_local_topk_after_decodes(monkeypatch):
 def test_shardq_plans_rank_local_rows_and_preserves_decode(monkeypatch, num_decode):
     """Rank-local host bounds and device row IDs refer to the same original queries."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
-    builder.state = FakeState(TOPK)
+    decode_state = FakeState(TOPK)
+    builder.state = decode_state
     builder._adaptive_verification = False
     plan_calls = []
     builder.shardq_state = SimpleNamespace(plan=lambda *args: plan_calls.append(args))
@@ -623,13 +624,15 @@ def test_shardq_plans_rank_local_rows_and_preserves_decode(monkeypatch, num_deco
     )
     result = builder.build(0, cam)
     ((n, lens, original, reqs, positions),) = plan_calls
-    assert result.shardq.attn_metadata.state is builder.shardq_state
+    assert result.shardq is not None
+    assert result.shardq.attn_metadata is local
+    assert local.state is builder.shardq_state
     assert n == 3 and lens.tolist() == [8, 10, 20]
     assert original is cam and reqs is meta.req_id_per_token
     assert torch.equal(positions, rows + num_decode)
-    assert len(builder.state.plan_calls) == num_decode
+    assert len(decode_state.plan_calls) == num_decode
     if num_decode:
-        assert builder.state.plan_calls[0][1].tolist() == [1]
+        assert decode_state.plan_calls[0][1].tolist() == [1]
 
 
 @pytest.mark.skipif(
