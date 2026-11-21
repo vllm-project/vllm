@@ -288,6 +288,7 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
         kv_cache_group: KVCacheGroup | None = None,
+        workspaces: list[Any] | None = None,
     ):
         spec = self.kv_cache_spec
         if kernel_block_size is not None and isinstance(spec, AttentionSpec):
@@ -327,6 +328,8 @@ class AttentionGroup:
                 dtype=torch.int32,
                 device=device,
             )
+        if workspaces is not None:
+            assert len(workspaces) == num_metadata_builders
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,
@@ -334,8 +337,9 @@ class AttentionGroup:
                 vllm_config,
                 device,
                 **builder_kwargs,
+                **({"workspace": workspaces[i]} if workspaces is not None else {}),
             )
-            for _ in range(num_metadata_builders)
+            for i in range(num_metadata_builders)
         ]
 
     def build_metadata(

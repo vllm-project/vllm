@@ -22,7 +22,7 @@ from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup, KVCacheLayerConfig
 from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
@@ -223,11 +223,15 @@ class Executor(ABC):
         return self.collective_rpc("get_supported_kv_cache_layouts")
 
     def set_kv_cache_layout(
-        self, layout_name: str, cp_kv_cache_interleave_size: int
+        self,
+        layout_name: str,
+        cp_kv_cache_interleave_size: int,
+        kv_cache_groups: list[KVCacheGroup] | None = None,
     ) -> None:
-        """Publish the resolved KV cache layout and CP interleave size."""
+        """Publish the layout and the groups available before memory profiling."""
         self.collective_rpc(
-            "set_kv_cache_layout", args=(layout_name, cp_kv_cache_interleave_size)
+            "prepare_kv_cache_layout",
+            args=(layout_name, cp_kv_cache_interleave_size, kv_cache_groups),
         )
 
     @overload

@@ -1415,7 +1415,7 @@ def _auto_fit_max_model_len(
     )
 
 
-def _project_kv_cache_groups_to_worker(
+def project_kv_cache_groups_to_worker(
     global_kv_cache_groups: list[KVCacheGroup],
     worker_spec: dict[str, KVCacheLayerConfig],
 ) -> list[KVCacheGroup]:
@@ -1497,7 +1497,7 @@ def get_kv_cache_configs(
     # determine the maximum model length that fits in available GPU memory.
     # We use per-worker projected groups to account for PP sharding.
     projected_groups_per_worker = [
-        _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
+        project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in layer_configs
     ]
 

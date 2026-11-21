@@ -105,6 +105,13 @@ vllm serve google/gemma-4-31B-it \
     --attention-backend TRITON_FLASHINFER
 ```
 
+### SM90 Sparse MLA Planner Chunks
+
+`FLASHINFER_MLA_SPARSE_SM90` splits a large MQA step into bounded planner chunks
+internally to stay within FlashInfer's planner work-list capacity. This is
+independent of [scheduler chunked prefill](../configuration/optimization.md#chunked-prefill)
+and does not change `--max-num-batched-tokens`.
+
 ### Manual Selection
 
 When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:

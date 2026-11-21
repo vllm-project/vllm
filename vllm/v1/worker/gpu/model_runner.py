@@ -84,7 +84,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -109,11 +109,13 @@ from vllm.v1.worker.gpu.async_utils import (
     new_d2h_stream,
 )
 from vllm.v1.worker.gpu.attn_utils import (
+    AttentionWorkspaces,
     FastPrefillHelper,
     build_slot_mappings_by_layer,
     get_kv_cache_layer_configs,
     init_attn_backend,
     init_kv_cache,
+    reserve_attn_workspaces,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
@@ -209,6 +211,8 @@ logger = init_logger(__name__)
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
+        self.attn_workspaces: AttentionWorkspaces | None = None
+        self.profile_kv_cache_groups: list[KVCacheGroup] | None = None
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -688,6 +692,48 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
         return configs
 
+    def _draft_metadata_layers(self) -> tuple[set[str] | None, set[str]]:
+        draft_attn_layer_names = None
+        no_attn_metadata_layer_names: set[str] = set()
+        if isinstance(self.speculator, DraftModelSpeculator):
+            draft_attn_layer_names = self.speculator.draft_attn_layer_names
+            if self.speculator.speculative_config.prefill_context_kv_only:
+                no_attn_metadata_layer_names = draft_attn_layer_names
+        return draft_attn_layer_names, no_attn_metadata_layer_names
+
+    @torch.inference_mode()
+    def prepare_attention_workspaces(self, groups: list[KVCacheGroup]) -> None:
+        from vllm.distributed.kv_transfer.kv_connector.utils import (
+            get_current_attn_backends,
+        )
+        from vllm.v1.core.kv_cache_planning import project_kv_cache_groups_to_worker
+
+        if self.profile_kv_cache_groups is not None or not any(
+            hasattr(backend, "reserve_metadata_workspace")
+            for backend in get_current_attn_backends(self.vllm_config)
+        ):
+            return
+        projected = project_kv_cache_groups_to_worker(
+            groups, self.get_kv_cache_layer_configs()
+        )
+        self.profile_kv_cache_groups = projected
+        draft, skipped = self._draft_metadata_layers()
+        self.attn_workspaces = reserve_attn_workspaces(
+            deepcopy(projected),
+            self.vllm_config,
+            self.device,
+            draft_layer_names=draft,
+            no_attn_metadata_layer_names=skipped,
+        )
+        if isinstance(self.speculator, DraftModelSpeculator):
+            self.speculator.attn_workspaces = reserve_attn_workspaces(
+                deepcopy(projected),
+                self.speculator.attn_vllm_config,
+                self.device,
+                active_layer_names=draft,
+                no_attn_metadata_layer_names=skipped,
+            )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -737,12 +783,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for group in self.kv_cache_config.kv_cache_groups
                 for layer_name in group.layer_names
             } - self.speculator.draft_attn_layer_names
-        draft_attn_layer_names = None
-        no_attn_metadata_layer_names: set[str] = set()
-        if isinstance(self.speculator, DraftModelSpeculator):
-            draft_attn_layer_names = self.speculator.draft_attn_layer_names
-            if self.speculator.speculative_config.prefill_context_kv_only:
-                no_attn_metadata_layer_names = draft_attn_layer_names
+        draft_attn_layer_names, no_attn_metadata_layer_names = (
+            self._draft_metadata_layers()
+        )
         # Metadata builders select attention kernels that need JIT warmup.
         with self.jit_warmup_registry.activate():
             (
@@ -755,6 +798,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
                 no_attn_metadata_layer_names=no_attn_metadata_layer_names,
+                workspaces=self.attn_workspaces,
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)

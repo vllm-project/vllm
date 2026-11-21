@@ -24,7 +24,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheLayerConfig
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -128,6 +128,16 @@ class WorkerBase:
         self.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
             cp_kv_cache_interleave_size
         )
+
+    def prepare_kv_cache_layout(
+        self, layout_name: str, cp_interleave: int, groups: list[KVCacheGroup] | None
+    ) -> None:
+        self.set_kv_cache_layout(layout_name, cp_interleave)
+        runner = getattr(self, "model_runner", None)
+        prepare = getattr(runner, "prepare_attention_workspaces", None)
+        if groups and prepare is not None:
+            with set_current_vllm_config(self.vllm_config):
+                prepare(groups)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
