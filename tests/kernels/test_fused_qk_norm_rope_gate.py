@@ -136,7 +136,7 @@ def test_fused_qk_norm_rope_gate_int64_row_offset(default_vllm_config) -> None:
     num_tokens = 2**31 // row_stride + 8
     # packed qkv plus the q, k and gate outputs, all bf16.
     need = num_tokens * (row_stride + 2 * q_size + kv_size) * 2
-    free, _ = current_platform.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < need + (1 << 30):
         pytest.skip("not enough free device memory")
 

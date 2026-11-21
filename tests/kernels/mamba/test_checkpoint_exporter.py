@@ -204,7 +204,7 @@ def test_exporter_int64_token_offset():
     """
     width, row_stride, state_len, slot = 8192, 12288, 3, 5
     num_tokens = 2**31 // row_stride + 64
-    free, _ = current_platform.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < num_tokens * row_stride * 2 + (1 << 30):
         pytest.skip("not enough free device memory")
 

@@ -19,7 +19,7 @@ BT = 64
 
 
 def _skip_if_low_memory(need: int) -> None:
-    free, _ = current_platform.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < need + (1 << 30):
         pytest.skip("not enough free device memory")
 
