@@ -118,6 +118,18 @@ def test_is_lossless_cast(src_dtype, tgt_dtype, expected_result):
         ([torch.bool, torch.int8], torch.int8),
         ([torch.bool, torch.int8, torch.float16], torch.float16),
         ([torch.bool, torch.int8, torch.float16, torch.complex32], torch.complex32),  # noqa: E501
+        # Neither input is a lossless cast target for the other: the tie is
+        # broken towards bfloat16 regardless of input order
+        ([torch.float16, torch.bfloat16], torch.bfloat16),
+        ([torch.bfloat16, torch.float16], torch.bfloat16),
+        # FP8 and integer weights mixed with 16-bit floats (safetensors
+        # metadata of quantized checkpoints) must not raise
+        ([torch.bfloat16, torch.float8_e4m3fn], torch.bfloat16),
+        ([torch.float8_e4m3fn, torch.bfloat16], torch.bfloat16),
+        ([torch.bfloat16, torch.float8_e5m2], torch.bfloat16),
+        ([torch.bfloat16, torch.float8_e4m3fn, torch.float32], torch.float32),
+        ([torch.bfloat16, torch.int8, torch.float8_e4m3fn], torch.bfloat16),
+        ([torch.float16, torch.bfloat16, torch.float8_e4m3fn], torch.bfloat16),
     ],
 )
 def test_common_broadcastable_dtype(dtypes, expected_result):

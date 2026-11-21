@@ -411,9 +411,18 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     """Get the common `dtype` where all of the other `dtypes` can be
     cast to it without losing any information.
     """
+    # Argmax over the inputs, not torch.promote_types: promotion raises for
+    # FP8, and widening {float16, bfloat16} to float32 would double the memory
+    # of the served model. Ties (e.g. float16 vs bfloat16, where neither is a
+    # lossless target for the other) prefer bfloat16, then fall back to the
+    # dtype name so the result never depends on iteration order.
     return max(
         dtypes,
-        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+        key=lambda dtype: (
+            sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+            dtype == torch.bfloat16,
+            str(dtype),
+        ),
     )
 
 
