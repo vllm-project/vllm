@@ -335,6 +335,67 @@ steps:
       - tests/entrypoints/openai/responses
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 18GB) Rust Frontend Multimodal"
+  key: rust-frontend-multimodal
+  automatic_shard: true
+  device: h200_18gb
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - vllm/entrypoints/serve/
+  - vllm/entrypoints/scale_out/
+  - vllm/multimodal/
+  - tests/utils.py
+  - tests/entrypoints/multimodal/conftest.py
+  - tests/entrypoints/multimodal/openai/chat_completion/test_video.py
+  - tests/entrypoints/multimodal/openai/chat_completion/test_vision.py
+  - tests/entrypoints/multimodal/openai/responses/test_image.py
+  - tests/entrypoints/scale_out/render/test_render_multimodal.py
+  - tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  # Unsupported in the Rust frontend: beam search, and --mm-processor-cache-gb (the Python
+  # processor cache). Image URLs on the local asset server: Rust refuses loopback media
+  # hosts (#65348). base64encoded: Phi-3.5-vision prompts lack the BOS and newline around
+  # the image that HF adds. icns: the error message differs.
+  - >-
+    pytest -v -s
+    entrypoints/multimodal/openai/chat_completion/test_vision.py
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_single_chat_session_image_beamsearch[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_single_chat_session_image_base64encoded_beamsearch[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_processor_only_cache_eviction_preserves_chat_logprobs
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_single_chat_session_image[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_chat_streaming_image[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_completions_with_image[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_completions_with_image_with_uuid[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_completions_with_image_with_incorrect_uuid_format[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_multi_image_input[image_urls0-
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_single_chat_session_image_base64encoded[
+    --deselect=tests/entrypoints/multimodal/openai/chat_completion/test_vision.py::test_chat_rejects_icns_image[
+  # The other video cases start a server with --media-io-kwargs and --trust-request-mm-kwargs,
+  # which the Rust frontend does not implement.
+  - pytest -v -s entrypoints/multimodal/openai/chat_completion/test_video.py::test_qwen3_vl_single_video
+  # Image URLs on the local asset server: Rust refuses loopback media hosts (#65348).
+  - >-
+    pytest -v -s
+    entrypoints/multimodal/openai/responses/test_image.py
+    --deselect=tests/entrypoints/multimodal/openai/responses/test_image.py::test_single_chat_session_image[
+    --deselect=tests/entrypoints/multimodal/openai/responses/test_image.py::test_multi_image_input[image_urls0-
+  # The Rust frontend has no --allowed-local-media-path, so its error does not name the flag.
+  - >-
+    pytest -v -s
+    entrypoints/scale_out/render/test_render_multimodal.py
+    --deselect=tests/entrypoints/scale_out/render/test_render_multimodal.py::test_chat_completion_render_rejects_local_file_when_disabled
+  # Metadata-only (cached) features are unsupported; the misordered-input error is worded differently.
+  - >-
+    pytest -v -s
+    entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py
+    --deselect=tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py::test_content_parts_before_features_is_rejected
+    --deselect=tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py::test_features_with_content_parts[True]
+
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
   key: rust-frontend-distributed
   automatic_shard: true
