@@ -40,7 +40,6 @@ VIEW_OPS = frozenset(
         torch.Tensor.split,
         torch.Tensor.unbind,
         torch.Tensor.detach,  # e.g. one tensor loaded into two shards
-        torch.detach,
     }
 )
 
