@@ -57,6 +57,9 @@ MODELS = [
         ({"use_audio_in_video": False}, False),
         ({"videos_kwargs": {"use_audio_in_video": True}}, True),
         ({"videos_kwargs": {"use_audio_in_video": False}}, False),
+        ({"load_audio_from_video": True}, True),
+        ({"videos_kwargs": {"load_audio_from_video": True}}, True),
+        ({"load_audio_from_video": False, "use_audio_in_video": True}, False),
         # The HF video scope wins over the shared flat namespace.
         (
             {
@@ -85,6 +88,31 @@ def create_mm_data(num_videos: int) -> dict[str, list]:
         mm_data["video"].append(video)
         mm_data["audio"].append((audio, sr))
     return mm_data
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+@pytest.mark.parametrize("audio_kwarg", ["load_audio_from_video", "use_audio_in_video"])
+def test_audio_kwarg_alias_matches_legacy_behavior(
+    model_id: str, audio_kwarg: str
+) -> None:
+    """The Transformers flag must drive the same processor guards as the alias."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video_token_id = processor.info.get_hf_config().video_token_id
+    mm_items = processor.info.parse_mm_data(create_mm_data(1))
+
+    with pytest.raises(VLLMValidationError, match="has no audio track"):
+        processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data(
+                {"video": [mm_items["video"][0]], "audio": [None]}
+            ),
+            mm_uuid_items={"audio": [VIDEO_AUDIO_UUID_PREFIX + "silent"]},
+            hf_processor_mm_kwargs={audio_kwarg: True},
+        )
 
 
 @pytest.mark.parametrize("model_id", MODELS)
@@ -512,7 +540,8 @@ def test_encoder_profiler_pairs_dummy_audio_with_video(model_id: str) -> None:
     assert len(dummy_inputs["mm_kwargs"]["audio"]) == 1
 
 
-def test_nemotron_silent_video_degrades_per_video():
+@pytest.mark.parametrize("audio_kwarg", ["load_audio_from_video", "use_audio_in_video"])
+def test_nemotron_silent_video_degrades_per_video(audio_kwarg: str):
     """A silent video must not inject an audio context in Nemotron-Omni.
 
     The renderer degrades a video without an audio track to a None audio
@@ -531,7 +560,7 @@ def test_nemotron_silent_video_degrades_per_video():
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"audio": 2, "video": 2},
-        mm_processor_kwargs={"use_audio_in_video": True},
+        mm_processor_kwargs={audio_kwarg: True},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     tokenizer = processor.info.get_tokenizer()
