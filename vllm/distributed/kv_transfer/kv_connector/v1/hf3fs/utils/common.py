@@ -55,6 +55,10 @@ class RequestSchedulingState:
 
     # Load operation info
     load_op: LoadBlockInfo | None = None
+    # A failed load must not be offered again while the metadata still
+    # reports the same keys. Otherwise recompute returns to WAITING and
+    # loads those keys forever.
+    load_failed: bool = False
 
     # Scheduling phase
     phase: str = "NEW"  # NEW -> WAITING_TO_LOAD -> ACTIVE -> FINISHED

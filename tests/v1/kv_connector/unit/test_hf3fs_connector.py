@@ -7,7 +7,9 @@
 
 import contextlib
 import os
+import signal
 import threading
+import time
 from collections.abc import Callable
 from unittest.mock import MagicMock
 
@@ -551,3 +553,229 @@ class TestHF3FSLoadErrorBlockIds:
                 pass
 
         assert _Unstarted().get_block_ids_with_load_errors() == set()
+
+
+def _publish_blocks(client, hashes: list[str]) -> None:
+    """Confirm one page per hash on rank 0 of a live metadata server."""
+    client.initialize(0, num_pages=max(8, len(hashes)), role="worker")
+    allocated = client.allocate_pages_for_keys(
+        0, [(block_hash, "") for block_hash in hashes]
+    )
+    pairs = [(item[0], item[1]) for item in allocated]
+    client.confirm_write_for_keys(0, pairs, [])
+
+
+def _wait_for_metadata(url: str) -> None:
+    import requests
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            requests.post(
+                f"{url}/rank/0/initialize",
+                json={"role": "scheduler", "num_pages": 0},
+                timeout=0.2,
+            ).raise_for_status()
+            return
+        except requests.RequestException:
+            time.sleep(0.05)
+    raise TimeoutError(f"metadata server at {url} did not accept requests")
+
+
+@pytest.mark.cpu_test
+class TestHF3FSRecomputeDoesNotReload:
+    """A failed load is not offered again while the same keys still exist."""
+
+    @pytest.fixture
+    def metadata_url(self):
+        import uvicorn
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server import (  # noqa: E501
+            Hf3fsMetadataServer,
+        )
+
+        url = "http://127.0.0.1:18000"
+        server = uvicorn.Server(
+            uvicorn.Config(
+                Hf3fsMetadataServer().app,
+                host="127.0.0.1",
+                port=18000,
+                log_level="error",
+            )
+        )
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        try:
+            _wait_for_metadata(url)
+            yield url
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+
+    @pytest.mark.parametrize("policy", ["fail", "recompute"])
+    def test_scheduler_policy_uses_one_failed_worker_load(
+        self, metadata_url: str, policy: str, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Fail ends the request; recompute runs the prompt locally once.
+
+        The worker load goes through AsyncOperationManager against the same
+        metadata server the scheduler connector used. Keys stay published, so
+        a second offer would be another remote load. This environment cannot
+        construct Scheduler via ModelConfig (the model stack needs vllm._C),
+        so the test calls Scheduler's real failure methods on that connector.
+        """
+        from dataclasses import dataclass
+
+        from vllm.config import CacheConfig, KVTransferConfig
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+        from vllm.sampling_params import SamplingParams
+        from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+        from vllm.v1.core.kv_cache_utils import KVCacheBlock
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.outputs import KVConnectorOutput
+        from vllm.v1.request import Request, RequestStatus
+
+        @dataclass
+        class _ModelConfig:
+            use_mla: bool = False
+
+        @dataclass
+        class _VllmConfig:
+            cache_config: CacheConfig
+            model_config: _ModelConfig
+            kv_transfer_config: KVTransferConfig
+
+        class _AllocatedBlocks:
+            def __init__(self, block_ids: list[int]):
+                self._block_ids = block_ids
+                self.freed = False
+
+            def get_block_ids(self, request_id: str) -> tuple[list[int]]:
+                return (self._block_ids,)
+
+            def free(self, request: Request) -> None:
+                self.freed = True
+
+            def cache_blocks(self, request: Request, num_tokens: int) -> None:
+                raise AssertionError(num_tokens)
+
+        _patch_cpu_cuda(monkeypatch)
+        saved_signals = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT)
+        }
+        vllm_config = _VllmConfig(
+            cache_config=CacheConfig(block_size=16),
+            model_config=_ModelConfig(),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="HF3FSKVConnector",
+                kv_role="kv_both",
+                kv_load_failure_policy=policy,  # type: ignore[arg-type]
+                kv_connector_extra_config={
+                    "hf3fs_metadata_server_url": metadata_url,
+                },
+            ),
+        )
+        connector = HF3FSKVConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _ModelConfig()
+        )
+        managers: list[AsyncOperationManager] = []
+        try:
+            prompt = list(range(65))
+            request = Request(
+                request_id="B",
+                prompt_token_ids=prompt,
+                sampling_params=SamplingParams(max_tokens=1),
+                pooling_params=None,
+            )
+            checked = connector._align_to_block_size(len(prompt) - 1)
+            hashes = connector._generate_block_hashes(prompt[:checked], 0)
+            _publish_blocks(connector._metadata_client, hashes)
+            hit, async_load = connector.get_num_new_matched_tokens(request, 0)
+            assert (hit, async_load) == (checked, True)
+
+            block_ids = [3, 5, 7, 9]
+            connector.update_state_after_alloc(
+                request,
+                KVCacheBlocks((tuple(KVCacheBlock(block_id=i) for i in block_ids),)),
+                hit,
+            )
+            request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+            request.num_computed_tokens = checked
+
+            services = _LoadServices(
+                lambda found: connector._metadata_client.get_key_locations(0, found),
+                -1,
+            )
+            manager = AsyncOperationManager(services)
+            managers.append(manager)
+            worker = _ReportingConnector(manager)
+            future = manager.submit_load_operation(
+                request.request_id, block_ids, hashes
+            )
+            assert future.result(timeout=10) is False
+            finished, errors = _poll_load(worker)
+            assert finished == {request.request_id}
+            assert errors == set(block_ids)
+
+            blocks = _AllocatedBlocks(block_ids)
+            scheduler = type(
+                "_FailureScheduler",
+                (),
+                {
+                    "block_size": 16,
+                    "recompute_kv_load_failures": policy == "recompute",
+                    "kv_cache_config": type(
+                        "_Groups", (), {"kv_cache_groups": (object(),)}
+                    )(),
+                    "kv_holding_waiting": [request],
+                    "running": [],
+                    "kv_cache_manager": blocks,
+                    "failed_recving_kv_req_ids": set(),
+                    "finished_recving_kv_req_ids": set(),
+                    "connector": connector,
+                    "requests": {request.request_id: request},
+                    "_kv_fetch_stages": None,
+                    "prefix_replay_tokens": 0,
+                },
+            )()
+            for name in (
+                "_set_kv_fetch_stage",
+                "_update_requests_with_invalid_blocks",
+                "_update_from_kv_xfer_finished",
+                "_update_waiting_for_remote_kv",
+                "_mark_prefix_replay",
+            ):
+                setattr(scheduler, name, getattr(Scheduler, name).__get__(scheduler))
+            output = KVConnectorOutput(
+                finished_recving={request.request_id},
+                invalid_block_ids=errors,
+            )
+            failed_ids = Scheduler._handle_invalid_blocks(scheduler, errors, {})
+            Scheduler._update_from_kv_xfer_finished(scheduler, output)
+            assert connector._scheduling_states[request.request_id].load_failed
+            assert connector._metadata_client.batch_key_exists(hashes) == [True] * len(
+                hashes
+            )
+
+            if policy == "fail":
+                assert failed_ids == {request.request_id}
+                assert request.num_computed_tokens == 0
+                return
+
+            assert failed_ids == set()
+            assert request.num_computed_tokens == 0
+            assert request.request_id in scheduler.failed_recving_kv_req_ids
+            Scheduler._update_waiting_for_remote_kv(scheduler, request)
+            assert blocks.freed
+            request.status = RequestStatus.WAITING
+            request.num_computed_tokens = 0
+            again, again_async = connector.get_num_new_matched_tokens(request, 0)
+            assert (again, again_async) == (0, False)
+            assert request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+        finally:
+            for manager in managers:
+                manager.shutdown()
+            connector.close()
+            for signum, handler in saved_signals.items():
+                signal.signal(signum, handler)

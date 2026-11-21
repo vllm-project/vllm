@@ -66,6 +66,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 HF3FS_AVAILABLE = True
@@ -548,7 +549,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
         if self._role == KVConnectorRole.SCHEDULER:
             self._scheduling_states: dict[str, RequestSchedulingState] = {}
-            self._metadata_client = Hf3fsMetadataClient()
+            self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(0, role="scheduler")
 
         atexit.register(self.close)
@@ -635,7 +636,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             # Initialize metadata client
             num_pages = self._file_size // self._bytes_per_page
-            self._metadata_client = Hf3fsMetadataClient()
+            self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(self._rank, num_pages, role="worker")
         except Exception as e:
             logger.error("HF3FS client initialization failed: %s", e)
@@ -729,6 +730,28 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     # Scheduler Side Methods
     ############################################################
 
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        """Remember requests whose external load failed.
+
+        The worker reports block ids. The scheduler still has those ids on
+        the load it issued, so a later `get_num_new_matched_tokens` can
+        refuse the same keys without another metadata round trip.
+        """
+        if self._role != KVConnectorRole.SCHEDULER:
+            return
+        invalid = connector_output.invalid_block_ids
+        failed_reqs = connector_output.failed_recving
+        if not invalid and not failed_reqs:
+            return
+        for state in self._scheduling_states.values():
+            if state.load_failed:
+                continue
+            fetched = state.load_op.need_fetch_block_ids if state.load_op else ()
+            if state.request_id in failed_reqs or any(
+                block_id in invalid for block_id in fetched
+            ):
+                state.load_failed = True
+
     def request_finished(
         self,
         request: "Request",
@@ -743,6 +766,13 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         try:
             state = self._get_or_create_scheduling_state(request.request_id)
             state.request = request
+            if state.load_failed:
+                state.load_op = LoadBlockInfo(
+                    num_computed_blocks=num_computed_tokens // self._block_size,
+                    num_blocks_to_load=0,
+                    need_fetch_block_ids=[],
+                )
+                return 0, False
             assert request.prompt_token_ids is not None
 
             num_tokens_to_check = self._align_to_block_size(
