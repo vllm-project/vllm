@@ -30,6 +30,9 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    decode_mm_kwargs_item,
+)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -1279,6 +1282,33 @@ def test_chat_render_metadata_payload_omits_tensors_only(qwen2_vl_server, conten
     for key in ("mm_hashes", "mm_placeholders", "mm_metadata"):
         assert metadata["features"][key] == tensors["features"][key]
     assert responses["none"].json()["features"]["mm_metadata"] is None
+
+
+def test_chat_render_tensors_after_metadata_keep_pixel_values(qwen2_vl_server):
+    """A metadata render skips the pixel transform without caching its result."""
+    image = Image.new("RGB", (448, 336), color=(7, 99, 201))
+    content = [{"type": "image_url", "image_url": {"url": encode_image_url(image)}}]
+    responses = {
+        mm_payload: httpx.post(
+            qwen2_vl_server.url_for("v1/chat/completions/render"),
+            json={
+                "model": QWEN2_VL_MODEL,
+                "messages": [{"role": "user", "content": content}],
+                "mm_payload": mm_payload,
+            },
+            timeout=120,
+        )
+        for mm_payload in ("metadata", "tensors")
+    }
+
+    assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
+    metadata = responses["metadata"].json()
+    tensors = responses["tensors"].json()
+    assert metadata["token_ids"] == tensors["token_ids"]
+    for key in ("mm_hashes", "mm_placeholders", "mm_metadata"):
+        assert metadata["features"][key] == tensors["features"][key]
+    (item,) = tensors["features"]["kwargs_data"]["image"]
+    assert "pixel_values" in decode_mm_kwargs_item(item)
 
 
 def test_chat_render_metadata_payload_rejects_modality_without_metadata(

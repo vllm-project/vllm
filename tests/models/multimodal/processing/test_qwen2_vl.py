@@ -11,12 +11,16 @@ import torch
 from PIL import Image
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    extract_mm_features,
+)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
-from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.processing.context import InputProcessingContext, TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
@@ -641,3 +645,115 @@ def test_mm_device_do_normalize(
     torch.testing.assert_close(
         pixel_values_with_normalize.to(device), pixel_values_do_input_norm
     )
+
+
+def _process_images(
+    processor,
+    images: list[Image.Image],
+    mm_processor_kwargs: dict[str, object],
+    *,
+    metadata_only: bool,
+    cache: MultiModalProcessorOnlyCache | None = None,
+):
+    tokenizer = processor.info.get_tokenizer()
+    placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    prompt = tokenizer.encode(f"<|im_start|>user\n{placeholder * len(images)}hi")
+    return processor.apply(
+        ProcessorInputs(
+            prompt,
+            processor.info.parse_mm_data({"image": images}),
+            hf_processor_mm_kwargs=mm_processor_kwargs,
+            cache=cache,
+            metadata_only=metadata_only,
+        ),
+        TimingContext(),
+    )
+
+
+def _rendered_features(engine_input):
+    return extract_mm_features(engine_input, mm_payload="metadata")
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        "Qwen/Qwen3-VL-4B-Instruct",
+    ],
+)
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [{}, {"max_pixels": 512**2}, {"images_kwargs": {"min_pixels": 1024**2}}],
+)
+def test_metadata_only_matches_full_processing(
+    image_assets: ImageTestAssets,
+    model_id: str,
+    mm_processor_kwargs: dict[str, object],
+):
+    """Metadata-only processing skips pixel_values and renders identically."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 2})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [image_assets[0].pil_image, image_assets[1].pil_image.resize((300, 900))]
+
+    full = _process_images(processor, images, mm_processor_kwargs, metadata_only=False)
+    meta = _process_images(processor, images, mm_processor_kwargs, metadata_only=True)
+
+    assert all("pixel_values" in item for item in full["mm_kwargs"]["image"])
+    assert not any("pixel_values" in item for item in meta["mm_kwargs"]["image"])
+    assert meta["prompt_token_ids"] == full["prompt_token_ids"]
+    assert meta["mm_hashes"] == full["mm_hashes"]
+    assert meta["mm_placeholders"] == full["mm_placeholders"]
+    # The serialized metadata (image_grid_thw) must match byte for byte.
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+@pytest.mark.parametrize(
+    ("image_size", "mm_processor_kwargs"),
+    [
+        ((1120, 672), {"do_resize": False}),
+        ((640, 480), {"images_kwargs": {"patch_size": 14}}),
+    ],
+)
+def test_metadata_only_falls_back_for_unmodeled_options(
+    image_size: tuple[int, int],
+    mm_processor_kwargs: dict[str, object],
+):
+    """Options that change the grid and are not modeled run the HF processor."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", image_size, color=(0, 128, 255))]
+
+    full = _process_images(processor, images, mm_processor_kwargs, metadata_only=False)
+    meta = _process_images(processor, images, mm_processor_kwargs, metadata_only=True)
+
+    assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+    assert meta["prompt_token_ids"] == full["prompt_token_ids"]
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+@pytest.mark.parametrize("metadata_first", [True, False])
+def test_metadata_only_results_do_not_enter_the_cache(metadata_first: bool):
+    """A tensor request after a metadata-only one still gets pixel_values."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", (640, 480), color=(10, 200, 30))]
+
+    order = [True, False] if metadata_first else [False, True]
+    results = {
+        metadata_only: _process_images(
+            processor, images, {}, metadata_only=metadata_only, cache=cache
+        )
+        for metadata_only in order
+    }
+
+    assert "pixel_values" in results[False]["mm_kwargs"]["image"][0]
+    assert "pixel_values" not in results[True]["mm_kwargs"]["image"][0]
+    assert results[True]["mm_hashes"] == results[False]["mm_hashes"]
