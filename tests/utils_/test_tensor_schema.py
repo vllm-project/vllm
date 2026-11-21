@@ -180,25 +180,21 @@ def test_tensor_schema_with_invalid_resolve_binding_dims():
 
 def test_tensor_schema_with_list_of_symbolic_dim():
     input_features = torch.randn(3, 10, 160)  # (b=3, fi=10, 160)
-    input_features_mask = torch.randn(3, 8)  # (b=3, fo=8)
     audio_embed_sizes = [8, 8, 8]  # len = b = 3
 
     GraniteSpeechAudioInputs(
         input_features=input_features,
-        input_features_mask=input_features_mask,
         audio_embed_sizes=audio_embed_sizes,
     )
 
 
 def test_tensor_schema_with_list_of_symbolic_dim_mismatch_in_length():
     input_features = torch.randn(4, 10, 160)  # (b=4, fi=10, 160)
-    input_features_mask = torch.randn(4, 8)  # (b=4, fo=8)
     audio_embed_sizes = [8, 8, 8]  # len = 3 ≠ b
 
     with pytest.raises(ValueError, match="expected 'b'=4, got 3"):
         GraniteSpeechAudioInputs(
             input_features=input_features,
-            input_features_mask=input_features_mask,
             audio_embed_sizes=audio_embed_sizes,
         )
 
