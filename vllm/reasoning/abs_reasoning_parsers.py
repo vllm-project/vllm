@@ -381,4 +381,4 @@ class ReasoningParserManager:
     @classmethod
     def import_reasoning_parser(cls, plugin_path: str) -> None:
         """Import a user-defined reasoning parser."""
-        import_plugin(plugin_path)
+        import_plugin(plugin_path, namespace="vllm.reasoning.plugins.")

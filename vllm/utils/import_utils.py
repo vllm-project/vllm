@@ -78,17 +78,23 @@ def import_triton_kernels():
         )
 
 
-def import_plugin(plugin_path: str) -> ModuleType | None:
+def import_plugin(plugin_path: str, namespace: str = "") -> ModuleType | None:
     """Import a user-defined plugin.
 
     Plugin can be either:
     * a module in site-packages
     * a Python file specified by its path
+
+    A path-based plugin is imported under ``namespace + <file stem>`` so a
+    plugin doing the usual ``logger = init_logger(__name__)`` lands inside
+    the configured ``vllm.*`` logging namespace; only the ``vllm`` logger
+    has handlers, so a bare module name would get no handler anywhere up
+    its chain and its INFO/DEBUG records would be dropped.
     """
     try:
         return importlib.import_module(plugin_path)
     except ModuleNotFoundError:
-        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
+        module_name = namespace + os.path.splitext(os.path.basename(plugin_path))[0]
         try:
             return import_from_path(module_name, plugin_path)
         except Exception:
