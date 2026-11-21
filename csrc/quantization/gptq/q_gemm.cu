@@ -143,112 +143,108 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
   // Block
   auto offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
   auto offset_m = blockIdx.y * m_count;
-  auto offset_k = blockIdx.z * BLOCK_KN_SIZE;
-
-  int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
-
   int n = offset_n + t * 4;
+  // Threads with n >= size_n carry no output, but they still own block_a
+  // preload slots and must reach every __syncthreads() in the K-tile loop,
+  // so they cannot return early; their loads and stores are predicated on
+  // n_valid instead.
+  const bool n_valid = n < size_n;
 
-  // Preload block_a
   __shared__ half block_a[m_count][BLOCK_KN_SIZE];
-
-  if (offset_k + t < end_k) {
-    for (int m = 0; m < m_count; ++m) {
-      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
-      half* block_a_ptr = block_a[m];
-
-      block_a_ptr[t] = a_ptr[offset_k + t];
-    }
-  }
-
-  // Zero output
-  if (n >= size_n) return;
-
-  __syncthreads();
-
-  // Find initial group
+  float block_c[m_count][4] = {};
   int groupsize = size_k / groups;
-  int group = offset_k / groupsize;
-  int nextgroup = offset_k + groupsize;
-
-  // a, b offset
-  int qk = offset_k / (32 / 4);
-
-  const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
-  const half* a_ptr = &block_a[0][0];
   int a_stride = BLOCK_KN_SIZE;
 
-  // Initial group
-  int zeros[4];
-  float scales[4];
-  half2 z1z16[4][2];
-  half2 y1y16[4][2];
-  b_gptq_qzeros_.item4(zeros, group, n);
-  b_gptq_scales_.item4_f(scales, group, n);
-  dequant_4bit_8_prep_zero(zeros[0] + zero_offset, z1z16[0], y1y16[0]);
-  dequant_4bit_8_prep_zero(zeros[1] + zero_offset, z1z16[1], y1y16[1]);
-  dequant_4bit_8_prep_zero(zeros[2] + zero_offset, z1z16[2], y1y16[2]);
-  dequant_4bit_8_prep_zero(zeros[3] + zero_offset, z1z16[3], y1y16[3]);
+  for (auto offset_k = blockIdx.z * BLOCK_KN_SIZE; offset_k < size_k;
+       offset_k += gridDim.z * BLOCK_KN_SIZE) {
+    int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
 
-  // Column result
-  float block_c[m_count][4] = {};
+    if (offset_k + t < end_k) {
+      for (int m = 0; m < m_count; ++m) {
+        const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+        block_a[m][t] = a_ptr[offset_k + t];
+      }
+    }
+    __syncthreads();
 
-  // Dequantize and multiply
-  int k = offset_k;
-  while (k < end_k) {
-    if (k == nextgroup) {
-      group++;
-      nextgroup += groupsize;
+    if (n_valid) {
+      int group = offset_k / groupsize;
+      int nextgroup = offset_k + groupsize;
+      int qk = offset_k / (32 / 4);
+      const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+      const half* a_ptr = &block_a[0][0];
+
+      int zeros[4];
+      float scales[4];
+      half2 z1z16[4][2];
+      half2 y1y16[4][2];
       b_gptq_qzeros_.item4(zeros, group, n);
       b_gptq_scales_.item4_f(scales, group, n);
       dequant_4bit_8_prep_zero(zeros[0] + zero_offset, z1z16[0], y1y16[0]);
       dequant_4bit_8_prep_zero(zeros[1] + zero_offset, z1z16[1], y1y16[1]);
       dequant_4bit_8_prep_zero(zeros[2] + zero_offset, z1z16[2], y1y16[2]);
       dequant_4bit_8_prep_zero(zeros[3] + zero_offset, z1z16[3], y1y16[3]);
-    }
+
+      int k = offset_k;
+      while (k < end_k) {
+        if (k == nextgroup) {
+          group++;
+          nextgroup += groupsize;
+          b_gptq_qzeros_.item4(zeros, group, n);
+          b_gptq_scales_.item4_f(scales, group, n);
+          dequant_4bit_8_prep_zero(zeros[0] + zero_offset, z1z16[0], y1y16[0]);
+          dequant_4bit_8_prep_zero(zeros[1] + zero_offset, z1z16[1], y1y16[1]);
+          dequant_4bit_8_prep_zero(zeros[2] + zero_offset, z1z16[2], y1y16[2]);
+          dequant_4bit_8_prep_zero(zeros[3] + zero_offset, z1z16[3], y1y16[3]);
+        }
 
 #pragma unroll
-    for (int j = 0; j < 4; j++) {
-      const int4* b_ptr4 = (int4*)b_ptr;
-      int4 load_int4 = *b_ptr4;
+        for (int j = 0; j < 4; j++) {
+          const int4* b_ptr4 = (int4*)b_ptr;
+          int4 load_int4 = *b_ptr4;
 
-      half2 dq[4][4];
-      dequant_4bit_8_gptq(load_int4.x, dq[0], z1z16[0], y1y16[0], size_n,
-                          false);
-      dequant_4bit_8_gptq(load_int4.y, dq[1], z1z16[1], y1y16[1], size_n,
-                          false);
-      dequant_4bit_8_gptq(load_int4.z, dq[2], z1z16[2], y1y16[2], size_n,
-                          false);
-      dequant_4bit_8_gptq(load_int4.w, dq[3], z1z16[3], y1y16[3], size_n,
-                          false);
+          half2 dq[4][4];
+          dequant_4bit_8_gptq(load_int4.x, dq[0], z1z16[0], y1y16[0], size_n,
+                              false);
+          dequant_4bit_8_gptq(load_int4.y, dq[1], z1z16[1], y1y16[1], size_n,
+                              false);
+          dequant_4bit_8_gptq(load_int4.z, dq[2], z1z16[2], y1y16[2], size_n,
+                              false);
+          dequant_4bit_8_gptq(load_int4.w, dq[3], z1z16[3], y1y16[3], size_n,
+                              false);
 
 #pragma unroll
-      for (int m = 0; m < m_count; m++) {
-        block_c[m][0] = fma(dot22_8_f(dq[0], a_ptr + m * a_stride), scales[0],
-                            block_c[m][0]);
-        block_c[m][1] = fma(dot22_8_f(dq[1], a_ptr + m * a_stride), scales[1],
-                            block_c[m][1]);
-        block_c[m][2] = fma(dot22_8_f(dq[2], a_ptr + m * a_stride), scales[2],
-                            block_c[m][2]);
-        block_c[m][3] = fma(dot22_8_f(dq[3], a_ptr + m * a_stride), scales[3],
-                            block_c[m][3]);
+          for (int m = 0; m < m_count; m++) {
+            block_c[m][0] = fma(dot22_8_f(dq[0], a_ptr + m * a_stride),
+                                scales[0], block_c[m][0]);
+            block_c[m][1] = fma(dot22_8_f(dq[1], a_ptr + m * a_stride),
+                                scales[1], block_c[m][1]);
+            block_c[m][2] = fma(dot22_8_f(dq[2], a_ptr + m * a_stride),
+                                scales[2], block_c[m][2]);
+            block_c[m][3] = fma(dot22_8_f(dq[3], a_ptr + m * a_stride),
+                                scales[3], block_c[m][3]);
+          }
+
+          b_ptr += size_n;
+          a_ptr += 8;
+        }
+
+        k += 32;
       }
-
-      b_ptr += size_n;
-      a_ptr += 8;
     }
-
-    k += 32;
+    __syncthreads();
   }
 
-  for (int m = 0; m < m_count; m++) {
-    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
-    half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]),
-                                    __float2half_rn(block_c[m][1]));
-    half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]),
-                                    __float2half_rn(block_c[m][3]));
-    atomicAdd(out, result01);
-    atomicAdd(out + 1, result23);
+  if (n_valid) {
+    for (int m = 0; m < m_count; m++) {
+      half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+      half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]),
+                                      __float2half_rn(block_c[m][1]));
+      half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]),
+                                      __float2half_rn(block_c[m][3]));
+      atomicAdd(out, result01);
+      atomicAdd(out + 1, result23);
+    }
   }
 }
 
@@ -646,6 +642,10 @@ void gemm_half_q_half_cuda_part(const half* a, const uint32_t* b_q_weight,
   gridDim.x = DIVIDE(size_n, BLOCK_KN_SIZE * 4);
   gridDim.y = DIVIDE(size_m, m_count);
   gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
+  const int max_4bit_split_k = 4;
+  if (bit == 4 && gridDim.z > max_4bit_split_k) {
+    gridDim.z = max_4bit_split_k;
+  }
 
   fp_gemm_half_q_half_gptq_kernel kernel =
       pick_gemm_half_q_half_gptq_kernel(true, m_count, bit);
@@ -1325,21 +1325,23 @@ void reconstruct_gptq(const uint32_t* b_q_weight, const uint32_t* b_gptq_qzeros,
                                            use_v2_format, out);
 }
 
+bool should_reconstruct(int size_m, bool use_exllama, int bit) {
+  if (use_exllama) {
+    return ((bit == 8 && size_m > MAX_Q_GEMM_ROWS_8BIT) ||
+            (bit != 8 && size_m > MAX_Q_GEMM_ROWS));
+  }
+  // The 2/3-bit kernels are somehow slower than dequant + gemm baseline, so
+  // we disabled them for now.
+  return (bit < 4 || size_m > MAX_ALT_GEMM_ROWS);
+}
+
 void gemm_half_q_half_cuda(cublasHandle_t cublas_handle, const half* a,
                            const uint32_t* b_q_weight,
                            const uint32_t* b_gptq_qzeros,
                            const half* b_gptq_scales, half* c, half* temp_dq,
                            int size_m, int size_n, int size_k, int groups,
                            bool use_exllama, bool use_v2_format, int bit) {
-  bool use_reconstruct;
-  if (use_exllama) {
-    use_reconstruct = ((bit == 8 && size_m > MAX_Q_GEMM_ROWS_8BIT) ||
-                       (bit != 8 && size_m > MAX_Q_GEMM_ROWS));
-  } else {
-    // The 2/3-bit kernels are somehow slower than dequant + gemm baseline, so
-    // we disabled them for now.
-    use_reconstruct = (bit < 4 || size_m > MAX_ALT_GEMM_ROWS);
-  }
+  const bool use_reconstruct = should_reconstruct(size_m, use_exllama, bit);
   if (use_reconstruct) {
     // Reconstruct FP16 matrix, then cuBLAS
     if (use_exllama) {
@@ -1468,16 +1470,20 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
   STD_TORCH_CHECK(a.size(1) % num_groups == 0, "Input size K = ", a.size(1),
                   " is not divisible by the number of groups = ", num_groups);
   auto c = torch::stable::new_zeros(a, {a.size(0), b_q_weight.size(1)});
-  auto temp_dq =
-      torch::stable::empty({b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)},
-                           a.scalar_type(), std::nullopt, a.device());
+  torch::stable::Tensor temp_dq;
+  half* temp_dq_ptr = nullptr;
+  if (vllm::gptq::should_reconstruct(a.size(0), use_exllama, bit)) {
+    temp_dq = torch::stable::empty(
+        {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, a.scalar_type(),
+        std::nullopt, a.device());
+    temp_dq_ptr = (half*)temp_dq.data_ptr();
+  }
 
   vllm::gptq::gemm_half_q_half_cuda(
       get_current_cuda_blas_handle(), (const half*)a.data_ptr(),
       (const uint32_t*)b_q_weight.data_ptr(),
       (const uint32_t*)b_gptq_qzeros.data_ptr(),
-      (const half*)b_gptq_scales.data_ptr(), (half*)c.data_ptr(),
-      (half*)temp_dq.data_ptr(),
+      (const half*)b_gptq_scales.data_ptr(), (half*)c.data_ptr(), temp_dq_ptr,
       c.size(0),  // m
       c.size(1),  // n
       a.size(1),  // k
