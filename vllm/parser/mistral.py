@@ -431,6 +431,9 @@ class MistralParser(ParserEngine):
             return request
 
         response_format = _mistral_response_format(request)
+        if not request.tools and response_format.get("type") == "text":
+            return request
+
         # The grammar replaces response_format as the engine constraint.
         request.response_format = None
 
