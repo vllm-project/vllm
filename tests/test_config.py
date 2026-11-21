@@ -2275,6 +2275,7 @@ _PEER_GROUP = {
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA Only Test")
 @pytest.mark.parametrize(
     "options,parallel,error",
     [
