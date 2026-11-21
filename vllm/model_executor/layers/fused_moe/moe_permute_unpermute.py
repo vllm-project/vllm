@@ -293,16 +293,13 @@ def moe_unpermute(
       tokens for each expert.
 
     Args:
-        out (torch.Tensor): output tensor
+        out (torch.Tensor): output tensor. The reduced and unpermuted
+            activation is accumulated in-place into this tensor.
         permuted_hidden_states (torch.Tensor): permuted activation.
         topk_weights (torch.Tensor): topk expert route weight for each token.
         inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
         expert_first_token_offset (Optional[torch.Tensor]): offset of the first
             token of each expert for grouped gemm.
-
-    Returns:
-    - hidden_states (torch.Tensor): The reduced and unpermuted activation
-      tensor.
 
     """
     topk = topk_weights.size(1)
