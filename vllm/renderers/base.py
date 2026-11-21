@@ -989,6 +989,7 @@ class BaseRenderer(ABC, Generic[_T]):
         media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ) -> "MultiModalInput":
         self._drain_mm_cache_invalidations()
         mm_processor = self.get_mm_processor()
@@ -1013,6 +1014,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 if skip_mm_cache
                 else self._mm_processor_cache
             ),
+            metadata_only=mm_metadata_only,
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
@@ -1028,6 +1030,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ) -> TokensInput | MultiModalInput:
         """Process token inputs, with multimodal preprocessing offloaded
         to the shared thread pool in the async variant.
@@ -1043,6 +1046,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
             )
         else:
             engine_input = tokens_input(prompt_token_ids)
@@ -1103,6 +1107,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ) -> TokensInput | MultiModalInput:
         prompt_token_ids = prompt["prompt_token_ids"]
 
@@ -1115,6 +1120,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
             )
         else:
             engine_input = tokens_input(prompt_token_ids)
@@ -1205,6 +1211,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
         tok_params: TokenizeParams | None = None,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
@@ -1213,6 +1220,7 @@ class BaseRenderer(ABC, Generic[_T]):
         engine_input = self._process_tokens(  # type: ignore[arg-type]
             prompt,  # type: ignore[arg-type]
             skip_mm_cache=skip_mm_cache,
+            mm_metadata_only=mm_metadata_only,
         )
         self._truncate_expanded_prompt(engine_input, tok_params)
         return engine_input
@@ -1222,6 +1230,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
         tok_params: TokenizeParams | None = None,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
@@ -1230,6 +1239,7 @@ class BaseRenderer(ABC, Generic[_T]):
         engine_input = await self._process_tokens_async(  # type: ignore[arg-type]
             prompt,  # type: ignore[arg-type]
             skip_mm_cache=skip_mm_cache,
+            mm_metadata_only=mm_metadata_only,
         )
         self._truncate_expanded_prompt(engine_input, tok_params)
         return engine_input
@@ -1253,18 +1263,25 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: EncoderDecoderTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
         return build_enc_dec_input(
             encoder_input=self._process_singleton(
-                enc_prompt, skip_mm_cache=skip_mm_cache
+                enc_prompt,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
             ),
             decoder_input=(
                 None
                 if dec_prompt is None
-                else self._process_singleton(dec_prompt, skip_mm_cache=skip_mm_cache)
+                else self._process_singleton(
+                    dec_prompt,
+                    skip_mm_cache=skip_mm_cache,
+                    mm_metadata_only=mm_metadata_only,
+                )
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
             skip_decoder_start_token=self._should_skip_decoder_start_token,
@@ -1275,17 +1292,24 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: EncoderDecoderTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
         encoder_input, decoder_input = await asyncio.gather(
-            self._process_singleton_async(enc_prompt, skip_mm_cache=skip_mm_cache),
+            self._process_singleton_async(
+                enc_prompt,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+            ),
             (
                 asyncio.sleep(0)
                 if dec_prompt is None
                 else self._process_singleton_async(
-                    dec_prompt, skip_mm_cache=skip_mm_cache
+                    dec_prompt,
+                    skip_mm_cache=skip_mm_cache,
+                    mm_metadata_only=mm_metadata_only,
                 )
             ),
         )
@@ -1303,14 +1327,20 @@ class BaseRenderer(ABC, Generic[_T]):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
         tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
-            engine_input = self._process_enc_dec(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
+            engine_input = self._process_enc_dec(
+                prompt, skip_mm_cache=skip_mm_cache, mm_metadata_only=mm_metadata_only
+            )  # type: ignore[arg-type]
         else:
             engine_input = self._process_singleton(
-                prompt, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                prompt,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+                tok_params=tok_params,
             )
 
         engine_input["arrival_time"] = arrival_time
@@ -1323,6 +1353,7 @@ class BaseRenderer(ABC, Generic[_T]):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
         tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         engine_input: EngineInput
@@ -1330,10 +1361,14 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input = await self._process_enc_dec_async(
                 prompt,  # type: ignore[arg-type]
                 skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
             )
         else:
             engine_input = await self._process_singleton_async(
-                prompt, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                prompt,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+                tok_params=tok_params,
             )
 
         engine_input["arrival_time"] = arrival_time
@@ -1348,6 +1383,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ):
         arrival_time = time.time()
 
@@ -1361,7 +1397,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return [
             self.process_for_engine(
-                prompt, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                prompt,
+                arrival_time,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+                tok_params=tok_params,
             )
             for prompt in tok_prompts
         ]
@@ -1373,6 +1413,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ):
         arrival_time = time.time()
 
@@ -1387,7 +1428,11 @@ class BaseRenderer(ABC, Generic[_T]):
         return await asyncio.gather(
             *(
                 self.process_for_engine_async(
-                    p, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                    p,
+                    arrival_time,
+                    skip_mm_cache=skip_mm_cache,
+                    mm_metadata_only=mm_metadata_only,
+                    tok_params=tok_params,
                 )
                 for p in tok_prompts
             )
@@ -1401,6 +1446,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ):
         arrival_time = time.time()
 
@@ -1426,7 +1472,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         eng_prompts = [
             self.process_for_engine(
-                prompt, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                prompt,
+                arrival_time,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+                tok_params=tok_params,
             )
             for prompt in tok_prompts
         ]
@@ -1441,6 +1491,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ):
         arrival_time = time.time()
 
@@ -1467,7 +1518,11 @@ class BaseRenderer(ABC, Generic[_T]):
         eng_prompts = await asyncio.gather(
             *(
                 self.process_for_engine_async(
-                    p, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                    p,
+                    arrival_time,
+                    skip_mm_cache=skip_mm_cache,
+                    mm_metadata_only=mm_metadata_only,
+                    tok_params=tok_params,
                 )
                 for p in tok_prompts
             )

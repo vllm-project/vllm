@@ -40,6 +40,11 @@ class ProcessorInputs:
 
     cache: BaseMultiModalProcessorCache | None = None
 
+    # The caller needs prompt updates, hashes and metadata but not the tensors.
+    # A model may then skip the tensor transform.
+    # It is not part of the hash.
+    metadata_only: bool = False
+
     def get_mm_hashes(
         self,
         model_id: str,

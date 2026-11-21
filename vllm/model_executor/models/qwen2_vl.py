@@ -76,6 +76,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
+    ImageProcessorItems,
     ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
@@ -1285,7 +1286,79 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         }
 
 
+# Models whose image grids match the HF processor when computed from the image size.
+# Other models reuse these processor classes and are not covered.
+_METADATA_ONLY_MODEL_TYPES = frozenset(
+    {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}
+)
+# Size options set the grid and are reproduced here; the others only change pixels.
+# Anything else, such as `do_resize` or patch sizes, needs the HF processor.
+_METADATA_ONLY_IMAGE_KWARGS = frozenset(
+    {
+        "size",
+        "min_pixels",
+        "max_pixels",
+        "do_normalize",
+        "do_rescale",
+        "rescale_factor",
+        "image_mean",
+        "image_std",
+        "do_convert_rgb",
+        "resample",
+    }
+)
+
+
+def image_grids_from_sizes(
+    info: Qwen2VLProcessingInfo,
+    mm_items: MultiModalDataItems,
+    hf_kwargs: Mapping[str, object],
+) -> BatchFeature | None:
+    """Compute `image_grid_thw` from image sizes, without the pixel transform.
+
+    Returns `None` when the full HF processor is needed: other models or
+    modalities, image embeddings, or image options other than the size ones.
+    """
+    if info.get_hf_config().model_type not in _METADATA_ONLY_MODEL_TYPES:
+        return None
+    images = mm_items.get("image")
+    if set(mm_items) != {"image"} or not isinstance(images, ImageProcessorItems):
+        return None
+
+    merged_kwargs = info._merge_and_resolve_mm_processor_kwargs(hf_kwargs)
+    image_kwargs = merged_kwargs.get("images_kwargs", {})
+    if set(image_kwargs) - _METADATA_ONLY_IMAGE_KWARGS:
+        return None
+
+    patch_size = info.get_hf_config().vision_config.patch_size
+    image_processor = info.get_image_processor()
+    grids = []
+    for idx in range(len(images)):
+        image_size = images.get_image_size(idx)
+        try:
+            resized, _ = info._get_vision_info(
+                image_width=image_size.width,
+                image_height=image_size.height,
+                image_processor=image_processor,
+                mm_kwargs=hf_kwargs,
+                modality="image",
+            )
+        except ValueError:
+            # Let the HF processor raise its own error.
+            return None
+        grids.append([1, resized.height // patch_size, resized.width // patch_size])
+
+    return BatchFeature({"image_grid_thw": torch.tensor(grids, dtype=torch.long)})
+
+
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
+    def _apply_hf_processor_metadata_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature | None:
+        return image_grids_from_sizes(self.info, mm_items, hf_kwargs)
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
