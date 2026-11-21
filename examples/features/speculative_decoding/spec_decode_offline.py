@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--draft-model", type=str, default=None)
+    parser.add_argument("--use-heterogeneous-vocab", action="store_true")
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=None)
     parser.add_argument("--max-num-seqs", type=int, default=None)
@@ -130,6 +131,7 @@ def main(args):
             "num_speculative_tokens": args.num_spec_tokens,
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
+            "use_heterogeneous_vocab": args.use_heterogeneous_vocab,
         }
     elif args.method == "mtp":
         speculative_config = {

@@ -11,9 +11,11 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
+from vllm.tokenizers.registry import get_tokenizer
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables, make_slot_mappings
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -35,6 +37,9 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
     Unlike Eagle, the draft model runs fully independently of the target model.
     Step 0 builds an expanded buffer (accepted + correction token + rejected
     slots) via a Triton kernel; steps 1..k-1 are single-token decode steps.
+
+    With `use_heterogeneous_vocab` (TLI), the draft model reads and samples
+    draft-vocab ids, and proposals are mapped back to target-vocab ids.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -57,6 +62,34 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         )
         self.expanded_slot_mappings: torch.Tensor
         self.supports_mm_inputs = False
+
+        self.vocab_mapping: VocabMapping | None = None
+        if self.speculative_config.use_heterogeneous_vocab:
+            self.vocab_mapping = self._build_vocab_mapping()
+            self.target_draft_tokens = torch.zeros_like(self.draft_tokens)
+
+    def _build_vocab_mapping(self) -> VocabMapping:
+        target_config = self.vllm_config.model_config
+        target_tokenizer = get_tokenizer(
+            target_config.tokenizer,
+            tokenizer_mode=target_config.tokenizer_mode,
+            revision=target_config.tokenizer_revision,
+            trust_remote_code=target_config.trust_remote_code,
+        )
+        # The draft config inherits the target's tokenizer mode and revision.
+        draft_tokenizer = get_tokenizer(
+            self.draft_model_config.tokenizer,
+            tokenizer_mode="auto",
+            revision=self.draft_model_config.revision,
+            trust_remote_code=self.draft_model_config.trust_remote_code,
+        )
+        return VocabMapping(
+            target_tokenizer=target_tokenizer,
+            draft_tokenizer=draft_tokenizer,
+            target_vocab_size=target_config.get_vocab_size(),
+            draft_vocab_size=self.vocab_size,
+            device=self.device,
+        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # The expanded prefill adds a correction token to each request.
@@ -129,6 +162,22 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 prefix="draft_model",
                 load_config=get_draft_load_config(draft_vllm_config),
             )
+
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        logits = super().compute_draft_logits(hidden_states, spec_step_idx)
+        if self.vocab_mapping is not None:
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+        return logits
+
+    def _to_target_ids(self, draft_tokens: torch.Tensor) -> torch.Tensor:
+        if self.vocab_mapping is None:
+            return draft_tokens
+        num_reqs, num_steps = draft_tokens.shape
+        target_tokens = self.target_draft_tokens[:num_reqs, :num_steps]
+        target_tokens.copy_(self.vocab_mapping.map_draft_to_target_ids(draft_tokens))
+        return target_tokens
 
     @torch.inference_mode()
     def _run_model(
@@ -346,8 +395,11 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             self.last_token_indices[:num_reqs] = self._accepted_last_indices(
                 input_batch, num_rejected, num_reqs
             )
+            input_ids = input_batch.input_ids[:src_tokens]
+            if self.vocab_mapping is not None:
+                input_ids = self.vocab_mapping.map_target_to_draft_ids(input_ids)
             hidden_states = self._run_model(
-                input_batch.input_ids[:src_tokens],
+                input_ids,
                 input_batch.positions[:src_tokens],
                 None,
                 None,
@@ -366,6 +418,12 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=self.max_model_len,
             )
+            if self.vocab_mapping is not None:
+                # In place, since the prefill CUDA graph reads this buffer.
+                expanded_input_ids = self.expanded_input_ids[:total_expanded]
+                expanded_input_ids.copy_(
+                    self.vocab_mapping.map_target_to_draft_ids(expanded_input_ids)
+                )
             max_query_len = int(input_batch.num_scheduled_tokens.max())
             uniform_token_count = get_uniform_decode_token_count(
                 num_reqs,
@@ -435,7 +493,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             if num_speculative_tokens == 0:
                 self.draft_tokens[:num_reqs].fill_(-1)
                 return self.draft_tokens[:num_reqs]
-            return self.draft_tokens[:num_reqs, :1]
+            return self._to_target_ids(self.draft_tokens[:num_reqs, :1])
 
         self._run_multi_step_decode(
             input_batch,
@@ -448,7 +506,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             num_speculative_tokens,
         )
 
-        return self.draft_tokens[:num_reqs]
+        return self._to_target_ids(self.draft_tokens[:num_reqs])
 
 
 @triton.jit

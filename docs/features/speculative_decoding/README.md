@@ -181,6 +181,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. With `synthetic`, runs FLy's entropy computation without deferring rejections (see [FLy](fly.md#measuring-fly-cost-with-synthetic-acceptance)). |
 | `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum normalized top-k entropy, in `[0, 1]`, required for FLy to defer a native rejection. |
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target scores renormalized for FLy's entropy gate, capped at the vocabulary size. |
+| `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. See [Draft Model](draft_model.md#draft-model-method-with-heterogeneous-vocabs). |
 
 For an EPLB-backed MoE draft, set its redundant expert count with
 `eplb_config.draft_num_redundant_experts` in addition to configuring

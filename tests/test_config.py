@@ -4954,6 +4954,36 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+def test_heterogeneous_vocab_draft_model_config():
+    """A TLI draft keeps its own tokenizer and may have a different vocab size,
+    but only with greedy drafting and full draft logits."""
+    target_model_config = ModelConfig("Qwen/Qwen2.5-0.5B-Instruct")
+    draft_model = "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+    def make_config(**kwargs) -> SpeculativeConfig:
+        return SpeculativeConfig(
+            method="draft_model",
+            model=draft_model,
+            num_speculative_tokens=3,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match="same vocabulary size"):
+        make_config()
+    config = make_config(use_heterogeneous_vocab=True)
+    assert config.draft_model_config.tokenizer == draft_model
+    with pytest.raises(ValueError, match="only supports greedy draft sampling"):
+        make_config(use_heterogeneous_vocab=True, draft_sample_method="probabilistic")
+    with pytest.raises(ValueError, match="not compatible with use_local_argmax"):
+        make_config(use_heterogeneous_vocab=True, use_local_argmax_reduction=True)
+    with pytest.raises(ValueError, match="only works with method='draft_model'"):
+        SpeculativeConfig(
+            method="ngram", num_speculative_tokens=2, use_heterogeneous_vocab=True
+        )
+
+
 def test_draft_sample_method_probabilistic_is_accepted():
     speculative_config = SpeculativeConfig(
         method="ngram",
