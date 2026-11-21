@@ -60,3 +60,33 @@ else:
         _builder=None,
     ):
         return None
+
+
+@triton.jit
+def store_2d_vec4_16bit(
+    base_ptr,
+    val_f32,
+    row_offs,
+    col_vec4_offs,
+    row_stride,
+    T,
+    COLS: tl.constexpr,
+    ROWS: tl.constexpr,
+    BCOLS: tl.constexpr,
+):
+    """Pack 4 adjacent 16-bit columns into uint64 so RDNA WMMA layouts emit
+    coalesced global_store_b128 instead of 8KB-strided scalar buffer_store_b16."""
+    u16 = val_f32.to(base_ptr.dtype.element_ty).to(tl.uint16, bitcast=True)
+    lo16, hi16 = tl.split(tl.reshape(u16, [ROWS, BCOLS // 2, 2]))
+    u32 = lo16.to(tl.uint32) | (hi16.to(tl.uint32) << 16)
+    lo32, hi32 = tl.split(tl.reshape(u32, [ROWS, BCOLS // 4, 2]))
+    u64 = lo32.to(tl.uint64) | (hi32.to(tl.uint64) << 32)
+    ptr_u64 = base_ptr.to(tl.pointer_type(tl.uint64))
+    mask = (row_offs[:, None] < T) & (col_vec4_offs[None, :] < (COLS // 4))
+    tl.store(
+        ptr_u64
+        + row_offs[:, None].to(tl.int64) * (row_stride // 4)
+        + col_vec4_offs[None, :],
+        u64,
+        mask=mask,
+    )
