@@ -42,7 +42,7 @@ use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
 use crate::request_metrics::{
     ParallelSamplingStats, RequestMetricHandles, RequestMetricsTracker,
-    resolve_request_metric_handles,
+    create_admission_rejection_series, resolve_request_metric_handles,
 };
 
 /// Boxed output stream returned by [`Llm::generate`].
@@ -146,6 +146,7 @@ impl EngineCoreLlm {
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
         METRICS.request.set_max_model_len(client.max_model_len());
+        create_admission_rejection_series(client.model_name());
         let request_metric_handles = (client.engine_indices().into_iter())
             .map(|engine| {
                 let handles = resolve_request_metric_handles(

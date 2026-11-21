@@ -10,8 +10,8 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_metrics::{
-    EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
-    U64Counter, WatermarkStatusLabels,
+    AdmissionRejectionLabels, EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS,
+    PromptTokenSourceLabels, U64Counter, WatermarkStatusLabels,
 };
 
 use crate::FinishReason;
@@ -19,6 +19,8 @@ use crate::FinishReason;
 const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
+/// The `reason` labels of `vllm:admission_rejections`, Python's `ADMISSION_REASONS`.
+const ADMISSION_REJECTION_REASONS: [&str; 2] = ["max_num_queued_reqs", "max_num_queued_tokens"];
 
 /// Engine lifecycle timestamps used by frontend per-request response metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -437,6 +439,22 @@ impl RequestMetricsTracker {
                 }
             }
         }
+    }
+}
+
+/// Create a `vllm:admission_rejections` series for every reason, like
+/// Python's `for reason in ADMISSION_REASONS` loop, so each exports zero.
+// TODO: count rejections once `--max-num-queued-reqs` and
+// `--max-num-queued-tokens` are supported; both are rejected at startup today.
+pub(crate) fn create_admission_rejection_series(model_name: &str) {
+    for reason in ADMISSION_REJECTION_REASONS {
+        METRICS
+            .request
+            .admission_rejections
+            .get_or_create_owned(&AdmissionRejectionLabels {
+                model_name: model_name.to_string(),
+                reason,
+            });
     }
 }
 
