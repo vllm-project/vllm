@@ -23,12 +23,8 @@ pub enum TokenizerSource {
     HuggingFace(PathBuf),
     /// Path to `tiktoken.model` or `*.tiktoken` file for tiktoken-based models.
     Tiktoken(PathBuf),
-    /// Path to `tekken.json` when present (Mistral native tokenizer format).
-    ///
-    /// When set, the Tekken tokenizer should be preferred over the Hugging Face
-    /// tokenizer because the HuggingFace `tokenizer.json` for Mistral
-    /// models has a known regex bug that produces incorrect token IDs for
-    /// some inputs.
+    /// Path to `tekken.json` (Mistral native tokenizer format), used only when the
+    /// model has no `tokenizer.json`.
     Tekken(PathBuf),
 }
 
@@ -326,9 +322,15 @@ impl SourceFiles {
         })
     }
 
-    /// Find the tokenizer file: `tekken.json`, `tokenizer.json`, or a tiktoken file.
+    /// Find the tokenizer file: `tokenizer.json`, `tekken.json`, or a tiktoken file.
+    ///
+    /// `tokenizer.json` comes first: current Mistral releases ship one that encodes like
+    /// `tekken.json` and carries the control tokens the chat template renders, while newer
+    /// `tekken.json` files can outgrow the `tekken` crate. The `tokenizer.json` of some older
+    /// Mistral models (Small 3/3.1) has a known pre-tokenizer regex bug that produces slightly
+    /// different token IDs; that is accepted.
     async fn tokenizer_file(&self) -> Result<Option<PathBuf>> {
-        for filename in ["tekken.json", "tokenizer.json"] {
+        for filename in ["tokenizer.json", "tekken.json"] {
             if let Some(path) = self.get(filename).await? {
                 return Ok(Some(path));
             }
@@ -368,7 +370,6 @@ impl SourceFiles {
         Ok(resolve_tokenizer_source(
             tokenizer_path,
             tokenizer_config.tokenizer_class.as_deref(),
-            None,
         ))
     }
 
@@ -403,24 +404,17 @@ fn cached_snapshot_dir(cache: &Cache, repo: &Repo) -> Option<PathBuf> {
     Some(cache_repo.pointer_path(&commit)).filter(|dir| dir.is_dir())
 }
 
-/// Choose the tokenizer.
+/// Choose the tokenizer for a `tokenizer.json` or tiktoken file.
 ///
 /// Selection order:
-/// 1. `tekken.json` — Mistral native tokenizer (preferred over HF `tokenizer.json` because the HF
-///    version has a known regex bug for Mistral models).
-/// 2. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from BPE data.
-/// 3. `tokenizer_class` in `tokenizer_config.json` — classes containing "Tiktoken" (case-
+/// 1. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from BPE data.
+/// 2. `tokenizer_class` in `tokenizer_config.json` — classes containing "Tiktoken" (case-
 ///    insensitive) trigger tiktoken loading from a sibling BPE file.
-/// 4. Default — `tokenizer.json` in HuggingFace format.
+/// 3. Default — `tokenizer.json` in HuggingFace format.
 fn resolve_tokenizer_source(
     tokenizer_path: PathBuf,
     tokenizer_class: Option<&str>,
-    tekken_path: Option<PathBuf>,
 ) -> TokenizerSource {
-    if let Some(tekken_path) = tekken_path {
-        return TokenizerSource::Tekken(tekken_path);
-    }
-
     if is_tiktoken_file(&tokenizer_path) {
         return TokenizerSource::Tiktoken(tokenizer_path);
     }
@@ -636,6 +630,34 @@ mod tests {
             files.tokenizer_config_path,
             Some(dir.path().join("tokenizer_config.json"))
         );
+    }
+
+    #[tokio::test]
+    async fn resolved_model_files_prefer_tokenizer_json_over_tekken() {
+        let both = tempdir().unwrap();
+        let tekken_only = tempdir().unwrap();
+        for dir in [&both, &tekken_only] {
+            fs::write(dir.path().join("tekken.json"), "{}").unwrap();
+            fs::write(dir.path().join("tokenizer_config.json"), "{}").unwrap();
+        }
+        fs::write(both.path().join("tokenizer.json"), "{}").unwrap();
+
+        let resolve = |dir: &std::path::Path| {
+            let dir = dir.to_str().unwrap().to_owned();
+            async move { ResolvedModelFiles::new(&dir, None).await.unwrap().tokenizer }
+        };
+        match resolve(both.path()).await {
+            Some(TokenizerSource::HuggingFace(path)) => {
+                assert_eq!(path, both.path().join("tokenizer.json"));
+            }
+            other => panic!("expected HuggingFace tokenizer, got {other:?}"),
+        }
+        match resolve(tekken_only.path()).await {
+            Some(TokenizerSource::Tekken(path)) => {
+                assert_eq!(path, tekken_only.path().join("tekken.json"));
+            }
+            other => panic!("expected Tekken tokenizer, got {other:?}"),
+        }
     }
 
     #[tokio::test]
