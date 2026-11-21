@@ -70,7 +70,10 @@ EAGLE3_MODEL_CONFIGS = [
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
         # FLASHINFER does not support ("sink setting not supported")
         excluded_backends={AttentionBackendEnum.FLASHINFER},
-        rocm_expected_acceptance_lengths_per_pos=[0.7040, 0.4820, 0.3350],
+        # ROCm runs are bimodal on the same commit and test order (e.g. builds
+        # 103755/103756: 0.698/0.467/0.318 vs 0.707/0.486/0.337). Use the
+        # lower mode so the 5% floor flags real regressions, not mode flips.
+        rocm_expected_acceptance_lengths_per_pos=[0.6980, 0.4670, 0.3180],
     ),
     Eagle3ModelConfig(
         verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
