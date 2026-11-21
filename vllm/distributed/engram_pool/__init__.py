@@ -10,7 +10,7 @@ hashing, row formats and the kernels that read fetched rows. A model:
    in layer i; its `consume` reads `fetch.wait(i)`, or `fetch.landed(i)` in its
    own kernel through `landed_row`.
 
-Transports: `nvlink` maps every GPU's HBM shard (cuMem FABRIC) and loads rows
+Transports: `nvlink` maps every GPU's HBM or EGM shard (cuMem FABRIC) and loads rows
 directly; with `rdma`, the owners' NICs gather rows from host or HBM shards.
 """
 
@@ -114,7 +114,7 @@ class EngramPool:
     Args:
         group: The peer group splitting the tables.
         transport: "nvlink" or "rdma".
-        host_shards: Keep shards in host memory (RDMA only).
+        host_shards: Use Grace EGM with NVLink or pinned host memory with RDMA.
         max_items: Most rows of one table one fetch gathers on this GPU.
         max_row_bytes: Largest row of any table.
         max_tables: Most tables one fetch reads.
@@ -139,6 +139,7 @@ class EngramPool:
         thp_dir: str | None = None,
     ) -> None:
         self.group, self.fetch_mode = group, fetch_mode
+        self.egm = transport == "nvlink" and host_shards
         self._check_same(("pool", transport, host_shards))
         self.max_row_bytes = round_up(max_row_bytes, _ROW_ALIGN)
         self.max_items, self.max_tables = max_items, max_tables
@@ -146,7 +147,7 @@ class EngramPool:
         if transport == "nvlink":
             from vllm.distributed.engram_pool import nvlink
 
-            self.transport = nvlink.NvlinkTransport(group)
+            self.transport = nvlink.NvlinkTransport(group, self.egm)
         else:
             from vllm.distributed.engram_pool import rdma
 
@@ -159,7 +160,10 @@ class EngramPool:
                 rdma_inflight,
                 thp_dir,
             )
-        self._where = "host memory" if host_shards else "HBM"
+        if self.egm:
+            self._where = "EGM"
+        else:
+            self._where = "host memory" if host_shards else "HBM"
         self._buffer: torch.Tensor | None = None
         self._metas: dict[tuple[int, ...], torch.Tensor] = {}
 
