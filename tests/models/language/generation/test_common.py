@@ -289,3 +289,24 @@ def test_models(
         # the memory might not be deallocated completely
         # before running the next test case
         torch.accelerator.synchronize()
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="FlashInfer requires CUDA")
+def test_flashinfer_rejects_alibi(vllm_runner, monkeypatch):
+    # Run in-process to preserve the backend's initialization error.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    with (
+        pytest.raises(NotImplementedError, match="FLASHINFER does not support ALiBi"),
+        vllm_runner(
+            "bigscience/bloom-560m",
+            dtype="bfloat16",
+            max_model_len=32,
+            max_num_seqs=1,
+            enforce_eager=True,
+            kv_cache_memory_bytes=64 * 1024 * 1024,
+            attention_config={"backend": "FLASHINFER"},
+        ),
+    ):
+        pass
