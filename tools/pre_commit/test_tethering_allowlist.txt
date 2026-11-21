@@ -47,6 +47,7 @@ tests/models/inkling2/test_attention.py  # Inkling2 B200 tests; CI job not added
 tests/models/inkling2/test_core_ops.py  # Inkling2 B200 tests; CI job not added yet
 tests/models/inkling2/test_model.py  # Inkling2 B200 tests; CI job not added yet
 tests/models/inkling2/test_moe.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_moe_ct.py  # Inkling2 B200 tests; CI job not added yet
 tests/models/inkling2/test_dspark.py  # Inkling2 B200 tests; CI job not added yet
 tests/models/inkling2/test_processing.py  # Inkling2 B200 tests; CI job not added yet
 tests/models/inkling2/test_allreduce.py  # Inkling2 B200 tests; CI job not added yet

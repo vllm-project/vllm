@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inkling2 mixture-of-experts layer (routed experts only, NVFP4 or MXFP8).
+"""Inkling2 mixture-of-experts layer (routed experts only, NVFP4 or MXFP8;
+compressed-tensors experts are in `moe_ct`).
 
 Experts are sharded contiguously over the TP group (EP size = TP size); each
 rank returns the full all-reduced bf16 output. Checkpoint names under
@@ -22,6 +23,7 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 
+from .moe_ct import Inkling2CTExperts, Inkling2CTScheme
 from .ops import use_sm100_kernels
 from .ops.activation import swiglu_quantize
 from .ops.block_scales import shuffle_rows, swizzle_block_scales
@@ -290,11 +292,17 @@ class Inkling2Experts(nn.Module):
 
 
 class Inkling2MoE(nn.Module):
-    def __init__(self, config, quant_format: QuantFormat) -> None:
+    def __init__(self, config, quant_format: "QuantFormat | Inkling2CTScheme") -> None:
+        """`quant_format`: NVFP4 / MXFP8 (`hf_quant_config.json`), or the
+        compressed-tensors scheme of the layer's experts (`moe_ct`)."""
         super().__init__()
         assert config.n_shared_experts == 0
         self.gate = Inkling2Gate(config)
-        self.experts = Inkling2Experts(config, quant_format)
+        self.experts: Inkling2Experts | Inkling2CTExperts
+        if isinstance(quant_format, Inkling2CTScheme):
+            self.experts = Inkling2CTExperts(config, quant_format)
+        else:
+            self.experts = Inkling2Experts(config, quant_format)
 
     def forward(
         self,
@@ -332,6 +340,7 @@ class Inkling2MoE(nn.Module):
                 is_padding,
             )
             return experts(x, selected, None, None, reduce, push)
+        assert isinstance(experts, Inkling2Experts)
         plan = experts.plan(x.shape[0])
         routing, quantized = route(
             x,
