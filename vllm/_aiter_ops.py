@@ -2334,6 +2334,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
+        VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE: Routes per-tensor fp8
+            sparse MLA decode with the MXFP8 output to FlyDSL (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2411,6 +2413,16 @@ class rocm_aiter_ops:
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
     # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
+    _FLYDSL_SPARSE_MLA_FP8_DECODE = (
+        envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE
+    )
+    # (device index, has extra list, MXFP8 output) -> whether the warm-up
+    # compiled the kernels (True) or failed (False, the config stays on Triton).
+    _FLYDSL_SPARSE_MLA_FP8_DECODE_WARM: dict[tuple[int, bool, bool], bool] = {}
+    # Query rows sent to the FlyDSL fp8 decode kernel. Triton / FlyDSL time
+    # on MI355X: 0.95 at 1 row, 1.02 at 6, 1.08-1.42 at 12-2048 (not
+    # measured above).
+    _FLYDSL_SPARSE_MLA_FP8_DECODE_ROWS = (6, 2048)
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2443,6 +2455,9 @@ class rocm_aiter_ops:
         cls._FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
             envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
+        )
+        cls._FLYDSL_SPARSE_MLA_FP8_DECODE = (
+            envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE
         )
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
@@ -4295,6 +4310,113 @@ class rocm_aiter_ops:
         return True, lse
 
     @staticmethod
+    @functools.cache
+    def _flydsl_sparse_mla_fp8_decode_ops() -> tuple[Callable, ...] | None:
+        """Aiter's FlyDSL fp8 sparse MLA decode (can_use, fwd, warmup), or
+        None when the installed aiter does not have it."""
+        try:
+            from aiter.ops.flydsl import (
+                can_use_flydsl_sparse_mla_decode_fp8_h64,
+                flydsl_sparse_mla_decode_fp8_h64,
+                warmup_flydsl_sparse_mla_decode_fp8_h64,
+            )
+        except Exception as e:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE is set, but "
+                "aiter has no flydsl_sparse_mla_decode_fp8_h64 (%s); using the "
+                "Triton kernel.",
+                e,
+            )
+            return None
+        return (
+            can_use_flydsl_sparse_mla_decode_fp8_h64,
+            flydsl_sparse_mla_decode_fp8_h64,
+            warmup_flydsl_sparse_mla_decode_fp8_h64,
+        )
+
+    @classmethod
+    def _flydsl_sparse_mla_fp8_decode(
+        cls,
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        sm_scale: float,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        max_keys_per_row: int,
+        **kwargs: Any,
+    ) -> bool:
+        """Run the call on aiter's FlyDSL fp8 decode kernel if it takes it.
+
+        `kwargs` are `sparse_mla_fwd`'s keyword arguments. The checks read
+        host metadata only (shapes, dtypes, strides, the row count), so a
+        CUDA graph records the same choice on every replay; aiter's launcher
+        repeats them, which only costs host time outside full CUDA graphs.
+        The kernels of a configuration (extra list, output mode) are compiled
+        on its first eager call; under graph capture an uncompiled
+        configuration stays on Triton, and so does one whose compile failed.
+        """
+        if not cls._FLYDSL_SPARSE_MLA_FP8_DECODE or not cls._AITER_ENABLED:
+            return False
+        lo, hi = cls._FLYDSL_SPARSE_MLA_FP8_DECODE_ROWS
+        if not lo <= q.shape[0] <= hi:
+            return False
+        ops = cls._flydsl_sparse_mla_fp8_decode_ops()
+        if ops is None:
+            return False
+        can_use, fwd, warmup = ops
+        if not can_use(
+            q,
+            kv_buffer,
+            kv_indptr,
+            kv_indices,
+            max_keys_per_row=max_keys_per_row,
+            **kwargs,
+        ):
+            return False
+        has_extra = kwargs.get("extra_kv") is not None
+        mxfp8 = kwargs.get("out_mxfp8") is not None
+        key = (q.device.index or 0, has_extra, mxfp8)
+        warm = cls._FLYDSL_SPARSE_MLA_FP8_DECODE_WARM.get(key)
+        if warm is None:
+            if torch.cuda.is_current_stream_capturing():
+                logger.warning_once(
+                    "FlyDSL fp8 sparse MLA decode was not compiled before "
+                    "CUDA graph capture; this graph uses the Triton kernel."
+                )
+                return False
+            try:
+                warmup(q.device, mxfp8=mxfp8, has_extra=has_extra)
+                warm = True
+            except Exception as e:
+                logger.warning_once(
+                    "FlyDSL fp8 sparse MLA decode failed to compile (%s); "
+                    "using the Triton kernel.",
+                    e,
+                )
+                warm = False
+            cls._FLYDSL_SPARSE_MLA_FP8_DECODE_WARM[key] = warm
+            if warm:
+                logger.info(
+                    "FlyDSL fp8 sparse MLA decode: extra list=%s, MXFP8 "
+                    "output=%s (first call: %d rows)",
+                    has_extra,
+                    mxfp8,
+                    q.shape[0],
+                )
+        if not warm:
+            return False
+        fwd(
+            q,
+            kv_buffer,
+            kv_indptr,
+            kv_indices,
+            sm_scale,
+            max_keys_per_row=max_keys_per_row,
+            **kwargs,
+        )
+        return True
+
+    @staticmethod
     def triton_sparse_mla_fwd(
         q: torch.Tensor,
         kv_buffer: torch.Tensor,
@@ -4316,6 +4438,7 @@ class rocm_aiter_ops:
         out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
         return_lse: bool = False,
         dot_precision: str | None = None,
+        max_keys_per_row: int | None = None,
     ) -> torch.Tensor | None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
@@ -4333,11 +4456,42 @@ class rocm_aiter_ops:
 
         With VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA, the calls the FlyDSL
         kernel supports (bf16 q, fp8_ds_mla, no scales/sink/extra) run there.
+        With VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE, a caller that
+        bounds a row's main + extra keys by max_keys_per_row sends the calls
+        aiter's FlyDSL fp8 decode kernel supports (fp8 q and per-tensor fp8
+        caches, 64 heads of 512, a sink) there.
         """
         assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
         if dot_precision is None:
             dot_precision = "fp8" if fp8_q else "bf16"
+        if (
+            max_keys_per_row is not None
+            and rocm_aiter_ops._flydsl_sparse_mla_fp8_decode(
+                q,
+                kv_buffer,
+                sm_scale,
+                kv_indptr,
+                kv_indices,
+                max_keys_per_row,
+                kv_scale=kv_scale,
+                kv_lora_rank=kv_lora_rank,
+                qk_rope_head_dim=qk_rope_head_dim,
+                has_invalid=has_invalid,
+                dot_precision=dot_precision,
+                q_scale=q_scale,
+                out=o,
+                attn_sink=attn_sink,
+                extra_kv=extra_kv_buffer,
+                extra_indptr=extra_kv_indptr,
+                extra_indices=extra_kv_indices,
+                inv_rope_positions=inv_rope_positions,
+                inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
+                out_mxfp8=out_mxfp8,
+                return_lse=return_lse,
+            )
+        ):
+            return None
         # The FlyDSL supports() check knows nothing of the inverse-RoPE
         # store or the MXFP8 output, so it would accept a call whose result it
         # then writes in the wrong form. Keep those on the Triton kernel.

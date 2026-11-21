@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: rocm_aiter_ops.triton_sparse_mla_fwd
-on the in-tree FlyDSL sparse MLA must match the Triton kernel on the Kimi-K3.1
-fp8_ds_mla call shapes, and fall back to it whenever FlyDSL cannot take a call."""
+"""FlyDSL routes of rocm_aiter_ops.triton_sparse_mla_fwd: each must match the
+Triton kernel on its call shapes and fall back to it whenever FlyDSL cannot
+take a call.
+
+VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: the in-tree kernel on the Kimi-K3.1
+fp8_ds_mla calls. VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE: aiter's
+fp8 decode kernel on the DeepSeek-V4.1 per-tensor fp8 decode call."""
 
 import pytest
 import torch
@@ -16,6 +20,11 @@ pytestmark = pytest.mark.skipif(
 KV_LORA_RANK, ROPE_DIM, TOPK = 512, 64, 2048
 # fp8_ds_mla record: 512 fp8 latent, 4 fp32 per-128 scales, 64 bf16 rope.
 ROW_BYTES = KV_LORA_RANK + 4 * 4 + ROPE_DIM * 2
+
+# DeepSeek-V4.1 decode: 64 heads x 512 per rank, 128-key window + top-512.
+H, D = 64, 512
+WINDOW, TOPK_V41 = 128, 512
+MAX_KEYS = WINDOW + TOPK_V41
 
 
 @pytest.fixture
@@ -358,3 +367,263 @@ def test_flydsl_min_tokens_gate(flydsl_ops, monkeypatch) -> None:
     ops.refresh_env_variables()
     _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
     assert launches == [(12, False, True)]
+
+
+@pytest.fixture
+def fp8_decode_env(monkeypatch):
+    """rocm_aiter_ops with the FlyDSL fp8 decode flag on and no kernel warm."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    monkeypatch.setattr(rocm_aiter_ops, "_FLYDSL_SPARSE_MLA_FP8_DECODE_WARM", {})
+    try:
+        yield rocm_aiter_ops
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+def _fp8_decode_meta(
+    ops, rows: int, extra: bool = True, mxfp8: bool = True, capturing: bool = False
+) -> bool:
+    """The V4.1 decode call on meta tensors; True if FlyDSL took it."""
+    meta = {"device": "meta"}
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+        return ops._flydsl_sparse_mla_fp8_decode(
+            torch.empty(rows, H, D, dtype=torch.float8_e4m3fn, **meta),
+            torch.empty(4, 64, D, dtype=torch.float8_e4m3fn, **meta),
+            D**-0.5,
+            torch.empty(rows + 1, dtype=torch.int32, **meta),
+            torch.empty(rows, dtype=torch.int32, **meta),
+            MAX_KEYS,
+            extra_kv=torch.empty(4, 64, D, **meta) if extra else None,
+            out=None if mxfp8 else torch.empty(rows, H, D, **meta),
+            out_mxfp8=(torch.empty(1, **meta), torch.empty(1, **meta))
+            if mxfp8
+            else None,
+        )
+
+
+def test_fp8_decode_gate_and_warmup(fp8_decode_env, monkeypatch) -> None:
+    """Runs without aiter's op (a stand-in for its can_use / fwd / warmup).
+
+    The env flag, the row range and aiter's check gate the route. Each
+    (extra list, output mode) compiles once, on an eager call: under graph
+    capture an uncompiled one records Triton, and a failed compile keeps
+    Triton without retrying.
+    """
+    ops = fp8_decode_env
+    launches: list[int] = []
+    warmups: list[tuple[bool, bool]] = []
+    state = {"supported": True, "compiles": True}
+
+    def warmup(device, *, mxfp8, has_extra):
+        warmups.append((mxfp8, has_extra))
+        if not state["compiles"]:
+            raise RuntimeError("compile failed")
+
+    monkeypatch.setattr(
+        ops,
+        "_flydsl_sparse_mla_fp8_decode_ops",
+        staticmethod(
+            lambda: (
+                lambda *a, **k: state["supported"],
+                lambda q, *a, **k: launches.append(q.shape[0]),
+                warmup,
+            )
+        ),
+    )
+    lo, hi = ops._FLYDSL_SPARSE_MLA_FP8_DECODE_ROWS
+    assert not _fp8_decode_meta(ops, 16, capturing=True)
+    assert [_fp8_decode_meta(ops, r) for r in (lo - 1, lo, hi, hi + 1)] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert _fp8_decode_meta(ops, 96, capturing=True)
+    assert not _fp8_decode_meta(ops, 96, mxfp8=False, capturing=True)
+    assert not _fp8_decode_meta(ops, 96, extra=False, capturing=True)
+    assert warmups == [(True, True)]
+
+    state["compiles"] = False
+    assert not _fp8_decode_meta(ops, 16, extra=False)
+    assert not _fp8_decode_meta(ops, 16, extra=False)
+    assert warmups == [(True, True), (True, False)]
+    state["compiles"] = True
+    assert _fp8_decode_meta(ops, 16, mxfp8=False)
+    assert warmups[-1] == (False, True)
+
+    state["supported"] = False
+    assert not _fp8_decode_meta(ops, lo)
+    state["supported"] = True
+    ops._FLYDSL_SPARSE_MLA_FP8_DECODE = False
+    assert not _fp8_decode_meta(ops, lo)
+    ops._FLYDSL_SPARSE_MLA_FP8_DECODE = True
+    monkeypatch.setattr(
+        ops, "_flydsl_sparse_mla_fp8_decode_ops", staticmethod(lambda: None)
+    )
+    assert not _fp8_decode_meta(ops, lo)
+    assert launches == [lo, hi, 96, 16]
+
+
+def test_fp8_decode_ops_none_without_aiter_op(monkeypatch) -> None:
+    """An aiter without the FlyDSL fp8 decode op keeps the Triton kernel."""
+    import sys
+    import types
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setitem(sys.modules, "aiter.ops.flydsl", types.ModuleType("x"))
+    rocm_aiter_ops._flydsl_sparse_mla_fp8_decode_ops.cache_clear()
+    try:
+        assert rocm_aiter_ops._flydsl_sparse_mla_fp8_decode_ops() is None
+    finally:
+        rocm_aiter_ops._flydsl_sparse_mla_fp8_decode_ops.cache_clear()
+
+
+@pytest.fixture
+def fp8_decode_kernel(fp8_decode_env, monkeypatch):
+    """fp8_decode_env with aiter's real kernel; yields the launched row counts."""
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("FlyDSL fp8 sparse MLA decode is gfx950-only")
+    pytest.importorskip("aiter.ops.triton.attention.sparse_mla")
+    ops = fp8_decode_env
+    real = ops._flydsl_sparse_mla_fp8_decode_ops()
+    if real is None:
+        pytest.skip("aiter has no flydsl_sparse_mla_decode_fp8_h64")
+    can_use, fwd, warmup = real
+    launches: list[int] = []
+
+    def logged_fwd(q, *args, **kwargs):
+        launches.append(q.shape[0])
+        fwd(q, *args, **kwargs)
+
+    monkeypatch.setattr(
+        ops,
+        "_flydsl_sparse_mla_fp8_decode_ops",
+        staticmethod(lambda: (can_use, logged_fwd, warmup)),
+    )
+    return ops, launches
+
+
+def _ragged(rows: int, lo: int, hi: int, slots: int, empty: int, gen):
+    lens = torch.randint(lo, hi + 1, (rows,), generator=gen)
+    lens[0], lens[-1], lens[empty] = hi, lo, 0
+    indptr = torch.zeros(rows + 1, dtype=torch.int32)
+    indptr[1:] = lens.cumsum(0)
+    indices = torch.randint(0, slots, (int(indptr[-1]),), generator=gen)
+    return indptr.cuda(), indices.to("cuda", torch.int32)
+
+
+def _v41_decode_call(rows: int, seed: int, extra: bool = True) -> dict:
+    """The DeepSeek-V4.1 decode call of _plain_fp8_sparse_mla: fp8 q and
+    caches with unit per-tensor scales, a SWA list and (unless SWA-only) a
+    top-k list per row, a sink, inverse RoPE + MXFP8 output. Row rows // 2
+    has no key in either list, like a CUDA-graph padding row."""
+    gen = torch.Generator().manual_seed(seed)
+
+    def e4m3(*shape):
+        return torch.randn(*shape, generator=gen).to("cuda", torch.float8_e4m3fn)
+
+    empty = rows // 2
+    swa, comp = e4m3(64, 64, D), e4m3(256, 64, D)
+    swa_indptr, swa_indices = _ragged(rows, 1, WINDOW, 64 * 64, empty, gen)
+    topk_indptr, topk_indices = _ragged(rows, 0, TOPK_V41, 256 * 64, empty, gen)
+    angles = torch.rand(4096, D // 16, generator=gen) * 6.3
+    one = torch.ones(1, device="cuda")
+    return dict(
+        q=e4m3(rows, H, D),
+        kv_buffer=swa,
+        o=None,
+        sm_scale=D**-0.5,
+        kv_indptr=swa_indptr,
+        kv_indices=swa_indices,
+        kv_lora_rank=D,
+        qk_rope_head_dim=0,
+        q_scale=one,
+        kv_scale=one,
+        attn_sink=torch.randn(H, generator=gen).cuda(),
+        extra_kv_buffer=comp if extra else None,
+        extra_kv_indptr=topk_indptr if extra else None,
+        extra_kv_indices=topk_indices if extra else None,
+        has_invalid=False,
+        dot_precision="fp8",
+        inv_rope_positions=torch.randint(0, 4096, (rows,), generator=gen).cuda(),
+        inv_rope_cos_sin_cache=torch.cat([angles.cos(), angles.sin()], 1).cuda(),
+        out_mxfp8=(
+            torch.empty(rows, H * D, dtype=torch.float8_e4m3fn, device="cuda"),
+            torch.empty(rows, H * D // 32, dtype=torch.uint8, device="cuda"),
+        ),
+    )
+
+
+def _mxfp8_rows(out_mxfp8) -> torch.Tensor:
+    codes, scales = out_mxfp8
+    rows = codes.shape[0]
+    scale = torch.exp2(scales.float() - 127).view(rows, -1, 1)
+    return (codes.float().view(rows, -1, 32) * scale).view(rows, -1)
+
+
+def _run_fp8_decode(ops, call: dict, max_keys_per_row: int | None) -> torch.Tensor:
+    for t in call["out_mxfp8"]:
+        t.view(torch.uint8).fill_(0xFF)  # NaN codes and scales
+    ops.triton_sparse_mla_fwd(**call, max_keys_per_row=max_keys_per_row)
+    return _mxfp8_rows(call["out_mxfp8"])
+
+
+@pytest.mark.parametrize(
+    "rows,extra", [(6, True), (96, True), (2048, True), (96, False)]
+)
+@torch.inference_mode()
+def test_fp8_decode_matches_triton(fp8_decode_kernel, rows: int, extra: bool) -> None:
+    """Every head-group kernel (16, 32 and 64 heads per workgroup) matches the
+    Triton kernel, with and without the top-k list and on a row with no
+    keys, and a CUDA graph replays the eager result."""
+    ops, launches = fp8_decode_kernel
+    call = _v41_decode_call(rows, seed=rows, extra=extra)
+    max_keys = MAX_KEYS if extra else WINDOW
+    out = _run_fp8_decode(ops, call, max_keys)
+    assert launches == [rows]
+    ops._FLYDSL_SPARSE_MLA_FP8_DECODE = False
+    ref = _run_fp8_decode(ops, call, max_keys)
+    assert len(launches) == 1
+    assert out.isfinite().all()
+    empty = rows // 2
+    assert not out[empty].any() and not ref[empty].any()
+    keyed = torch.arange(rows, device=out.device) != empty
+    # Both outputs are MXFP8-rounded and Triton's P is one e4m3 term (row
+    # cosine ~0.9997 to fp64); observed minimum here 0.99901.
+    cos = torch.nn.functional.cosine_similarity(out[keyed], ref[keyed], dim=1)
+    assert cos.min() > 0.998
+
+    ops._FLYDSL_SPARSE_MLA_FP8_DECODE = True
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        ops.triton_sparse_mla_fwd(**call, max_keys_per_row=max_keys)
+    for t in call["out_mxfp8"]:
+        t.zero_()
+    graph.replay()
+    assert len(launches) == 2
+    assert torch.equal(_mxfp8_rows(call["out_mxfp8"]), out)
+
+
+@torch.inference_mode()
+def test_fp8_decode_falls_back_to_triton(fp8_decode_kernel) -> None:
+    """A call without the key bound (prefill), a bound above the kernel's
+    1024 keys, or a single row runs the Triton kernel."""
+    ops, launches = fp8_decode_kernel
+    call = _v41_decode_call(16, seed=0)
+    ops._FLYDSL_SPARSE_MLA_FP8_DECODE = False
+    ref = _run_fp8_decode(ops, call, MAX_KEYS)
+    ops._FLYDSL_SPARSE_MLA_FP8_DECODE = True
+    for bound in (None, 1025):
+        assert torch.equal(_run_fp8_decode(ops, call, bound), ref)
+    single = _v41_decode_call(1, seed=1)
+    _run_fp8_decode(ops, single, MAX_KEYS)
+    assert not launches
