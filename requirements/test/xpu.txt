@@ -4129,9 +4129,9 @@ pathvalidate==3.3.1 \
     --hash=sha256:5263baab691f8e1af96092fa5137ee17df5bdfbd6cff1fcac4d6ef4bc2e1735f \
     --hash=sha256:b18c07212bfead624345bb8e1d6141cdcf15a39736994ea0b94035ad2b1ba177
     # via pytablewriter
-peft==0.21.2 \
-    --hash=sha256:106ab6077ff72c54d21577f9af5970e34bac7582cb14209f7b2b511e322a4eae \
-    --hash=sha256:b803ccfb3f3f316004d850284306687833a2235ea278fb56abc856203456142e
+peft==0.22.0 \
+    --hash=sha256:397f09710e3e1b6ad730211468839aa271732b51a50e99d4f44f2a6e8d9a9f0b \
+    --hash=sha256:e7fca396b98e6c1b0b02538e45efd84875c4d0d074c29c837e372cd7c845647a
     # via -r requirements/test/xpu.in
 pillow==13.0.0 \
     --hash=sha256:02464da86f561f410e13b061ec37c3068a9cb557a095494157742d07b3c24a27 \
@@ -6721,9 +6721,9 @@ traitlets==5.16.1 \
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.23.0 \
-    --hash=sha256:018e82fd07490ad5bb58414f65e31576033dc7f36bed10c574843f69b90991bf \
-    --hash=sha256:19d647a4d5d903a7c644ca5cde2d86efc3dde7d8c687ae7988806ff2205efa71
+transformers==5.24.0 \
+    --hash=sha256:ff5ebedf9359f94bb63772b6380eba6e7104d010cbbb2cb82c788817ea7486f6 \
+    --hash=sha256:906cb8c3cb2123575e263962586a4d21a979ce97feeb95fe6aaf66fe6ae88bf3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
