@@ -147,6 +147,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         return config
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # A drafter-only eager override skips draft capture even when the
+        # target keeps its graphs.
+        if self.draft_model_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
         wants_full = (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and not self.context_kv_only
