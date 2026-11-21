@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
+    VLLM_ROCM_MUSE_TSP_FP8_AG: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1351,6 +1352,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
+    # Muse Spark on ROCm: on token-sharded forwards, all-gather the attention
+    # input and the pooled expert input as FP8 rows with per-row scales.
+    "VLLM_ROCM_MUSE_TSP_FP8_AG": lambda: bool(
+        int(os.getenv("VLLM_ROCM_MUSE_TSP_FP8_AG", "0"))
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops

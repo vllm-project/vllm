@@ -14,6 +14,7 @@ _EXPANDED_ATTR = "_muse_route_expanded"
 @triton.jit
 def _rmsnorm_expand_kernel(
     x_ptr,
+    xs_ptr,
     w_ptr,
     out_ptr,
     D: tl.constexpr,
@@ -23,11 +24,14 @@ def _rmsnorm_expand_kernel(
     BLOCK_D: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     INPUT_SCALE: tl.constexpr,
+    HAS_XSCALE: tl.constexpr,
 ):
     t = tl.program_id(0)
     d = tl.arange(0, BLOCK_D)
     dm = d < D
     x = tl.load(x_ptr + t * D + d, mask=dm, other=0.0).to(tl.float32)
+    if HAS_XSCALE:
+        x = x * tl.load(xs_ptr + t)
     if HAS_WEIGHT:
         w = tl.load(w_ptr + d, mask=dm, other=0.0).to(tl.float32) + gain_center
         if INPUT_SCALE:
@@ -47,15 +51,21 @@ def fused_rmsnorm_expand(
     gain_center: float,
     input_scale: bool,
     repeats: int,
+    x_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """RMSNorm of `x` written `repeats` times per row."""
+    """RMSNorm of `x` written `repeats` times per row.
+
+    `x_scale` (`[T]` fp32) dequantizes an FP8 `x` on load; the output is BF16.
+    """
     assert x.dim() == 2 and x.is_contiguous()
     T, D = x.shape
-    out = torch.empty((T, repeats, D), dtype=x.dtype, device=x.device)
+    out_dtype = x.dtype if x_scale is None else torch.bfloat16
+    out = torch.empty((T, repeats, D), dtype=out_dtype, device=x.device)
     if T > 0:
         block_d = triton.next_power_of_2(D)
         _rmsnorm_expand_kernel[(T,)](
             x,
+            x_scale if x_scale is not None else x,
             weight if weight is not None else x,
             out,
             D=D,
@@ -65,6 +75,7 @@ def fused_rmsnorm_expand(
             BLOCK_D=block_d,
             HAS_WEIGHT=weight is not None,
             INPUT_SCALE=input_scale and weight is not None,
+            HAS_XSCALE=x_scale is not None,
             num_warps=8 if block_d >= 4096 else 4,
         )
     first = out[:, 0]
