@@ -38,6 +38,16 @@ differ: in particular, LM Format Enforcer uses Python-style regex syntax, while
 XGrammar and Guidance use Rust-style regex syntax. Changing backends can change
 which tokens are allowed and therefore the generated output.
 
+## Stop Tokens
+
+While structured-output constraints are active, the `xgrammar` and `guidance`
+backends mask EOS token IDs from the model's generation configuration and
+request-specific `stop_token_ids` until the grammar allows a complete output.
+They can then terminate generation, even if the grammar also allows more content.
+A token designated as a stop token is
+not available as ordinary content within an unfinished structured output.
+Length limits such as `max_tokens` still apply and can truncate the output.
+
 ## Online Serving (OpenAI API)
 
 You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
