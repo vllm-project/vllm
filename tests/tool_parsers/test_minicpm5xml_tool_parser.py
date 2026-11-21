@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tool_parsers.minicpm5xml_tool_parser import MiniCPM5XMLToolParser
 
@@ -704,8 +705,7 @@ def test_extract_tool_calls_streaming_single(parser: ToolParser) -> None:
         _random_chunks(text, 1, 4),
         request,
     )
-    assert "Intro before." in reconstructor.other_content
-    assert "Outro after." in reconstructor.other_content
+    assert reconstructor.other_content == "Intro before.\n\nOutro after.\n"
     assert len(reconstructor.tool_calls) == 1
     assert reconstructor.tool_calls[0].function.name == "get_weather"
     assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
@@ -731,15 +731,144 @@ def test_extract_tool_calls_streaming_multiple(parser: ToolParser) -> None:
         _random_chunks(text, 1, 5),
         request,
     )
-    assert "Head" in reconstructor.other_content
-    assert "TXT" in reconstructor.other_content
-    assert "Tail" in reconstructor.other_content
+    assert reconstructor.other_content == "Head\n\nTXT\n\nTail\n"
     assert len(reconstructor.tool_calls) == 2
     assert json.loads(reconstructor.tool_calls[0].function.arguments)["city"] == "北京"
     assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
         "nums": [7, 8, 9],
         "exact": False,
     }
+
+
+@pytest.mark.parametrize("split_idx", range(1, len("<function")))
+def test_extract_tool_calls_streaming_split_function_tag(
+    parser: ToolParser, split_idx: int
+) -> None:
+    request = make_request(make_tools_weather())
+    tag = '<function name="get_weather"><param name="city">Paris</param></function>'
+    for prefix, expected_content in [
+        ("Intro before.\n", "Intro before.\n\nOutro."),
+        ("", "\nOutro."),
+    ]:
+        full = f"{prefix}{tag}\nOutro."
+        cut = len(prefix) + split_idx
+        chunks = [full[:cut], full[cut:]]
+        reconstructor = run_tool_extraction_streaming(
+            parser,
+            chunks,
+            request,
+        )
+        assert reconstructor.other_content == expected_content
+        assert len(reconstructor.tool_calls) == 1
+        assert reconstructor.tool_calls[0].function.name == "get_weather"
+        assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+            "city": "Paris"
+        }
+
+
+def test_extract_tool_calls_streaming_single_delta_prose_and_multi_block(
+    parser: ToolParser,
+) -> None:
+    tools = make_tools_weather() + make_tools_sum()
+    request = make_request(tools)
+
+    single_prose_and_call = (
+        "Intro before.\n"
+        '<function name="get_weather"><param name="city">Paris</param></function>\n'
+        "Outro."
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [single_prose_and_call],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "Intro before.\n\nOutro."
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Paris"
+    }
+
+    multi_block = (
+        "Head\n"
+        '<function name="get_weather"><param name="city">北京</param></function>\n'
+        "TXT\n"
+        '<function name="sum_values"><param name="nums">[7,8,9]</param>'
+        '<param name="exact">false</param></function>\n'
+        "Tail\n"
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [multi_block],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "Head\n\nTXT\n\nTail\n"
+    assert len(reconstructor.tool_calls) == 2
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "北京"
+    }
+    assert reconstructor.tool_calls[1].function.name == "sum_values"
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "nums": [7, 8, 9],
+        "exact": False,
+    }
+
+    bare_multi_block = (
+        '<function name="get_weather"><param name="city">Paris</param></function>\n'
+        '<function name="sum_values"><param name="nums">[1, 2]</param></function>'
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [bare_multi_block],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "\n"
+    assert [tc.function.name for tc in reconstructor.tool_calls] == [
+        "get_weather",
+        "sum_values",
+    ]
+    assert [json.loads(tc.function.arguments) for tc in reconstructor.tool_calls] == [
+        {"city": "Paris"},
+        {"nums": [1, 2]},
+    ]
+
+
+def test_extract_tool_calls_streaming_partial_then_multi_block_with_trailing_split_tag(
+    parser: ToolParser,
+) -> None:
+    tools = make_tools_weather() + make_tools_sum()
+    request = make_request(tools)
+    chunks = [
+        '<function name="get_weather"><param name="city">Par',
+        (
+            "is</param></function>\n"
+            '<function name="sum_values"><param name="nums">[1, 2]</param></function>\n'
+            "Mid <fun"
+        ),
+        'ction name="get_weather"><param name="city">NYC</param></function>\nEnd.',
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        chunks,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "\n\nMid \nEnd."
+    assert len(reconstructor.tool_calls) == 3
+    assert [tc.function.name for tc in reconstructor.tool_calls] == [
+        "get_weather",
+        "sum_values",
+        "get_weather",
+    ]
+    assert [json.loads(tc.function.arguments) for tc in reconstructor.tool_calls] == [
+        {"city": "Paris"},
+        {"nums": [1, 2]},
+        {"city": "NYC"},
+    ]
 
 
 def make_tools_write() -> list[ChatCompletionToolsParam]:
@@ -785,7 +914,6 @@ class TestParameterWhitespace:
             parser,
             chunks,
             request,
-            assert_one_tool_per_delta=False,
         )
 
         assert len(reconstructor.tool_calls) == 1
@@ -816,3 +944,105 @@ def test_nullable_string_keeps_raw_text(
     else:
         calls = parser.extract_tool_calls(text, request).tool_calls
     assert [json.loads(call.function.arguments) for call in calls] == [{"v": expected}]
+
+
+# get_weather is missing required `city`. One delta keeps that block as content
+# and still emits sum_values. Smaller chunks must not open get_weather.
+_INVALID_WEATHER_THEN_SUM = (
+    '<function name="get_weather">'
+    '<param name="date">Mon</param>'
+    "</function>\n"
+    '<function name="sum_values"><param name="nums">[1, 2]</param></function>'
+)
+
+
+def _invalid_weather_then_sum_chunks(kind: str) -> list[str]:
+    text = _INVALID_WEATHER_THEN_SUM
+    if kind == "single":
+        return [text]
+    if kind == "three":
+        return [
+            '<function name="get_weather">',
+            '<param name="date">Mon</param>',
+            (
+                "</function>\n"
+                '<function name="sum_values"><param name="nums">[1, 2]</param>'
+                "</function>"
+            ),
+        ]
+    return [text[i : i + 3] for i in range(0, len(text), 3)]
+
+
+@pytest.mark.parametrize("kind", ["single", "three", "by_three"])
+def test_streaming_rejected_block_is_content_not_a_tool_call(
+    parser: ToolParser, kind: str
+) -> None:
+    """A block that fails validation stays content for every chunk split.
+
+    Opening the call before `</function>` streams arguments with the closing
+    brace removed. When `city` is missing, those arguments are not JSON, and
+    a 3-character split disagrees with one delta of the same text.
+    """
+    request = make_request(make_tools_weather() + make_tools_sum())
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _invalid_weather_then_sum_chunks(kind),
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert reconstructor.other_content == (
+        '<function name="get_weather"><param name="date">Mon</param></function>\n'
+    )
+    assert [tc.function.name for tc in reconstructor.tool_calls] == ["sum_values"]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "nums": [1, 2]
+    }
+
+
+def test_streaming_less_than_is_not_held_once_disambiguated(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        ["value <", " 3"],
+        request,
+    )
+    assert reconstructor.other_content == "value < 3"
+    assert reconstructor.tool_calls == []
+
+
+class _MiniCPM5StreamingParser(DelegatingParser):
+    tool_parser_cls = MiniCPM5XMLToolParser
+
+
+def _parse_finished_chunks(chunks: list[str]) -> str:
+    streaming_parser = _MiniCPM5StreamingParser(MagicMock())
+    request = make_request(make_tools_weather())
+    parts: list[str] = []
+    for index, chunk in enumerate(chunks):
+        delta = streaming_parser.parse_delta(
+            chunk,
+            [],
+            request,
+            prompt_token_ids=[] if index == 0 else None,
+            finished=index == len(chunks) - 1,
+        )
+        if delta is not None and delta.content:
+            parts.append(delta.content)
+        if delta is not None and delta.tool_calls:
+            raise AssertionError(delta.tool_calls)
+    return "".join(parts)
+
+
+@pytest.mark.parametrize("text", ["value <", "value <f", "value <fun", "<fun"])
+def test_finished_stream_flushes_held_function_prefix(text: str) -> None:
+    """Generation can end on a prefix of `<function`. That suffix is content."""
+    assert _parse_finished_chunks([text]) == text
+
+
+def test_finished_stream_flushes_prose_that_looks_like_a_function_tag() -> None:
+    """`<` plus `function later.` is prose. Finish must emit the held tail."""
+    assert (
+        _parse_finished_chunks(["Call it a <", "function later."])
+        == "Call it a <function later."
+    )

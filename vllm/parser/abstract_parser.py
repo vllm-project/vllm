@@ -839,6 +839,33 @@ class DelegatingParser(Parser):
                 delta_message.content = (delta_message.content or "") + promoted
 
         self._append_unstreamed_tool_args(delta_message)
+        return self._flush_non_engine_tool_parser(delta_message)
+
+    def _flush_non_engine_tool_parser(
+        self, delta_message: DeltaMessage | None
+    ) -> DeltaMessage | None:
+        """Flush text a legacy tool parser held until generation ended.
+
+        Engine-based parsers flush in `_flush_engine_parsers`. Calling both
+        would emit the held suffix twice.
+        """
+        parser = self._tool_parser
+        if parser is None or parser.engine_based_streaming:
+            return delta_message
+        finish = getattr(parser, "finish_streaming", None)
+        if finish is None:
+            return delta_message
+        flush_delta = finish()
+        if flush_delta is None:
+            return delta_message
+        if delta_message is None:
+            return flush_delta
+        if flush_delta.content:
+            delta_message.content = (delta_message.content or "") + flush_delta.content
+        if flush_delta.tool_calls:
+            delta_message.tool_calls = (delta_message.tool_calls or []) + list(
+                flush_delta.tool_calls
+            )
         return delta_message
 
     def parse(
