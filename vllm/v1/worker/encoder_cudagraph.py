@@ -716,10 +716,16 @@ class EncoderCudaGraphManager:
         )
         outputs = [outputs_by_orig_idx[i] for i in range(num_items)]
         if all_eager:
-            # Cache entries must release their storage independently on eviction.
-            cached_outputs = [torch.empty_like(output) for output in outputs]
-            torch._foreach_copy_(cached_outputs, outputs)
-            return cached_outputs
+            # Do not retain a whole batch for one cached item.
+            sources, destinations = [], []
+            for i, output in enumerate(outputs):
+                if output.untyped_storage().nbytes() > output.nbytes:
+                    copied = torch.empty_like(output)
+                    sources.append(output)
+                    destinations.append(copied)
+                    outputs[i] = copied
+            if sources:
+                torch._foreach_copy_(destinations, sources)
         return outputs
 
     def _dp_shard(

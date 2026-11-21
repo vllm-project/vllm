@@ -2423,16 +2423,21 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         misses = self.mgr.graph_misses
         input_storage = mm_kwargs["input_audio_features"].untyped_storage().data_ptr()
 
-        class RejectInputRepacking(TorchDispatchMode):
+        class CheckFallbackCopies(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
                 if func == torch.ops.aten.cat.default:
                     assert all(
                         tensor.untyped_storage().data_ptr() != input_storage
                         for tensor in args[0]
                     ), "Eager fallback must not concatenate the packed audio input"
+                elif func == torch.ops.aten._foreach_copy_.default:
+                    assert all(
+                        tensor.untyped_storage().nbytes() > tensor.nbytes
+                        for tensor in args[1]
+                    ), "Eager fallback must not copy outputs with bounded storage"
                 return func(*args, **(kwargs or {}))
 
-        with RejectInputRepacking():
+        with CheckFallbackCopies():
             result = self.mgr.execute(mm_kwargs)
         assert self.mgr.graph_misses == misses + len(feature_lens)
         assert len(result) == len(expected)
