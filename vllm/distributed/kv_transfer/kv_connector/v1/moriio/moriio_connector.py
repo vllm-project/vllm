@@ -493,10 +493,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         assert self.connector_worker is not None
-        timed_out: set[ReqId] = set()
-        if isinstance(self._connector_metadata, MoRIIOConnectorMetadata):
-            timed_out = self._connector_metadata.write_recv_timed_out_req_ids
-        return self.connector_worker.get_transfer_results(timed_out)
+        return self.connector_worker.get_transfer_results()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Blocks whose MoRIIO read failed, for the scheduler to recompute."""
@@ -2195,6 +2192,8 @@ class MoRIIOConnectorWorker:
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
         self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
+        # Timed-out receives from start_load_kv, for the next get_transfer_results.
+        self._write_recv_timed_out: set[ReqId] = set()
         # Receives this worker reported, done, failed or timed out, while the
         # scheduler maps them.
         self._write_recv_reported: set[ReqId] = set()
@@ -3312,11 +3311,7 @@ class MoRIIOConnectorWorker:
 
         return done_sending, done_recving
 
-    def get_transfer_results(
-        self, write_recv_timed_out: Collection[ReqId] = ()
-    ) -> KVConnectorTransferResults:
-        """This step's completions; `write_recv_timed_out` are the WRITE
-        receives the scheduler timed out this step."""
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         done_sending, done_recving = self.get_finished()
         failed_recving: set[ReqId] = set()
 
@@ -3332,7 +3327,7 @@ class MoRIIOConnectorWorker:
                 pending.popitem(last=False)
             done_recving |= failed_recving
             done_sending |= self._report_write_recv_timeouts(
-                write_recv_timed_out, done_recving, failed_recving
+                done_recving, failed_recving
             )
 
         return KVConnectorTransferResults(
@@ -3342,10 +3337,7 @@ class MoRIIOConnectorWorker:
         )
 
     def _report_write_recv_timeouts(
-        self,
-        timed_out: Collection[ReqId],
-        done_recving: set[ReqId],
-        failed_recving: set[ReqId],
+        self, done_recving: set[ReqId], failed_recving: set[ReqId]
     ) -> set[ReqId]:
         """Report the receives the scheduler timed out (`write_recv_timeout`).
 
@@ -3367,13 +3359,14 @@ class MoRIIOConnectorWorker:
         failed_recving -= released
         # Every report so far, a producer write_failed included: each counted once.
         self._write_recv_reported |= done_recving
-        for req_id in timed_out:
+        for req_id in self._write_recv_timed_out:
             if req_id in self._write_recv_reported:
                 released.add(req_id)
             else:
                 done_recving.add(req_id)
                 failed_recving.add(req_id)
                 self._write_recv_reported.add(req_id)
+        self._write_recv_timed_out = set()
         return released
 
     def _pop_done_transfers(self) -> set[str]:
@@ -3751,6 +3744,7 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.WRITE:
             live_req_ids = set(self.transfer_id_to_request_id.values())
             self._write_recv_reported &= live_req_ids
+            self._write_recv_timed_out |= metadata.write_recv_timed_out_req_ids
             return
 
         # Handshake every referenced remote prefill rank up front, before any
