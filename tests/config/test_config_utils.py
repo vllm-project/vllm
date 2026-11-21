@@ -7,6 +7,7 @@ from enum import Enum
 import pytest
 
 from vllm.config.cache import CacheConfig
+from vllm.config.kernel import KernelConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import (
     get_attr_docs,
@@ -332,6 +333,18 @@ def test_cache_config_default_block_size():
     explicit = CacheConfig(block_size=16)
     assert explicit.block_size == 16
     assert explicit.user_specified_block_size is True
+
+
+def test_humming_fp8_dispatch_is_opt_in_and_changes_compile_hash():
+    """Changing the dispatch dtype policy must invalidate captured graphs."""
+    default = KernelConfig()
+    disabled = KernelConfig(humming_fp8_dispatch=False)
+    enabled = KernelConfig(humming_fp8_dispatch=True)
+
+    assert default.humming_fp8_dispatch is False
+    assert hash_config(default) == hash_config(disabled)
+    assert hash_config(enabled) != hash_config(disabled)
+    assert hash_config(enabled) == hash_config(KernelConfig(humming_fp8_dispatch=True))
 
 
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():

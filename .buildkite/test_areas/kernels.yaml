@@ -1193,6 +1193,7 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
+    - pytest -v -s kernels/moe/test_humming_fp8_dispatch.py
   mirror:
     amd:
       label: ":amd: (MI355) FusedMoE Layer Kernels"
@@ -1236,8 +1237,11 @@ steps:
   - vllm/model_executor/layers/quantization/
   - vllm/distributed/device_communicators/
   - vllm/config
+  - tests/quantization/test_humming_mxfp4_block_fp8.py
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
+    - pytest -v -s kernels/moe/test_humming_fp8_dispatch.py
+    - pytest -v -s quantization/test_humming_mxfp4_block_fp8.py -k test_humming_fp8_dispatch_public_dp_generation
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
     - pytest -v -s kernels/moe/test_deepep_v2_async_finalize.py
   mirror:

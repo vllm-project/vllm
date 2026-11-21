@@ -62,6 +62,47 @@ Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel
 
 Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel.
 
+## Humming Per-Token FP8 Expert Dispatch
+
+`humming_fp8_dispatch` in `--kernel-config` enables Humming's per-token FP8
+quantization before expert dispatch. It defaults to `false` (off). When enabled,
+eligible steps send FP8 activations with FP32 scales at every batch size;
+the experts reuse the same Humming producer's results. There is no configurable
+token threshold. The same quantization path runs in eager mode and CUDA Graphs.
+
+This experimental option is connected to the `humming` quantization method
+and GPT-OSS MXFP4. Other format-specific integrations, including the W4A8
+oracle, retain their existing behavior. It requires indexed Humming, AgRs,
+dynamic per-token E4M3 with FP32 scales, and BF16 or FP16 inputs. It uses the
+existing AgRs communication group and scale transport, including tensor,
+prefill context, and sequence parallelism. Other
+configurations retain their existing behavior, including grouped experts,
+block-scaled activations, additional input transforms or scales, elastic EP,
+and router weights applied to the input. Existing backend capability checks
+continue to govern features such as LoRA and dual batch overlap. Elastic EP
+is excluded because its reconfiguration does not preserve the producer callback.
+
+For a GPT-OSS configuration with batch invariance and graph serving:
+
+```bash
+VLLM_BATCH_INVARIANT=1 \
+VLLM_HUMMING_MOE_GEMM_TYPE=indexed \
+VLLM_HUMMING_INPUT_QUANT_CONFIG='{"dtype":"float8e4m3"}' \
+vllm serve openai/gpt-oss-20b --dtype bfloat16 --seed 42 \
+  --tensor-parallel-size 1 --data-parallel-size 2 --enable-expert-parallel \
+  --all2all-backend allgather_reducescatter \
+  --max-model-len 9216 --max-num-batched-tokens 8192 --max-num-seqs 32 \
+  --kv-cache-memory-bytes 4294967296 --no-enable-prefix-caching \
+  --async-scheduling --reasoning-parser openai_gptoss \
+  --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,32]}' \
+  --quantization-config '{"linear":"fp8_per_channel"}' \
+  --kernel-config '{"moe_backend":"humming","humming_fp8_dispatch":true}'
+```
+
+Benchmark the intended workload and validate model quality before deployment.
+Existing quality evidence is scoped to `VLLM_BATCH_INVARIANT=1`; other modes
+need validation.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
