@@ -16,8 +16,8 @@ from vllm.platforms import current_platform
 
 _cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
 requires_sm90 = pytest.mark.skipif(
-    _cap is None or _cap.major not in (9, 10, 11, 12),
-    reason="Inkling2 attention requires Hopper or Blackwell",
+    _cap is None or _cap.major not in (8, 9, 10, 11, 12),
+    reason="Inkling2 attention requires Ampere or newer",
 )
 
 HEAD_DIM = 128
@@ -96,6 +96,7 @@ def _ref_attention(
 @requires_sm90
 def test_e4m3_kv_load_preserves_all_byte_values_and_masks():
     from vllm.models.inkling2.nvidia.ops.attention_sm90 import _load_fp8_kv
+    from vllm.models.inkling2.nvidia.ops.e4m3 import e4m3_arg
     from vllm.triton_utils import tl, triton
 
     @triton.jit
@@ -107,7 +108,7 @@ def test_e4m3_kv_load_preserves_all_byte_values_and_masks():
 
     source = torch.arange(256, device="cuda").to(torch.uint8).view(torch.float8_e4m3fn)
     output = torch.empty(512, device="cuda", dtype=torch.bfloat16)
-    load_values[(1,)](source, output)
+    load_values[(1,)](e4m3_arg(source), output)
     expected = torch.cat((source.bfloat16(), torch.zeros_like(output[256:])))
     nan = expected.isnan()
     assert torch.equal(output.isnan(), nan)

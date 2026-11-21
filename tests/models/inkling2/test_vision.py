@@ -19,8 +19,8 @@ from vllm.models.inkling2.nvidia.vision import (
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
-    or torch.cuda.get_device_capability()[0] not in (9, 10, 12),
-    reason="needs a Hopper or Blackwell GPU",
+    or torch.cuda.get_device_capability()[0] not in (8, 9, 10, 12),
+    reason="needs an Ampere or newer GPU",
 )
 
 CONFIG = {
