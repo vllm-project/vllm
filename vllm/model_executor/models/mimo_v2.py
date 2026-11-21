@@ -6,6 +6,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -19,6 +20,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -107,8 +109,63 @@ class MiMoV2MLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
+    def _can_use_mono_kernel(self, gate_up: torch.Tensor) -> bool:
+        if not envs.VLLM_ROCM_MIMO_MONO_MLP:
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            return False
+        from vllm.model_executor.kernels.triton.mimo_mono_mlp import (
+            can_use_mimo_fp8_mono_mlp,
+        )
+
+        if getattr(self.down_proj, "aiter_bpreshuffled", False):
+            return False
+        return can_use_mimo_fp8_mono_mlp(
+            gate_up,
+            self.down_proj.weight,
+            self.down_proj.weight_scale_inv,
+            tensor_parallel_size=self.gate_up_proj.tp_size,
+            is_capturing=torch.cuda.is_current_stream_capturing(),
+        )
+
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
+        eligible = self._can_use_mono_kernel(gate_up)
+        if envs.VLLM_ROCM_MIMO_MONO_MLP:
+            logger.info_once(
+                "MiMo mono MLP: eligible=%s compiling=%s gate=%s/%s/%s weight=%s/%s/%s "
+                "scale=%s/%s/%s weight_dtype=%s scale_dtype=%s preshuffled=%s tp=%s",
+                eligible,
+                torch.compiler.is_compiling(),
+                tuple(gate_up.shape),
+                tuple(gate_up.stride()),
+                gate_up.is_contiguous(),
+                tuple(self.down_proj.weight.shape),
+                tuple(self.down_proj.weight.stride()),
+                self.down_proj.weight.is_contiguous(),
+                tuple(self.down_proj.weight_scale_inv.shape),
+                tuple(self.down_proj.weight_scale_inv.stride()),
+                self.down_proj.weight_scale_inv.is_contiguous(),
+                self.down_proj.weight.dtype,
+                self.down_proj.weight_scale_inv.dtype,
+                getattr(self.down_proj, "aiter_bpreshuffled", False),
+                self.gate_up_proj.tp_size,
+            )
+        if not torch.compiler.is_compiling() and eligible:
+            from vllm.model_executor.kernels.triton.mimo_mono_mlp import (
+                mimo_fp8_mono_mlp,
+            )
+
+            output = mimo_fp8_mono_mlp(
+                gate_up,
+                self.down_proj.weight,
+                self.down_proj.weight_scale_inv,
+            )
+            if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
+                output = tensor_model_parallel_all_reduce(output)
+            return output
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
