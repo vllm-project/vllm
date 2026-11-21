@@ -6,6 +6,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
+    get_fp4_marlin_unavailable_reason,
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
 )
@@ -25,7 +26,7 @@ class MarlinNvFp4LinearKernel(NvFp4LinearKernel):
     ) -> tuple[bool, str | None]:
         if is_fp4_marlin_supported():
             return True, None
-        return False, "Marlin FP4 not available"
+        return False, get_fp4_marlin_unavailable_reason() or "Marlin FP4 not available"
 
     @classmethod
     def executed_activation_key(
