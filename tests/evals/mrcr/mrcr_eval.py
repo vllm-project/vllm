@@ -12,7 +12,9 @@ import argparse
 import asyncio
 import json
 import time
+from collections.abc import Iterable, Iterator
 from difflib import SequenceMatcher
+from typing import TypeVar
 
 import aiohttp
 import numpy as np
@@ -31,6 +33,34 @@ PROMPT_SAFETY_BUFFER = 256
 CHARS_PER_TOKEN = 4
 # Skip chain-of-thought on reasoning models; ignored by non-reasoning templates.
 DEFAULT_EXTRA_BODY: dict = {"chat_template_kwargs": {"enable_thinking": False}}
+
+T = TypeVar("T")
+
+
+def _buffer_shuffle(rows: Iterable[T], seed: int, buffer_size: int) -> Iterator[T]:
+    """Shuffle a stream exactly as `IterableDataset.shuffle` in datasets 3.x.
+
+    datasets 4+ shuffles streams differently, so the same seed selects other
+    samples and the score thresholds no longer apply. Doing it here keeps the
+    sample set fixed whatever datasets version is installed.
+    """
+    rng = np.random.default_rng(seed)
+
+    def random_indices() -> Iterator[int]:
+        while True:
+            yield from (int(i) for i in rng.integers(0, buffer_size, size=1000))
+
+    indices = random_indices()
+    buffer: list[T] = []
+    for row in rows:
+        if len(buffer) == buffer_size:
+            i = next(indices)
+            yield buffer[i]
+            buffer[i] = row
+        else:
+            buffer.append(row)
+    rng.shuffle(buffer)
+    yield from buffer
 
 
 def discover_server_model(base_url: str) -> tuple[str, int | None]:
@@ -88,10 +118,10 @@ def _load_mrcr_samples(
             data_files=NEEDLE_SHARDS[n],
             split="train",
             streaming=True,
-        ).shuffle(seed=seed + n, buffer_size=16)
+        )
 
         taken = 0
-        for row in ds:
+        for row in _buffer_shuffle(ds, seed=seed + n, buffer_size=16):
             if int(row.get("n_chars", 0)) > max_chars:
                 continue
             prompt = row["prompt"]
