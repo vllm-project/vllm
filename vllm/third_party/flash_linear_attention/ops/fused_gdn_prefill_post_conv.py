@@ -54,12 +54,16 @@ def _fused_post_conv_kernel(
 ):
     """Single fused kernel for post-conv1d preparation.
 
-    Grid: (ceil(L, BLOCK_T), H + HV)
-      - program_id(1) in [0, H):    Q/K head processing + l2norm
-      - program_id(1) in [H, H+HV): V head processing + gating
+    Grid: (ceil(L, BLOCK_T) * (H + HV),)
+      - head_idx in [0, H):    Q/K head processing + l2norm
+      - head_idx in [H, H+HV): V head processing + gating
     """
-    i_tb = tl.program_id(0)
-    i_head = tl.program_id(1)
+    # Order heads inner so concurrent workgroups co-read the same token rows
+    # while keeping a 1D grid exempt from CUDA's 65535 gridDim.y cap on >1M tokens.
+    NUM_HEADS: tl.constexpr = H + HV
+    pid = tl.program_id(0)
+    i_tb = pid // NUM_HEADS
+    i_head = pid % NUM_HEADS
 
     HK: tl.constexpr = H * K
 
@@ -223,7 +227,7 @@ def fused_post_conv_prep(
     BLOCK_T = 16  # tokens per block
 
     # Single kernel: blocks [0,H) do Q/K, blocks [H, H+HV) do V+gating
-    grid = (triton.cdiv(L, BLOCK_T), H + HV)
+    grid = (triton.cdiv(L, BLOCK_T) * (H + HV),)
     _fused_post_conv_kernel[grid](
         mixed_qkv_ptr=conv_output,
         a_ptr=a,
