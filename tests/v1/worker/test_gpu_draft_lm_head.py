@@ -80,6 +80,29 @@ def test_tracks_bf16_head_through_logits_processor(
 
 
 @requires_cuda
+def test_fp8_is_weight_only_without_fp8_gemm(
+    default_vllm_config, dist_init, monkeypatch
+):
+    # SM80/SM86 have no FP8 GEMM: "fp8" falls back to W8A16 instead of failing.
+    monkeypatch.setattr(current_platform, "supports_fp8", lambda: False)
+    head = _target_head(monkeypatch)
+    draft_head = quantized_lm_head_copy(head, "fp8")
+    assert draft_head.quant_method.activation_quant_key is None
+    # One byte per weight (Marlin repacks it into int32 words).
+    nbytes = draft_head.weight.numel() * draft_head.weight.element_size()
+    assert nbytes == head.weight.numel()
+
+    logits_processor = LogitsProcessor(VOCAB)
+    hidden = torch.randn(2048, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    ref = logits_processor(head, hidden).float()
+    out = logits_processor(draft_head, hidden).float()
+    rel_err = ((out - ref).norm() / ref.norm()).item()
+    top1 = (out.argmax(-1) == ref.argmax(-1)).float().mean().item()
+    assert rel_err < 0.05
+    assert top1 > 0.9
+
+
+@requires_cuda
 @pytest.mark.parametrize("quantization", ["fp8", NVFP4])
 def test_refresh_follows_target_update(
     default_vllm_config, dist_init, monkeypatch, quantization

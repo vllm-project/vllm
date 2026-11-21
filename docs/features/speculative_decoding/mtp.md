@@ -82,4 +82,5 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   large vocabulary. The copy costs about one byte (FP8) or 0.56 bytes (NVFP4)
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
-  for it.
+  for it. On GPUs without FP8 GEMMs (e.g. A100, RTX 3090), `"fp8"` is
+  weight-only (W8A16).

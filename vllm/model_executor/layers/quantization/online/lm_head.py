@@ -36,6 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -219,11 +220,20 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 }
 
 
+def _lm_head_method(quantization: str) -> OnlineLinearBase:
+    if quantization == "fp8" and not current_platform.supports_fp8():
+        # No FP8 W8A8 GEMM on this GPU (e.g. SM80/SM86). Keep the FP8 weights,
+        # which carry the bandwidth saving when decoding, and leave the
+        # activations unquantized (W8A16).
+        return Fp8PtpcOnlineLinearMethod(activation_quant_key=None)
+    return _LM_HEAD_METHODS[quantization]()
+
+
 def lm_head_quant_method(quantization: Literal["fp8", "nvfp4"]) -> OnlineLinearBase:
     """The online method of a `quantization` lm_head, for a drafter that builds
     its own head quantized (`ParallelLMHead(..., quant_method=...)`) instead of
     sharing the target's."""
-    return _LM_HEAD_METHODS[quantization]()
+    return _lm_head_method(quantization)
 
 
 def lm_head_padding_size(tp_size: int) -> int:
@@ -256,7 +266,7 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             padding_size=lm_head.padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
-            quant_method=_LM_HEAD_METHODS[quantization](),
+            quant_method=_lm_head_method(quantization),
         )
     # Never loaded: a new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
@@ -280,7 +290,8 @@ def quantized_lm_head_copy(
     """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 
     "fp8" uses per-row weight and per-token activation scales on the platform's
-    FP8 linear kernel; "nvfp4" is weight-only on the
+    FP8 linear kernel, or is weight-only (W8A16) on GPUs without FP8 GEMMs;
+    "nvfp4" is weight-only on the
     platform's W4A16 kernel. `lm_head` is left
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
