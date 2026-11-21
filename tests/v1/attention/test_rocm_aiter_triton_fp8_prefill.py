@@ -40,10 +40,13 @@ def fp8(monkeypatch):
         "vllm.v1.attention.backends.rocm_aiter_triton_fp8_prefill"
     )
     mod._load_kernel.cache_clear()
+    mod._kernel_takes_out.cache_clear()
     # The small shapes here are below the length gate, which has its own test.
     monkeypatch.setattr(mod, "_MIN_CAUSAL_SEQLEN_Q", 0)
+    monkeypatch.setattr(mod, "_MIN_CAUSAL_SEQLEN_Q_WITH_OUT", 0)
     yield mod
     mod._load_kernel.cache_clear()
+    mod._kernel_takes_out.cache_clear()
 
 
 @pytest.fixture
@@ -56,11 +59,14 @@ def kernel(monkeypatch):
     def fake(q, k, v, **kw):
         calls.append(SimpleNamespace(q=q, k=k, v=v, **kw))
         o_dtype = kw.get("out_dtype") or torch.float32
-        o = torch.full(q.shape[:-1] + v.shape[-1:], 0.5, dtype=o_dtype)
+        o = kw.get("out")
+        if o is None:
+            o = torch.empty(q.shape[:-1] + v.shape[-1:], dtype=o_dtype, device=q.device)
+        o.fill_(0.5)
         lse = torch.arange(q.shape[0] * q.shape[1], dtype=torch.float32).view(
             q.shape[0], q.shape[1]
         )
-        return o.to(q.device), lse.to(q.device), None, 0, 0
+        return o, lse.to(q.device), None, 0, 0
 
     monkeypatch.setattr(mha, "_flash_attn_forward", fake)
     return calls
@@ -290,21 +296,28 @@ def test_ineligible_calls_fall_back_unchanged(fp8, kernel, name):
     _assert_same_args(orig.calls[0], args)
 
 
-def test_short_causal_prefill_stays_on_ck(monkeypatch, fp8, kernel):
+@pytest.mark.parametrize("takes_out", [False, True])
+def test_short_causal_prefill_stays_on_ck(monkeypatch, fp8, kernel, takes_out):
     """Causal prefill below the length gate runs CK; context chunks are not gated."""
-    monkeypatch.setattr(fp8, "_MIN_CAUSAL_SEQLEN_Q", 64)
+    gate, other = "_MIN_CAUSAL_SEQLEN_Q", "_MIN_CAUSAL_SEQLEN_Q_WITH_OUT"
+    if takes_out:
+        gate, other = other, gate
+    monkeypatch.setattr(fp8, gate, 64)
+    monkeypatch.setattr(fp8, other, 10**6)
     orig = _Orig()
 
-    fp8.triton_fp8_prefill_attn(orig=orig, **_inputs(seq_lens=[37]))
-    assert kernel == [] and len(orig.calls) == 1
+    with monkeypatch.context() as m:
+        m.setattr(fp8, "_kernel_takes_out", lambda: takes_out)
+        fp8.triton_fp8_prefill_attn(orig=orig, **_inputs(seq_lens=[37]))
+        assert kernel == [] and len(orig.calls) == 1
 
-    fp8.triton_fp8_prefill_attn(orig=orig, **_inputs(seq_lens=[64]))
-    assert len(kernel) == 1 and len(orig.calls) == 1
+        fp8.triton_fp8_prefill_attn(orig=orig, **_inputs(seq_lens=[64]))
+        assert len(kernel) == 1 and len(orig.calls) == 1
 
-    short = _inputs(seq_lens=[37])
-    short["causal"] = False
-    fp8.triton_fp8_prefill_attn(orig=orig, **short)
-    assert len(kernel) == 2 and len(orig.calls) == 1
+        short = _inputs(seq_lens=[37])
+        short["causal"] = False
+        fp8.triton_fp8_prefill_attn(orig=orig, **short)
+        assert len(kernel) == 2 and len(orig.calls) == 1
 
 
 def test_reused_query_matches_per_call_quantization(fp8, kernel):
@@ -466,13 +479,18 @@ def test_lse_is_returned_heads_by_tokens(fp8, kernel):
     torch.testing.assert_close(lse, expected.view(t, HQ).t())
 
 
-def test_out_is_written_in_place(fp8, kernel):
+@pytest.mark.parametrize("takes_out", [False, True])
+def test_out_is_written_in_place(monkeypatch, fp8, kernel, takes_out):
+    """An aiter that takes ``out`` writes it directly; an older one is copied."""
     args = _inputs()
     args["return_lse"] = False
     out = torch.zeros_like(args["q"])
-    res = fp8.triton_fp8_prefill_attn(orig=_Orig(), out=out, **args)
+    with monkeypatch.context() as m:
+        m.setattr(fp8, "_kernel_takes_out", lambda: takes_out)
+        res = fp8.triton_fp8_prefill_attn(orig=_Orig(), out=out, **args)
     assert res is out
     assert bool((out == 0.5).all())
+    assert (getattr(kernel[0], "out", None) is out) == takes_out
 
 
 def _use_fp8(fp8, impl, on=True):

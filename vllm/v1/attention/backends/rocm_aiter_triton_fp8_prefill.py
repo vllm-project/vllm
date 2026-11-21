@@ -28,6 +28,8 @@ _HEAD_DIM = 256
 _Quantized = tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]
 # Below this query length, quantizing q/k/v costs more than the kernel saves.
 _MIN_CAUSAL_SEQLEN_Q = 2048
+# Lower when aiter writes the output in place, as there is no copy to amortise.
+_MIN_CAUSAL_SEQLEN_Q_WITH_OUT = 1536
 _KERNEL_KWARGS = frozenset(
     {
         "cu_seqlens_q",
@@ -61,6 +63,15 @@ def _load_kernel() -> ModuleType | None:
         logger.warning("FP8 Triton prefill unavailable, using CK: %r", e)
         return None
     return mha
+
+
+@functools.cache
+def _kernel_takes_out() -> bool:
+    mha = _load_kernel()
+    return (
+        mha is not None
+        and "out" in inspect.signature(mha._flash_attn_forward).parameters
+    )
 
 
 def enabled(
@@ -136,12 +147,13 @@ def profile(
         torch.empty(
             (num_kv_tokens, num_kv_heads, _HEAD_DIM), dtype=fp8, device=query.device
         )
-    # aiter allocates the output inside the call.
-    torch.empty(
-        (num_q_tokens, num_q_heads, _HEAD_DIM),
-        dtype=query.dtype,
-        device=query.device,
-    )
+    if not _kernel_takes_out():
+        # This aiter allocates the output inside the call.
+        torch.empty(
+            (num_q_tokens, num_q_heads, _HEAD_DIM),
+            dtype=query.dtype,
+            device=query.device,
+        )
 
 
 def _eligible(
@@ -191,8 +203,11 @@ def _eligible(
     if causal and cu_seqlens_k is not cu_seqlens_q:
         # aiter writes LSE 0 for causal rows with no key; a value check would sync.
         return False, "causal with separate cu_seqlens_q and cu_seqlens_k"
-    if causal and not kv_is_fp8 and max_seqlen_q < _MIN_CAUSAL_SEQLEN_Q:
-        return False, f"max_seqlen_q {max_seqlen_q} below {_MIN_CAUSAL_SEQLEN_Q}"
+    min_q = (
+        _MIN_CAUSAL_SEQLEN_Q_WITH_OUT if _kernel_takes_out() else _MIN_CAUSAL_SEQLEN_Q
+    )
+    if causal and not kv_is_fp8 and max_seqlen_q < min_q:
+        return False, f"max_seqlen_q {max_seqlen_q} below {min_q}"
     return True, ""
 
 
@@ -289,6 +304,7 @@ def _triton_or_orig(
         (q8, k8, v8), (dq, dk, dv) = _quant(q, k, v, batch=batch)
     mha = _load_kernel()
     assert mha is not None
+    write_out = out is not None and _kernel_takes_out()
     o, lse = mha._flash_attn_forward(
         q8,
         k8,
@@ -313,6 +329,7 @@ def _triton_or_orig(
         sink=None,
         config=None,
         out_dtype=q.dtype,
+        **({"out": out} if write_out else {}),
     )[:2]
 
     logger.info_once(
@@ -323,7 +340,8 @@ def _triton_or_orig(
         bool(causal),
         bool(return_lse),
     )
-    o = out.copy_(o) if out is not None else o
+    if out is not None and not write_out:
+        o = out.copy_(o)
     if not return_lse:
         return o
     return o, lse.transpose(0, 1)
