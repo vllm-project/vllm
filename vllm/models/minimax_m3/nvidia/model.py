@@ -148,10 +148,20 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Largest batch whose MoE top-k finalize runs inside the next layer's fused
-# all-reduce + input norm + MXFP8 quantization. Larger batches finalize in the
-# MoE and use the regular fused all-reduce + norm.
-FUSED_MOE_FINALIZE_MAX_TOKENS = 32
+# Largest batch whose MoE top-k finalize is fused into the next all-reduce +
+# input norm + MXFP8 quantization at TP4; larger batches finalize in the MoE.
+# The one-shot all-reduce's traffic grows with the batch; above the cap its
+# gain over the regular path was measured to vanish.
+FUSED_MOE_FINALIZE_MAX_TOKENS = 128
+
+
+def fused_moe_finalize_max_tokens(tp_size: int) -> int:
+    """The cap at `tp_size`. Each rank reduces `tp_size` rows per token, so
+    above TP4 the cap shrinks to keep that at TP4's measured load."""
+    return min(
+        FUSED_MOE_FINALIZE_MAX_TOKENS, FUSED_MOE_FINALIZE_MAX_TOKENS * 4 // tp_size
+    )
+
 
 _QKV_FUSED_EPILOGUE_MIN_TOKENS = 512
 
@@ -1515,7 +1525,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         from .specialized_decode import fused_finalize_max_tokens
 
         max_tokens = fused_finalize_max_tokens(
-            vllm_config, FUSED_MOE_FINALIZE_MAX_TOKENS
+            vllm_config,
+            fused_moe_finalize_max_tokens(get_tensor_model_parallel_world_size()),
         )
         layers = self.layers[self.start_layer : self.end_layer]
         deferring = [
