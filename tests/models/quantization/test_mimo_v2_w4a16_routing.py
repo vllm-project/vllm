@@ -16,6 +16,8 @@ both halves: the gate accepts the router family, and the routing the wrapper
 requests reproduces the model's own math.
 """
 
+import dataclasses
+
 import pytest
 import torch
 
@@ -46,6 +48,52 @@ def mimo_routing_method() -> RoutingMethodType:
         renormalize=True,
         num_expert_group=1,
         has_e_score_bias=True,
+    )
+
+
+def dp_parallel_config(dp_size: int = 2) -> FusedMoEParallelConfig:
+    """DP attention without expert parallelism (``-tp 1 -dp N``).
+
+    ``use_ep`` is False, so no all2all kernels are involved and TP is flattened
+    across the DP ranks.
+    """
+    return FusedMoEParallelConfig(
+        tp_size=dp_size,
+        tp_rank=0,
+        pcp_size=1,
+        pcp_rank=0,
+        dp_size=dp_size,
+        dp_rank=0,
+        ep_size=1,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=False,
+        all2all_backend="allgather_reducescatter",
+        enable_eplb=False,
+    )
+
+
+def dp_ep_parallel_config(
+    dp_size: int = 2, all2all_backend: str = "allgather_reducescatter"
+) -> FusedMoEParallelConfig:
+    """DP attention with expert parallelism (``-dp N --enable-expert-parallel``).
+
+    ``use_ep`` is True and ``dp_size > 1``, so ``use_all2all_kernels`` is set
+    and the backend decides whether the kernel can serve the deployment.
+    """
+    return FusedMoEParallelConfig(
+        tp_size=1,
+        tp_rank=0,
+        pcp_size=1,
+        pcp_rank=0,
+        dp_size=dp_size,
+        dp_rank=0,
+        ep_size=dp_size,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend=all2all_backend,
+        enable_eplb=False,
     )
 
 
@@ -80,6 +128,86 @@ def test_aiter_w4a16_supports_mimo_routing() -> None:
     assert AiterW4A16ExpertsMonolithic._supports_routing_method(
         RoutingMethodType.DeepSeekV3, kMxfp4Static, None
     )
+
+
+def test_aiter_w4a16_supports_dp_without_all2all() -> None:
+    """DP attention without EP must not fall back off this kernel.
+
+    The naive monolithic prepare/finalize handles the all-gather, so only the
+    all2all paths stay unsupported.
+    """
+    assert AiterW4A16ExpertsMonolithic._supports_parallel_config(dp_parallel_config())
+
+
+@pytest.mark.parametrize(
+    "all2all_backend,supported",
+    [("allgather_reducescatter", True), ("deepep_high_throughput", False)],
+)
+def test_aiter_w4a16_dp_ep_support_follows_all2all_backend(
+    all2all_backend: str, supported: bool
+) -> None:
+    """DP + EP is only servable when the all2all is allgather/RS.
+
+    That backend resolves to the same naive monolithic prepare/finalize as
+    DP-without-EP, so the only delta is the ``expert_map`` the kernel already
+    consumes for TP + EP. A dispatching backend instead hands the kernel a
+    layout it cannot read.
+    """
+    assert (
+        AiterW4A16ExpertsMonolithic._supports_parallel_config(
+            dp_ep_parallel_config(all2all_backend=all2all_backend)
+        )
+        is supported
+    )
+
+
+def test_aiter_w4a16_rejects_ep_with_silu_on_gfx1250(monkeypatch) -> None:
+    """SILU on gfx1250 runs the a8w4 kernel, which takes no ``expert_map``.
+
+    The gate has to reject it, otherwise the oracle picks this backend and the
+    forward pass raises ``NotImplementedError`` mid-step.
+    """
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: True)
+    moe_config = dataclasses.replace(
+        mimo_moe_config(),
+        moe_parallel_config=dp_ep_parallel_config(),
+        activation=MoEActivation.SILU,
+    )
+
+    supported, reason = AiterW4A16ExpertsMonolithic.is_supported_config(
+        AiterW4A16ExpertsMonolithic,
+        moe_config,
+        kMxfp4Static,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert not supported
+    assert reason is not None and "gfx1250" in reason
+
+
+def test_aiter_w4a16_rejects_hash_routing_under_dp() -> None:
+    """Hash routing plus DP must stay rejected.
+
+    The naive DP prepare/finalize gathers router logits but not ``input_ids``,
+    so the kernel would route ``sum(T_dp)`` logits against ``T_local`` ids.
+    """
+    moe_config = dataclasses.replace(
+        mimo_moe_config(),
+        moe_parallel_config=dp_parallel_config(),
+        has_hash_routing=True,
+    )
+
+    supported, reason = AiterW4A16ExpertsMonolithic.is_supported_config(
+        AiterW4A16ExpertsMonolithic,
+        moe_config,
+        kMxfp4Static,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert not supported
+    assert reason is not None and "hash routing" in reason
 
 
 @pytest.mark.skipif(
