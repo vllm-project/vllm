@@ -153,6 +153,10 @@ class MediaIO(ABC, Generic[_T]):
         """Return the maximum encoded payload size accepted by this media IO."""
         return None
 
+    def get_max_bytes_parameter(self) -> str:
+        """Return the API parameter name used for encoded-size errors."""
+        return "media_filesize_mb"
+
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError
