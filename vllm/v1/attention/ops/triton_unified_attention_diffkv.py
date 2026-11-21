@@ -22,12 +22,14 @@ Both 2D and 3D launches are supported:
     for decode-only batches whose 2D grid would under-fill the GPU.
 """
 
+import functools
 from typing import Any
 
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
@@ -52,6 +54,104 @@ _SPEC_3D_MAX_Q = 16
 _SPEC_3D_BLOCK_M = 128
 _SPEC_3D_NUM_WARPS = 8
 _SPEC_3D_TILE = 16
+
+# Splitting a sliding window pays only while every segment gets a tile and the
+# reduce reads fewer partials than the split saves; below MIN_SEGMENTS_3D the
+# reduce launch is not repaid and 2D wins.
+MAX_PARTIALS_PER_WINDOW_TOKEN = 8
+MIN_SEGMENTS_3D = 4
+
+# One wave per workgroup keeps BLOCK_M=16 softmax reductions out of LDS but
+# needs 2 waves/SIMD to hide latency, i.e. 8 single-wave workgroups per CU.
+MIN_WORKGROUPS_PER_CU_SINGLE_WAVE = 8
+
+
+@functools.cache
+def _is_tuned_arch() -> bool:
+    """CDNA4 (MI350/MI355), where the window split and launch tuning are measured."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() == 4
+
+
+@functools.cache
+def _num_compute_units(device_index: int) -> int:
+    return current_platform.num_compute_units(device_index)
+
+
+def _num_kv_segments(
+    max_segments: int,
+    num_seqs: int,
+    num_query_heads: int,
+    sliding_window: int,
+    tile_size: int,
+) -> int:
+    """Segments for the 3D decode split, or 0 to launch 2D instead."""
+    if sliding_window <= 0 or not _is_tuned_arch():
+        return max_segments
+    n = max_segments
+    while n >= MIN_SEGMENTS_3D and (
+        n * tile_size > sliding_window
+        or num_seqs * num_query_heads * n
+        > MAX_PARTIALS_PER_WINDOW_TOKEN * sliding_window
+    ):
+        n //= 2
+    return n if n >= MIN_SEGMENTS_3D else 0
+
+
+def _use_single_wave_2d(
+    block_m: int,
+    num_queries_per_kv: int,
+    max_seqlen_q: int,
+    sliding_window: int,
+    num_workgroups: int,
+    device: torch.device,
+) -> bool:
+    # Full-attention decode with partly empty Q rows is faster on 4 warps.
+    # Under batch invariance the warp count must not depend on the batch.
+    return (
+        block_m <= 16
+        and (max_seqlen_q > 1 or sliding_window > 0 or num_queries_per_kv >= block_m)
+        and not is_batch_invariant
+        and _is_tuned_arch()
+        and num_workgroups
+        >= MIN_WORKGROUPS_PER_CU_SINGLE_WAVE * _num_compute_units(device.index or 0)
+    )
+
+
+@triton.jit
+def compute_3d_segments_diffkv(
+    seq_len,
+    context_len,
+    TILE_SIZE: tl.constexpr,
+    NUM_SEGMENTS_PER_SEQ: tl.constexpr,
+    WINDOW_SPLIT: tl.constexpr,
+):
+    """Segment `i` covers tiles `segm_tile_start + [i, i + 1) *
+    tiles_per_segment` and has work iff its first key is below `seq_len`.
+
+    Splitting the whole sequence leaves a sliding window in one or two
+    segments, so only the window is split. Near the window both splits are
+    equally long and re-splitting only shifts tile alignment, so it is done
+    once it shortens the longest segment by 1.5x. Attention and reduce must
+    agree, so both call this. `WINDOW_SPLIT` is the sliding window when the
+    split is enabled, else 0 (whole-sequence split, as before).
+    """
+    segm_tile_start = 0
+    tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
+    if WINDOW_SPLIT > 0:
+        window_tile_start = tl.maximum(context_len - WINDOW_SPLIT + 1, 0) // TILE_SIZE
+        window_tiles_per_segment = cdiv_fn(
+            seq_len - window_tile_start * TILE_SIZE, NUM_SEGMENTS_PER_SEQ * TILE_SIZE
+        )
+        resplit = 2 * tiles_per_segment >= 3 * window_tiles_per_segment
+        segm_tile_start = tl.where(resplit, window_tile_start, 0)
+        tiles_per_segment = tl.where(
+            resplit, window_tiles_per_segment, tiles_per_segment
+        )
+    return segm_tile_start, tiles_per_segment
 
 
 @triton.jit
@@ -96,6 +196,7 @@ def kernel_unified_attention_diffkv(
     USE_Q_SCALE: tl.constexpr,
     USE_KV_SCALES: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
+    WINDOW_SPLIT: tl.constexpr,
     # Strides for both cache views (they share the same packed buffer, so
     # dims 0/1/2 strides match; only the per-head extent differs).
     stride_k_cache_0: tl.int64,
@@ -134,10 +235,17 @@ def kernel_unified_attention_diffkv(
         return
 
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+        segm_tile_start, tiles_per_segment = compute_3d_segments_diffkv(
+            seq_len,
+            seq_len - cur_batch_query_len,
+            TILE_SIZE,
+            NUM_SEGMENTS_PER_SEQ,
+            WINDOW_SPLIT,
+        )
+        if (segm_tile_start + segm_idx * tiles_per_segment) * TILE_SIZE >= seq_len:
             return
     else:
+        segm_tile_start = 0
         tiles_per_segment = 0
 
     offs_m = tl.arange(0, BLOCK_M)
@@ -188,21 +296,26 @@ def kernel_unified_attention_diffkv(
             alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
         )
 
+    # The 3D slice is applied below; the helper does not know segm_tile_start.
     loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
         context_len,
         seq_len,
         cur_batch_query_len,
         q_block_local_idx,
-        segm_idx,
-        tiles_per_segment,
+        0,
+        0,
         TILE_SIZE,
         BLOCK_M,
         BLOCK_Q,
         num_queries_per_kv,
         SLIDING_WINDOW,
         False,  # USE_MM_PREFIX
-        IS_3D,
+        False,  # IS_3D
     )
+    if IS_3D:
+        segm_lo = segm_tile_start + segm_idx * tiles_per_segment
+        loop_lo = tl.maximum(loop_lo, segm_lo)
+        loop_hi = tl.minimum(loop_hi, segm_lo + tiles_per_segment)
 
     for j in range(loop_lo, loop_hi):
         seq_offset = j * TILE_SIZE + offs_t
@@ -345,6 +458,7 @@ def kernel_reduce_segments_diffkv(
     query_start_len_ptr,  # [num_seqs+1]
     BLOCK_Q: tl.constexpr,
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,
+    WINDOW_SPLIT: tl.constexpr,
 ):
     """Combine per-segment partials into the final softmax output.
 
@@ -358,12 +472,17 @@ def kernel_reduce_segments_diffkv(
         query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
     )
     seq_len = tl.load(seq_lens_ptr + seq_idx)
-
-    tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
-    segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
-        [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
+    query_len = tl.load(query_start_len_ptr + seq_idx + 1) - tl.load(
+        query_start_len_ptr + seq_idx
     )
+
+    segm_tile_start, tiles_per_segment = compute_3d_segments_diffkv(
+        seq_len, seq_len - query_len, TILE_SIZE, NUM_SEGMENTS_PER_SEQ, WINDOW_SPLIT
+    )
+    segm_first_tile = (
+        segm_tile_start + tl.arange(0, NUM_SEGMENTS_PER_SEQ) * tiles_per_segment
+    )
+    segm_mask = segm_first_tile * TILE_SIZE < seq_len
     dim_mask = tl.where(tl.arange(0, HEAD_SIZE_V_PADDED) < HEAD_SIZE_V, 1, 0).to(
         tl.int1
     )
@@ -495,17 +614,31 @@ def unified_attention_diffkv(
 
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers
     # smaller tiles to expose more parallelism along the KV dim.
-    tile_size = 32 if not use_3d else (16 if q.element_size() >= 2 else 32)
-    if spec_tile is not None:
-        tile_size = spec_tile
+    tile_size_3d = spec_tile or (16 if q.element_size() >= 2 else 32)
+    num_segments = 1
+    if use_3d:
+        assert num_par_softmax_segments is not None
+        num_segments = _num_kv_segments(
+            num_par_softmax_segments,
+            num_seqs,
+            num_query_heads,
+            sliding_window_val,
+            tile_size_3d,
+        )
+        use_3d = num_segments > 0
+    tile_size = tile_size_3d if use_3d else 32
+    # Window-relative 3D split, tuned and measured on CDNA4 only.
+    window_split = sliding_window_val if use_3d and _is_tuned_arch() else 0
 
+    launch_num_warps: int | None = None
+    launch_num_stages: int | None = None
     grid: tuple[Any, ...]
     if use_3d:
-        grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
+        grid = (total_num_q_blocks, num_kv_heads, num_segments)
+        # Buffers hold max segments; both kernels index them with num_segments.
         segm_output_ptr = softmax_segm_output
         segm_max_ptr = softmax_segm_max
         segm_expsum_ptr = softmax_segm_expsum
-        num_segments = num_par_softmax_segments
     else:
         grid = (total_num_q_blocks, num_kv_heads)
         # 2D never touches the segm tensors but Triton wants a non-null
@@ -514,6 +647,23 @@ def unified_attention_diffkv(
         segm_max_ptr = out
         segm_expsum_ptr = out
         num_segments = 1
+        if _use_single_wave_2d(
+            BLOCK_M,
+            num_queries_per_kv,
+            max_seqlen_q,
+            sliding_window_val,
+            total_num_q_blocks * num_kv_heads,
+            q.device,
+        ):
+            launch_num_warps = 1
+            launch_num_stages = 1
+
+    # Spec-verify 3D and single-wave 2D are exclusive; at most one sets warps.
+    launch_kwargs = dict(launch_kw)
+    if launch_num_warps is not None:
+        launch_kwargs["num_warps"] = launch_num_warps
+    if launch_num_stages is not None:
+        launch_kwargs["num_stages"] = launch_num_stages
 
     kernel_unified_attention_diffkv[grid](
         output_ptr=out,
@@ -552,6 +702,7 @@ def unified_attention_diffkv(
         USE_Q_SCALE=q_descale is not None,
         USE_KV_SCALES=k_descale is not None,
         SLIDING_WINDOW=sliding_window_val,
+        WINDOW_SPLIT=window_split,
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
         stride_k_cache_2=k.stride(2),
@@ -566,7 +717,7 @@ def unified_attention_diffkv(
         BLOCK_M=BLOCK_M,
         NUM_SEGMENTS_PER_SEQ=num_segments,
         IS_3D=use_3d,
-        **launch_kw,
+        **launch_kwargs,
     )
 
     if use_3d:
@@ -585,5 +736,6 @@ def unified_attention_diffkv(
             HEAD_SIZE_V_PADDED=triton.next_power_of_2(head_size_v),
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
-            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            NUM_SEGMENTS_PER_SEQ=num_segments,
+            WINDOW_SPLIT=window_split,
         )
