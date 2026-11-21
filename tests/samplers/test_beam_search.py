@@ -11,8 +11,16 @@ from unittest.mock import Mock
 
 import jsonschema
 import pytest
-from transformers import AutoModelForSeq2SeqLM
+import torch
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import (
+    AutoModelForSeq2SeqLM,
+    GPT2Config,
+    GPT2LMHeadModel,
+    TokenizersBackend,
+)
 
+from tests.utils import RemoteOpenAIServer
 from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
@@ -402,3 +410,151 @@ def test_beam_search_structured_output(
             print(f"Generated JSON: {generated!r}")
             parsed = json.loads(generated)
             jsonschema.validate(instance=parsed, schema=json_schema)
+
+
+@pytest.fixture(scope="module")
+def beam_eos_model(tmp_path_factory):
+    model_path = tmp_path_factory.mktemp("beam-eos-model")
+    vocabulary = {"<pad>": 0, "<bos>": 1, "<eos>": 2, "<unk>": 3}
+    vocabulary.update({f"word{i}": i + 4 for i in range(28)})
+    tokenizer = Tokenizer(models.WordLevel(vocabulary, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = TokenizersBackend(
+        tokenizer_object=tokenizer,
+        bos_token="<bos>",
+        eos_token="<eos>",
+        pad_token="<pad>",
+        unk_token="<unk>",
+    )
+    tokenizer.save_pretrained(model_path)
+    torch.manual_seed(74)
+    config = GPT2Config(
+        vocab_size=32,
+        n_embd=128,
+        n_layer=1,
+        n_head=2,
+        n_positions=32,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    model = GPT2LMHeadModel(config).eval()
+    # Cover both a special tokenizer EOS and an ordinary generation-config EOS.
+    model.generation_config.eos_token_id = [2, 4]
+    model.save_pretrained(model_path)
+    return str(model_path), tokenizer
+
+
+@pytest.mark.parametrize("terminal_id", [2, 4])
+@pytest.mark.parametrize("include_stop", [False, True])
+def test_beam_eos_offline_output(
+    vllm_runner, beam_eos_model, terminal_id: int, include_stop: bool
+) -> None:
+    model_path, tokenizer = beam_eos_model
+    prompt = [1, 5, 6]
+    with vllm_runner(
+        model_path,
+        dtype="float32",
+        max_model_len=32,
+        max_num_seqs=2,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.1,
+    ) as model:
+        for skip_special in (False, True):
+            for ignore_eos in (False, True):
+                params = BeamSearchParams(
+                    beam_width=1,
+                    max_tokens=3,
+                    allowed_token_ids=[terminal_id],
+                    include_stop_str_in_output=include_stop,
+                    skip_special_tokens=skip_special,
+                    ignore_eos=ignore_eos,
+                )
+                beam = model.llm.beam_search([{"prompt_token_ids": prompt}], params)[
+                    0
+                ].sequences[0]
+                generated = (
+                    [terminal_id] * 3
+                    if ignore_eos
+                    else [terminal_id]
+                    if include_stop
+                    else []
+                )
+                assert beam.tokens == prompt + generated
+                assert beam.text == tokenizer.decode(
+                    prompt + generated, skip_special_tokens=skip_special
+                )
+                assert len(beam.logprobs) == (3 if ignore_eos else 1)
+                assert beam.cum_logprob == pytest.approx(
+                    sum(row[terminal_id].logprob for row in beam.logprobs)
+                )
+                if ignore_eos:
+                    assert beam.stop_reason is None
+                else:
+                    assert beam.finish_reason == "stop"
+                    assert beam.stop_reason == terminal_id
+
+
+@pytest.fixture(scope="module")
+def beam_eos_server(beam_eos_model):
+    model_path, _ = beam_eos_model
+    args = [
+        "--dtype",
+        "float32",
+        "--max-model-len",
+        "32",
+        "--max-num-seqs",
+        "2",
+        "--enforce-eager",
+        "--no-enable-prefix-caching",
+        "--gpu-memory-utilization",
+        "0.1",
+        "--served-model-name",
+        "beam-eos-model",
+    ]
+    with RemoteOpenAIServer(model_path, args) as server:
+        yield server
+
+
+@pytest.mark.parametrize("terminal_id", [2, 4])
+@pytest.mark.parametrize("include_stop", [False, True])
+@pytest.mark.parametrize("skip_special", [False, True])
+def test_beam_eos_online_output(
+    beam_eos_server,
+    beam_eos_model,
+    terminal_id: int,
+    include_stop: bool,
+    skip_special: bool,
+) -> None:
+    _, tokenizer = beam_eos_model
+    with beam_eos_server.get_client() as client:
+        for ignore_eos in (False, True):
+            response = client.completions.create(
+                model="beam-eos-model",
+                prompt=[1, 5, 6],
+                max_tokens=3,
+                temperature=0,
+                extra_body={
+                    "use_beam_search": True,
+                    "allowed_token_ids": [terminal_id],
+                    "include_stop_str_in_output": include_stop,
+                    "skip_special_tokens": skip_special,
+                    "ignore_eos": ignore_eos,
+                    "return_token_ids": True,
+                },
+            )
+            choice = response.choices[0]
+            generated = (
+                [terminal_id] * 3
+                if ignore_eos
+                else [terminal_id]
+                if include_stop
+                else []
+            )
+            assert choice.token_ids == generated
+            assert choice.text == tokenizer.decode(
+                generated, skip_special_tokens=skip_special
+            )
+            assert choice.finish_reason == ("length" if ignore_eos else "stop")
+            assert choice.stop_reason == (None if ignore_eos else terminal_id)

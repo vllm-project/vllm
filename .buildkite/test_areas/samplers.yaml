@@ -12,6 +12,8 @@ steps:
   - vllm/sampling_metadata.py
   - tests/samplers
   - tests/conftest.py
+  - tests/utils.py
+  - vllm/sampling_params.py
   - vllm/entrypoints/generate/beam_search
   commands:
     # VLLM_USE_FLASHINFER_SAMPLER defaults to 1 now, so we need to pin both
@@ -34,6 +36,8 @@ steps:
       - vllm/entrypoints/generate/beam_search/
       - tests/samplers
       - tests/conftest.py
+      - tests/utils.py
+      - vllm/sampling_params.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       commands:
