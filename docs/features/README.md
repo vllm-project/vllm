@@ -45,7 +45,7 @@ th:not(:first-child) {
 | [CP](../configuration/optimization.md#chunked-prefill) | ✅ | | | | | | | | | | | | | | |
 | [APC](automatic_prefix_caching.md) | ✅ | ✅ | | | | | | | | | | | | | |
 | [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | | |
-| [SD](speculative_decoding/README.md) | ✅ | ✅ | ❌ | ✅ | | | | | | | | | | | |
+| [SD](speculative_decoding/README.md) | ✅ | ✅ | 🟠<sup>†</sup> | ✅ | | | | | | | | | | | |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | | |
 | [pooling](../models/pooling_models/README.md) | 🟠\* | 🟠\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | | |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | ❌ | [❌](https://github.com/vllm-project/vllm/issues/7366) | ❌ | [❌](https://github.com/vllm-project/vllm/issues/7366) | ✅ | ✅ | ✅ | | | | | | | | |
@@ -60,6 +60,7 @@ th:not(:first-child) {
 
 \* Chunked prefill and prefix caching are only applicable to last-token or all pooling with causal attention.  
 <sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.  
+<sup>†</sup> Support depends on the speculative method and model. Some reject LoRA, for example [DFly](speculative_decoding/dfly.md), [adaptive verification](speculative_decoding/adaptive_verification.md) and some model-specific decode paths.  
 
 ### Feature x Hardware
 
