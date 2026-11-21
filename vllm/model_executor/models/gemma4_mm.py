@@ -1865,6 +1865,9 @@ class Gemma4ForConditionalGeneration(
                 "pixel_position_ids": pad_pixel_position_ids,
             },
             capture_axes=(row_widths,),
+            # A batch holds at least one row of its width (every item counts
+            # as a padded row), so budgets below the width never replay it.
+            axis_keys_min_tokens={(width,): width for width in row_widths},
         )
 
     def get_encoder_cudagraph_budget_range(

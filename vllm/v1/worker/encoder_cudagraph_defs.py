@@ -104,8 +104,16 @@ class EncoderCudaGraphConfig:
 
     Each entry is the ordered key set of one axis. When non-empty, one graph
     is captured per token budget per combination of axis keys (cartesian
-    product), so the total number of captured graphs is
+    product), so the total number of captured graphs is at most
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
+
+    axis_keys_min_tokens: dict[tuple[Hashable, ...], int] = field(default_factory=dict)
+    """Fewest output tokens of a batch that resolves to these axis keys.
+
+    Keys are combinations of `capture_axes` keys, one per axis. A batch is
+    replayed on the smallest budget that holds its tokens, so budgets below
+    the minimum are never selected for that combination and are not
+    captured. Combinations that are not listed have no minimum."""
 
 
 @dataclass(slots=True)

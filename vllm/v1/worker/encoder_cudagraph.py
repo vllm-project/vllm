@@ -348,7 +348,7 @@ class EncoderCudaGraphManager:
             for token_budget in sorted(budgets, reverse=True):
                 if token_budget == 0:
                     continue
-                for axis_keys in itertools.product(*self._capture_axes):
+                for axis_keys in self._capture_axis_keys(token_budget):
                     self._capture_budget_graph(
                         token_budget,
                         path=path,
@@ -361,9 +361,22 @@ class EncoderCudaGraphManager:
             len(self.path_token_budgets),
         )
 
+    def _capture_axis_keys(self, token_budget: int) -> list[CaptureAxisKeys]:
+        """Axis-key combinations that a batch replayed on this budget can have.
+
+        Without capture axes this is the single empty combination.
+        """
+        min_tokens = self.config.axis_keys_min_tokens
+        return [
+            axis_keys
+            for axis_keys in itertools.product(*self._capture_axes)
+            if token_budget >= min_tokens.get(axis_keys, 0)
+        ]
+
     def _num_graphs_for_budgets(self, budgets: list[int]) -> int:
-        num_budgets = sum(1 for budget in budgets if budget != 0)
-        return num_budgets * math.prod(len(axis) for axis in self._capture_axes)
+        return sum(
+            len(self._capture_axis_keys(budget)) for budget in budgets if budget != 0
+        )
 
     def get_num_graphs_to_capture(self) -> int:
         if not self.config.modalities:
