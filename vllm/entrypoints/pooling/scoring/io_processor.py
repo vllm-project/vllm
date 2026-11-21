@@ -494,9 +494,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         chat_tok_params = request.build_tok_params(
             self.model_config, self.renderer.default_chat_tok_params
         )
+
+        resolved_template = self._default_chat_template()
+        saved_chat_template_kwargs = (
+            self.saved_chat_template_kwargs
+            if self.saved_chat_template is not None
+            and resolved_template == self.saved_chat_template
+            else None
+        )
         chat_params = request.build_chat_params(
-            default_template=self._default_chat_template(),
-            chat_template_kwargs=self.saved_chat_template_kwargs,
+            default_template=resolved_template,
+            chat_template_kwargs=saved_chat_template_kwargs,
             default_template_content_format=self.chat_template_content_format,
         )
         chat_params = self._prepare_chat_params(chat_params)
@@ -546,10 +554,18 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
+
+        resolved_template = self._default_chat_template()
+        saved_chat_template_kwargs = (
+            self.saved_chat_template_kwargs
+            if self.saved_chat_template is not None
+            and resolved_template == self.saved_chat_template
+            else None
+        )
         chat_params = ctx.build_chat_params(
             ctx.pooling_params,
-            default_template=self._default_chat_template(),
-            chat_template_kwargs=self.saved_chat_template_kwargs,
+            default_template=resolved_template,
+            chat_template_kwargs=saved_chat_template_kwargs,
             default_template_content_format=self.chat_template_content_format,
         )
         chat_params = self._prepare_chat_params(chat_params)

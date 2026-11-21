@@ -254,7 +254,9 @@ def test_truncation_keeps_jinavl_score_token(
     processor = llm_reranker_processor
     processor.supports_score_template = True
     processor.model = JinaVLForSequenceClassification
-    processor.renderer = SimpleNamespace(process_for_engine=lambda prompt, _: prompt)
+    processor.renderer = SimpleNamespace(
+        process_for_engine=lambda prompt, _, **kw: prompt
+    )
 
     engine_input = processor.render(
         ScoringRenderParams(

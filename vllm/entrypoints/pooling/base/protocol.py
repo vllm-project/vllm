@@ -301,6 +301,19 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
     )
     # --8<-- [end:chat-extra-params]
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if data.get("continue_final_message") and data.get("add_generation_prompt"):
+            raise VLLMValidationError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True.",
+                parameter="add_generation_prompt",
+            )
+        return data
+
     @model_validator(mode="after")
     def set_default_add_special_tokens(self):
         # Unlike `CompletionRequestMixin` where `None` falls back to the
