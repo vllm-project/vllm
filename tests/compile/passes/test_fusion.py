@@ -48,7 +48,7 @@ from vllm.model_executor.kernels.linear import (
     XPUW8A8FP8LinearKernel,
     _KernelT,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -142,6 +142,7 @@ class TestModel(torch.nn.Module):
         dtype: torch.dtype,
         use_aiter_fusion: bool = False,
         use_aiter_quant: bool = False,
+        norm_cls: type[RMSNorm] | type[GemmaRMSNorm] = RMSNorm,
         *args,
         **kwargs,
     ):
@@ -150,7 +151,7 @@ class TestModel(torch.nn.Module):
         self.group_shape = group_shape
         self.use_aiter_quant_op = use_aiter_quant
         self.use_aiter_fusion = use_aiter_fusion
-        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
+        self.norm = [norm_cls(hidden_size, eps) for _ in range(4)]
         self.enable_rms_norm_custom_op = self.norm[0].enabled()
 
         # Determine if blockwise based on group_shape
@@ -443,6 +444,66 @@ def test_fusion_rmsnorm_quant(
         )
         backend.check_before_ops(
             model.ops_in_model_before_partial(), fully_replaced=False
+        )
+
+
+@pytest.mark.parametrize(
+    "kernel_groupshape",
+    [kg for kg in KERNEL_GROUPSHAPE_COMBINATIONS if kg[1].is_per_group()],
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_fusion_gemma_rmsnorm_block_quant(kernel_groupshape):
+    """GemmaRMSNorm's fp32 weight still fuses into rms_norm_per_block_quant."""
+    force_kernel, group_shape = kernel_groupshape
+    dtype, hidden_size, num_tokens = torch.bfloat16, 256, 257
+    if group_shape == GroupShape(1, 64) and (
+        cutlass_block_fp8_supported() or is_deep_gemm_supported()
+    ):
+        pytest.skip("Unsupported group shape 64 for CUTLASS/DeepGemm")
+    if (
+        force_kernel
+        in (
+            DeepGemmFp8BlockScaledMMKernel,
+            FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        )
+        and is_deep_gemm_e8m0_used()
+    ):
+        pytest.skip("rms+quant fusion does not yet match the packed UE8M0 path")
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+quant_fp8"],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        torch.set_default_device(current_platform.device_type)
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        model = TestModel(
+            hidden_size=hidden_size,
+            eps=1e-6,
+            force_kernel=force_kernel,
+            group_shape=group_shape,
+            dtype=dtype,
+            norm_cls=GemmaRMSNorm,
+        )
+        if any(
+            type(layer.kernel) is not force_kernel for layer in model.fp8_linear_layers
+        ):
+            pytest.skip(f"{force_kernel.__name__} is not supported on this platform")
+        for norm in model.norm:
+            norm.weight.data.normal_(mean=0.0, std=0.1)
+
+        _run_fusion_test(
+            model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
 
 
