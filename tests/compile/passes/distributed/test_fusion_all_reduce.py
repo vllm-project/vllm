@@ -40,9 +40,12 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+from vllm.model_executor.kernels.linear.mxfp4.base import MxFp4LinearLayerConfig
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
@@ -409,6 +412,89 @@ class TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model(
     ):
         super().__init__(hidden_size, token_num, eps, dtype)
         self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
+        for norm in self.norm:
+            norm.weight.requires_grad_(False)
+
+
+class TestAiterAllReduceRMSNormMxfp4GemmModel(torch.nn.Module):
+    """`all_reduce -> fused_add_rms_norm -> AiterMxfp4LinearKernel` sites for
+    the AITER MXFP4 GEMM patterns of `RocmAiterAllReduceFusionPass`:
+
+    * `norm[0]`: an ASM-layout MXFP4 linear plus a bf16 consumer of the same
+      norm (GDN `in_proj_ba` next to the MXFP4 `in_proj_qkvz`)
+      -> `AiterAllreduceFusedAddRMSNormMxfp4GemmPattern`
+    * `norm[1]`: the same linear with a fused input Hadamard rotation, which
+      the fused quant does not apply -> the AR+RMS-only pattern
+
+    N=3072, K=1536 has tuned ASM and preshuffled Triton FP4 GEMM configs, which
+    `use_asm_gemm` requires.
+    """
+
+    out_size = 3072
+
+    def __init__(
+        self,
+        hidden_size=1536,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        self.norm = [RMSNorm(hidden_size, eps) for _ in range(2)]
+        self.w = [torch.rand(hidden_size, hidden_size, dtype=dtype) for _ in range(2)]
+        self.bf16_w = torch.rand(hidden_size, 8, dtype=dtype)
+        self.linears = [
+            self._mxfp4_linear(hidden_size, hadamard) for hadamard in (False, True)
+        ]
+
+    def _mxfp4_linear(self, hidden_size: int, hadamard: bool):
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(
+            torch.randint(0, 256, (self.out_size, hidden_size // 2), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.weight_scale = torch.nn.Parameter(
+            torch.randint(
+                120, 124, (self.out_size, hidden_size // 32), dtype=torch.uint8
+            ),
+            requires_grad=False,
+        )
+        kernel = AiterMxfp4LinearKernel(MxFp4LinearLayerConfig(kMxfp4Dynamic))
+        kernel.process_weights_after_loading(layer)
+        assert kernel.use_asm_gemm
+        if hadamard:
+            assert kernel.fuse_input_hadamard(32)
+        return kernel, layer
+
+    def forward(self, hidden_states):
+        z = torch.relu(hidden_states)
+        x0 = tensor_model_parallel_all_reduce(torch.mm(z, self.w[0]))
+        rms0, resid0 = self.norm[0](x0, z.clone())
+        kernel0, layer0 = self.linears[0]
+        y0 = kernel0.apply_weights(layer0, rms0)
+        b0 = torch.mm(rms0, self.bf16_w)
+
+        x1 = tensor_model_parallel_all_reduce(torch.mm(z, self.w[1]))
+        rms1, resid1 = self.norm[1](x1, resid0)
+        kernel1, layer1 = self.linears[1]
+        y1 = kernel1.apply_weights(layer1, rms1)
+        return y0, y1, b0, resid1
+
+
+class TestAiterAllReduceGemmaRMSNormMxfp4GemmModel(
+    TestAiterAllReduceRMSNormMxfp4GemmModel
+):
+    """Gemma norms -> `AiterAllreduceFusedAddGemmaRMSNormMxfp4GemmPattern`."""
+
+    def __init__(
+        self,
+        hidden_size=1536,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(hidden_size, token_num, eps, dtype)
+        self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(2)]
         for norm in self.norm:
             norm.weight.requires_grad_(False)
 
@@ -891,4 +977,124 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         fused_quant_op, fused_indexer_op = model.ops_in_model_after()
         assert backend.op_count(fused_quant_op) == 2
         assert backend.op_count(fused_indexer_op) == 2
+        del all_reduce_fusion_pass
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize(
+    "test_model_cls",
+    [
+        TestAiterAllReduceRMSNormMxfp4GemmModel,
+        TestAiterAllReduceGemmaRMSNormMxfp4GemmModel,
+    ],
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm AITER AR+RMS+MXFP4 GEMM fusion is ROCm-only",
+)
+@pytest.mark.skipif(not IS_AITER_FOUND, reason="aiter is not found")
+def test_rocm_aiter_all_reduce_rmsnorm_mxfp4_gemm_fusion_pass_replace(
+    enable_rms_norm_custom_op: bool,
+    test_model_cls: type[torch.nn.Module],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The AITER MXFP4 GEMM patterns match the linear the way
+    `AiterMxfp4LinearKernel` calls it, win over the AR+RMS-only patterns, and
+    leave a linear with a fused input Hadamard rotation to those."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        if not rocm_aiter_ops.is_asm_fp4_gemm_supported():
+            pytest.skip("needs the AITER ASM FP4 GEMM (gfx950)")
+
+    num_processes = 2
+    torch.multiprocessing.spawn(
+        rocm_aiter_mxfp4_gemm_fusion_pass_on_test_model,
+        args=(
+            num_processes,
+            get_open_port(),
+            test_model_cls,
+            enable_rms_norm_custom_op,
+        ),
+        nprocs=num_processes,
+    )
+
+
+def rocm_aiter_mxfp4_gemm_fusion_pass_on_test_model(
+    local_rank: int,
+    world_size: int,
+    master_port: int,
+    test_model_cls: type[torch.nn.Module],
+    enable_rms_norm_custom_op: bool,
+):
+    set_random_seed(0)
+    dtype = torch.bfloat16
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
+        }
+    )
+    rocm_aiter_ops.refresh_env_variables()
+    init_distributed_environment()
+
+    custom_ops = ["+rms_norm"] if enable_rms_norm_custom_op else []
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=custom_ops
+        )
+    )
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_allreduce_rms=True, eliminate_noops=True
+    )
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
+    vllm_config.parallel_config.rank = local_rank
+    vllm_config.model_config = ModelConfig(
+        model="RedHatAI/Llama-3.2-1B-Instruct-FP8", dtype=dtype, seed=42
+    )
+    with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+        all_reduce_fusion_pass = RocmAiterAllReduceFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            all_reduce_fusion_pass,
+            FixFunctionalizationPass(vllm_config),
+            PostCleanupPass(vllm_config),
+        )
+
+        model = test_model_cls()
+        hidden_states = torch.randn((16, model.norm[0].weight.numel()))
+        compiled_model = torch.compile(model, backend=backend)
+        compiled_model(hidden_states)
+
+        results_unfused = model(hidden_states)
+        results_fused = compiled_model(hidden_states)
+        # MXFP4 rounding flips between the fused and the standalone quant.
+        for reference, actual in zip(results_unfused[:3], results_fused[:3]):
+            rel_l1 = (actual - reference).abs().mean() / reference.abs().mean()
+            assert rel_l1 < 0.05, f"{rel_l1=}"
+        torch.testing.assert_close(
+            results_unfused[3], results_fused[3], atol=1e-2, rtol=1e-2
+        )
+
+        assert all_reduce_fusion_pass.matched_count == 2
+        backend.check_before_ops(
+            [torch.ops.vllm.all_reduce.default], fully_replaced=True
+        )
+        assert (
+            backend.op_count(rocm_aiter_ops.get_fused_allreduce_rmsnorm_mxfp4_gemm_op())
+            == 1
+        )
+        assert backend.op_count(rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()) == 1
         del all_reduce_fusion_pass
