@@ -203,7 +203,7 @@ class MHCPreOp(CustomOp):
                 norm_eps,
             )
         else:
-            post_mix, comb_mix, layer_input = self.forward_native(
+            return self.forward_native(
                 residual,
                 fn,
                 hc_scale,
@@ -216,11 +216,6 @@ class MHCPreOp(CustomOp):
                 n_splits,
                 norm_weight,
                 norm_eps,
-            )
-            return (
-                post_mix,
-                comb_mix,
-                _apply_mhc_norm(layer_input, norm_weight, norm_eps),
             )
 
     def forward_native(
@@ -238,7 +233,7 @@ class MHCPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return mhc_kernels.mhc_pre_torch(
+        post_mix, comb_mix, layer_input = mhc_kernels.mhc_pre_torch(
             residual,
             fn,
             hc_scale,
@@ -248,6 +243,14 @@ class MHCPreOp(CustomOp):
             hc_sinkhorn_eps,
             hc_post_mult_value,
             sinkhorn_repeat,
+        )
+        # mhc_pre_torch returns the raw residual mix, but callers expect
+        # layer_input normalized, as the fused kernels return it. forward_oot
+        # and the HIP fallback both land here.
+        return (
+            post_mix,
+            comb_mix,
+            _apply_mhc_norm(layer_input, norm_weight, norm_eps),
         )
 
     def forward_xpu(
@@ -904,7 +907,7 @@ class MHCFusedPostPreOp(CustomOp):
                 norm_weight,
                 norm_eps,
             )
-        residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur = self.forward_native(
+        return self.forward_native(
             x,
             residual,
             post_layer_mix,
@@ -921,12 +924,6 @@ class MHCFusedPostPreOp(CustomOp):
             tile_n,
             norm_weight,
             norm_eps,
-        )
-        return (
-            residual_cur,
-            post_mix_cur,
-            comb_mix_cur,
-            _apply_mhc_norm(layer_input_cur, norm_weight, norm_eps),
         )
 
     def forward_native(
@@ -963,7 +960,13 @@ class MHCFusedPostPreOp(CustomOp):
             hc_post_mult_value,
             sinkhorn_repeat,
         )
-        return residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur
+        # Same normalization contract as MHCPreOp.forward_native above.
+        return (
+            residual_cur,
+            post_mix_cur,
+            comb_mix_cur,
+            _apply_mhc_norm(layer_input_cur, norm_weight, norm_eps),
+        )
 
     def forward_xpu(
         self,
