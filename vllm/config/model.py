@@ -486,6 +486,7 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
+            "model",
             "convert",
             "tokenizer",
             "tokenizer_mode",
