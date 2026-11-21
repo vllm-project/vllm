@@ -8,7 +8,7 @@ def is_ray_initialized():
         import ray
 
         return ray.is_initialized()
-    except ImportError:
+    except (ImportError, RuntimeError):
         return False
     except AttributeError:
         return False
@@ -23,7 +23,7 @@ def is_in_ray_actor():
             ray.is_initialized()
             and ray.get_runtime_context().get_actor_id() is not None
         )
-    except ImportError:
+    except (ImportError, RuntimeError):
         return False
     except AttributeError:
         return False
