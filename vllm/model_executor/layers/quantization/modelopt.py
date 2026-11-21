@@ -1120,38 +1120,70 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         ):
             set_weight_attrs(param, {"dummy_weight_value": value})
 
-    def _validate_loaded_expert_scales(self, layer: RoutedExperts) -> None:
-        """Reject ModelOpt NVFP4 MoE checkpoints with missing expert scales."""
-        names = ["w13_weight_scale_2", "w2_weight_scale_2"]
-        # Only backends that read the checkpoint's activation scales need them.
-        # FLASHINFER_B12X quantizes FC1 input itself and overwrites a2_gscale with
-        # 1.0; FLASHINFER_MOE_EP_CUTEDSL drops the input scales.
-        if not (
-            self.nvfp4_backend
+    def _reads_input_scales(self) -> bool:
+        """Whether the backend quantizes activations with the checkpoint's
+        input scales. Weight-only kernels do not, FLASHINFER_B12X quantizes the
+        FC1 input itself and sets a2_gscale to 1.0, FLASHINFER_MOE_EP_CUTEDSL
+        drops them, and per-token activation replaces them with 1.0."""
+        return not (
+            self.per_token_activation
+            or _use_a16(self.nvfp4_backend, self.use_a16)
+            or self.nvfp4_backend
             in (
                 NvFp4MoeBackend.HUMMING,
                 NvFp4MoeBackend.MARLIN,
                 NvFp4MoeBackend.FLASHINFER_B12X,
                 NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
             )
-            or (
-                self.nvfp4_backend == NvFp4MoeBackend.B12X
-                and _use_a16(self.nvfp4_backend, self.use_a16)
-            )
-        ):
-            names.extend(("w13_input_scale", "w2_input_scale"))
+        )
 
-        for name in names:
-            scale = getattr(layer, name)
-            per_expert = scale.detach().float().reshape(scale.shape[0], -1)
-            bad = ((per_expert == 0) | ~per_expert.isfinite()).any(dim=-1)
+    def _check_and_fill_expert_scales(self, layer: RoutedExperts) -> None:
+        """Reject missing weight scales; fill missing activation scales.
+
+        The scales start as NaN, so one the checkpoint does not provide stays
+        NaN. Calibration can leave an expert without an input scale (no tokens
+        were routed to it), so a missing or non-positive one takes the largest
+        calibrated value of the same tensor before any backend reduces the
+        scales or hands them to a kernel. Expert ids are the tensor's rows:
+        local ids, or global ids for input scales shared across EP ranks.
+        """
+        for name in ("w13_weight_scale_2", "w2_weight_scale_2"):
+            scale = getattr(layer, name).data
+            bad = ~scale.isfinite().reshape(scale.shape[0], -1).all(dim=-1)
             if bad.any():
-                bad_experts = bad.nonzero(as_tuple=True)[0].tolist()
                 raise ValueError(
-                    f"NVFP4 MoE checkpoint has incomplete ModelOpt calibration "
-                    f"or load for layer '{layer.layer_name}': '{name}' has zero "
-                    f"or non-finite values for expert ids {bad_experts}."
+                    f"ModelOpt NVFP4 MoE checkpoint is missing '{name}' in layer "
+                    f"'{layer.layer_name}' for expert ids "
+                    f"{bad.nonzero(as_tuple=True)[0].tolist()}."
                 )
+        if not self._reads_input_scales():
+            return
+        filled = []
+        for name in ("w13_input_scale", "w2_input_scale"):
+            scale = getattr(layer, name).data
+            bad = ~(scale.isfinite() & (scale > 0))
+            if not bad.any():
+                continue
+            if bad.all():
+                raise ValueError(
+                    f"ModelOpt NVFP4 MoE checkpoint has no calibrated '{name}' in "
+                    f"layer '{layer.layer_name}', which the "
+                    f"{self.nvfp4_backend.value} backend needs."
+                )
+            fill = scale[~bad].max()
+            experts = bad.reshape(scale.shape[0], -1).any(dim=-1)
+            scale[bad] = fill
+            filled.append(
+                f"'{name}' of expert ids "
+                f"{experts.nonzero(as_tuple=True)[0].tolist()} set to {fill.item():.6g}"
+            )
+        if filled:
+            logger.warning(
+                "ModelOpt NVFP4 MoE layer '%s' has experts without a calibrated "
+                "activation scale; using the layer's largest one: %s.",
+                layer.layer_name,
+                "; ".join(filled),
+            )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
@@ -1172,7 +1204,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_input_scale.data.fill_(1.0)
             layer.w2_input_scale.data.fill_(1.0)
 
-        self._validate_loaded_expert_scales(layer)
+        self._check_and_fill_expert_scales(layer)
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(

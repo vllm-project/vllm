@@ -1639,37 +1639,26 @@ def _patch_nvfp4_moe_conversion(moe):
     )
 
 
-@pytest.mark.parametrize(
-    ("backend_name", "quant_method", "force_a16", "missing", "rejected"),
-    [
-        ("FLASHINFER_CUTEDSL", "NVFP4", False, None, False),
-        *[
-            ("FLASHINFER_CUTEDSL", "NVFP4", False, n, True)
-            for n in NVFP4_MOE_SCALE_NAMES
-        ],
-        # W4A16 kernels and backends that compute their own activation scales
-        # never read the checkpoint's input scales.
-        *[
-            (backend, quant_method, force_a16, missing, missing == "w2_weight_scale_2")
-            for backend, quant_method, force_a16 in [
-                ("HUMMING", "NVFP4", False),
-                ("MARLIN", "NVFP4", False),
-                ("B12X", "W4A16_NVFP4", False),
-                ("B12X", "NVFP4", True),
-                ("FLASHINFER_B12X", "NVFP4", False),
-                ("FLASHINFER_MOE_EP_CUTEDSL", "NVFP4", False),
-            ]
-            for missing in ("w13_input_scale", "w2_weight_scale_2")
-        ],
-        ("B12X", "NVFP4", False, "w13_input_scale", True),
-    ],
-)
-def test_modelopt_nvfp4_moe_rejects_missing_expert_scales(
-    backend_name, quant_method, force_a16, missing, rejected, monkeypatch
-):
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-        NvFp4MoeBackend,
-    )
+# Backends that quantize activations with the checkpoint's input scales, and
+# those that do not (backend, checkpoint quant_method, VLLM_B12X_MOE_FP4_FORCE_A16).
+NVFP4_MOE_READS_INPUT_SCALES = [
+    ("FLASHINFER_CUTLASS", "NVFP4", False),
+    ("FLASHINFER_CUTEDSL", "NVFP4", False),
+    ("VLLM_CUTLASS", "NVFP4", False),
+    ("B12X", "NVFP4", False),
+]
+NVFP4_MOE_IGNORES_INPUT_SCALES = [
+    ("HUMMING", "NVFP4", False),
+    ("MARLIN", "NVFP4", False),
+    ("B12X", "W4A16_NVFP4", False),
+    ("B12X", "NVFP4", True),
+    ("FLASHINFER_B12X", "NVFP4", False),
+    ("FLASHINFER_MOE_EP_CUTEDSL", "NVFP4", False),
+]
+
+
+def _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.modelopt.envs."
@@ -1681,37 +1670,99 @@ def test_modelopt_nvfp4_moe_rejects_missing_expert_scales(
     )
     layer = _create_nvfp4_moe_layer(moe)
     _fill_nvfp4_moe_scales(layer)
-    if missing is not None:
-        getattr(layer, missing).data[2] = float("nan")
-
-    expected = (
-        pytest.raises(
-            ValueError, match=rf"layer 'test\.moe\.experts'.*'{missing}'.*\[2\]"
-        )
-        if rejected
-        else nullcontext()
-    )
-    convert, build = _patch_nvfp4_moe_conversion(moe)
-    with convert, build, expected:
-        moe.process_weights_after_loading(layer)
+    return moe, layer
 
 
-def test_modelopt_nvfp4_moe_process_validates_before_conversion():
-    moe = _make_nvfp4_moe()
-    layer = _create_nvfp4_moe_layer(moe)
-    _fill_nvfp4_moe_scales(layer)
-    layer.w2_weight_scale_2.data[2] = float("nan")
+@pytest.mark.parametrize(
+    ("backend_name", "quant_method", "force_a16"),
+    NVFP4_MOE_READS_INPUT_SCALES + NVFP4_MOE_IGNORES_INPUT_SCALES,
+)
+@pytest.mark.parametrize("missing", NVFP4_MOE_WEIGHT_SCALE_NAMES)
+def test_modelopt_nvfp4_moe_missing_weight_scale_fails(
+    backend_name, quant_method, force_a16, missing, monkeypatch
+):
+    moe, layer = _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16)
+    getattr(layer, missing).data[2] = float("nan")
 
     convert, build = _patch_nvfp4_moe_conversion(moe)
     with (
         convert as converter,
         build as build_kernel,
-        pytest.raises(ValueError, match=r"'w2_weight_scale_2'.*\[2\]"),
+        pytest.raises(
+            ValueError, match=rf"'{missing}' in layer 'test\.moe\.experts'.*\[2\]"
+        ),
     ):
         moe.process_weights_after_loading(layer)
-
     converter.assert_not_called()
     build_kernel.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "quant_method", "force_a16"), NVFP4_MOE_READS_INPUT_SCALES
+)
+def test_modelopt_nvfp4_moe_fills_missing_input_scales(
+    backend_name, quant_method, force_a16, monkeypatch, caplog_vllm
+):
+    moe, layer = _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16)
+    layer.w13_input_scale.data[:, 0] = torch.linspace(0.01, 0.08, 8)
+    layer.w13_input_scale.data[:, 1] = torch.linspace(0.01, 0.08, 8)
+    layer.w13_input_scale.data[2, 1] = float("nan")  # never loaded
+    layer.w13_input_scale.data[7] = float("nan")  # the largest expert
+    layer.w2_input_scale.data[5] = 0.0
+    layer.w2_input_scale.data[6] = 0.03
+
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with convert as converter, build:
+        moe.process_weights_after_loading(layer)
+
+    a13 = converter.call_args.kwargs["a13_scale"]
+    a2 = converter.call_args.kwargs["a2_scale"]
+    torch.testing.assert_close(a13[2], torch.tensor([0.03, 0.07]))
+    torch.testing.assert_close(a13[7], torch.tensor([0.07, 0.07]))
+    torch.testing.assert_close(a2[5], torch.tensor(0.03))
+    assert torch.all(a13.isfinite() & (a13 > 0)) and torch.all(a2 > 0)
+    warnings = [r.getMessage() for r in caplog_vllm.records if "calibrated" in r.msg]
+    assert len(warnings) == 1
+    assert "'test.moe.experts'" in warnings[0]
+    assert "'w13_input_scale' of expert ids [2, 7] set to 0.07" in warnings[0]
+    assert "'w2_input_scale' of expert ids [5] set to 0.03" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "quant_method", "force_a16"), NVFP4_MOE_READS_INPUT_SCALES
+)
+@pytest.mark.parametrize("missing", ["w13_input_scale", "w2_input_scale"])
+def test_modelopt_nvfp4_moe_no_calibrated_input_scale_fails(
+    backend_name, quant_method, force_a16, missing, monkeypatch
+):
+    moe, layer = _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16)
+    getattr(layer, missing).data.fill_(float("nan"))
+
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with (
+        convert as converter,
+        build,
+        pytest.raises(ValueError, match=rf"no calibrated '{missing}'.*{backend_name}"),
+    ):
+        moe.process_weights_after_loading(layer)
+    converter.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "quant_method", "force_a16"), NVFP4_MOE_IGNORES_INPUT_SCALES
+)
+def test_modelopt_nvfp4_moe_backends_without_input_scales_load(
+    backend_name, quant_method, force_a16, monkeypatch, caplog_vllm
+):
+    moe, layer = _make_backend_moe(monkeypatch, backend_name, quant_method, force_a16)
+    layer.w13_input_scale.data.fill_(float("nan"))
+    layer.w2_input_scale.data.fill_(float("nan"))
+
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with convert as converter, build:
+        moe.process_weights_after_loading(layer)
+    converter.assert_called_once()
+    assert not any("calibrated" in r.msg for r in caplog_vllm.records)
 
 
 @pytest.mark.parametrize("missing_weight", [None, *NVFP4_MOE_WEIGHT_SCALE_NAMES])
@@ -1736,6 +1787,30 @@ def test_modelopt_nvfp4_moe_per_token_fills_only_activation_scales(missing_weigh
     assert torch.all(layer.w2_input_scale == 1.0)
     assert converter.called == (missing_weight is None)
     assert build_kernel.called == (missing_weight is None)
+
+
+def test_muse_spark_nvfp4_moe_checks_expert_scales():
+    from vllm.models.muse_spark.nvidia.muse_moe_runner import (
+        MuseSparkModelOptNvFp4FusedMoE,
+    )
+
+    base = _make_nvfp4_moe()
+    layer = _create_nvfp4_moe_layer(base)
+    _fill_nvfp4_moe_scales(layer)
+    layer.w2_weight_scale_2.data[3] = float("nan")
+    # The subclass constructor needs a FLASHINFER_TRTLLM deployment; the scale
+    # check only reads the attributes the base constructor sets.
+    moe = MuseSparkModelOptNvFp4FusedMoE.__new__(MuseSparkModelOptNvFp4FusedMoE)
+    moe.__dict__.update(base.__dict__, use_route_major=False)
+    with (
+        patch(
+            "vllm.models.muse_spark.nvidia.muse_moe_runner."
+            "convert_to_nvfp4_moe_kernel_format"
+        ) as converter,
+        pytest.raises(ValueError, match=r"'w2_weight_scale_2'.*\[3\]"),
+    ):
+        moe.process_weights_after_loading(layer)
+    converter.assert_not_called()
 
 
 @pytest.mark.parametrize(
