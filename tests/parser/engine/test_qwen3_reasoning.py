@@ -491,6 +491,21 @@ class TestStreaming:
         assert reasoning == "reasoning"
         assert content == "content1 content2"
 
+    def test_streaming_strips_leading_newlines_after_think_end(self, parser):
+        """Leading newlines (e.g. from Qwen3 chat template) after <think>
+        are stripped from the first content delta."""
+        reasoning, content = simulate_reasoning_streaming(
+            parser,
+            ["reasoning", "</think>", "\n\nThe answer is 42."],
+            [
+                (1,),
+                (_THINK_END_ID,),
+                (2,),
+            ],
+        )
+        assert reasoning == "reasoning"
+        assert content == "The answer is 42."
+
     def test_streaming_content_after_tool_call(self, parser):
         """Content deltas after <tool_call> are routed as content."""
         reasoning, content = simulate_reasoning_streaming(
