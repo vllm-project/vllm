@@ -1038,6 +1038,7 @@ class SyncMPClient(MPClient):
                     frames = out_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
+                    outputs.unpack_after_transport()
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)
                     else:
@@ -1252,6 +1253,7 @@ class AsyncMPClient(MPClient):
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
+                    outputs.unpack_after_transport()
                     if outputs.utility_output:
                         if (
                             outputs.utility_output.call_id == EEP_NOTIFICATION_CALL_ID
