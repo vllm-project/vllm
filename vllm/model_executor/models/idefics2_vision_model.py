@@ -538,7 +538,7 @@ class Idefics2VisionTransformer(nn.Module):
         if not self.apply_encoder_attention_mask or flat_patch_mask is None:
             attention_mask = None
         else:
-            if use_varlen:
+            if use_varlen and not self.use_data_parallel:
                 varlen = self.get_varlen_metadata(flat_patch_mask)
                 attention_mask = None
             else:
@@ -579,6 +579,7 @@ class Idefics2VisionTransformer(nn.Module):
     def get_varlen_metadata(
         self, patch_mask: torch.Tensor
     ) -> Idefics2VarlenMetadata | None:
+        """Returns None if no token is padded."""
         with gpu_sync_allowed():
             patch_mask_cpu = patch_mask.cpu()
         if patch_mask_cpu.all():

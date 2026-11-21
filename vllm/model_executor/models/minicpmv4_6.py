@@ -1012,7 +1012,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         hidden_states: torch.Tensor,
         tgt_sizes: torch.Tensor,
         attention_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         B, _L, D = hidden_states.shape
         device = hidden_states.device
         dtype = hidden_states.dtype
@@ -1051,7 +1051,6 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
 
         # Build new attention mask after spatial downsampling
         new_attention_mask: torch.Tensor | None = None
-        mask: torch.Tensor | None = None
         if attention_mask is not None:
             mask = torch.zeros(
                 B,
@@ -1065,7 +1064,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
             new_attention_mask = (~mask).to(dtype=dtype) * min_val
             new_attention_mask = new_attention_mask[:, None, None, :]
 
-        return new_hidden, new_tgt_sizes, new_attention_mask, mask
+        return new_hidden, new_tgt_sizes, new_attention_mask
 
 
 class MiniCPMV4_6DownsampleMLP(nn.Module):
@@ -1318,7 +1317,7 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     def _run_vpm_layers(
         self,
-        layers: list[nn.Module],
+        layers: Iterable[nn.Module],
         hidden_states: torch.Tensor,
         varlen: Idefics2VarlenMetadata | None,
     ) -> torch.Tensor:
@@ -1374,14 +1373,6 @@ class MiniCPMV4_6ForConditionalGeneration(
             tgt_sizes=tgt_sizes,
         )
 
-        if torch.any(~patch_attn_mask):
-            mask_dtype = hidden_states.dtype
-            min_val = torch.finfo(mask_dtype).min
-            attention_mask = (~patch_attn_mask).to(dtype=mask_dtype) * min_val
-            attention_mask = attention_mask[:, None, None, :]
-        else:
-            attention_mask = None
-
         varlen = self.vpm.get_varlen_metadata(patch_attn_mask)
 
         # Encoder layers with mid-encoder merger injection
@@ -1397,13 +1388,18 @@ class MiniCPMV4_6ForConditionalGeneration(
         )
 
         if use_vit_merger:
-            hidden_states, tgt_sizes, attention_mask, patch_attn_mask = self.vit_merger(
+            hidden_states, tgt_sizes, _ = self.vit_merger(
                 hidden_states,
                 tgt_sizes,
-                attention_mask,
+                None,
             )
-            if patch_attn_mask is not None:
-                varlen = self.vpm.get_varlen_metadata(patch_attn_mask)
+            if varlen is not None:
+                merged_lens = tgt_sizes.prod(-1)
+                merged_mask = (
+                    torch.arange(hidden_states.size(1), device=device)
+                    < merged_lens[:, None]
+                )
+                varlen = self.vpm.get_varlen_metadata(merged_mask)
 
         hidden_states = self._run_vpm_layers(
             self.vpm.encoder.layers[insert_layer_id + 1 :],
