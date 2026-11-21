@@ -39,6 +39,18 @@ def _maybe_set_ucx_rcache_limit() -> None:
     os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
 
 
+def _maybe_set_rdma_auth_plugin() -> None:
+    plugin = os.environ.get("VLLM_RDMA_AUTH_PLUGIN")
+    if not plugin:
+        return
+
+    for var in ("IBV_AUTH_PLUGIN", "NIXL_AUTH_PLUGIN"):
+        if var not in os.environ:
+            os.environ[var] = plugin
+            logger.info_once("Set %s=%s from VLLM_RDMA_AUTH_PLUGIN", var,
+                             plugin)
+
+
 def _get_nixl_package_name() -> str:
     return "nixl_rocm" if current_platform.is_rocm() else "nixl"
 
@@ -60,6 +72,7 @@ def _load_nixl_attr(name: str) -> Any:
     }[name]
 
     _maybe_set_ucx_rcache_limit()
+    _maybe_set_rdma_auth_plugin()
     try:
         module = importlib.import_module(_get_nixl_module_name(name))
     except ImportError:
