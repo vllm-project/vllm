@@ -17,7 +17,7 @@ steps:
     concurrency_group: "vllm/rocm/base/rocm/$ROCM_CI_REPO/$BUILDKITE_PULL_REQUEST/$BUILDKITE_BRANCH"
     retry:
       automatic:
-        - exit_status: 75  # Registry error (build.sh)
+        - exit_status: 75  # Registry error or infrastructure fault (build.sh)
           limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
@@ -38,6 +38,8 @@ steps:
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
+        - exit_status: 75  # Registry error or infrastructure fault (build.sh)
           limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1

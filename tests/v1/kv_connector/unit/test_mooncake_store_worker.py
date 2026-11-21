@@ -490,7 +490,7 @@ def _make_hybrid_gdn_kv_cache_config(
         shapes=(conv_shape, (local_factor, 2, 2)),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     return KVCacheConfig(
         num_blocks=10,
@@ -532,7 +532,7 @@ def _make_qsa_hybrid_kv_cache_config():
                     block_size=800,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                 ),
             ),
         ],
@@ -1199,8 +1199,6 @@ def _make_partial_tail_send_thread(
         lcm_block_size=16,
         mamba_group_ids={1},
         num_hash_lookahead_tokens=0,
-        use_eagle=False,
-        eagle_proof_margin_by_group={},
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -1240,22 +1238,19 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
     )
 
 
-@pytest.mark.parametrize("use_eagle", [False, True])
-def test_partial_tail_ignores_handoff_off_prompt_boundary(use_eagle):
+def test_partial_tail_ignores_handoff_off_prompt_boundary():
     """A Mamba hand-off away from the prompt checkpoint (a shared-prefix
     junction) gets no attention tail; only its own Mamba put remains."""
     store = MagicMock()
     thread = _make_partial_tail_send_thread(store)
-    thread.coord.use_eagle = use_eagle
-    thread.coord.eagle_proof_margin_by_group = {0: 4} if use_eagle else {}
+    thread.coord.num_hash_lookahead_tokens = 1
     req = _make_partial_tail_req([1, 2, 3])
-    req.num_prompt_tokens = 17 if use_eagle else 13
     req.boundary_puts = [(1, 7, 8)]
 
     assert _resolve_partial_tail(thread, req).boundary_puts == [(1, 7, 8)]
 
 
-def test_eagle_attention_proof_published_after_checkpoint_handoff():
+def test_attention_tail_published_only_after_kv_completes():
     store = MagicMock()
     stored = set()
     store.batch_is_exist.side_effect = lambda keys: [int(k in stored) for k in keys]
@@ -1266,8 +1261,7 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
 
     store.batch_put_from_multi_buffers.side_effect = put
     thread = _make_partial_tail_send_thread(store)
-    thread.coord.use_eagle = True
-    thread.coord.eagle_proof_margin_by_group = {0: 4}
+    thread.coord.num_hash_lookahead_tokens = 1
     metadata = _make_partial_tail_req([1, 2, 3])
     metadata.num_prompt_tokens = 13
     metadata.completed_token_len = 8
@@ -1450,7 +1444,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
@@ -1588,7 +1582,7 @@ def test_normal_save_excludes_mamba_group_and_null_blocks():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
@@ -1660,8 +1654,7 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
 
 
 @pytest.mark.parametrize("saved_tokens", [0, 32])
-@pytest.mark.parametrize("use_eagle", [False, True])
-def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
+def test_mixed_snapshot_and_sub_block_offloads(saved_tokens):
     """A retention snapshot and the prompt-end sub-block CoW tail can arrive
     in one hand-off; the sub-block path covers FA gap blocks but reads the
     mamba boundary only from the CoW block, never positionally."""
@@ -1669,8 +1662,7 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_partial_tail_send_thread(store)
-    thread.coord.use_eagle = use_eagle
-    thread.coord.eagle_proof_margin_by_group = {0: 4} if use_eagle else {}
+    thread.coord.num_hash_lookahead_tokens = 1
     thread._saved_offset["req-a"] = saved_tokens
 
     hs = [bytes([i + 1]) * 4 for i in range(12)]
@@ -1681,19 +1673,19 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
         block_hashes=hs,
         can_save=True,
         boundary_puts=[(1, 9, 32), (1, 7, 44)],
-        num_prompt_tokens=49 if use_eagle else 45,
-        completed_token_len=49 if use_eagle else 45,
+        num_prompt_tokens=45,
+        completed_token_len=45,
     )
     assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     db_full, db_mamba = thread.token_databases
-    proof_end = 48 if use_eagle else 44
+    checkpoint = 44
     assert keys == [
         # The tail reads only the LCM gap, even when normal saves lag.
         *[
             db_full.store_layout.key_for(0, BlockHash(hs[i]))
-            for i in range(8, proof_end // 4)
+            for i in range(8, checkpoint // 4)
         ],
         # Aligned snapshot: boundary 32 from the handed-off block 9.
         db_mamba.store_layout.key_for(0, BlockHash(hs[7])),
@@ -1701,7 +1693,7 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
         db_mamba.store_layout.key_for(0, BlockHash(hs[10])),
     ]
     assert addrs == [
-        *[[0x1000 + (i + 1) * 256] for i in range(8, proof_end // 4)],
+        *[[0x1000 + (i + 1) * 256] for i in range(8, checkpoint // 4)],
         [0x2000 + 9 * 256],
         [0x2000 + 7 * 256],
     ]
@@ -1722,8 +1714,6 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         lcm_block_size=16,
         mamba_group_ids={1},
         num_hash_lookahead_tokens=0,
-        use_eagle=False,
-        eagle_proof_margin_by_group={},
     )
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16, hash_block_size=4
@@ -1780,9 +1770,7 @@ def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
-        num_hash_lookahead_tokens=0,
-        use_eagle=True,
-        eagle_proof_margin_by_group={0: 4},
+        num_hash_lookahead_tokens=1,
     )
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=4, hash_block_size=4
@@ -4251,7 +4239,7 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
         block_size=8,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
@@ -4890,11 +4878,10 @@ def _make_bare_worker(
     return worker
 
 
-@pytest.mark.parametrize("use_eagle", [False, True])
 @pytest.mark.parametrize("prefix_match_unit", [None, 8])
 @pytest.mark.parametrize("dcp_world_size,mamba_block_size", [(1, 32), (8, 16)])
 def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
-    use_eagle, prefix_match_unit, dcp_world_size, mamba_block_size
+    prefix_match_unit, dcp_world_size, mamba_block_size
 ):
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
         coordinator as mooncake_coordinator,
@@ -4909,7 +4896,6 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
             AttentionSpec(
                 block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
-            is_eagle_group=use_eagle,
         ),
         make_kv_cache_group(
             ["mamba"],
@@ -4917,7 +4903,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
                 block_size=mamba_block_size,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
@@ -4991,7 +4977,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
                 block_size=32,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
@@ -5109,7 +5095,7 @@ def test_lookup_key_prefixes_expand_tp_sharded_groups_per_rank():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["l0"], fa),
@@ -5149,7 +5135,7 @@ def test_group_tp_replication_factors_mixed_mla_gqa_mamba():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["l0"], mla),
@@ -5320,7 +5306,7 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["l0"], fa),
@@ -5371,7 +5357,7 @@ def test_lookup_requires_all_attention_chunks_in_page(
                 block_size=mamba_block_size,
                 shapes=((1, 1),),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
@@ -5437,7 +5423,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["full"], full),
@@ -5473,27 +5459,6 @@ def test_lookup_full_hit_reuses_existing_boundary():
         hit_length=16,
         tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=16),),
     )
-    assert worker.store.batch_is_exist.call_count == 1
-
-
-def test_lookup_full_hit_with_eagle_pops_once_not_twice():
-    """Eagle already leaves the last block for the drafter, so a
-    full-prompt re-derivation must never fire for eagle-governed hits:
-    firing would anchor the search one block lower and pop a second
-    block, regressing the hit by an extra producer boundary."""
-    worker = _make_bare_worker(block_size=16)
-    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        worker._kv_cache_groups,
-        scheduler_block_size=16,
-        hash_block_size=16,
-        use_eagle=True,
-    )
-    worker.store.batch_is_exist.return_value = [1, 1, 1, 1]
-
-    # 64-token exact-multiple prompt, all 4 blocks stored: one eagle pop
-    # gives 48; a spurious re-derivation (anchored at 48) would pop again
-    # and return 32.
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 48
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -5545,7 +5510,7 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["full"], full),
@@ -5564,7 +5529,6 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
         worker._kv_cache_groups,
         scheduler_block_size=16,
         hash_block_size=4,
-        use_eagle=True,
         enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
@@ -5593,13 +5557,11 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
 
     result = worker.lookup(25, hashes)
 
-    # The eagle drop trims the hit to 20 tokens, but the block that survives
-    # truncation is the one keyed at the 24-token boundary (hashes[5]), which
-    # the load path cannot derive from hit_length.
-    assert result.hit_length == 20
+    # Both groups load the exact key at the proven 24-token boundary.
+    assert result.hit_length == 24
     assert result.tail_key_boundaries == (
         TailKeyBoundary(group_id=0, num_tokens=24),
-        TailKeyBoundary(group_id=1, num_tokens=20),
+        TailKeyBoundary(group_id=1, num_tokens=24),
     )
 
 
@@ -5614,7 +5576,7 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["full"], full),

@@ -109,8 +109,6 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.model_config.get_total_num_kv_heads.return_value = 8
     cfg.model_config.max_model_len = 4096
     cfg.scheduler_config.max_num_batched_tokens = 8192
-    # Without this, MagicMock's truthy use_eagle() triggers the coordinator's
-    # "use_eagle && nothing annotated → flag all groups" fallback.
     cfg.speculative_config = None
     cfg.num_hash_lookahead_tokens = 0
     return cfg
@@ -336,7 +334,7 @@ def test_hybrid_mamba_values_hold_only_group_states():
         shapes=((4, 8), (2, 8)),
         dtypes=(torch.float32, torch.float16),
         page_size_padded=page,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     assert mamba.spec.state_content_size_bytes == 160 < page
     num_layers, num_blocks = 3, 4
@@ -414,7 +412,7 @@ _MAMBA = mamba_layer(
     shapes=((4, 8), (2, 8)),
     dtypes=(torch.float32, torch.float16),
     page_size_padded=_ATTN.page_size_bytes,
-    mamba_cache_mode="align",
+    enable_prefix_caching=True,
 )
 # Model shapes as KV cache groups: each group is (layer names, spec).
 _MODELS = {
@@ -879,7 +877,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     groups = [
         make_kv_cache_group(["L0"], full),
@@ -965,7 +963,7 @@ def test_offload_syncs_event_before_put():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     groups = [
         make_kv_cache_group(["L0"], full),
@@ -1036,14 +1034,14 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     offload must persist every FA block up to the boundary — the normal save
     floors to the lcm, so those blocks are otherwise never written and the
     consumer's per-group lookup would miss. The mamba boundary block still
-    reads the core-provided CoW target. Without EAGLE, the 12-token prompt's
-    resend-safe checkpoint is 8, leaving two attention blocks to save."""
+    reads the core-provided CoW target. The 12-token prompt's resend-safe
+    checkpoint is 8, leaving two attention blocks to save."""
     full = AttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     groups = [
         make_kv_cache_group(["L0"], full),
@@ -1133,7 +1131,7 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     cfg = KVCacheConfig(
         num_blocks=4,
@@ -1225,7 +1223,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     # Scratch block 4 is not divisible by the hash unit 8 below.
     scratch = circular_buffer_layer(
@@ -1452,7 +1450,7 @@ def _full_plus_mamba_worker(store, *, partial_hash_hits=False):
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     cfg = KVCacheConfig(
         num_blocks=8,
