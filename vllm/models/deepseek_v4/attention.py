@@ -349,6 +349,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
+            packed_block_stride_alignment=576,
         )
 
         # Register with compilation context for metadata lookup.
@@ -833,6 +834,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             tokens_per_state=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+            block_stride_alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
@@ -880,6 +882,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             tokens_per_state=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+            block_stride_alignment=576 if uses_fp8_ds_mla_layout else None,
         )
         return FullAttentionManager.layer_config(spec)
 
