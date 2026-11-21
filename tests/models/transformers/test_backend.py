@@ -123,6 +123,7 @@ def check_implementation(
 @pytest.mark.parametrize(
     "model,model_impl,num_fused,trust_remote_code",
     [
+        ("baidu/ERNIE-4.5-0.3B-PT", "auto", None, False),
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers", None, False),
         ("vllm-project/Ilama-3.2-1B", "auto", None, True),
         ("allenai/OLMoE-1B-7B-0924", "transformers", {"QKVFuser": 1}, False),  # MoE
