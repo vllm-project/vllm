@@ -364,7 +364,9 @@ def render_message(
                 tc_block_name=tool_calls_block_name,
             )
 
-        summary_content = content or ""
+        # When tool_calls are present, suppress content so history replay does not
+        # inject pre-tool prose into the prompt context.
+        summary_content = "" if tool_calls else (content or "")
         reasoning = reasoning or ""
 
         # Check if previous message has a task - if so, this is a task output (no thinking)
