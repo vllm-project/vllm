@@ -251,7 +251,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch)
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
             kv_cache_layout=KVCacheLayout.BLNHC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
         ),
@@ -1569,7 +1569,7 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
         _grouping_config(),
         {
             "model.full_attn": full_layer(full_spec),
-            "model.mamba": mamba_layer(mamba_spec, mamba_cache_mode="align"),
+            "model.mamba": mamba_layer(mamba_spec, enable_prefix_caching=True),
             "cache_only_layers.0": full_layer(hidden_spec),
         },
     )
@@ -1864,6 +1864,8 @@ def test_auto_fit_max_model_len_with_hybrid():
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    # Without prefix caching a Mamba layer holds 1 + gamma blocks.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -2266,8 +2268,6 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         draft_model_config=SimpleNamespace(
             hf_config=SimpleNamespace(), architectures=[]
         ),
-        use_eagle=lambda: True,
-        use_dflash=lambda: method == "dflash",
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,

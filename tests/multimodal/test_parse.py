@@ -143,6 +143,34 @@ def test_parse_image_preserves_positive_stride_numpy_array():
     assert items.get(0) is view
 
 
+@pytest.mark.parametrize("axis", [0, 1, 2, 3])
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_parse_video_normalizes_negative_strides(axis, with_metadata):
+    """Flipped NumPy videos are contiguous before reaching HF processors."""
+    video = np.arange(2 * H * W * 3, dtype=np.uint8).reshape(2, H, W, 3)
+    flipped = np.flip(video, axis=axis)
+    data = (flipped, {"fps": 1.0}) if with_metadata else flipped
+
+    items = MultiModalDataParser().parse_mm_data({"video": data})["video"]
+    parsed = items.get(0)
+
+    assert all(stride >= 0 for stride in parsed.strides)
+    assert parsed.flags.c_contiguous
+    np.testing.assert_array_equal(parsed, flipped)
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_video_preserves_positive_stride_numpy_array():
+    """Positive-stride arrays remain zero-copy through video parsing."""
+    video = np.zeros((2, H, W, 3), dtype=np.uint8)
+    view = video[:, :, ::2]
+
+    items = MultiModalDataParser().parse_mm_data({"video": view})["video"]
+
+    assert items.get(0) is view
+
+
 @pytest.mark.parametrize(
     "frame",
     [

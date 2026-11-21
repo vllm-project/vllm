@@ -260,7 +260,6 @@ class HYV4VLForConditionalGeneration(
         video_grids = [grid.tolist() for grid in data.get("video_grid_thw", [])]
         config = self.config
         vision = config.vision_config
-        extra = int(bool(vision.cat_extra_token))
         starts = torch.where(tokens == config.image_start_token_id)[0].tolist()
         ends = torch.where(tokens == config.image_end_token_id)[0].tolist()
         if len(starts) != len(ends):
@@ -270,7 +269,6 @@ class HYV4VLForConditionalGeneration(
         inside_video = False
         while mm_index < len(starts):
             marker = starts[mm_index]
-            pos = marker + 1 + extra
             while scan < marker:
                 if input_tokens[scan] == config.video_start_token_id:
                     inside_video = True
@@ -281,11 +279,6 @@ class HYV4VLForConditionalGeneration(
                 image_index + 1 >= len(image_grids)
                 and video_index + 1 < len(video_grids)
             )
-            if start_pos < pos:
-                positions[:, start_pos:pos] = (
-                    torch.arange(pos - start_pos) + start_index
-                )
-                start_index += pos - start_pos
             if is_video:
                 video_index += 1
                 if video_index >= len(video_grids):
@@ -302,6 +295,13 @@ class HYV4VLForConditionalGeneration(
                 )
             if mm_index + frames > len(starts) or mm_index + frames > len(ends):
                 raise ValueError("Missing HYV4 image/frame boundary tokens")
+            extra = int(bool(vision.cat_extra_token))
+            pos = marker + 1 + extra
+            if start_pos < pos:
+                positions[:, start_pos:pos] = (
+                    torch.arange(pos - start_pos) + start_index
+                )
+                start_index += pos - start_pos
             count = rows * cols
             for frame in range(frames):
                 begin = starts[mm_index + frame] + 1 + extra
