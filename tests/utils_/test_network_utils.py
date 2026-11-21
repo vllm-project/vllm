@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import socket
 import threading
 
@@ -11,6 +12,7 @@ from vllm.utils.network_utils import (
     get_file_store_init_method,
     get_open_port,
     get_open_ports_list,
+    get_open_zmq_ipc_path,
     get_tcp_uri,
     join_host_port,
     make_zmq_listener,
@@ -255,6 +257,22 @@ def test_make_zmq_listener_failed_ipc_bind_keeps_existing_path(tmp_path):
 def test_make_zmq_path():
     assert make_zmq_path("tcp", "127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
     assert make_zmq_path("tcp", "::1", 5555) == "tcp://[::1]:5555"
+
+
+def test_get_open_zmq_ipc_path_falls_back_from_long_base(monkeypatch, tmp_path):
+    long_base = tmp_path / ("d" * 120)
+    long_base.mkdir()
+    monkeypatch.setenv("VLLM_RPC_BASE_PATH", str(long_base))
+    path = get_open_zmq_ipc_path()
+    socket_dir = os.path.dirname(path.removeprefix("ipc://"))
+    assert socket_dir.startswith("/tmp/")
+    assert os.stat(socket_dir).st_mode & 0o777 == 0o700
+
+    sock = zmq.Context.instance().socket(zmq.PAIR)
+    try:
+        sock.bind(path)
+    finally:
+        sock.close(linger=0)
 
 
 def test_get_tcp_uri():
