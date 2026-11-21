@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             port,
         },
         grpc_listener_mode: None,
+        grpc_shm_directory: None,
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
         tool_strict_level: None,

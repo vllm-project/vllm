@@ -440,6 +440,25 @@ async fn setup_grpc_service_with_engine_script<F>(
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    setup_grpc_service_with_shm(engine_id, ready, backend, engine_shutdown, None, script).await
+}
+
+async fn setup_grpc_service_with_shm<F>(
+    engine_id: impl Into<EngineId>,
+    ready: EngineCoreReadyResponse,
+    backend: Arc<dyn ChatTextBackend>,
+    engine_shutdown: Option<tokio_util::sync::CancellationToken>,
+    shm_directory: Option<&std::path::Path>,
+    script: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    EngineHealth,
+    MockEngineTask,
+)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -466,8 +485,12 @@ where
 
     let chat = ChatLlm::from_shared_backend(llm, backend).with_served_model_name("test-model");
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
+    let mut inference = InferenceServiceImpl::new(state.clone());
+    if let Some(directory) = shm_directory {
+        inference = inference.with_shared_memory_directory(directory).expect("open SHM directory");
+    }
     (
-        InferenceServer::new(InferenceServiceImpl::new(state.clone()))
+        InferenceServer::new(inference)
             .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
         ControlServer::new(ControlServiceImpl::new(state).with_engine_shutdown(engine_shutdown)),
         engine_health,
@@ -1109,6 +1132,7 @@ async fn generate_forwards_preprocessed_multimodal_features() {
                         length: 2,
                         mm_hash: Some("image-hash-a".to_string()),
                         is_embed: vec![true, false],
+                        kwargs_shm: None,
                     },
                 )),
                 mime_type: String::new(),
@@ -1130,6 +1154,230 @@ async fn generate_forwards_preprocessed_multimodal_features() {
 
         engine_task.await.expect("mock engine task");
         server_task.abort();
+    }
+}
+
+/// SHM bypasses protobuf's inline limit, but the engine receives owned tensors
+/// identical to inline inputs, even after the producer removes the source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_copies_shm_kwargs_before_engine_submission() {
+    use sha2::{Digest as _, Sha256};
+
+    for stream in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pixels");
+        let kwargs = BTreeMap::from([(
+            "pixel_values".to_string(),
+            MmFieldElem {
+                data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+                    TensorDtype::U8,
+                    vec![17 * 1024 * 1024],
+                    vec![7; 17 * 1024 * 1024],
+                ))),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+            },
+        )]);
+        let encoded = crate::mm_wire::encode_kwargs(&kwargs).unwrap();
+        let input = pb::SharedMemoryInput {
+            name: "pixels".into(),
+            offset: 3,
+            length: encoded.len() as u64,
+            sha256: Sha256::digest(&encoded).to_vec(),
+        };
+        let mut file = b"pad".to_vec();
+        file.extend_from_slice(&encoded);
+        fs::write(&path, file).unwrap();
+        let (inference, control, health, engine) = setup_grpc_service_with_shm(
+            b"engine-grpc-shm",
+            default_ready_response(),
+            multimodal_backend(),
+            None,
+            Some(directory.path()),
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    // Once submitted, no downstream reader needs the producer file.
+                    fs::remove_file(path).unwrap();
+                    let request = decode_add_request(&add);
+                    let features = request.mm_features.as_ref().unwrap();
+                    assert_eq!(features[0].data.as_ref(), Some(&kwargs));
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            default_stream_output_specs(),
+                        ),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+        let (channel, server) = start_grpc_test_server(
+            inference,
+            control,
+            health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+        let mut media = preprocessed_grpc_media(pb::Modality::Image, "image", 1, 2);
+        let Some(pb::media_item::Source::Features(features)) = &mut media.source else {
+            unreachable!()
+        };
+        features.kwargs = None;
+        features.kwargs_shm = Some(input);
+        let request = preprocessed_grpc_request(vec![media]);
+        if stream {
+            let mut output = client.generate_stream(request).await.unwrap().into_inner();
+            let mut messages = 0;
+            while output.message().await.unwrap().is_some() {
+                messages += 1;
+            }
+            assert!(messages > 0);
+        } else {
+            assert!(client.generate(request).await.unwrap().into_inner().outputs.is_some());
+        }
+        engine.await.unwrap();
+        server.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_invalid_shm_before_engine_submission() {
+    use sha2::{Digest as _, Sha256};
+
+    for enabled in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let media = preprocessed_grpc_media(pb::Modality::Image, "image", 1, 2);
+        let Some(pb::media_item::Source::Features(features)) = media.source else {
+            unreachable!()
+        };
+        let encoded = features.kwargs.unwrap();
+        fs::write(directory.path().join("data"), &encoded).unwrap();
+        fs::write(directory.path().join("malformed"), b"payload").unwrap();
+        std::os::unix::fs::symlink("data", directory.path().join("link")).unwrap();
+        fs::create_dir(directory.path().join("folder")).unwrap();
+        let (inference, control, health, engine) = setup_grpc_service_with_shm(
+            b"engine-grpc-invalid-shm",
+            default_ready_response(),
+            multimodal_backend(),
+            None,
+            enabled.then_some(directory.path()),
+            |dealer, _| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    panic!("invalid SHM must not reach engine: {add:?}");
+                })
+            },
+        )
+        .await;
+        let (channel, server) = start_grpc_test_server(
+            inference,
+            control,
+            health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+        let input = pb::SharedMemoryInput {
+            name: "data".into(),
+            offset: 0,
+            length: encoded.len() as u64,
+            sha256: Sha256::digest(&encoded).to_vec(),
+        };
+        let mut cases = vec![];
+        for name in ["../data", "/data", "link", "folder", "missing"] {
+            cases.push(pb::SharedMemoryInput {
+                name: name.into(),
+                ..input.clone()
+            });
+        }
+        cases.extend([
+            pb::SharedMemoryInput {
+                name: "malformed".into(),
+                offset: 0,
+                length: 7,
+                sha256: Sha256::digest(b"payload").to_vec(),
+            },
+            pb::SharedMemoryInput {
+                offset: u64::MAX,
+                ..input.clone()
+            },
+            pb::SharedMemoryInput {
+                length: input.length + 1,
+                ..input.clone()
+            },
+            pb::SharedMemoryInput {
+                length: 256 * 1024 * 1024 + 1,
+                ..input.clone()
+            },
+            pb::SharedMemoryInput {
+                sha256: vec![0; 32],
+                ..input.clone()
+            },
+            pb::SharedMemoryInput {
+                sha256: vec![],
+                ..input.clone()
+            },
+        ]);
+        for input in cases {
+            let mut media = preprocessed_grpc_media(pb::Modality::Image, "image", 1, 2);
+            let Some(pb::media_item::Source::Features(features)) = &mut media.source else {
+                unreachable!()
+            };
+            features.kwargs = None;
+            features.kwargs_shm = Some(input);
+            let request = preprocessed_grpc_request(vec![media]);
+            for stream in [false, true] {
+                let status = if stream {
+                    client.generate_stream(request.clone()).await.unwrap_err()
+                } else {
+                    client.generate(request.clone()).await.unwrap_err()
+                };
+                if !enabled {
+                    assert!(matches!(
+                        status.code(),
+                        tonic::Code::FailedPrecondition | tonic::Code::ResourceExhausted
+                    ));
+                } else {
+                    assert!(matches!(
+                        status.code(),
+                        tonic::Code::InvalidArgument | tonic::Code::ResourceExhausted
+                    ));
+                }
+            }
+        }
+        let mut conflicting = preprocessed_grpc_media(pb::Modality::Image, "image", 1, 2);
+        let Some(pb::media_item::Source::Features(features)) = &mut conflicting.source else {
+            unreachable!()
+        };
+        features.kwargs_shm = Some(input.clone());
+        let error =
+            client.generate(preprocessed_grpc_request(vec![conflicting])).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+        let mut oversized = preprocessed_grpc_media(pb::Modality::Image, "image", 1, 2);
+        let Some(pb::media_item::Source::Features(features)) = &mut oversized.source else {
+            unreachable!()
+        };
+        features.kwargs = None;
+        features.kwargs_shm = Some(pb::SharedMemoryInput {
+            length: 129 * 1024 * 1024,
+            ..input
+        });
+        let error = client
+            .generate(preprocessed_grpc_request(vec![
+                oversized.clone(),
+                oversized,
+            ]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        server.abort();
+        drop(engine);
     }
 }
 
@@ -1160,6 +1408,7 @@ fn preprocessed_grpc_media(
                 length,
                 mm_hash: Some(identifier.to_string()),
                 is_embed: Vec::new(),
+                kwargs_shm: None,
             },
         )),
         mime_type: String::new(),
@@ -3522,7 +3771,7 @@ async fn render_chat_returns_preprocessed_media_for_generate() {
     assert!(features.mm_hash.is_some());
 
     // The media decodes the way Inference.Generate decodes it.
-    let decoded = super::media::from_proto(rendered.media, None).expect("decode media");
+    let decoded = super::media::from_proto(rendered.media, None, 0).expect("decode media");
     assert!(
         !decoded.preprocessed.is_empty(),
         "expected preprocessed media"

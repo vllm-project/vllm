@@ -26,6 +26,7 @@ const MAX_INLINE_MM_BYTES: usize = 16 * 1024 * 1024;
 pub(super) fn from_proto(
     media: Vec<pb::MediaItem>,
     media_io_kwargs: Option<&prost_types::Struct>,
+    shared_bytes: usize,
 ) -> Result<MultimodalInput, Status> {
     let video_fps = video_fps(media_io_kwargs)?;
     if !media
@@ -46,7 +47,7 @@ pub(super) fn from_proto(
         };
         encoded_bytes = encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
     }
-    check_inline_kwargs_size(encoded_bytes)?;
+    check_inline_kwargs_size(encoded_bytes.saturating_sub(shared_bytes))?;
     let features = media
         .into_iter()
         .enumerate()
@@ -171,6 +172,7 @@ pub(super) fn feature_to_proto(
                 length: feature.mm_position.length as u64,
                 mm_hash: feature.mm_hash,
                 is_embed,
+                kwargs_shm: None,
             },
         )),
         ..Default::default()
@@ -335,7 +337,7 @@ mod tests {
         };
         for media in [vec![raw.clone(), preprocessed()], vec![preprocessed(), raw]] {
             assert_eq!(
-                from_proto(media, None).unwrap_err().code(),
+                from_proto(media, None, 0).unwrap_err().code(),
                 tonic::Code::InvalidArgument
             );
         }
@@ -355,7 +357,7 @@ mod tests {
             "https://example.com/clip.mp4".to_owned(),
         ));
         let kwargs = json_to_proto_struct(&serde_json::json!({"video": {"fps": 1}}));
-        let parts = from_proto(vec![url], kwargs.as_ref()).unwrap().raw;
+        let parts = from_proto(vec![url], kwargs.as_ref(), 0).unwrap().raw;
         expect_test::expect![[r#"
             [
                 VideoUrl {
@@ -392,7 +394,7 @@ mod tests {
             .into_iter()
             .map(|(item, kwargs)| {
                 let kwargs = json_to_proto_struct(&kwargs);
-                let error = from_proto(vec![item], kwargs.as_ref()).unwrap_err();
+                let error = from_proto(vec![item], kwargs.as_ref(), 0).unwrap_err();
                 assert_eq!(error.code(), tonic::Code::InvalidArgument);
                 error.message().to_owned()
             })
@@ -425,7 +427,7 @@ mod tests {
         };
         feature.is_embed = vec![true, false];
         for media in [missing_modality, missing_kwargs, invalid_mask] {
-            let error = from_proto(vec![media], None).unwrap_err();
+            let error = from_proto(vec![media], None, 0).unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(error.message().starts_with("media[0]:"));
         }
@@ -438,7 +440,7 @@ mod tests {
             unreachable!()
         };
         feature.kwargs = Some(vec![0; MAX_INLINE_MM_BYTES / 2 + 1]);
-        let error = from_proto(vec![item.clone(), item], None).unwrap_err();
+        let error = from_proto(vec![item.clone(), item], None, 0).unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     }
 

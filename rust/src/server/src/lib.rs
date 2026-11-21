@@ -289,9 +289,14 @@ where
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
         )
         .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-        let inference_service =
-            grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let mut inference = grpc::InferenceServiceImpl::new(state.clone());
+        if let Some(directory) = &config.grpc_shm_directory {
+            inference = inference
+                .with_shared_memory_directory(directory)
+                .context("failed to open gRPC SHM directory")?;
+        }
+        let inference_service = grpc::InferenceGrpcService::new(inference)
+            .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let render_service =
             grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);

@@ -1,5 +1,8 @@
 # Online Serving
 
+For local preprocessed multimodal inputs to the native Rust gRPC API, see
+[Rust gRPC shared-memory inputs](grpc_shm.md).
+
 vLLM provides an HTTP server that is compatible with many interfaces!
 
 ## OpenAI-Compatible Server
