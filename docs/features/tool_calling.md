@@ -175,6 +175,12 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
+With `--enable-auto-tool-choice --tool-call-parser lfm2`, streaming can avoid
+repeated parsing while plain-text string arguments grow.
+No extra flag is needed. Escape-heavy arguments, such as source code, can
+still require increasing parser work as the output grows; this optimization
+does not make all LFM2 tool-call streaming linear in output length.
+
 When a custom structured-output grammar includes reasoning or tool-call
 delimiters, its token constraints must match the configured parser. See
 [Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).
