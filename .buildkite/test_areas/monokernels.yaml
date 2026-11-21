@@ -63,7 +63,10 @@ steps:
   - tests/models/test_dsv41_mono_layers.py
   commands:
   # only the TP8 cases; the 4-GPU step above runs TP2/TP4 (TP8 skips there)
-  - pytest -v -s "tests/models/test_dsv41_mono_numerics.py::test_mono_decode_layer_matches_vllm[8]"
+  - >-
+    pytest -v -s
+    "tests/models/test_dsv41_mono_numerics.py::test_mono_decode_layer_matches_vllm[8-fp8_ds_mla]"
+    "tests/models/test_dsv41_mono_numerics.py::test_mono_decode_layer_matches_vllm[8-fp8_e4m3]"
   - >-
     pytest -v -s
     "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-8]"
