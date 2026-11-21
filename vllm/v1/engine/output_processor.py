@@ -272,6 +272,18 @@ class RequestState:
         if self.stats is not None:
             self.stats.arrival_time = update.arrival_time
         self.is_prefilling = True
+        detokenizer = self.detokenizer
+        if detokenizer is not None and (prompt_token_ids := update.prompt_token_ids):
+            # Decode the next chunk's output after its prompt. The scheduler
+            # drops the last sampled token from the context, so skip it when
+            # the prompt re-sends it (as Voxtral realtime does): the
+            # detokenizer has already decoded it.
+            if (
+                detokenizer.num_output_tokens()
+                and prompt_token_ids[0] == detokenizer.token_ids[-1]
+            ):
+                prompt_token_ids = prompt_token_ids[1:]
+            detokenizer.add_prompt_tokens(prompt_token_ids)
 
     @classmethod
     def from_new_request(

@@ -10,6 +10,7 @@ import numpy as np
 import prometheus_client
 import pytest
 import torch
+from transformers import AutoTokenizer
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -1723,7 +1724,7 @@ async def test_streaming_input_collector_preserves_chunk_boundary():
 
 
 def _make_streaming_input_request(
-    request_id: str, prompt_token_ids: list[int]
+    request_id: str, prompt_token_ids: list[int], detokenize: bool = False
 ) -> EngineCoreRequest:
     """One chunk of a streaming-input (resumable) request."""
     return EngineCoreRequest(
@@ -1731,7 +1732,7 @@ def _make_streaming_input_request(
         prompt_token_ids=prompt_token_ids,
         mm_features=None,
         sampling_params=SamplingParams(
-            detokenize=False, output_kind=RequestOutputKind.DELTA
+            detokenize=detokenize, output_kind=RequestOutputKind.DELTA
         ),
         pooling_params=None,
         arrival_time=0,
@@ -1804,6 +1805,66 @@ def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
     assert output is not None
     assert output.finished is True
     assert output.outputs[0].finish_reason == str(finish_reason)
+
+
+@pytest.mark.parametrize("resend_last_token", [False, True])
+def test_streaming_input_chunk_text_follows_its_prompt(resend_last_token: bool):
+    """A chunk that hits max_tokens partway through a character ends on a
+    byte token the scheduler then drops from the context. The next chunk's
+    text is decoded after its own prompt, so it must not start with U+FFFD.
+    A prompt that re-sends the dropped token (as Voxtral realtime does) still
+    completes that character."""
+    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+
+    def encode(text: str) -> list[int]:
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    emoji_ids = encode("😀")
+    assert len(emoji_ids) == 2  # one character, two byte-level tokens
+
+    processor = OutputProcessor(tokenizer, log_stats=False)
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request_id="stream-req")
+    processor.add_request(
+        _make_streaming_input_request("stream-req", encode("Hi"), detokenize=True),
+        None,
+        queue=queue,
+    )
+    processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=encode(" a") + emoji_ids[:1],
+                finish_reason=FinishReason.LENGTH,
+            )
+        ]
+    )
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.outputs[0].text == " a"
+
+    if resend_last_token:
+        prompt_ids, new_token_ids, expected_text = emoji_ids[:1], emoji_ids[1:], "😀"
+    else:
+        prompt_ids, new_token_ids, expected_text = (
+            encode(" there"),
+            encode(" ok"),
+            " ok",
+        )
+    processor.add_request(
+        _make_streaming_input_request("stream-req", prompt_ids, detokenize=True), None
+    )
+    processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=new_token_ids,
+                finish_reason=FinishReason.LENGTH,
+            )
+        ]
+    )
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.outputs[0].text == expected_text
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
