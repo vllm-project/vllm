@@ -344,6 +344,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
+            activation_type=activation_to_flashinfer_int(activation),
             do_finalize=not defer,
             output=None if defer else output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
