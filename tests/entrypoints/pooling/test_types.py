@@ -209,12 +209,11 @@ class TestOnlineBuildChatParams:
         assert kwargs["media_io_kwargs"] == media_kwargs
 
     def test_conflict_in_explicit_fields_raises(self):
-        req = _make_online_request(
-            add_generation_prompt=True,
-            continue_final_message=True,
-        )
         with pytest.raises(VLLMValidationError):
-            _call_online_build_chat_params(req)
+            _make_online_request(
+                add_generation_prompt=True,
+                continue_final_message=True,
+            )
 
     def test_conflict_in_merged_chat_template_kwargs_raises(self):
         req = _make_online_request(
