@@ -10,6 +10,14 @@ import torch
 
 from tests.kernels.utils import torch_moe_single
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts import (
+    cutlass_moe as cutlass_moe_module,
+)
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    _select_mxfp4_input_quantization,
+    run_cutlass_moe_mxfp4,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -25,21 +33,43 @@ def _mxfp4_experts_quant_for_test(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     sorted_expert_ids: torch.Tensor | None = None,
+    input_permutation: torch.Tensor | None = None,
+    *,
+    fill_unwritten: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Call the raw quant op with a compact, zero-initialized scale buffer."""
-    m_numtopk, k = input_tensor.shape
+    """Call the raw quant op with the required padded scale capacity."""
+    m_numtopk = (
+        input_permutation.numel()
+        if input_permutation is not None
+        else input_tensor.size(0)
+    )
+    k = input_tensor.size(1)
     scales_k = k // MXFP4_BLOCK_SIZE
     padded_k = (scales_k + 3) // 4
-    num_sf_rows = int(blockscale_offsets[-1].item())
-    output = torch.empty(
-        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
-    )
-    output_scales = torch.zeros(
-        num_sf_rows,
-        padded_k,
-        dtype=torch.int32,
-        device=input_tensor.device,
-    )
+    scale_buffer_rows = ops._mxfp4_scale_buffer_rows(m_numtopk, n_experts)
+    if fill_unwritten:
+        output = torch.full(
+            (m_numtopk, k // 2),
+            0xA5,
+            device=input_tensor.device,
+            dtype=torch.uint8,
+        )
+        output_scales = torch.full(
+            (scale_buffer_rows, padded_k),
+            0x5A5A5A5A,
+            dtype=torch.int32,
+            device=input_tensor.device,
+        )
+    else:
+        output = torch.empty(
+            m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+        )
+        output_scales = torch.zeros(
+            scale_buffer_rows,
+            padded_k,
+            dtype=torch.int32,
+            device=input_tensor.device,
+        )
     torch.ops._C.mxfp4_experts_quant(
         output,
         output_scales,
@@ -48,8 +78,76 @@ def _mxfp4_experts_quant_for_test(
         blockscale_offsets,
         n_experts,
         sorted_expert_ids,
+        input_permutation,
     )
     return output, output_scales.view(torch.uint8)
+
+
+def _mxfp4_experts_quantize_once_fanout_for_test(
+    input_tensor: torch.Tensor,
+    topk_ids: torch.Tensor,
+    output_permutation: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call fanout quantization with sentinel-filled output buffers."""
+    m, k = input_tensor.shape
+    topk = topk_ids.size(1)
+    num_routes = m * topk
+    scale_buffer_rows = ops._mxfp4_scale_buffer_rows(num_routes, n_experts)
+    padded_k = (k // MXFP4_BLOCK_SIZE + 3) // 4
+    output = torch.full(
+        (num_routes, k // 2), 0xA5, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.full(
+        (scale_buffer_rows, padded_k),
+        0x5A5A5A5A,
+        device=input_tensor.device,
+        dtype=torch.int32,
+    )
+    torch.ops._C.mxfp4_experts_quantize_once_fanout(
+        output,
+        output_scales,
+        input_tensor,
+        topk_ids,
+        output_permutation,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+    )
+    return output, output_scales.view(torch.uint8)
+
+
+def _mxfp4_scale_written_mask(
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    k: int,
+    device: torch.device,
+) -> torch.Tensor:
+    counts = (expert_offsets[1:] - expert_offsets[:-1]).cpu().tolist()
+    scale_offsets = blockscale_offsets.cpu().tolist()
+    num_k_tiles = (k + 127) // 128
+    mask = torch.zeros(
+        scale_offsets[-1] * num_k_tiles * 4, dtype=torch.bool, device="cpu"
+    )
+    for expert, count in enumerate(counts):
+        base = scale_offsets[expert] * num_k_tiles * 4
+        for row in range(count):
+            m_tile = row // 128
+            outer_m = row % 32
+            inner_m = (row // 32) % 4
+            for scale_idx in range(k // MXFP4_BLOCK_SIZE):
+                k_tile, inner_k = divmod(scale_idx, 4)
+                offset = (
+                    base
+                    + ((m_tile * num_k_tiles + k_tile) << 9)
+                    + (outer_m << 4)
+                    + (inner_m << 2)
+                    + inner_k
+                )
+                mask[offset] = True
+    return mask.to(device)
 
 
 def _silu_and_mul_mxfp4_experts_quant_for_test(
@@ -64,12 +162,12 @@ def _silu_and_mul_mxfp4_experts_quant_for_test(
     k = k_times_2 // 2
     scales_k = k // MXFP4_BLOCK_SIZE
     padded_k = (scales_k + 3) // 4
-    num_sf_rows = int(blockscale_offsets[-1].item())
+    scale_buffer_rows = ops._mxfp4_scale_buffer_rows(m_numtopk, n_experts)
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
     output_scales = torch.zeros(
-        num_sf_rows,
+        scale_buffer_rows,
         padded_k,
         dtype=torch.int32,
         device=input_tensor.device,
@@ -101,6 +199,54 @@ def is_sm100_supported() -> bool:
     return current_platform.is_cuda() and current_platform.is_device_capability_family(
         100
     )
+
+
+def is_b200_supported() -> bool:
+    return is_sm100_supported() and current_platform.get_device_name() == "NVIDIA B200"
+
+
+@pytest.mark.parametrize(
+    ("m", "expected_fanout"),
+    [
+        (18, False),
+        (19, False),
+        (27, False),
+        (28, False),
+        (57, False),
+        (58, True),
+        (59, True),
+    ],
+)
+def test_mxfp4_input_quantization_dispatch_boundaries(m: int, expected_fanout: bool):
+    """Top-k 8 switches to fanout at its measured threshold."""
+    assert _select_mxfp4_input_quantization(m, 8) == expected_fanout
+
+
+@pytest.mark.parametrize(
+    ("topk", "min_tokens"),
+    [
+        (2, 80),
+        (3, 80),
+        (4, 96),
+        (5, 96),
+        (6, 96),
+        (7, 96),
+        (8, 58),
+        (15, 58),
+        (16, 58),
+        (32, 58),
+    ],
+)
+def test_mxfp4_selector_threshold_ranges(topk: int, min_tokens: int):
+    """Top-k ranges reuse thresholds from their lower measured anchor."""
+    assert not _select_mxfp4_input_quantization(min_tokens - 1, topk)
+    assert _select_mxfp4_input_quantization(min_tokens, topk)
+
+
+def test_mxfp4_topk1_stays_on_gather():
+    """Top-k 1 keeps gather because fanout cannot avoid repeated quantization."""
+    for m in (1, 57, 58, 128, 512):
+        assert not _select_mxfp4_input_quantization(m, 1)
 
 
 def compute_ref_output(
@@ -618,6 +764,335 @@ def test_mxfp4_experts_quant_sorted_expert_ids_matches_offset_search(
 
     assert torch.equal(baseline_out, direct_out)
     assert torch.equal(baseline_sf, direct_sf)
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize(
+    ("m", "topk", "num_experts", "k", "dtype", "routing"),
+    [
+        pytest.param(4, 8, 256, 6144, torch.bfloat16, "mixed_invalid", id="decode"),
+        pytest.param(4, 8, 256, 160, torch.bfloat16, "mixed_invalid", id="tail-k160"),
+        pytest.param(4, 8, 256, 224, torch.bfloat16, "mixed_invalid", id="tail-k224"),
+        pytest.param(32, 8, 16, 512, torch.bfloat16, "skewed", id="small-experts"),
+        pytest.param(32, 1, 256, 512, torch.float16, "topk1", id="topk1-fp16"),
+        pytest.param(8192, 1, 256, 512, torch.bfloat16, "topk1", id="large-route"),
+        pytest.param(4, 8, 256, 512, torch.bfloat16, "all_invalid", id="all-invalid"),
+    ],
+)
+def test_mxfp4_experts_quantize_once_fanout_matches_gather(
+    m: int,
+    topk: int,
+    num_experts: int,
+    k: int,
+    dtype: torch.dtype,
+    routing: str,
+):
+    """Gather and fanout must match the expert-row quantization reference."""
+    set_random_seed(2)
+    if routing == "all_invalid":
+        topk_ids = torch.full((m, topk), -1, device="cuda", dtype=torch.int32)
+    elif routing == "topk1":
+        topk_ids = (torch.arange(m, device="cuda", dtype=torch.int32) % 5).view(m, 1)
+    else:
+        topk_ids = torch.arange(topk, device="cuda", dtype=torch.int32)
+        topk_ids = topk_ids.expand(m, -1).clone()
+        if routing == "mixed_invalid":
+            topk_ids[0, -1] = -1
+            topk_ids[-1, -2] = -1
+        elif routing == "skewed":
+            topk_ids[-4:] += topk
+
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = (
+        torch.empty_like(input_permutation) if num_experts > 16 else None
+    )
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        128,
+        k,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    activations = torch.randn(m, k, device="cuda", dtype=dtype) / 5
+    shuffled_activations = ops.shuffle_rows(activations, input_permutation)
+    baseline_out, baseline_sf = _mxfp4_experts_quant_for_test(
+        shuffled_activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        sorted_expert_ids,
+        fill_unwritten=True,
+    )
+    gathered_out, gathered_sf = _mxfp4_experts_quant_for_test(
+        activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        sorted_expert_ids,
+        input_permutation,
+        fill_unwritten=True,
+    )
+    fanout_out, fanout_sf = _mxfp4_experts_quantize_once_fanout_for_test(
+        activations,
+        topk_ids,
+        output_permutation,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+    )
+
+    num_valid_rows = int(expert_offsets[-1].item())
+    valid_sources = input_permutation[:num_valid_rows]
+    assert torch.all((valid_sources >= 0) & (valid_sources < m))
+    assert torch.all(input_permutation[num_valid_rows:] == -1)
+    assert torch.equal(baseline_out[:num_valid_rows], gathered_out[:num_valid_rows])
+    assert torch.equal(baseline_out[:num_valid_rows], fanout_out[:num_valid_rows])
+    for output in (baseline_out, gathered_out, fanout_out):
+        assert torch.all(output[num_valid_rows:] == 0xA5)
+    assert torch.equal(baseline_sf, gathered_sf)
+    assert torch.equal(baseline_sf, fanout_sf)
+
+    written_sf = _mxfp4_scale_written_mask(
+        expert_offsets, blockscale_offsets, k, activations.device
+    )
+    assert written_sf.numel() <= baseline_sf.numel()
+    for output_sf in (baseline_sf, gathered_sf, fanout_sf):
+        flat_scale = output_sf.reshape(-1)
+        assert torch.all(flat_scale[: written_sf.numel()][~written_sf] == 0x5A)
+        assert torch.all(flat_scale[written_sf.numel() :] == 0x5A)
+
+    if routing == "skewed":
+        n = 128
+        weight_rows_per_expert = 2 * n
+        weight = (
+            torch.randn(
+                num_experts * weight_rows_per_expert,
+                k,
+                device="cuda",
+                dtype=dtype,
+            )
+            / 5
+        )
+        weight_offsets = (
+            torch.arange(num_experts + 1, device="cuda", dtype=torch.int32)
+            * weight_rows_per_expert
+        )
+        weight_fp4, weight_sf = ops.mxfp4_experts_quant(
+            weight,
+            weight_offsets,
+            weight_offsets,
+            num_experts,
+            topk=1,
+        )
+        weight_fp4 = weight_fp4.view(num_experts, weight_rows_per_expert, k // 2)
+        weight_sf = weight_sf.view(-1)[
+            : num_experts * weight_rows_per_expert * (k // MXFP4_BLOCK_SIZE)
+        ].view(num_experts, weight_rows_per_expert, k // MXFP4_BLOCK_SIZE)
+
+        baseline_gemm = torch.empty(
+            m * topk, weight_rows_per_expert, device="cuda", dtype=dtype
+        )
+        gathered_gemm = torch.empty_like(baseline_gemm)
+        for quantized_input, quantized_scale, gemm_output in (
+            (baseline_out, baseline_sf, baseline_gemm),
+            (gathered_out, gathered_sf, gathered_gemm),
+        ):
+            ops.cutlass_mxfp4_moe_mm(
+                gemm_output,
+                quantized_input,
+                weight_fp4,
+                quantized_scale,
+                weight_sf,
+                problem_sizes1,
+                expert_offsets[:-1],
+                blockscale_offsets[:-1],
+            )
+        assert torch.equal(
+            baseline_gemm[:num_valid_rows], gathered_gemm[:num_valid_rows]
+        )
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="MXFP4 experts quantization requires CUDA SM100",
+)
+def test_mxfp4_scale_buffers_cover_per_expert_padding(monkeypatch):
+    """Wrapper buffers include 128-row padding even for one route per expert."""
+    monkeypatch.setattr(ops.envs, "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", 8)
+    num_experts = 8
+    num_routes = 8
+    k = 32
+    topk_ids = torch.arange(num_routes, device="cuda", dtype=torch.int32).view(-1, 1)
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(num_routes, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        128,
+        k,
+        blockscale_offsets,
+        is_gated=True,
+    )
+    assert blockscale_offsets[-1].item() == 128 * num_experts
+
+    input_tensor = torch.randn(num_routes, k, device="cuda", dtype=torch.bfloat16)
+    _, gather_scales = ops.mxfp4_experts_quant(
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        topk=1,
+        input_permutation=input_permutation,
+    )
+    _, fanout_scales = ops.mxfp4_experts_quantize_once_fanout(
+        input_tensor,
+        topk_ids,
+        output_permutation,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+    )
+    _, silu_scales = ops.silu_and_mul_mxfp4_experts_quant(
+        torch.randn(num_routes, 2 * k, device="cuda", dtype=torch.bfloat16),
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        topk=1,
+    )
+
+    required_rows = ops._mxfp4_scale_buffer_rows(num_routes, num_experts)
+    assert required_rows == 128 * num_experts
+    assert gather_scales.size(0) == required_rows
+    assert fanout_scales.size(0) == required_rows
+    assert silu_scales.size(0) == required_rows
+
+    too_small_output = torch.empty(num_routes, k // 2, device="cuda", dtype=torch.uint8)
+    too_small_scales = torch.empty(num_routes, 1, device="cuda", dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="at least 1024 rows"):
+        torch.ops._C.mxfp4_experts_quant(
+            too_small_output,
+            too_small_scales,
+            input_tensor,
+            expert_offsets,
+            blockscale_offsets,
+            num_experts,
+            None,
+            input_permutation,
+        )
+    with pytest.raises(RuntimeError, match="at least 1024 rows"):
+        torch.ops._C.mxfp4_experts_quantize_once_fanout(
+            too_small_output,
+            too_small_scales,
+            input_tensor,
+            topk_ids,
+            output_permutation,
+            expert_offsets,
+            blockscale_offsets,
+            num_experts,
+        )
+
+
+@pytest.mark.skipif(
+    not is_b200_supported(),
+    reason="complete gather/fanout comparison requires a B200",
+)
+def test_mxfp4_gather_and_fanout_match_with_cuda_graphs(monkeypatch):
+    """Both dispatch branches preserve complete MoE output and graph results."""
+    set_random_seed(3)
+    m, topk, e, n, k = 58, 8, 256, 128, 6144
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    activations = torch.randn(m, k, device=device, dtype=dtype) / 5
+    topk_ids = torch.randint(e, (m, topk), device=device, dtype=torch.int32)
+    topk_ids[0, -1] = -1
+    topk_ids[1, 1] = topk_ids[1, 0]
+    topk_weights = torch.rand(m, topk, device=device, dtype=dtype)
+
+    w1_fp4 = torch.randint(0, 256, (e, 2 * n, k // 2), device=device, dtype=torch.uint8)
+    w2_fp4 = torch.randint(0, 256, (e, k, n // 2), device=device, dtype=torch.uint8)
+    w1_blockscale = torch.full(
+        (e, 2 * n, k // 32), 127, device=device, dtype=torch.uint8
+    )
+    w2_blockscale = torch.full((e, k, n // 32), 127, device=device, dtype=torch.uint8)
+    num_routes = m * topk
+
+    def run_path(use_fanout: bool, *, capture: bool) -> torch.Tensor:
+        monkeypatch.setattr(
+            cutlass_moe_module,
+            "MXFP4_QUANTIZE_ONCE_MIN_TOKENS",
+            m if use_fanout else m + 1,
+        )
+        output = torch.empty(m, k, device=device, dtype=dtype)
+        workspace13 = torch.empty(num_routes * k, device=device, dtype=dtype)
+        workspace2 = torch.empty(num_routes * n, device=device, dtype=dtype)
+
+        def run():
+            run_cutlass_moe_mxfp4(
+                output,
+                activations,
+                w1_fp4,
+                w1_blockscale,
+                w2_fp4,
+                w2_blockscale,
+                topk_weights,
+                topk_ids,
+                MoEActivation.SILU,
+                workspace13,
+                workspace2,
+                m,
+                n,
+                k,
+                e,
+                device,
+            )
+
+        if not capture:
+            run()
+            return output
+
+        run()
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        graph.replay()
+        torch.accelerator.synchronize()
+        return output
+
+    gather_output = run_path(False, capture=False)
+    fanout_output = run_path(True, capture=False)
+    torch.testing.assert_close(gather_output, fanout_output, rtol=0, atol=0)
+
+    gather_graph_output = run_path(False, capture=True)
+    fanout_graph_output = run_path(True, capture=True)
+    torch.testing.assert_close(gather_graph_output, gather_output, rtol=0, atol=0)
+    torch.testing.assert_close(fanout_graph_output, fanout_output, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
