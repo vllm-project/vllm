@@ -315,6 +315,19 @@ def test_preprocess_model_output(xlam_tool_parser):
     assert potential_tool_calls is None
 
 
+@pytest.mark.parametrize("prefix", ["I can help.", "<think>I can help.</think>"])
+def test_preprocess_indented_fenced_tool_call(xlam_tool_parser, prefix):
+    tool_call = '[{"name": "get_current_weather", "arguments": {"city": "Seattle"}}]'
+    model_output = f"{prefix}\n```json\r\n\t  {tool_call}\n```"
+
+    content, potential_tool_calls = xlam_tool_parser.preprocess_model_output(
+        model_output
+    )
+
+    assert content == prefix
+    assert potential_tool_calls == f"{tool_call}\n"
+
+
 # Simulate streaming to test extract_tool_calls_streaming
 def test_streaming_with_list_structure(xlam_tool_parser):
     # Reset streaming state
