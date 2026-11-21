@@ -235,7 +235,12 @@ def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
             [
                 (
                     WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
-                    KVConnectorOutput(finished_recving={"req1"}, invalid_block_ids={7}),
+                    (
+                        "worker failed",
+                        KVConnectorOutput(
+                            finished_recving={"req1"}, invalid_block_ids={7}
+                        ),
+                    ),
                 )
             ]
         ),

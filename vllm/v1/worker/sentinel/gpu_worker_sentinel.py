@@ -108,8 +108,19 @@ class WorkerSentinel:
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
+        context = (
+            f"[FT] request_id={ft_request.request_id} "
+            f"instruction={ft_request.instruction}"
+        )
+        logger.info("%s started", context)
         with set_current_vllm_config(self.worker.vllm_config):
-            return run_method(self, ft_request.instruction, (ft_request,), {})
+            try:
+                result = run_method(self, ft_request.instruction, (ft_request,), {})
+            except Exception as exc:
+                exc.add_note(context)
+                raise
+        logger.info("%s completed", context)
+        return result
 
     def activate_cpu_group_timeouts(self, ft_request: FaultToleranceRequest):
         enter_steady_state()
