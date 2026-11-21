@@ -978,6 +978,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
+        video_target_num_patches: int | None = None,
+        video_maintain_aspect_ratio: bool | None = None,
         use_audio_in_video: bool = False,
         do_rescale: bool = True,
         do_normalize: bool = True,
@@ -1001,7 +1003,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         self.video_pruning_rate = video_pruning_rate
         self.use_audio_in_video = use_audio_in_video
 
-        # Video params live exclusively in vision_config
+        # Video params live in vision_config. The keyword arguments carry the
+        # frame size of a checkpoint that keeps it in its image processor config.
         vision_config = getattr(config, "vision_config", config)
         self.video_temporal_patch_size: int = getattr(
             vision_config, "video_temporal_patch_size", 1
@@ -1015,6 +1018,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         # DynamicResolutionImageTilingStrategy validation).
         target_num_patches = getattr(vision_config, "video_target_num_patches", None)
         target_img_size = getattr(vision_config, "video_target_img_size", None)
+        if target_num_patches is None and target_img_size is None:
+            target_num_patches = video_target_num_patches
+            if video_maintain_aspect_ratio is not None:
+                self.video_maintain_aspect_ratio = video_maintain_aspect_ratio
         if target_num_patches is not None and target_img_size is not None:
             raise ValueError(
                 "Exactly one of video_target_num_patches or "
@@ -1153,21 +1160,16 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         ]
         video_num_patches = torch.tensor([len(item) for item in pixel_values_lst_video])
 
-        video_inputs: dict[str, Any]
-        if self.device_resize:
-            video_inputs = {
-                "pixel_values_raw_video": pixel_values_lst_video,
-                "video_frame_sizes": torch.tensor(frame_sizes),
-            }
-        else:
-            # Normalization already fused into resize above.
-            # Skip the torch.cat copy when there is exactly one video
-            if len(pixel_values_lst_video) == 1:
-                pixel_values_flat = pixel_values_lst_video[0]
-            else:
-                pixel_values_flat = torch.cat(pixel_values_lst_video)
-            video_inputs = {"pixel_values_flat_video": pixel_values_flat}
-        video_inputs |= {
+        # One tensor per video: videos that keep their aspect ratio can differ
+        # in frame size. Normalization is already fused into the resize above.
+        pixels_key = (
+            "pixel_values_raw_video"
+            if self.device_resize
+            else "pixel_values_flat_video"
+        )
+        video_inputs: dict[str, Any] = {
+            pixels_key: pixel_values_lst_video,
+            "video_frame_sizes": torch.tensor(frame_sizes),
             "video_num_patches": video_num_patches,
             "frames_indices": frames_indices_lst,
             "frame_duration_ms": torch.tensor(frame_duration_ms_lst),
@@ -1308,7 +1310,11 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         if ragged_frames_indices:
             combined_inputs.pop("frames_indices")
         # Videos of different sizes can't be stacked: bypass BatchFeature.
-        raw_videos = combined_inputs.pop("pixel_values_raw_video", None)
+        video_pixels = {
+            key: combined_inputs.pop(key)
+            for key in ("pixel_values_raw_video", "pixel_values_flat_video")
+            if key in combined_inputs
+        }
 
         if self.dynamic_tiler is None:
             batch = BatchFeature(
@@ -1320,8 +1326,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             # allow images to be exempt from the BatchFeature validation:
             # We will .stack() them in _parse_and_validate_image_input
             batch.update(image_inputs)
-        if raw_videos is not None:
-            batch["pixel_values_raw_video"] = raw_videos
+        batch.update(video_pixels)
         if ragged_frames_indices:
             assert isinstance(frames_indices, list)
             batch["frames_indices"] = [
