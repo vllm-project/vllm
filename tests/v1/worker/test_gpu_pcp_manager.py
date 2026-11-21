@@ -524,6 +524,97 @@ def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping(monkeypatch)
     assert torch.equal(cache_slot_mapping, slot_mapping)
 
 
+def _pcp_only_context_lens(
+    pcp_rank: int,
+    pcp_world_size: int,
+    num_scheduled_tokens: list[int],
+    num_computed_tokens: list[int],
+    is_prefilling: list[bool] | None = None,
+) -> list[int]:
+    """Context length of each of one rank's rows, in row order, without DCP."""
+    scheduled = np.array(num_scheduled_tokens, dtype=np.int32)
+    computed = np.array(num_computed_tokens, dtype=np.int32)
+    prefilling = np.array(
+        is_prefilling if is_prefilling is not None else [True] * len(scheduled)
+    )
+    manager = PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=pcp_rank,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        dcp_world_size=1,
+    )
+    query_start_loc_np = np.concatenate([[0], np.cumsum(scheduled)]).astype(np.int32)
+    segments = manager._get_rank_segments(
+        pcp_rank, scheduled, prefilling, query_start_loc_np, computed
+    )
+    return [
+        int(
+            computed[segment.global_batch_req_idx]
+            + segment.global_batch_slice.start
+            - query_start_loc_np[segment.global_batch_req_idx]
+        )
+        for segment in segments
+        if prefilling[segment.global_batch_req_idx]
+    ]
+
+
+@pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
+@pytest.mark.parametrize(
+    ("num_scheduled_tokens", "num_computed_tokens"),
+    [
+        ([64, 64, 64, 64], [0, 0, 0, 0]),
+        ([1000, 960, 1024], [0, 0, 0]),
+        ([64, 64, 64], [0, 128, 0]),  # a continued prefill between fresh ones
+    ],
+)
+def test_pcp_rows_with_context_are_contiguous_on_every_rank(
+    pcp_world_size, num_scheduled_tokens, num_computed_tokens
+):
+    """The MLA context planner packs only consecutive rows that have context,
+    and rank 0 holds the first and the last chunk of every fresh prefill."""
+    for rank in range(pcp_world_size):
+        context_lens = _pcp_only_context_lens(
+            rank, pcp_world_size, num_scheduled_tokens, num_computed_tokens
+        )
+        has_context = [length > 0 for length in context_lens]
+        assert has_context == sorted(has_context), (
+            f"rank {rank} context lengths {context_lens}"
+        )
+
+
+def test_pcp_context_grouping_keeps_decodes_first_and_covers_every_token():
+    scheduled = np.array([64, 1, 64], dtype=np.int32)
+    computed = np.array([0, 20, 0], dtype=np.int32)
+    is_prefilling = np.array([True, False, True])
+    query_start_loc_np = np.concatenate([[0], np.cumsum(scheduled)]).astype(np.int32)
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        dcp_world_size=1,
+    )
+    covered = []
+    for rank in range(2):
+        segments = manager._get_rank_segments(
+            rank, scheduled, is_prefilling, query_start_loc_np, computed
+        )
+        assert segments[0].global_batch_req_idx == 1
+        offset = 0
+        for segment in segments:
+            assert segment.rank_local_batch_slice.start == offset
+            offset = segment.rank_local_batch_slice.stop
+            if is_prefilling[segment.global_batch_req_idx]:
+                covered.extend(
+                    range(
+                        segment.global_batch_slice.start,
+                        segment.global_batch_slice.stop,
+                    )
+                )
+    assert sorted(covered) == [*range(0, 64), *range(65, 129)]
+
+
 def _rank_rows(
     pcp_rank: int,
     pcp_world_size: int,
