@@ -43,6 +43,7 @@ from vllm.utils.argparse_utils import human_readable_int
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineGenerateError
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.metrics.loggers import StatLoggerManager
 
@@ -502,6 +503,23 @@ async def test_parallel_admission_cancellation_cleans_up_all_children():
     assert llm.output_processor.get_num_unfinished_requests() == 0
     aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
     assert set(aborted_ids) == {"0_parallel", "1_parallel", "2_parallel"}
+
+
+@pytest.mark.asyncio
+async def test_single_request_submission_failure_releases_slot():
+    """An n=1 request whose send to the engine core fails must not keep its
+    admission slot."""
+
+    async def add_request_async(_request):
+        raise RuntimeError("send to the engine core failed")
+
+    llm = _make_request_test_llm(1, add_request_async)
+    request = _make_engine_request("single", 1)
+    with pytest.raises(EngineGenerateError):
+        await anext(llm.generate(request, request.params, request.request_id))
+
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    llm.check_admission()
 
 
 # ---------------------------------------------------------------------------

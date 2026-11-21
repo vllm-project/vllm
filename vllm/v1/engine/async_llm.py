@@ -586,16 +586,23 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        if parent_req is None and not self.output_processor.has_request(
+        is_new_request = parent_req is None and not self.output_processor.has_request(
             request.request_id
-        ):
+        )
+        if is_new_request:
             self.check_admission(request_id=request.request_id)
 
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        try:
+            await self.engine_core.add_request_async(request)
+        except BaseException:
+            # The caller has no output queue to abort through yet.
+            if is_new_request:
+                await self.abort(request.request_id, internal=True)
+            raise
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)

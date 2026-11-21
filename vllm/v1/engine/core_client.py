@@ -1818,6 +1818,19 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             len(self.core_engines) * self.client_index
         ) // client_count
 
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        new_route = request.request_id not in self.reqs_in_flight
+        try:
+            await super().add_request_async(request)
+        except BaseException:
+            # The engine never received the request, so it never reports it
+            # finished.
+            if new_route and (
+                engine := self.reqs_in_flight.pop(request.request_id, None)
+            ):
+                self.engine_inflight[engine] -= 1
+            raise
+
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         if request.resumable:
             self.streaming_reqs.add(request.request_id)
