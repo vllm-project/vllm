@@ -96,6 +96,20 @@ class _InlineExecutor:
         pass
 
 
+class _PendingExecutor:
+    """Probes that answer only when a test sets their result."""
+
+    def __init__(self):
+        self.probes: list[Future] = []
+
+    def submit(self, fn, *args):
+        self.probes.append(Future())
+        return self.probes[-1]
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+
 class _Clock:
     def __init__(self):
         self.now = time.monotonic()
@@ -340,6 +354,22 @@ def test_prefill_that_stops_answering_fails_at_the_next_deadline(engine):
     engine.clock.now += TIMEOUT_S
     engine.step()
     assert request.status == RequestStatus.FINISHED_ERROR
+
+
+def test_probe_is_dropped_when_its_last_request_finishes(engine):
+    """A probe lives on its receive's record, so it goes when the receive
+    finishes, not when the process exits."""
+    connector = engine.scheduler.connector.connector_scheduler
+    connector._write_recv_prober = _PendingExecutor()
+    request = engine.add_waiting_request()
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    assert connector._write_recvs_in_flight[request.request_id].probe is not None
+
+    engine.step(write_done=frozenset({request.request_id}))
+    engine.step()
+    assert request.status == RequestStatus.RUNNING
+    assert request.request_id not in connector._write_recvs_in_flight
 
 
 def test_peer_listening():
