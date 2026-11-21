@@ -144,6 +144,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
+    VLLM_MUSE_DSPARK_FUSED_BOUNDARY: bool = False
+    VLLM_MUSE_DSPARK_FUSED_LAYER_ENTRY: bool = False
+    VLLM_MUSE_DSPARK_SHARDED_FC: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1351,6 +1354,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
+    # Muse Spark DSpark draft on ROCm: run both residual boundaries of each
+    # draft layer (post-norm, gated blend and the next pre-norm) as the target's
+    # fused norm/blend kernels. Not bitwise: the fp32 post-norm result is blended
+    # without a bf16 round.
+    "VLLM_MUSE_DSPARK_FUSED_BOUNDARY": lambda: bool(
+        int(os.getenv("VLLM_MUSE_DSPARK_FUSED_BOUNDARY", "0"))
+    ),
+    # Muse Spark DSpark draft on ROCm: also fuse each layer's FFN boundary with
+    # the next layer's pre-QKV norm (the last one with the final norm). Needs
+    # VLLM_MUSE_DSPARK_FUSED_BOUNDARY=1 and an fp32 draft residual.
+    "VLLM_MUSE_DSPARK_FUSED_LAYER_ENTRY": lambda: bool(
+        int(os.getenv("VLLM_MUSE_DSPARK_FUSED_LAYER_ENTRY", "0"))
+    ),
+    # Muse Spark DSpark draft on ROCm: column-shard the draft fc over TP and
+    # all-gather its output, instead of replicating the weight on every rank.
+    "VLLM_MUSE_DSPARK_SHARDED_FC": lambda: bool(
+        int(os.getenv("VLLM_MUSE_DSPARK_SHARDED_FC", "0"))
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
