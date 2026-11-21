@@ -53,6 +53,16 @@ class PrometheusResponse(Response):
     media_type = prometheus_client.CONTENT_TYPE_LATEST
 
 
+UNINSTRUMENTED_HANDLERS = [
+    "/metrics",
+    "/health",
+    "/load",
+    "/ping",
+    "/version",
+    "/server_info",
+]
+
+
 def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
     registry = get_prometheus_registry()
@@ -62,14 +72,7 @@ def attach_router(app: FastAPI):
     # instead of the default "application/json" which is incorrect.
     # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
     Instrumentator(
-        excluded_handlers=[
-            "/metrics",
-            "/health",
-            "/load",
-            "/ping",
-            "/version",
-            "/server_info",
-        ],
+        excluded_handlers=UNINSTRUMENTED_HANDLERS,
         registry=registry,
     ).add().instrument(app).expose(app, response_class=PrometheusResponse)
 
