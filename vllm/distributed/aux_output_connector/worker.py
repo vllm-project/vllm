@@ -492,6 +492,14 @@ class AuxOutputWorkerConnector:
             self._publish_blocks(block_batches, retained_keys, release_keys)
             self._teardown(finished_now)
 
+    def drain(self, metadata: AuxOutputConnectorMetadata) -> None:
+        """Apply `metadata` and wait until every object queued so far is
+        written or dropped: objects of requests that stopped before a pause
+        are in the store once the pause completes."""
+        self.begin_step(metadata)
+        if self._writer is not None:
+            self._writer.drain()
+
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()

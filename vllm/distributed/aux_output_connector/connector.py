@@ -230,6 +230,23 @@ class AuxOutputSchedulerConnector:
                 packed = self._take_new_hashes(request, request.num_computed_tokens)
                 if packed is not None:
                     block_hashes_by_request[request_id] = packed
+        return self._take_metadata(scheduled_requests, block_hashes_by_request)
+
+    def drain_metadata(self) -> AuxOutputConnectorMetadata | None:
+        """Metadata for the write barrier of a pause: it ends the runs of
+        preempted namespace requests and writes every settled block; `None`
+        without an object key prefix."""
+        if self._key_prefix is None:
+            return None
+        for state in self._namespaces.values():
+            self._end_preempted(state)
+        return self._take_metadata({}, {})
+
+    def _take_metadata(
+        self,
+        scheduled_requests: dict[str, int],
+        block_hashes_by_request: dict[str, PackedBlockHashes],
+    ) -> AuxOutputConnectorMetadata:
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(

@@ -1006,6 +1006,12 @@ class EngineCore:
             if clear_cache:
                 self._reset_caches(reset_connector=reset_connector)
                 self._set_kv_cache_reclaimable(True)
+            connector = getattr(self.scheduler, "aux_output_connector", None)
+            if (
+                connector is not None
+                and (metadata := connector.drain_metadata()) is not None
+            ):
+                self.collective_rpc("drain_aux_output", args=(metadata,))
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
