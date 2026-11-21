@@ -20,6 +20,7 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
+from vllm.device_allocator.alloc_conf import expandable_segments_enabled_from_env
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
@@ -2386,14 +2387,19 @@ class VllmConfig:
             self.compilation_config.debug_dump_path = env_path
 
         self._verify_kv_transfer_compat()
+        # NCCL graph registration pins the offloaded pool, and on expandable
+        # segments a captured collective can write outside its buffers on the
+        # first replay; workers inherit this.
         if self.use_cumem_cudagraph_pool:
-            # NCCL graph registration pins the offloaded pool; workers inherit this.
+            reason = "pins the CUDA graph pool during sleep"
+        elif expandable_segments_enabled_from_env():
+            reason = "can corrupt memory with expandable_segments"
+        else:
+            reason = None
+        if reason is not None:
             value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
             if value != "0":
-                logger.warning(
-                    "NCCL_GRAPH_REGISTER=%s pins the CUDA graph pool during sleep.",
-                    value,
-                )
+                logger.warning("NCCL_GRAPH_REGISTER=%s %s.", value, reason)
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
         self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()

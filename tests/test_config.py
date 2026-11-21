@@ -1282,6 +1282,35 @@ def test_breakable_cudagraph_env_override(
 
 
 @pytest.mark.parametrize(
+    ("alloc_conf", "explicit", "expected"),
+    [
+        ("expandable_segments:True", None, "0"),
+        ("expandable_segments:True", "1", "1"),
+        ("", None, None),
+    ],
+)
+def test_nccl_graph_register_with_expandable_segments(
+    monkeypatch, alloc_conf, explicit, expected
+):
+    """NCCL graph registration defaults off on expandable segments, where a
+    captured collective can corrupt memory; an explicit value is kept."""
+    for name in (
+        "PYTORCH_ALLOC_CONF",
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "NCCL_GRAPH_REGISTER",
+    ):
+        # setenv first so monkeypatch restores the variable after the test.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    if alloc_conf:
+        monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", alloc_conf)
+    if explicit is not None:
+        monkeypatch.setenv("NCCL_GRAPH_REGISTER", explicit)
+    VllmConfig()
+    assert os.environ.get("NCCL_GRAPH_REGISTER") == expected
+
+
+@pytest.mark.parametrize(
     ("model_type", "expected_architecture"),
     [
         ("deepseek_v32", "DeepseekV32MTPModel"),
