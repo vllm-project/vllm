@@ -3,7 +3,7 @@
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.config import ModelConfig, SpeculativeConfig
+from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 
 MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 VOCAB_SIZE = 32000
@@ -42,5 +42,6 @@ def test_masked_token_ids_rejects_lossy_spec_decode(lossy_kwargs: dict):
             method="ngram",
             num_speculative_tokens=2,
             target_model_config=target,
+            target_parallel_config=ParallelConfig(),
             **lossy_kwargs,
         )
