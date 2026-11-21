@@ -108,6 +108,8 @@ from ..common.engram import (
     NgramHashState,
     can_share_engram_tables,
     gather_engram_hashes,
+    is_engram_ranged_checkpoint_weight,
+    load_engram_ranged_checkpoint_weights,
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .ops.mhc import (
@@ -2033,6 +2035,14 @@ class DeepseekV41LLMForCausalLM(
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
+
+    def is_ranged_checkpoint_weight(self, name: str) -> bool:
+        return is_engram_ranged_checkpoint_weight(self, name)
+
+    def load_ranged_checkpoint_weights(
+        self, checkpoint_files: dict[str, str], source: str
+    ) -> list[tuple[str, torch.Tensor]]:
+        return load_engram_ranged_checkpoint_weights(self, checkpoint_files, source)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

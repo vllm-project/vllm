@@ -45,6 +45,10 @@ from vllm.models.deepseek_v4.common.vision import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from ..common.engram import (
+    is_engram_ranged_checkpoint_weight,
+    load_engram_ranged_checkpoint_weights,
+)
 from ..common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
     DeepseekV4VLDummyInputsBuilder,
@@ -338,6 +342,14 @@ class DeepseekV41ForCausalLM(
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer for the MTP/DSpark draft model."""
         return self.language_model.get_mtp_target_hidden_states()
+
+    def is_ranged_checkpoint_weight(self, name: str) -> bool:
+        return is_engram_ranged_checkpoint_weight(self, name)
+
+    def load_ranged_checkpoint_weights(
+        self, checkpoint_files: dict[str, str], source: str
+    ) -> list[tuple[str, torch.Tensor]]:
+        return load_engram_ranged_checkpoint_weights(self, checkpoint_files, source)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
