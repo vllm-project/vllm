@@ -16,35 +16,51 @@ Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 | `{"action": "reset"}` | `{"status": "reset"}` |
 | `{"action": "compare", "baseline": {key: sha256_hex}}` | `{"match": bool, "mismatches": [key]}` |
 
-Keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`, so each
-shard is checked separately. By default all actions cover the target model's
-parameters. For `checksum` and `compare`, set `"target": "draft"` to check a
-resident speculative draft model on every rank. Save the baseline from the same
-target. `reset` only supports the target model. The endpoint keeps no state,
-so the caller holds the baseline. Invalid requests return HTTP 400, and
-requesting a draft when there is none returns HTTP 409.
+All three actions accept `"model": "target"`, `"draft"`, or `"both"`. Omitting
+`model` selects the target. Use the same selection for checksum and compare.
+
+For a single model, keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`.
+Selecting `both` adds a `target:` or `draft:` prefix to each key. With pipeline
+parallelism, draft keys come from the last stage. The endpoint keeps no state,
+so the caller holds the baseline.
+
+Invalid requests return HTTP 400. A draft selection without resident draft
+weights returns HTTP 409. Reset also returns HTTP 409 during an active or
+incomplete weight update, or if a single-model reset would overwrite storage
+shared with the other model. Use `both` for shared weights and restore both
+models before resuming.
 
 ## RL weight-update check
 
 ```bash
 URL=http://localhost:8000
+MODEL=both  # Use target or draft to verify a single model.
 
 # 1. Stop serving, then save the original digests.
 curl -X POST "$URL/pause?mode=abort"
-curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
-  -d '{"action":"checksum"}' > baseline.json
+curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
+  -d "{\"action\":\"checksum\",\"model\":\"$MODEL\"}" > baseline.json
 
 # 2. Zero the weights.
-curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
-  -d '{"action":"reset"}'
+curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
+  -d "{\"action\":\"reset\",\"model\":\"$MODEL\"}"
 
-# 3. Transfer the original weights with start/update/finish_weight_update.
+# 3. Compare again to confirm the reset changed weights before restoring them.
+jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
+  baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
+  -H 'Content-Type: application/json' -d @-
 
-# 4. Compare against the baseline; expect {"match": true, "mismatches": []}.
-curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
-  -d "{\"action\":\"compare\",\"baseline\":$(jq .checksums baseline.json)}"
+# 4. Transfer the original target weights with /start_weight_update,
+#    /update_weights, /finish_weight_update. For the draft, use
+#    /start_draft_weight_update, then the same update and finish routes.
+#    For both, complete the target transfer before starting the draft transfer.
 
-curl -X POST $URL/resume
+# 5. Compare against the baseline. Resume only after match is true.
+jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
+  baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
+  -H 'Content-Type: application/json' -d @-
+
+curl -X POST "$URL/resume"
 ```
 
 ## Limitations
@@ -54,7 +70,9 @@ curl -X POST $URL/resume
 - A request covers the engines managed by the API server it reaches. With
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.
-- Buffers and LoRA adapters are not checked.
+- Buffers and LoRA adapters are excluded from checksum and reset.
+- Restoring a draft requires an existing weight transfer backend and topology
+  that support draft weight updates.
 - CPU backends that repack linear weights hide them from the checker.
 - compressed-tensors online transforms are not supported: their Hadamard
   weights are normalized once per storage, so restored copies differ.

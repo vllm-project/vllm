@@ -1730,6 +1730,44 @@ mod tests {
     }
 
     #[test]
+    fn neutral_sampling_params_ignore_generation_defaults() {
+        let lower = |sampling_params: SamplingParams, sampling_hints| {
+            lower_sampling_params(
+                SamplingParams {
+                    max_tokens: Some(1),
+                    ..sampling_params
+                },
+                sampling_hints,
+                sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
+                3,
+                &stub_tokenizer(),
+            )
+            .unwrap()
+        };
+        // Every hint is listed, so a new generation default fails to compile
+        // here until `SamplingParams::neutral` decides on it.
+        let generation_defaults = SamplingHints {
+            primary_eos_token_id: None,
+            extra_eos_token_ids: BTreeSet::new(),
+            default_temperature: Some(0.8),
+            default_top_p: Some(0.9),
+            default_top_k: Some(12),
+            default_min_p: Some(0.1),
+            default_repetition_penalty: Some(1.2),
+            default_presence_penalty: Some(1.5),
+            default_frequency_penalty: Some(0.5),
+            default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+            default_skip_special_tokens: Some(false),
+        };
+
+        assert_eq!(
+            lower(SamplingParams::neutral(), generation_defaults),
+            lower(SamplingParams::default(), SamplingHints::default()),
+        );
+    }
+
+    #[test]
     fn resolve_max_tokens_applies_the_server_cap_to_client_values() {
         use DefaultMaxTokens::{Cap, Fallback};
         // A client asking for more than the cap is clamped, like Python's
