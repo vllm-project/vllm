@@ -69,6 +69,12 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
             self.no_replay_start = self.no_replay_start.new_zeros(
                 2 * self.vllm_config.scheduler_config.max_num_seqs + 1
             )
+            self.cache_positions_buffer = torch.empty(
+                self.vllm_config.scheduler_config.max_num_batched_tokens
+                * self.pcp_size,
+                dtype=torch.int64,
+                device=self.device,
+            )
         compress_ratios = getattr(
             self.vllm_config.model_config.hf_config, "compress_ratios", None
         ) or [0]
@@ -91,7 +97,11 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
         if self.pcp_size > 1:
             metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
             assert cm.positions is not None
-            metadata.cache_positions = get_pcp_group().all_gather(cm.positions, dim=0)
+            positions = get_pcp_group().all_gather(cm.positions, dim=0)
+            # FULL graphs retain the capture-time metadata tensor addresses.
+            metadata.cache_positions = self.cache_positions_buffer[
+                : positions.numel()
+            ].copy_(positions)
         return metadata
 
 
@@ -210,6 +220,12 @@ class DeepseekV4SparseMLAMetadataBuilder(
             self.compressed_slot_mapping_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
+            if self.pcp_size > 1:
+                self.pcp_compressed_slot_mapping_buffer = torch.empty(
+                    max_num_batched_tokens * self.pcp_size,
+                    dtype=torch.int64,
+                    device=device,
+                )
 
     def build(
         self,
@@ -239,6 +255,9 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 slot_mapping = get_pcp_group().all_gather(
                     self.compressed_slot_mapping_buffer[: local_slots.numel()], dim=0
                 )
+                slot_mapping = self.pcp_compressed_slot_mapping_buffer[
+                    : slot_mapping.numel()
+                ].copy_(slot_mapping)
 
         return DeepseekV4FlashMLAMetadata(
             num_reqs=cm.num_reqs,

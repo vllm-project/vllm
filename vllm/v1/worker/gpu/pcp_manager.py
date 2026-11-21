@@ -10,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -192,11 +193,11 @@ class PCPManager:
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
             and getattr(model_config.hf_text_config, "model_type", None)
-            not in ("deepseek_v32", "glm_moe_dsa")
+            not in ("deepseek_v32", "glm_moe_dsa", "deepseek_v41")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
-                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2, "
+                "GLM-5.2/5.3 and DeepSeek-V4.1. Set -cc.cudagraph_mode=NONE."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
@@ -426,6 +427,12 @@ class PCPManager:
             )
             for rank in range(self.pcp_world_size)
         )
+
+    def get_num_reqs_for_dispatch(self, num_reqs: int, has_prefill: bool) -> int:
+        """Match decode graphs to the largest rank-local request count."""
+        if self.shard_decode_requests and not has_prefill:
+            return cdiv(num_reqs, self.pcp_world_size)
+        return num_reqs
 
     @staticmethod
     def _resolve_num_reqs_after_padding(
