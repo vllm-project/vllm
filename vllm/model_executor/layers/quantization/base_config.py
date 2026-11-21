@@ -128,6 +128,13 @@ class QuantizationConfig(ABC):
         ".q_zero_point",
         ".k_zero_point",
         ".v_zero_point",
+        # AutoRound calibration observer stats, saved next to the q/k/v scales.
+        ".q_max",
+        ".k_max",
+        ".v_max",
+        ".q_min",
+        ".k_min",
+        ".v_min",
     )
     """Suffixes of quantization parameters that may be present in the checkpoint but
     not in the model, and should be ignored if unexpected during loading. These are used

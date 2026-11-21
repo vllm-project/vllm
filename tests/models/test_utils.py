@@ -160,6 +160,42 @@ def test_module_load_shared_params_that_are_not_tied_embeddings():
     assert torch.all(mod.gate.weight == torch.Tensor([[1, 2], [3, 4]]))
 
 
+class ModuleWithQuantizedAttention(torch.nn.Module):
+    """Mimics `Qwen3Model`: the quant config lives on a nested model whose
+    `load_weights` builds its own `AutoWeightsLoader`."""
+
+    def __init__(self):
+        super().__init__()
+        self.quant_config = Fp8Config(activation_scheme="static")
+        self.layers = torch.nn.ModuleList([torch.nn.Module()])
+        attn = torch.nn.Module()
+        attn.q_scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=False)
+        self.layers[0].self_attn = torch.nn.Module()
+        self.layers[0].self_attn.attn = attn
+
+    def load_weights(self, weights):
+        return AutoWeightsLoader(self).load_weights(weights)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("stat", ["q_max", "k_max", "v_max", "q_min"])
+def test_autoround_attention_stats_are_ignored(stat: str):
+    """AutoRound FP8-attention checkpoints ship `self_attn.q_max` (and may ship
+    other q/k/v observer stats) next to `self_attn.q_scale`. The stats have no
+    vLLM parameter and must be skipped instead of failing the load."""
+    outer = torch.nn.Module()
+    outer.model = ModuleWithQuantizedAttention()
+
+    weights = [
+        ("model.layers.0.self_attn.q_scale", torch.tensor(0.25)),
+        (f"model.layers.0.self_attn.{stat}", torch.tensor(112.0)),
+    ]
+    loaded = AutoWeightsLoader(outer).load_weights(iter(weights))
+
+    assert loaded == {"model.layers.0.self_attn.attn.q_scale"}
+    assert outer.model.layers[0].self_attn.attn.q_scale.item() == 0.25
+
+
 class raise_if_cuda_sync:
     def __enter__(self):
         self.previous_debug_mode = torch.cuda.get_sync_debug_mode()
