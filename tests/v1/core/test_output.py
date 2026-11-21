@@ -160,3 +160,22 @@ def test_unpickled_long_lists_are_untracked() -> None:
     new = copy.deepcopy(new)
     assert not gc.is_tracked(new.block_ids[0]) and gc.is_tracked(new.block_ids[1])
     assert new.block_ids[0] == long
+
+
+def test_from_request_copies_cache_salt() -> None:
+    from unittest.mock import MagicMock
+
+    request = MagicMock()
+    request.request_id = "r0"
+    request.prompt_token_ids = [1, 2, 3]
+    request.mm_features = []
+    request.num_computed_tokens = 0
+    request.sampling_params = None
+    request.pooling_params = None
+    request.lora_request = None
+    request.prompt_embeds = None
+    request.prompt_is_token_ids = None
+    request.cache_salt = "tenant-a"
+
+    data = NewRequestData.from_request(request, ([],), request.prompt_token_ids)
+    assert data.cache_salt == "tenant-a"
