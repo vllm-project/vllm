@@ -36,6 +36,7 @@ from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_version import is_torch_equal_or_newer
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -217,6 +218,11 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+# torch < 2.14 Inductor can reuse an indirect load from inside a reduction loop
+# after the loop closes (pytorch#194490). Drop once ROCm uses torch >= 2.14.
+_INDUCTOR_GATHER_OK = is_torch_equal_or_newer("2.14.0")
+
+
 @torch.compile(dynamic=True)
 def _compute_num_rejected(
     num_logits: torch.Tensor,
@@ -308,7 +314,14 @@ def _compiled_masked_step(
         x0 = (logits_3d + req_temps[:, None, None] * gumbel).argmax(dim=-1)
     else:
         x0 = logits_3d.argmax(dim=-1)  # [num_decode, CL]
-    chosen_logits = logits_3d.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
+    if _INDUCTOR_GATHER_OK:
+        chosen_logits = logits_3d.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
+    else:
+        # Masked max: same value as the gather, without the indirect load.
+        vocab_ids = torch.arange(logits_3d.shape[-1], device=device)
+        chosen_logits = torch.where(
+            vocab_ids == x0.unsqueeze(-1), logits_3d, float("-inf")
+        ).amax(dim=-1)
     x0_logprob = chosen_logits - logits_3d.logsumexp(dim=-1)
     neg_inf = torch.full_like(x0_logprob, float("-inf"))
     confidence = torch.where(mask_index, x0_logprob, neg_inf)
@@ -348,9 +361,11 @@ def _compiled_masked_step(
         # Greedy requests report unscaled model logprobs, as in AR sampling.
         row_temp = torch.where(req_temps > 0, req_temps, 1.0)
         sample_logits = logits_3d / row_temp[:, None, None]
-        chosen_lp = sample_logits.gather(-1, x0.unsqueeze(-1)).squeeze(
-            -1
-        ) - sample_logits.logsumexp(dim=-1)
+        if _INDUCTOR_GATHER_OK:
+            chosen_sample = sample_logits.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
+        else:
+            chosen_sample = chosen_logits / row_temp[:, None]
+        chosen_lp = chosen_sample - sample_logits.logsumexp(dim=-1)
         chosen_rank = (
             (logits_3d >= chosen_logits.unsqueeze(-1)).sum(dim=-1).to(torch.int32)
         )
