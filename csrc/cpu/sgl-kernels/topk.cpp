@@ -536,6 +536,21 @@ std::tuple<at::Tensor, at::Tensor> hash_topk_cpu(
   TORCH_CHECK(tid2eid.scalar_type() == at::kInt, "tid2eid must be int32");
   TORCH_CHECK(num_experts_gating == num_experts, "num_experts mismatch");
 
+  // The hash-table VALUES are consumed as raw expert indices by
+  // `hash_topk_kernel_impl` (`scores[eid]` on a NUM_EXPERTS-wide stack
+  // array) and flow verbatim into `topk_ids`, which later indexes the MoE
+  // workspace in `moe_align_block_size`. `tid2eid` is loaded directly from
+  // the checkpoint (DeepSeek-V4 hash-MoE `gate.tid2eid`), so validate the
+  // values here at the op boundary instead of trusting the producer.
+  if (tid2eid.numel() > 0) {
+    const int32_t eid_min = tid2eid.min().item<int32_t>();
+    const int32_t eid_max = tid2eid.max().item<int32_t>();
+    TORCH_CHECK(eid_min >= 0 && eid_max < num_experts,
+                "hash_topk_cpu: tid2eid holds expert ids outside [0, ",
+                num_experts, ") (min = ", eid_min, ", max = ", eid_max,
+                "); the hash-routing table is checkpoint-controlled");
+  }
+
   int scoring_func_id = 0;
   if (scoring_func == "softmax") {
     scoring_func_id = 0;
