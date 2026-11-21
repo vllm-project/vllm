@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -17,6 +18,8 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+from vllm.platforms import current_platform
 
 VOCAB_SIZE = 16
 HIDDEN_SIZE = 4
@@ -90,6 +93,68 @@ def test_no_retie_without_checkpoint_override():
     maybe_retie_word_embeddings(model, make_model_config())
 
     assert model.lm_head.weight is not model.embed_tokens.weight
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU GEMM preprocessing")
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("tied", [True, False])
+@torch.inference_mode()
+def test_cpu_embedding_lookup_does_not_prepack(dtype, tied):
+    embedding = VocabParallelEmbedding(64, 8, params_dtype=dtype)
+    head = ParallelLMHead(64, 8, params_dtype=dtype)
+    if tied:
+        head.tie_weights(embedding)
+    original = ((torch.arange(512).reshape(64, 8) % 7 - 3) / 8).to(dtype)
+    inputs = ((torch.arange(16).reshape(2, 8) % 4 - 1) / 4).to(dtype)
+    ids = torch.tensor([0, 7, 63])
+    for weight in (original, original + 0.5, original):
+        embedding.weight_loader(embedding.weight, weight)
+        if not tied:
+            head.weight_loader(head.weight, weight + 0.25)
+        embedding.quant_method.process_weights_after_loading(embedding)
+        head.quant_method.process_weights_after_loading(head)
+        finalize_model_weights(nn.ModuleList([embedding, head]))
+        assert (head.weight is embedding.weight) is tied
+        assert torch.equal(embedding(ids), weight[ids])
+        assert getattr(embedding, "cpu_linear", None) is None
+        actual = head.quant_method.apply(head, inputs)
+        expected = torch.nn.functional.linear(inputs, head.weight)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU GEMM preprocessing")
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_cpu_embedding_logits_rebuild_after_weight_processing(dtype):
+    embedding = VocabParallelEmbedding(64, 8, params_dtype=dtype)
+    processor = LogitsProcessor(64)
+    original = ((torch.arange(512).reshape(64, 8) % 7 - 3) / 8).to(dtype)
+    inputs = ((torch.arange(16).reshape(2, 8) % 4 - 1) / 4).to(dtype)
+    embedding.weight_loader(embedding.weight, original)
+    torch.testing.assert_close(
+        processor(embedding, inputs),
+        torch.nn.functional.linear(inputs, original),
+        rtol=0,
+        atol=0,
+    )
+    for weight in (original + 0.5, original):
+        embedding.weight_loader(embedding.weight, weight)
+        embedding.quant_method.process_weights_after_loading(embedding)
+        finalize_model_weights(embedding)
+        assert getattr(embedding, "cpu_linear", None) is None
+        expected = torch.nn.functional.linear(inputs, weight)
+        torch.testing.assert_close(
+            processor(embedding, inputs), expected, rtol=0, atol=0
+        )
+        prepared = embedding.cpu_linear
+        torch.testing.assert_close(
+            processor(embedding, inputs), expected, rtol=0, atol=0
+        )
+        assert embedding.cpu_linear is prepared
 
 
 @pytest.mark.cpu_test

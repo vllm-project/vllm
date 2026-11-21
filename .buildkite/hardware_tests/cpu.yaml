@@ -12,6 +12,8 @@ steps:
   - CMakeLists.txt
   - vllm/_custom_ops.py
   - vllm/_cpu_ops.py
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - tests/model_executor/model_loader/test_weight_tying.py
   - tests/kernels/attention/test_cpu_attn.py
   - tests/v1/attention/test_group_head_counts.py
   - tests/kernels/attention/test_amx_mla.py
@@ -57,6 +59,7 @@ steps:
       tests/test_zentorch_version_pin.py \
       tests/kernels/mamba/test_cpu_short_conv.py \
       tests/kernels/test_onednn.py \
+      tests/model_executor/model_loader/test_weight_tying.py \
       tests/kernels/test_cpu_fused_sampling.py \
       tests/kernels/test_awq_int4_to_int8.py \
       tests/kernels/quantization/test_cpu_fp8_scaled_mm.py \
