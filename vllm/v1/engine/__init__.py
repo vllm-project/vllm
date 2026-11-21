@@ -272,6 +272,19 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
+class PrefillProgress(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    """Per-request prefill progress, so a router can price a request exactly."""
+
+    request_id: str
+    # Tokens still to compute for this request's prefill.
+    remaining_prefill_tokens: int
+
+
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -322,6 +335,9 @@ class EngineCoreOutput(
     # Sent once, on the first output, when watermark_config is set. Appended last
     # for array_like compatibility.
     watermarking: bool | None = None
+
+    # Remaining prefill work. Appended last for `array_like` compatibility.
+    prefill_progress: PrefillProgress | None = None
 
     @property
     def finished(self) -> bool:

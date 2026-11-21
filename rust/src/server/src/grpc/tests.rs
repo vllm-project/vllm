@@ -38,13 +38,15 @@ use vllm_engine_core_client::mock_engine::{
 };
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
-use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
+use vllm_engine_core_client::protocol::handshake::{
+    EngineCoreReadyResponse, KvEventsConfig,
+};
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue,
 };
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
-    UtilityCallOutput,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, PrefillProgress,
+    RequestBatchOutputs, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
@@ -1614,6 +1616,111 @@ async fn unary_generate_invalid_structured_outputs_returns_invalid_argument() {
         assert!(status.message().contains(message), "{}", status.message());
     }
 
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn streaming_prefill_progress_survives_a_mixed_output() {
+    let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-prefill-progress".to_vec(),
+        default_ready_response(),
+        Arc::new(FakeTextBackend::default()),
+        None,
+        |dealer, push| {
+            boxed_test_future(async move {
+                let frames = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&frames[1]).expect("decode generation request");
+                assert_eq!(request.external_req_id.as_deref(), Some("progress-request"));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![
+                            EngineCoreOutput {
+                                prefill_progress: Some(Box::new(PrefillProgress {
+                                    request_id: request.request_id.clone(),
+                                    remaining_prefill_tokens: 1,
+                                })),
+                                ..request_output(&request.request_id, vec![], None)
+                            },
+                            // One output, as the scheduler emits it: progress,
+                            // the token and the finish reason.
+                            EngineCoreOutput {
+                                prefill_progress: Some(Box::new(PrefillProgress {
+                                    request_id: request.request_id.clone(),
+                                    remaining_prefill_tokens: 0,
+                                })),
+                                ..request_output(
+                                    &request.request_id,
+                                    vec![b'h' as u32],
+                                    Some(EngineCoreFinishReason::Length),
+                                )
+                            },
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference,
+        control,
+        health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+    let request = pb::GenerateRequest {
+        request_id: "progress-request".to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: vec![1, 2, 3, 4, 5],
+        })),
+        ..Default::default()
+    };
+    let mut stream = client.generate_stream(request).await.expect("stream request").into_inner();
+    let first = tokio::time::timeout(Duration::from_secs(10), stream.message())
+        .await
+        .expect("progress timeout")
+        .expect("progress response")
+        .expect("progress frame");
+    assert!(first.prompt_info.is_none());
+    assert!(first.outputs.is_none());
+    let progress = first.prefill_progress.expect("prefill progress");
+    assert_eq!(progress.remaining_prefill_tokens, 1);
+
+    let responses: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.map(|item| item.expect("stream output")).collect(),
+    )
+    .await
+    .expect("stream completion timeout");
+    assert!(responses.iter().any(|response| response.prompt_info.is_some()));
+    // The frontend splits that output, so the progress frame comes first.
+    let terminal = responses
+        .iter()
+        .position(|response| {
+            response
+                .outputs
+                .as_ref()
+                .is_some_and(|output| output.finish_info.is_some())
+        })
+        .expect("a terminal output frame");
+    assert!(!responses[terminal].outputs.as_ref().unwrap().text.is_empty());
+    assert_eq!(
+        responses[..terminal]
+            .iter()
+            .filter_map(|response| response.prefill_progress.as_ref())
+            .map(|progress| progress.remaining_prefill_tokens)
+            .last(),
+        Some(0)
+    );
+    engine_task.await.expect("mock engine task");
     server_task.abort();
 }
 
