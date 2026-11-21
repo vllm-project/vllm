@@ -35,6 +35,11 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     set_triton_ptr_range,
 )
+from vllm.v1.attention.ops.hd512_mfma_decode import (
+    hd512_decode_attention,
+    hd512_get_kernel,
+    hd512_partial_scratch_shape,
+)
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -91,6 +96,12 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+
+    # gfx942 hd512 split-KV MFMA decode kernel (VLLM_GEMMA4_HD512_DECODE):
+    # persistent scratch, sized for max(cudagraph capture, scheduler) batch.
+    hd512_part_o: torch.Tensor | None = None
+    hd512_part_ml: torch.Tensor | None = None
+    hd512_capacity: int = 0
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -220,6 +231,35 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 device=device,
             )
 
+        # gfx942 hd512 MFMA decode kernel scratch (VLLM_GEMMA4_HD512_DECODE):
+        # one shared set for all layers of this KV cache group, persistent
+        # across CUDA graph captures and replays.
+        self.hd512_part_o: torch.Tensor | None = None
+        self.hd512_part_ml: torch.Tensor | None = None
+        self.hd512_capacity = 0
+        if (
+            envs.VLLM_GEMMA4_HD512_DECODE
+            and current_platform.is_rocm()
+            and kv_cache_spec.head_size == 512
+            and kv_cache_spec.dtype == torch.bfloat16
+            and kv_cache_spec.num_kv_heads == 2
+        ):
+            max_reqs = vllm_config.scheduler_config.max_num_seqs
+            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
+            if capture_sizes:
+                max_reqs = max(max_reqs, max(capture_sizes))
+            part_o_elems, part_ml_elems = hd512_partial_scratch_shape(max_reqs)
+            self.hd512_part_o = torch.empty(
+                part_o_elems, dtype=torch.float32, device=device
+            )
+            self.hd512_part_ml = torch.empty(
+                part_ml_elems, dtype=torch.float32, device=device
+            )
+            self.hd512_capacity = max_reqs
+            # Compile the HIP kernels up front (~2-4 min on first build;
+            # cached afterwards) so it happens outside graph capture.
+            hd512_get_kernel()
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
@@ -297,6 +337,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             attn_metadata.rswa_prefix_lens = persistent_prefix_lens
             attn_metadata.rswa_window = self.rswa_window
 
+        attn_metadata.hd512_part_o = self.hd512_part_o
+        attn_metadata.hd512_part_ml = self.hd512_part_ml
+        attn_metadata.hd512_capacity = self.hd512_capacity
         return attn_metadata
 
     def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
@@ -589,6 +632,23 @@ class TritonAttentionImpl(AttentionImpl):
             self.use_td = td_override
         self._set_kv_ptr_range = current_platform.is_rocm()
 
+        # gfx942 hd512 split-KV MFMA decode kernel (VLLM_GEMMA4_HD512_DECODE).
+        # The kernel hardcodes GQA 8Q/2KV, head_size 512, bf16 full-causal
+        # cache reads; anything else keeps the stock Triton unified path.
+        self._hd512_mfma_decode = (
+            envs.VLLM_GEMMA4_HD512_DECODE
+            and current_platform.is_rocm()
+            and head_size == 512
+            and num_heads == 8
+            and num_kv_heads == 2
+            and attn_type == AttentionType.DECODER
+            and self.sliding_window == (-1, -1)
+            and kv_cache_dtype in ("auto", "bfloat16")
+            and self.alibi_slopes is None
+            and sinks is None
+            and (logits_soft_cap or 0.0) == 0.0
+        )
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -630,6 +690,37 @@ class TritonAttentionImpl(AttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        # gfx942 hd512 MFMA split-KV decode (VLLM_GEMMA4_HD512_DECODE):
+        # pure-decode batches only (one query token per request, so
+        # query/token i is request i). Anything else falls through to the
+        # stock unified path.
+        if (
+            self._hd512_mfma_decode
+            and attn_metadata.max_query_len == 1
+            and attn_metadata.hd512_part_o is not None
+            and attn_metadata.hd512_part_ml is not None
+            and num_actual_tokens <= attn_metadata.hd512_capacity
+            and kv_cache.shape[2] == 16
+            and kv_cache.dtype == torch.bfloat16
+            and kv_cache.stride(3) == 1
+            and query.dtype == torch.bfloat16
+            and query.is_contiguous()
+            and output.is_contiguous()
+        ):
+            hd512_decode_attention(
+                q=query[:num_actual_tokens],
+                kv_cache=kv_cache,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                part_o=attn_metadata.hd512_part_o,
+                part_ml=attn_metadata.hd512_part_ml,
+                out=output[:num_actual_tokens],
+                softmax_scale=self.scale,
+            )
+            return output
+
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
         # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
@@ -638,8 +729,6 @@ class TritonAttentionImpl(AttentionImpl):
         # Minimize the PyTorch ops in this method as much as possible.
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
-
-        num_actual_tokens = attn_metadata.num_actual_tokens
 
         # Handle encoder attention differently - no KV cache needed
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
