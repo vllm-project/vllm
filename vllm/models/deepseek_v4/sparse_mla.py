@@ -191,14 +191,15 @@ class DeepseekV4SparseMLAMetadataBuilder(
         cm = common_attn_metadata
         req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
 
-        slot_mapping = cm.slot_mapping
+        cache_cm = cm.dsa_sp_global or cm
+        slot_mapping = cache_cm.slot_mapping
         if self.compress_ratio > 1:
             slot_mapping = get_compressed_slot_mapping(
-                cm.num_actual_tokens,
-                cm.slot_mapping,
-                cm.query_start_loc,
-                cm.seq_lens,
-                cm.block_table_tensor.clamp_(min=0),
+                cache_cm.num_actual_tokens,
+                slot_mapping,
+                cache_cm.query_start_loc,
+                cache_cm.seq_lens,
+                cache_cm.block_table_tensor.clamp_(min=0),
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,

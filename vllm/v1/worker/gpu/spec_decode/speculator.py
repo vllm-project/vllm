@@ -176,6 +176,14 @@ class DraftModelSpeculator(BaseSpeculator):
             vllm_config.parallel_config = replace_config(
                 parallel_config, decode_context_parallel_size=dcp
             )
+        if vllm_config.attention_config.dsa_sequence_parallel is not None:
+            # MTP consumes the target's gathered hidden states in global token
+            # order. Its projections, MoE dispatch and metadata use ordinary TP.
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.attention_config = replace_config(
+                vllm_config.attention_config, dsa_sequence_parallel=None
+            )
+            self.can_reuse_target_attn_metadata = False
         self.vllm_config = vllm_config
         self.device = device
 
@@ -415,6 +423,11 @@ class DraftModelSpeculator(BaseSpeculator):
         target_attn_groups: list[list[AttentionGroup]],
         kernel_block_sizes: list[int],
     ) -> None:
+        if model_state.vllm_config.attention_config.dsa_sequence_parallel is not None:
+            # Reuse the target's input state for draft prefill and graph
+            # capture, with the draft's unsharded query layout.
+            model_state = copy.copy(model_state)
+            model_state.vllm_config = self.vllm_config
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
         # Use the sizes the KV cache was allocated with: draft layers can share a

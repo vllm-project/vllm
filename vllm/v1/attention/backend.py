@@ -488,6 +488,9 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads `rswa_window` from model config."""
 
+    dsa_sp_global: "CommonAttentionMetadata | None" = None
+    """Global cache-write view when queries are distributed across TP ranks."""
+
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 

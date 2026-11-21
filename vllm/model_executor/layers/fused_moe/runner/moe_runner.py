@@ -310,7 +310,11 @@ class MoERunner(MoERunnerInterface):
         self._forward_entry = self._select_forward()
 
         # For smuggling this layer into the fused moe custom op
-        register_layer_for_moe_forward_op(get_current_vllm_config(), self)
+        config = get_current_vllm_config()
+        self.dispatch_local_input_ids = (
+            config.attention_config.dsa_sequence_parallel is not None
+        )
+        register_layer_for_moe_forward_op(config, self)
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
@@ -879,7 +883,8 @@ class MoERunner(MoERunnerInterface):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
         # router logits to all experts.
         # NOTE: this will be removed once all kernels are migrated into the
@@ -889,9 +894,17 @@ class MoERunner(MoERunnerInterface):
                 hidden_states,
                 router_logits,
                 self.moe_config.is_sequence_parallel,
+                # Token-dependent routing (e.g. V4 hash MoE) consumes the
+                # same row layout as the dispatched logits. DSA SP provides
+                # local IDs in the same order as the hidden states.
+                extra_tensors=[input_ids]
+                if self.dispatch_local_input_ids and input_ids is not None
+                else None,
             )
-            assert len(result) == 2
-            hidden_states, router_logits = result
+            if len(result) == 3:
+                hidden_states, router_logits, (input_ids,) = result
+            else:
+                hidden_states, router_logits = result
 
         hidden_states_scale = None
         if (
@@ -909,7 +922,7 @@ class MoERunner(MoERunnerInterface):
                 hidden_states_scale = pcp_group.all_gather(hidden_states_scale, dim=0)
             router_logits = pcp_group.all_gather(router_logits, dim=0)
 
-        return hidden_states, router_logits, hidden_states_scale
+        return hidden_states, router_logits, hidden_states_scale, input_ids
 
     def _maybe_combine(
         self,
@@ -997,9 +1010,12 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
-            hidden_states, router_logits, hidden_states_scale = self._maybe_dispatch(
-                hidden_states,
-                router_logits,
+            hidden_states, router_logits, hidden_states_scale, input_ids = (
+                self._maybe_dispatch(
+                    hidden_states,
+                    router_logits,
+                    input_ids,
+                )
             )
 
             shared_output, hidden_states = self._apply_quant_method(

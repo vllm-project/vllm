@@ -140,6 +140,12 @@ class AttentionConfig:
     MQA-logits path (`indexer_sparse_logits`) emits BF16 on SM100 and FP32
     on SM90 and ROCm, independently of this setting."""
 
+    dsa_sequence_parallel: Literal["contiguous", "zigzag"] | None = None
+    """Shard the whole token batch over TP ranks in NVIDIA DeepSeek-V3.2
+    and DeepSeek-V4. Each rank projects all query heads for its local rows
+    and maintains the full KV cache. Zigzag assigns mirrored token windows
+    to each rank. Selecting a layout changes the model's weight partitioning."""
+
     sparse_mla_shard_q: bool = True
     """Under tensor parallelism, shard sparse-MLA (DSA) prefill by token
     instead of by head: each TP rank runs the indexer and the sparse attention

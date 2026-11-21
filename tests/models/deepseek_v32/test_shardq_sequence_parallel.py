@@ -14,21 +14,23 @@ from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM, DeepseekV32Config
 
 from tests.models.utils import check_logprobs_close
+from tests.v1.e2e.spec_decode.utils import compute_acceptance_rate
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 
 
 @pytest.fixture(scope="module")
-def shardq_checkpoint(tmp_path_factory):
+def shardq_checkpoint(tmp_path_factory, request):
     path = tmp_path_factory.mktemp("deepseek_v32_shardq")
+    heads = getattr(request, "param", 16)
     config = DeepseekV32Config(
         vocab_size=1024,
         hidden_size=256,
         intermediate_size=512,
         num_hidden_layers=2,
-        num_attention_heads=16,
-        num_key_value_heads=16,
+        num_attention_heads=heads,
+        num_key_value_heads=heads,
         kv_lora_rank=512,
         q_lora_rank=128,
         qk_nope_head_dim=128,
@@ -185,6 +187,13 @@ def _observed_rows(worker):
     return worker.shardq_observed_rows
 
 
+def _mtp_projection_tp(worker):
+    model_runner = worker.model_runner
+    target = model_runner.model.model.layers[0]
+    draft = next(iter(model_runner.speculator.model.model.layers.values()))
+    return target.self_attn.q_b_proj.tp_size, draft.mtp_block.self_attn.q_b_proj.tp_size
+
+
 @pytest.mark.parametrize(
     ("quantization", "use_lora", "spec_method", "enforce_eager"),
     [
@@ -320,4 +329,96 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
         outputs_1_lst=[(list(r.token_ids), "", r.logprobs) for r in outputs[1]],
         name_0="TP",
         name_1="TP with extended ShardQ",
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expert_parallel", "enforce_eager", "mtp", "shardq_checkpoint"),
+    [
+        ("contiguous", False, True, False, 16),
+        ("zigzag", True, False, False, 16),
+        # A 32-head target normally uses separate FlashMLA prefill/decode.
+        pytest.param("zigzag", True, False, True, 32, id="zigzag-mtp"),
+    ],
+    indirect=["shardq_checkpoint"],
+)
+def test_dsa_sequence_parallel_preserves_generation(
+    vllm_runner,
+    shardq_checkpoint,
+    shardq_mtp_checkpoint,
+    monkeypatch,
+    mode,
+    expert_parallel,
+    enforce_eager,
+    mtp,
+):
+    """Preserve sampled rows across chunked prefills and mixed decode batches."""
+    if mtp:
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    prompts = [
+        {"prompt_token_ids": [16 + (i + n) % 700 for i in range(n)]}
+        for n in (513, 23, 7)
+    ]
+    sampling = SamplingParams(
+        temperature=0, max_tokens=16 if mtp else 4, ignore_eos=True, logprobs=16
+    )
+    outputs = []
+    for split in (None, mode):
+        with vllm_runner(
+            shardq_mtp_checkpoint if mtp else shardq_checkpoint,
+            tensor_parallel_size=2,
+            enable_expert_parallel=expert_parallel,
+            all2all_backend="allgather_reducescatter",
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            enforce_eager=enforce_eager,
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+                "index_share_for_mtp_iteration": True,
+            }
+            if mtp and split is not None
+            else None,
+            disable_log_stats=False,
+            compilation_config=None
+            if enforce_eager
+            else {
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                # With three four-row verifications the inner zigzag rank
+                # sees request segments of lengths 1, 4 and 1.
+                "prefill_cudagraph_capture_token_sizes": [12, 64, 128, 255]
+                if mtp
+                else [64, 128, 255],
+                "decode_cudagraph_capture_request_sizes": [1, 2, 4],
+            },
+            max_model_len=1024,
+            max_num_batched_tokens=255,
+            max_num_seqs=4,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            block_size=64,
+            kv_cache_dtype="fp8_ds_mla",
+            attention_config={
+                "backend": "FLASHMLA_SPARSE",
+                "dsa_sequence_parallel": split,
+            },
+            gpu_memory_utilization=0.1,
+        ) as runner:
+            runs = runner.llm.generate(prompts, sampling, use_tqdm=False)
+            runs += runner.llm.generate(prompts[:1], sampling, use_tqdm=False)
+            if mtp and split is not None:
+                assert compute_acceptance_rate(runner.llm.get_metrics()) > 0
+                # The target owns all Q heads; the ordinary MTP layer keeps TP2.
+                assert runner.llm.collective_rpc(_mtp_projection_tp) == [(1, 2)] * 2
+            outputs.append(
+                [
+                    (list(r.outputs[0].token_ids), "", r.outputs[0].logprobs)
+                    for r in runs
+                ]
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="TP",
+        name_1=f"DSA SP ({mode})",
     )

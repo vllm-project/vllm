@@ -170,18 +170,25 @@ def assert_fp8(got: torch.Tensor, ref: torch.Tensor, msg: str):
 
 
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
-@pytest.mark.parametrize("num_tokens", [1, 4, 17, 512, 4096])
+@pytest.mark.parametrize(
+    ("num_tokens", "num_queries"),
+    [(n, n) for n in (1, 4, 17, 512, 4096)] + [(17, 6), (1, 2)],
+)
 @pytest.mark.parametrize("index_interleave", [True, False])
 @pytest.mark.parametrize("mla_dtype", ["auto", "bfloat16", "fp8"])
 def test_fused_norm_rope(
-    num_tokens: int, index_interleave: bool, mla_dtype: str, cfg: ModelConfig
+    num_tokens: int,
+    num_queries: int,
+    index_interleave: bool,
+    mla_dtype: str,
+    cfg: ModelConfig,
 ):
     torch.manual_seed(0)
     dev = "cuda"
     max_pos = 8192
     pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
 
-    q_c = torch.randn(num_tokens, cfg.q_lora, device=dev, dtype=torch.bfloat16)
+    q_c = torch.randn(num_queries, cfg.q_lora, device=dev, dtype=torch.bfloat16)
     kv_c = torch.randn(num_tokens, cfg.kv_lora, device=dev, dtype=torch.bfloat16)
     k_pe = torch.randn(num_tokens, cfg.rope_dim, device=dev, dtype=torch.bfloat16)
     qw = torch.randn(cfg.q_lora, device=dev, dtype=torch.bfloat16)
@@ -265,7 +272,8 @@ def test_fused_norm_rope(
     torch.testing.assert_close(scales[:num_tokens], s_ref, rtol=0, atol=0)
 
     # Top-k buffer cleared to -1 on indexer layers.
-    assert (topk == -1).all(), "topk buffer not cleared on indexer layer"
+    assert (topk[:num_queries] == -1).all()
+    assert (topk[num_queries:] == 7).all()
 
 
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)

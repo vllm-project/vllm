@@ -30,7 +30,7 @@ from tests.v1.core.utils import (
     new_kv_cache_spec,
 )
 from vllm.config import ModelConfig, VllmConfig
-from vllm.config.attention import HiSparseConfig
+from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
@@ -1493,8 +1493,9 @@ def test_pp_stage_without_group_layers_keeps_manager_block_size():
     assert prepare_kernel_block_sizes(config, [[]]) == [64]
 
 
+@pytest.mark.parametrize("target_sp", [None, "zigzag"])
 def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
-    monkeypatch,
+    monkeypatch, target_sp
 ):
     """Draft layers sharing a KV cache group with the target read its cache in
     the kernel blocks the target's backend needs, even when the draft's backend
@@ -1524,10 +1525,10 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
             dict.fromkeys(self.layer_names, kernel_block_size)
         ),
     )
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
-        parallel_config=SimpleNamespace(use_ubatching=False),
+    vllm_config = VllmConfig(
+        attention_config=AttentionConfig(dsa_sequence_parallel=target_sp)
     )
+    target_state = SimpleNamespace(vllm_config=vllm_config)
     spec = new_kv_cache_spec(block_size=512)
     kv_cache_config = KVCacheConfig(
         num_blocks=1,
@@ -1542,14 +1543,25 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
     assert prepare_kernel_block_sizes(kv_cache_config, [[draft_group]]) == [512]
 
     built.clear()
+    draft_config = VllmConfig() if target_sp else vllm_config
     drafter = SimpleNamespace(
-        attn_vllm_config=vllm_config,
+        attn_vllm_config=draft_config,
+        vllm_config=draft_config,
         device="cpu",
         draft_attn_layer_names={"draft"},
         speculative_config=SimpleNamespace(prefill_context_kv_only=False),
         _configure_decode_metadata_update=lambda: None,
     )
     DraftModelSpeculator.set_attn(
-        drafter, None, kv_cache_config, None, None, target_groups, kernel_block_sizes
+        drafter,
+        target_state,
+        kv_cache_config,
+        None,
+        None,
+        target_groups,
+        kernel_block_sizes,
     )
     assert built == {"draft": 128}
+    assert drafter.model_state.vllm_config is draft_config
+    assert target_state.vllm_config.attention_config.dsa_sequence_parallel == target_sp
+    assert (drafter.model_state is target_state) == (target_sp is None)

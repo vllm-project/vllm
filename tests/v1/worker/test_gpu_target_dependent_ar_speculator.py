@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm.config.attention import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.model_executor.models.exaone4_5_mtp import Exaone4_5_MTP
@@ -110,17 +111,16 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     )
     speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
     builder = SimpleNamespace(build=build, supports_update_block_table=False)
-    speculator.attn_groups = [
-        [
-            # Stand-in group: build_attn_metadata only reads these members.
-            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
-                metadata_builders=[builder],
-                get_metadata_builder=lambda _: builder,
-                build_metadata=lambda cm, ubatch_idx=0, **_: build(0, cm),
-                layer_names=["draft"],
-            )
-        ]
-    ]
+    group = AttentionGroup(
+        flash_attn_module.FlashAttentionBackend,
+        ["draft"],
+        MLAAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        ),
+        0,
+    )
+    group.metadata_builders.append(builder)
+    speculator.attn_groups = [[group]]
     num_reqs_padded = 4 if cg_mode == CUDAGraphMode.FULL else 2
     metadata = speculator._build_uniform_attn_metadata(
         batch_desc=BatchExecutionDescriptor(cg_mode, 4, num_reqs_padded),
@@ -169,8 +169,12 @@ def _make_speculator(
     return speculator
 
 
-@pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])
-def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected):
+@pytest.mark.parametrize(
+    ("hc_mult", "expected", "target_sp"), [(None, 64, None), (4, 256, "zigzag")]
+)
+def test_speculator_uses_draft_hidden_size_and_query_layout(
+    monkeypatch, hc_mult, expected, target_sp
+):
     # Qwen4Exp targets expose multi-stream HC residuals to the drafter.
     monkeypatch.setattr(base_spec_module, "_target_feeds_hc_residual", lambda _: True)
     hf_config = SimpleNamespace()
@@ -192,6 +196,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
     )
     vllm_config = SimpleNamespace(
         speculative_config=speculative_config,
+        attention_config=AttentionConfig(dsa_sequence_parallel=target_sp),
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
             max_num_batched_tokens=8,
@@ -212,6 +217,9 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
     speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
 
     assert speculator.hidden_size == expected
+    assert speculator.vllm_config.attention_config.dsa_sequence_parallel is None
+    assert vllm_config.attention_config.dsa_sequence_parallel == target_sp
+    assert speculator.can_reuse_target_attn_metadata is (target_sp is None)
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):

@@ -37,6 +37,32 @@ def test_dispatch_sizes_expand_pcp_before_tp(pcp_size, sp_size, enable_ep, expec
 
 
 @pytest.mark.parametrize(
+    "layout,physical_sizes",
+    [("contiguous", [6, 10]), ("zigzag", [8, 12])],
+)
+def test_dsa_dispatch_sizes_include_tp_window_padding(layout, physical_sizes):
+    config = ParallelConfig(
+        distributed_executor_backend="mp",
+        data_parallel_size=2,
+        tensor_parallel_size=2,
+    )
+    scheduled = torch.tensor([5, 9])
+    metadata = DPMetadata.make(config, 5, scheduled, layout)
+    assert scheduled.tolist() == [5, 9]
+    assert metadata.num_tokens_across_dp_cpu.tolist() == physical_sizes
+    for size in (1, config.tensor_parallel_size):
+        sizes = [n // size for n in physical_sizes for _ in range(size)]
+        with metadata.sp_local_sizes(size, use_ep=size > 1) as dispatch_sizes:
+            assert dispatch_sizes == sizes
+        assert (
+            metadata.cu_tokens_across_sp(size).tolist()
+            == torch.tensor(sizes).cumsum(0).tolist()
+        )
+    with pytest.raises(AssertionError):
+        DPMetadata.make(config, physical_sizes[0], scheduled, layout)
+
+
+@pytest.mark.parametrize(
     "dp_size,pcp_size,tp_size,use_ep,is_sp,expected",
     [
         (2, 2, 1, True, False, "ep"),

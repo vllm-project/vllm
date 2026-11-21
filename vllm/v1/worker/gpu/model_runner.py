@@ -735,7 +735,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         no_attn_metadata_layer_names: set[str] = set()
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
-            if self.speculator.speculative_config.prefill_context_kv_only:
+            if (
+                self.speculator.speculative_config.prefill_context_kv_only
+                or self.vllm_config.attention_config.dsa_sequence_parallel is not None
+            ):
                 no_attn_metadata_layer_names = draft_attn_layer_names
         # Metadata builders select attention kernels that need JIT warmup.
         with self.jit_warmup_registry.activate():

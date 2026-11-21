@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.distributed import parallel_state
 from vllm.model_executor.models import utils as model_utils
+from vllm.models.common.ops import sequence_parallel as sp
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.sequence import IntermediateTensors
 
@@ -96,14 +97,16 @@ class _TopkReusingLayer(nn.Module):
         return hidden_states, torch.zeros_like(hidden_states)
 
 
-def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
+@pytest.mark.parametrize("dsa_sp", [None, "contiguous", "zigzag"])
+def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch, dsa_sp):
     model = object.__new__(deepseek_v32_model.DeepseekV32Model)
     nn.Module.__init__(model)
     model.topk_indices_buffer = torch.full((8, 2), -1, dtype=torch.int32)
     layer = _TopkReusingLayer(model.topk_indices_buffer)
     model.layers = nn.ModuleList([layer])
     model.start_layer, model.end_layer = 0, 1
-    model.use_sequence_parallel = False
+    model.dsa_sp = dsa_sp
+    model.use_sequence_parallel = bool(dsa_sp)
     model.shardq_sequence_parallel = False
     model.aux_hidden_state_layers = ()
     model.pp_buffers = {"topk_indices": model.topk_indices_buffer}
@@ -116,17 +119,32 @@ def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
         deepseek_v32_model, "tensor_model_parallel_all_reduce", lambda t: t
     )
 
-    received_topk = torch.arange(6, dtype=torch.int32).view(3, 2)
+    received_topk = torch.arange(8, dtype=torch.int32).view(4, 2)
+    received_hidden = torch.arange(16, dtype=torch.float32).view(4, 4)
+    local_rows = [0, 3] if dsa_sp == "zigzag" else [0, 1]
+    remote_rows = [1, 2] if dsa_sp == "zigzag" else [2, 3]
+    if dsa_sp:
+        monkeypatch.setattr(sp, "get_tensor_model_parallel_rank", lambda: 0)
+        monkeypatch.setattr(sp, "get_tensor_model_parallel_world_size", lambda: 2)
+
+        def gather(local):
+            full = received_topk + 10 if local.dtype == torch.int32 else received_hidden
+            return torch.cat((local, full[remote_rows]))
+
+        monkeypatch.setattr(sp, "sp_all_gather", gather)
     output = model(
         None,
-        torch.arange(3),
+        torch.arange(4),
         IntermediateTensors(
             {
-                "hidden_states": torch.zeros(3, 4),
+                "hidden_states": received_hidden,
                 "topk_indices": received_topk,
             }
         ),
     )
 
-    torch.testing.assert_close(layer.seen_topk, received_topk)
+    torch.testing.assert_close(
+        layer.seen_topk, received_topk[local_rows] if dsa_sp else received_topk
+    )
+    torch.testing.assert_close(output["hidden_states"], received_hidden)
     torch.testing.assert_close(output["topk_indices"], received_topk + 10)

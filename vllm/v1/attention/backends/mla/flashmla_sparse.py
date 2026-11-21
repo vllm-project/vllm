@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
     flat_kv_row_view,
+    max_local_query_requests,
     neutralize_dcp_empty_rows_,
     request_row_bounds,
     triton_convert_req_index_to_global_index,
@@ -355,6 +356,14 @@ def get_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return vllm_config.model_config.max_model_len * factor
 
 
+def _sp_decode_in_prefill(cm: CommonAttentionMetadata, num_decodes: int) -> bool:
+    # SP can split uniform MTP queries into unequal segments. FlashMLA counts
+    # the suffix as prefill, but its host lengths can include rejected drafts.
+    if cm.dsa_sp_global is None or num_decodes == cm.num_reqs:
+        return False
+    return cm.is_prefilling is None or not bool(cm.is_prefilling[num_decodes:].all())
+
+
 class FlashMLASparseMetadataBuilder(
     SparseMLACommonMetadataBuilder[FlashMLASparseMetadata]
 ):
@@ -373,7 +382,7 @@ class FlashMLASparseMetadataBuilder(
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
 
-        num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
+        num_q_heads = self.num_heads
         if current_platform.is_device_capability_family(100):
             threshold = {8: 128, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
                 num_q_heads, 1024
@@ -391,7 +400,6 @@ class FlashMLASparseMetadataBuilder(
 
         sm_count = num_compute_units(device.index)
 
-        self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         # FP8 decode kernel only supports h_q = 64 or 128, so we need to pad
         self.fp8_decode_padded_heads = (
             FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
@@ -400,7 +408,7 @@ class FlashMLASparseMetadataBuilder(
         self.use_fp8_kv_cache = (
             cache_config.cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
         )
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_seqs = max_local_query_requests(vllm_config)
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
             (max_num_seqs,), self.topk_tokens, device=device, dtype=torch.int32
@@ -707,7 +715,14 @@ class FlashMLASparseMetadataBuilder(
 
         metadata.fp8_use_mixed_batch = self.fp8_use_mixed_batch
         if self.use_fp8_kv_cache:
-            if self.fp8_use_mixed_batch:
+            if (
+                self.vllm_config.speculative_config is not None
+                and _sp_decode_in_prefill(common_attn_metadata, metadata.num_decodes)
+            ):
+                # Attend to paged top-k slots directly. The separate prefill
+                # gather requires exact host lengths to compute KV offsets.
+                metadata.fp8_use_mixed_batch = True
+            if metadata.fp8_use_mixed_batch:
                 metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill()
             else:
                 metadata.fp8_extra_metadata = self._build_fp8_separate_prefill_decode(
