@@ -399,6 +399,97 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
     assert len(disabled_warnings) == (1 if warns else 0), warnings
 
 
+@pytest.mark.parametrize(
+    "profile_peak_gib,capture_peak_gib,estimate_enabled,expected_extra_gib",
+    [
+        # Capture transient peak (e.g. speculator sparse_attn_indexer) exceeds
+        # profile_run peak: reserve only the uncovered excess.
+        (2, 5, True, 3),
+        # profile_run peak already dominates: zero extra KV cache subtracted.
+        (6, 2, True, 0),
+        # Equal peaks: zero extra KV cache subtracted.
+        (4, 4, True, 0),
+        # CUDA graph profiling disabled: capture peak is not queried/applied.
+        (2, 5, False, 0),
+    ],
+)
+def test_cudagraph_capture_transient_peak_reserves_only_excess_headroom(
+    monkeypatch,
+    profile_peak_gib,
+    capture_peak_gib,
+    estimate_enabled,
+    expected_extra_gib,
+):
+    """determine_available_memory() must reserve max(profile_run peak, capture
+    transient peak) so post-KV speculator/indexer capture does not OOM without
+    double-counting against profile_run's transient headroom."""
+    from vllm.config import CUDAGraphMode
+
+    cg_estimate = 4 * GiB_bytes
+    profile_peak = profile_peak_gib * GiB_bytes
+    capture_peak = capture_peak_gib * GiB_bytes
+    total_consumed = 20 * GiB_bytes
+
+    model_runner = SimpleNamespace(
+        profile_run=lambda **kwargs: None,
+        model_memory_usage=0,
+        cudagraph_capture_transient_peak_bytes=0,
+    )
+
+    def _profile_cudagraph_memory():
+        model_runner.cudagraph_capture_transient_peak_bytes = capture_peak
+        return cg_estimate
+
+    model_runner.profile_cudagraph_memory = _profile_cudagraph_memory
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+        ),
+        randomize_dummy_inputs=False,
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None,
+            gpu_memory_utilization=0.9,
+            resolved_gpu_memory_utilization=0.9,
+            enable_extensible_kv_cache=False,
+        ),
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        model_runner=model_runner,
+        init_snapshot=SimpleNamespace(
+            free_memory=80 * GiB_bytes, total_memory=80 * GiB_bytes
+        ),
+        requested_memory=72 * GiB_bytes,
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    profile_result = SimpleNamespace(
+        after_profile=SimpleNamespace(free_memory=60 * GiB_bytes),
+        total_consumed=total_consumed,
+        non_kv_cache_memory=total_consumed + profile_peak,
+        transient_peak_headroom=profile_peak,
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker,
+        "memory_profiling",
+        lambda *args, **kwargs: nullcontext(profile_result),
+    )
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setenv(
+        "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1" if estimate_enabled else "0"
+    )
+
+    available = gpu_worker.Worker.determine_available_memory(worker)
+
+    applied_cg = cg_estimate if estimate_enabled else 0
+    expected_extra = expected_extra_gib * GiB_bytes
+    assert available == (
+        72 * GiB_bytes - total_consumed - profile_peak - expected_extra - applied_cg
+    )
+    assert worker.cudagraph_memory_estimate == applied_cg
+    assert worker.peak_activation_memory == profile_peak + expected_extra + applied_cg
+
+
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 

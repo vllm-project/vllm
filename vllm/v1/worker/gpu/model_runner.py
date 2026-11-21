@@ -207,6 +207,8 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    cudagraph_capture_transient_peak_bytes: int = 0
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -1153,6 +1155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Estimate the GPU memory required to capture CUDA graphs."""
         if self.cache_config.enable_extensible_kv_cache:
             # The extensible KV cache measures the capture footprint after warmup.
+            self.cudagraph_capture_transient_peak_bytes = 0
             return 0
         # Runs before the KV cache exists, outside compile_or_warm_up_model.
         with self.eplb.suppress():
@@ -1194,6 +1197,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             with self.maybe_setup_dummy_loras(self.lora_config):
                 if capture_encoder:
                     self.model_state.encoder_runner.capture()
+                    if capture_decoder:
+                        # Release warmup activations cached on the encoder
+                        # capture stream before decoder/speculator capture.
+                        torch.accelerator.empty_cache()
 
                 if capture_decoder:
                     input_buffers = self.input_buffers
@@ -1221,6 +1228,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.cudagraph_manager.capture_stream,
                     )
                     if self.speculator is not None:
+                        # Release warmup activations cached on the target
+                        # capture stream(s) before the speculator captures on
+                        # its own stream(s).
+                        torch.accelerator.empty_cache()
                         with self.draft_context():
                             self.speculator.capture()
                     if self.adaptive_verification is not None and not profile_only:
