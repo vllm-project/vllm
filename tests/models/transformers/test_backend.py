@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
+import transformers
 from safetensors.torch import load_file, save_file
 from transformers import (
     AutoConfig,
@@ -33,12 +34,20 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.transformers import causal
 from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.causal import (
+    probe_output_head,
+    stub_base_model,
+    to_output_head,
+)
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.transformers_utils import dynamic_module
+from vllm.transformers_utils.dynamic_module import get_transformers_model_class
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -147,6 +156,76 @@ def test_models(
         model_impl=model_impl,
         trust_remote_code=trust_remote_code,
     )
+
+
+def test_output_head_transform(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+) -> None:
+    """ModernBERT decoder transforms the hidden states (dense -> act -> norm) before
+    its biased output embeddings, `decoder`. In float32 because this tiny model has
+    near-tied logits in bfloat16."""
+    check_implementation(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        "jhu-clsp/ettin-decoder-17m",
+        kwargs_ref={"dtype": "float32"},
+        kwargs_test={"dtype": "float32"},
+        num_fused=(0, 1),  # `Wi` already holds the input and gate projections
+        model_impl="transformers",
+    )
+
+
+OUTPUT_HEAD_KWARGS = dict(
+    model_impl="transformers",
+    load_format="dummy",
+    hf_overrides={"num_hidden_layers": 1},
+    max_model_len=512,
+    gpu_memory_utilization=0.5,
+)
+
+
+@create_new_process_for_each_test("spawn")
+def test_output_head_moe(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept head is not replaced by `MoEMixin`."""
+    # Disable multiprocessing so that the patch applies to the engine
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(causal, "probe_output_head", lambda *args: None)
+    model = "ibm-granite/granite-3.0-1b-a400m-base"
+    with vllm_runner(model, **OUTPUT_HEAD_KWARGS) as model_test:
+        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        assert has_head == [True]
+        model_test.generate_greedy(["Hello"], max_tokens=4)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_output_head_lora(vllm_runner: type[VllmRunner]) -> None:
+    """The kept head projects `[1, n, h]` hidden states, which LoRA's `lm_head`
+    must see as `[n, h]` to reorder the TP-sharded vocab."""
+    kwargs = OUTPUT_HEAD_KWARGS | dict(enable_lora=True, tensor_parallel_size=2)
+    with vllm_runner("jhu-clsp/ettin-decoder-17m", **kwargs) as model_test:
+        model_test.generate_greedy(["Hello"], max_tokens=4)
+
+
+@create_new_process_for_each_test("spawn")
+def test_output_head_fallback(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A head that cannot run without its base model falls back to `lm_head`."""
+    # Disable multiprocessing so that the patch applies to the engine
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def forward(self, *args, **kwargs):
+        raise AttributeError("'_OpaqueBaseModel' object has no attribute 'weight'")
+
+    monkeypatch.setattr(causal._OpaqueBaseModel, "forward", forward)
+    with vllm_runner("jhu-clsp/ettin-decoder-17m", **OUTPUT_HEAD_KWARGS) as model_test:
+        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        assert has_head == [False]
 
 
 @create_new_process_for_each_test("spawn")
@@ -906,6 +985,193 @@ def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
 
     assert positions.shape == (4, 3)
     assert delta == 0
+
+
+def build_causal_lm(model_type: str, arch: str, device: str, **overrides):
+    """A tiny HF `ForCausalLM` of one layer, in float32."""
+    if not hasattr(transformers, arch):
+        pytest.skip(f"The installed transformers has no {arch!r}")
+    model_cls = getattr(transformers, arch)
+    config = AutoConfig.for_model(
+        model_type,
+        num_hidden_layers=1,
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        vocab_size=VOCAB_SIZE,
+        pad_token_id=0,
+        **overrides,
+    )
+    with torch.device(device):
+        return model_cls._from_config(config, dtype=torch.float32)
+
+
+OUTPUT_HEADS = [
+    # (model_type, arch, overrides, renames of the output embeddings)
+    ("llama", "LlamaForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Soft caps the logits
+    ("gemma2", "Gemma2ForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Multiplies the logits by `logit_scale`
+    ("cohere", "CohereForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Divides the logits by `logits_scaling`
+    (
+        "granite",
+        "GraniteForCausalLM",
+        {"logits_scaling": 4.0},
+        {"lm_head.weight": "lm_head.weight"},
+    ),
+    # Multiplies the logits by `logits_scaling`
+    (
+        "hyperclovax",
+        "HyperCLOVAXForCausalLM",
+        {"logits_scaling": 0.125},
+        {"lm_head.weight": "lm_head.weight"},
+    ),
+    # dense -> act -> norm in `lm_head`, then the biased output embeddings `decoder`
+    (
+        "modernbert-decoder",
+        "ModernBertDecoderForCausalLM",
+        {},
+        {"decoder.weight": "lm_head.weight", "decoder.bias": "lm_head.bias"},
+    ),
+    # The output embeddings are nested inside the module which transforms first,
+    # whose `bias` aliases theirs
+    (
+        "roberta",
+        "RobertaForCausalLM",
+        {"is_decoder": True},
+        {
+            "lm_head.decoder.weight": "lm_head.weight",
+            "lm_head.decoder.bias": "lm_head.bias",
+            "lm_head.bias": "lm_head.bias",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
+def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
+    """Everything after the base model, with the output embeddings swapped for a
+    projection, gives the HF logits from the base model's hidden states."""
+    torch.manual_seed(0)
+    model = build_causal_lm(model_type, arch, "cpu", **overrides).eval()
+    hidden_states = torch.randn(1, 3, model.config.hidden_size)
+
+    def replace_hidden_states(module, args, output):
+        output.last_hidden_state = hidden_states
+        return output
+
+    model.base_model.register_forward_hook(replace_hidden_states)
+    with torch.no_grad():
+        expected = model(input_ids=torch.zeros(1, 3, dtype=torch.long)).logits
+
+        embeddings = model.get_output_embeddings()
+        output_head = to_output_head(model, type(model.base_model))
+        assert output_head is not None
+        lm_head_renames = {
+            k: v for k, v in output_head.renames.items() if v.startswith("lm_head.")
+        }
+        assert lm_head_renames == renames
+        assert not any(p is embeddings.weight for p in model.parameters())
+        output_head.output_embeddings.project = embeddings
+        logits = model(inputs_embeds=hidden_states).logits
+
+    torch.testing.assert_close(logits, expected)
+
+
+LOGIT_TRANSFORMS = {
+    "LlamaForCausalLM": (1.0, None),
+    "Gemma2ForCausalLM": (1.0, 30.0),
+    "CohereForCausalLM": (0.0625, None),
+    "GraniteForCausalLM": (0.25, None),
+    "HyperCLOVAXForCausalLM": (0.125, None),
+}
+
+
+@pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
+def test_logit_transform_is_detected(model_type, arch, overrides, renames):
+    """Heads which only scale or soft cap the logits are left to `LogitsProcessor`,
+    so they keep its fused path and batch-sharded sampling."""
+    model = build_causal_lm(model_type, arch, "meta", **overrides)
+    assert (output_head := to_output_head(model, type(model.base_model)))
+    logit_transform = probe_output_head(output_head, model.config.hidden_size)
+    assert logit_transform == LOGIT_TRANSFORMS.get(arch)
+
+
+def test_output_head_calling_base_model_submodule():
+    """OPT calls its base model's decoder directly, and finds its input embeddings
+    there, which the stub also serves without building the base model."""
+    overrides = dict(ffn_dim=128, tie_word_embeddings=False)
+    model = build_causal_lm("opt", "OPTForCausalLM", "meta", **overrides)
+    with torch.device("meta"), stub_base_model(model.base_model):
+        model = type(model)._from_config(model.config)
+    assert [name for name, _ in model.named_parameters()] == ["lm_head.weight"]
+    assert (output_head := to_output_head(model))
+    assert probe_output_head(output_head, model.config.hidden_size) == (1.0, None)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "arch", "overrides", "module_renames"),
+    [
+        (
+            "modernbert-decoder",
+            "ModernBertDecoderForCausalLM",
+            {},
+            {"lm_head.dense": "output_head.lm_head.dense", "decoder": "lm_head"},
+        ),
+        (
+            "roberta",
+            "RobertaForCausalLM",
+            {"is_decoder": True},
+            {
+                "lm_head.dense": "output_head.lm_head.dense",
+                "lm_head.decoder": "lm_head",
+            },
+        ),
+    ],
+)
+def test_output_head_renames_modules(model_type, arch, overrides, module_renames):
+    """Quantization configs name the head's layers (e.g. to skip them) by their
+    checkpoint names, so the renames cover modules as well as parameters."""
+    model = build_causal_lm(model_type, arch, "meta", **overrides)
+    assert (output_head := to_output_head(model, type(model.base_model)))
+    mapper = output_head.weights_mapper()
+    assert mapper.apply_list(list(module_renames)) == list(module_renames.values())
+
+
+def test_transformers_model_class_honours_remote_code_config(monkeypatch):
+    """Remote code is loaded with the model's revisions and `trust_remote_code`."""
+    calls = []
+
+    def fake_get_class(class_reference, model, **kwargs):
+        calls.append((class_reference, model, kwargs))
+        return nn.Module
+
+    monkeypatch.setattr(
+        dynamic_module, "try_get_class_from_dynamic_module", fake_get_class
+    )
+    model_config = SimpleNamespace(
+        model="org/repo",
+        revision="abc",
+        code_revision="def",
+        trust_remote_code=True,
+        hf_config=SimpleNamespace(
+            auto_map={
+                "AutoConfig": "configuration_x.XConfig",
+                "AutoModel": "modeling_x.XModel",
+                "AutoModelForCausalLM": "modeling_x.XForCausalLM",
+            }
+        ),
+    )
+
+    assert get_transformers_model_class("XForCausalLM", model_config) is nn.Module
+    assert calls == [
+        (
+            "modeling_x.XForCausalLM",
+            "org/repo",
+            {"trust_remote_code": True, "revision": "abc", "code_revision": "def"},
+        )
+    ]
 
 
 # The smallest sizes the fused MoE kernels accept
