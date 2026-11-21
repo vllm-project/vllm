@@ -385,7 +385,8 @@ def test_manager_get_stats_gauges_and_info_labels() -> None:
 def test_manager_info_labels_reflect_disk_mode() -> None:
     connector = _make_connector(
         extra_config={
-            "kv_offload_backend": "disk",
+            "kv_offload_backend": "hybrid",
+            "cpu_hot_cache": 0,
             "disk_path": "/tmp/fake-disk-metrics",
             "disk_capacity_bytes": 1024**3,
             "use_page_cache": True,

@@ -2,6 +2,8 @@
 
 This guide covers configuration of the [`OffloadingConnector`](disagg_prefill.md), which extends the prefix cache by offloading completed KV blocks to slower but larger tiers (CPU host memory, plus optional secondary tiers) as they are produced. Hits in the offload tiers are promoted back to GPU on demand. Transfers between GPU and CPU use DMA (`cudaMemcpyAsync`) and run asynchronously alongside model computation, so offloading adds minimal CPU- and GPU-core overhead.
 
+For the DRAM/SSD backend of `SimpleCPUOffloadConnector`, see [Hybrid Backend](#hybrid-backend). Its configuration is separate from the `OffloadingConnector` configuration below.
+
 !!! note
     The `OffloadingConnector` currently supports CUDA, ROCm, and XPU only.
 
@@ -500,6 +502,52 @@ Example (OpenAI-compatible completions request):
 }
 ```
 
+## Hybrid Backend
+
+Select `kv_offload_backend="hybrid"` on `SimpleCPUOffloadConnector` to store
+offloaded KV blocks on SSD and retain selected copies in pinned host DRAM.
+Configure it through `kv_connector_extra_config`, for example with a 2 GiB
+hot cache:
+
+```bash
+vllm serve <model> \
+  --enable-prefix-caching \
+  --kv-transfer-config '{
+    "kv_connector": "SimpleCPUOffloadConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "kv_offload_backend": "hybrid",
+      "disk_path": "/mnt/nvme/kv",
+      "cpu_hot_cache": 2147483648,
+      "disk_buffer_slots": 2,
+      "max_load_slots": 8
+    }
+  }'
+```
+
+Byte-valued settings use integer bytes; 1 GiB is `1073741824` bytes.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `kv_offload_backend` | `"cpu"` | Set to `"hybrid"` to enable the DRAM/SSD backend. |
+| `disk_path` | Required | SSD file path prefix, not a directory or raw device. Use a distinct path per engine; files are temporary and do not persist KV across runs. |
+| `cpu_hot_cache` | `8589934592` (8 GiB) | Hot KV data capacity per worker in bytes, rounded down to complete blocks. Must be non-negative; `0` disables the hot pool. Fixed staging and alignment overhead are allocated separately. |
+| `disk_capacity_bytes` | `107374182400` (100 GiB) | SSD capacity per worker; must be positive. |
+| `hot_cache_tokens_per_request` | `2048` | First N tokens eligible for DRAM copies, rounded down to complete KV blocks. An upper limit, not a guaranteed allocation. `0` disables retention, not the allocated pool. |
+| `disk_buffer_slots` | `2` | Fixed staging slots per direction: N load slots and N store slots, each holding one KV block. Allocated even when the hot cache is disabled. Minimum effective value is `1`. |
+| `max_load_slots` | `max(8, disk_buffer_slots)` | Maximum load slots after borrowing hot-cache capacity; actual usage can be lower. Must be at least `disk_buffer_slots`; setting them equal disables borrowing. Without a hot pool, load slots remain at `disk_buffer_slots`. |
+| `num_cpu_blocks` | Automatically sized | Explicit number of SSD slots, bounded by `disk_capacity_bytes`. See [explicit pool sizing](#explicit-pool-sizing-for-simplecpuoffloadconnector). |
+| `use_page_cache` | `false` | Use OS page-cache I/O instead of `O_DIRECT`. `true` is allowed only with `cpu_hot_cache=0`. |
+| `lazy_offload` | `false` | Enable inherited lazy offload. Must remain `false` when `cpu_hot_cache` is positive. |
+
+`cpu_bytes_to_use` and `cpu_bytes_to_use_per_rank` apply only to the `"cpu"`
+backend. For Hybrid, use `cpu_hot_cache`; total host buffer memory includes
+the hot pool, both fixed staging pools, and alignment overhead.
+
+Prefix caching is required. With a positive `cpu_hot_cache`, Hybrid currently
+supports one GPU, no data parallelism, and one full-attention KV cache group;
+the SSD filesystem must support `O_DIRECT`.
+
 ## Huge pages for `SimpleCPUOffloadConnector`
 
 With `kv_offload_backend="cpu"`, set `cpu_hugepage_block_size` to `"2MB"` or
@@ -550,7 +598,7 @@ different KV cache sizes without adding a collective during initialization.
 
 The example count must be adjusted for the model, KV layout, and parallelism.
 The configured byte budget remains an upper bound: startup fails if the
-requested count exceeds a worker's capacity. For the `disk` backend the count
+requested count exceeds a worker's capacity. For the `hybrid` backend the count
 selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.

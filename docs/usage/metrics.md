@@ -62,8 +62,10 @@ only the GPU pool.
 These metrics are exposed when the `SimpleCPUOffloadConnector` KV connector
 is configured (e.g. `--kv-transfer-config='{"kv_connector":
 "SimpleCPUOffloadConnector", "kv_role": "kv_both", "kv_connector_extra_config":
-{"kv_offload_backend": "disk", "disk_path": "/mnt/nvme/kv"}}'`). They are
+{"kv_offload_backend": "hybrid", "disk_path": "/mnt/nvme/kv"}}'`). They are
 updated once per engine step.
+
+For configuration and defaults, see the [Hybrid Backend guide](../features/kv_offloading_usage.md#hybrid-backend).
 
 Caveats to keep in mind when interpreting them:
 

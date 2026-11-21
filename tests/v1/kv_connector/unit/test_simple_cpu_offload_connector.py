@@ -124,8 +124,8 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
     assert coord.block_pool.num_hash_lookahead_tokens == num_lookahead
 
 
-def test_disk_mode_rejects_non_positive_capacity() -> None:
-    """Disk mode with disk_capacity_bytes <= 0 raises ValueError.
+def test_hybrid_mode_rejects_non_positive_capacity() -> None:
+    """Hybrid mode with disk_capacity_bytes <= 0 raises ValueError.
 
     Without this guard, the worker operates in disk mode but the scheduler
     classifies events as MEDIUM_CPU instead of MEDIUM_STORAGE, silently
@@ -134,7 +134,8 @@ def test_disk_mode_rejects_non_positive_capacity() -> None:
     with pytest.raises(ValueError, match="disk_capacity_bytes > 0"):
         _make_connector(
             extra_config={
-                "kv_offload_backend": "disk",
+                "kv_offload_backend": "hybrid",
+                "cpu_hot_cache": 0,
                 "disk_path": "/tmp/fake",
                 "disk_capacity_bytes": 0,
             }
