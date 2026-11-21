@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -12,6 +15,7 @@ from vllm.config import CompilationConfig, VllmConfig, replace
 from vllm.config.kernel import MoEBackend
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 from ..utils import (
     Messages,
@@ -102,6 +106,48 @@ cases = [
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runner):
     args.enforce_eager = enforce_eager
     assert_draft_model_correctness(args, vllm_runner)
+
+
+@pytest.mark.parametrize("target_modelscope", [False, True])
+def test_draft_model_hub_override(target_modelscope, monkeypatch, vllm_runner):
+    """Mix hubs in either direction without rewriting the HF repository ID."""
+    hf_model = "Qwen/Qwen3-0.6B"
+    ms_model = "modelscope-only/Qwen3-0.6B"
+    local_model = hf_api().snapshot_download(hf_model)
+    # Mock the external ModelScope service; load real weights from its snapshot.
+    ms_download = Mock(return_value=local_model)
+    module = ModuleType("modelscope.hub.snapshot_download")
+    module.__dict__["snapshot_download"] = ms_download
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setenv("VLLM_USE_MODELSCOPE", str(int(target_modelscope)))
+    monkeypatch.setenv("VLLM_DRAFT_USE_MODELSCOPE", str(int(not target_modelscope)))
+    target, draft = (ms_model, hf_model) if target_modelscope else (hf_model, ms_model)
+
+    with vllm_runner(
+        target,
+        enforce_eager=True,
+        max_model_len=128,
+        speculative_config={"model": draft, "num_speculative_tokens": 3},
+    ) as runner:
+        config = runner.llm.llm_engine.vllm_config
+        assert config.model_config.model == (
+            local_model if target_modelscope else hf_model
+        )
+        assert config.speculative_config.draft_model_config.model == (
+            hf_model if target_modelscope else local_model
+        )
+        assert config.speculative_config.draft_model_config.tokenizer == (
+            config.model_config.tokenizer
+        )
+        outputs = runner.llm.generate(
+            ["The future of AI is"],
+            SamplingParams(temperature=0, max_tokens=8, ignore_eos=True),
+        )
+        assert len(outputs[0].outputs[0].token_ids) == 8
+    assert ms_download.call_count > 0
+    assert all(
+        call.kwargs["model_id"] == ms_model for call in ms_download.call_args_list
+    )
 
 
 @single_gpu_only
