@@ -303,6 +303,7 @@ def test_sync_load_failure_with_shared_blocks(
         assert (
             request.num_computed_tokens == expected_computed_tokens[request.request_id]
         )
+        assert request.prefill_stats.num_cached_tokens == request.num_computed_tokens
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
 
 
@@ -394,3 +395,110 @@ def test_block_level_load_failure_fails_closed_with_multiple_groups():
 
     with pytest.raises(RuntimeError, match="failed_recving"):
         scheduler._handle_invalid_blocks({1}, {})
+
+
+def test_sync_load_failure_updates_prefill_stats(scheduler: Scheduler):
+    """Recomputed tokens must not be reported as external cache hits."""
+    block_size = scheduler.block_size
+    num_prompt_tokens = 10 * block_size
+    num_external_computed_tokens = 9 * block_size
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    scheduler.add_request(request=request)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request.request_id: num_external_computed_tokens}, async_load=False
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    model_runner_output = create_model_runner_output(
+        [request], invalid_block_ids={req_block_ids[2]}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.num_computed_tokens == 2 * block_size
+    stats = request.prefill_stats
+    assert stats is not None
+    assert stats.num_external_cached_tokens == 2 * block_size
+    assert stats.num_cached_tokens == 2 * block_size
+    assert stats.num_computed_tokens == num_prompt_tokens - 2 * block_size
+
+    scheduler_output = scheduler.schedule()
+    engine_outputs = scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request])
+    )
+    reported = [
+        output.prefill_stats
+        for outputs in engine_outputs.values()
+        for output in outputs.outputs
+        if output.request_id == request.request_id
+    ]
+    assert len(reported) == 1
+    assert reported[0].num_cached_tokens == 2 * block_size
+    assert reported[0].num_external_cached_tokens == 2 * block_size
+    assert reported[0].num_computed_tokens == num_prompt_tokens - 2 * block_size
+
+
+def test_shared_load_failure_keeps_locally_prefilled_tokens_uncached(
+    scheduler: Scheduler,
+):
+    """Tokens prefilled locally in earlier chunks are not reported as external hits."""
+    block_size = scheduler.block_size
+    num_prompt_tokens = 10 * block_size
+    num_external_computed_tokens = 9 * block_size
+    common_prefix_len = 4 * block_size
+
+    request1 = create_request(
+        num_tokens=num_prompt_tokens, common_prefix_len=common_prefix_len
+    )
+    scheduler.add_request(request=request1)
+    request2 = create_request(
+        num_tokens=num_prompt_tokens, common_prefix_len=common_prefix_len
+    )
+    scheduler.add_request(request=request2)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request1.request_id: num_external_computed_tokens}, async_load=False
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    first_output = scheduler.schedule()
+    first_runner_output = create_model_runner_output([request1, request2])
+    first_runner_output.sampled_token_ids[1] = []  # request2 is still prefilling
+    scheduler.update_from_output(first_output, first_runner_output)
+    assert request2.num_computed_tokens == common_prefix_len + 48
+
+    shared_block_id = first_output.scheduled_new_reqs[0].block_ids[0][1]
+    second_output = scheduler.schedule()
+    scheduler.update_from_output(
+        second_output,
+        create_model_runner_output(
+            [request1, request2], invalid_block_ids={shared_block_id}
+        ),
+    )
+
+    reported = []
+    for _ in range(10):
+        engine_outputs = scheduler.update_from_output(
+            scheduler.schedule(), create_model_runner_output([request1, request2])
+        )
+        reported = [
+            output.prefill_stats
+            for outputs in engine_outputs.values()
+            for output in outputs.outputs
+            if output.request_id == request2.request_id
+        ]
+        if reported:
+            break
+    assert len(reported) == 1
+    assert reported[0].num_cached_tokens == common_prefix_len
+    assert reported[0].num_external_cached_tokens == 0
+    assert reported[0].num_local_cached_tokens == common_prefix_len

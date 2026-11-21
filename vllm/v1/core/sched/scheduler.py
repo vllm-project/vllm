@@ -3791,6 +3791,23 @@ class Scheduler(SchedulerInterface):
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 
+    def _sync_prefill_stats(self, request: Request) -> None:
+        """Cap cache hit counts at the tokens still valid after a rewind."""
+        prefill_stats = request.prefill_stats
+        if prefill_stats is None or prefill_stats.num_prompt_tokens == 0:
+            return
+        num_cached_tokens = min(
+            prefill_stats.num_cached_tokens, request.num_computed_tokens
+        )
+        num_local_cached_tokens = min(
+            prefill_stats.num_local_cached_tokens, num_cached_tokens
+        )
+        prefill_stats.set(
+            num_prompt_tokens=request.num_prompt_tokens,
+            num_local_cached_tokens=num_local_cached_tokens,
+            num_external_cached_tokens=num_cached_tokens - num_local_cached_tokens,
+        )
+
     def _update_requests_with_invalid_blocks(
         self,
         requests: Iterable[Request],
@@ -3870,6 +3887,7 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
+                self._sync_prefill_stats(request)
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -3890,6 +3908,7 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+                    self._sync_prefill_stats(request)
 
                 affected_req_ids.add(request.request_id)
 
