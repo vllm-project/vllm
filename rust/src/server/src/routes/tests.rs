@@ -74,6 +74,7 @@ use crate::render::RenderState;
 use crate::state::AppState;
 
 mod responses;
+mod speech_to_text;
 
 fn request_output(
     request_id: &str,
@@ -469,6 +470,7 @@ fn fake_chat_tokenizer() -> TestTokenizer {
         .with_bos_token("<bos>", FAKE_BOS_TOKEN_ID)
         .with_regular_token("<image>", 999)
         .with_regular_token("<|image_pad|>", 151655)
+        .with_regular_token("<|audio_pad|>", 151676)
         .with_regular_token("<think>", 0xF001)
         .with_regular_token("</think>", 0xF002)
         .with_regular_token("<|START_THINKING|>", 0xF003)

@@ -33,9 +33,9 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_AUDIO_CLIP_FILESIZE_MB,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode,
+    LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;

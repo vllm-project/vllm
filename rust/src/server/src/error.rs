@@ -37,6 +37,12 @@ pub enum ApiError {
         message: String,
         param: Option<String>,
     },
+    /// A `multipart/form-data` body could not be parsed into the route's
+    /// form; `param` names the offending field as `body.<name>`.
+    InvalidForm {
+        message: String,
+        param: Option<String>,
+    },
     /// The requested operation conflicts with current server state.
     Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
@@ -53,7 +59,9 @@ impl ApiError {
             Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::JsonParseError { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
+            Self::JsonParseError { .. } | Self::InvalidQuery { .. } | Self::InvalidForm { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -84,8 +92,9 @@ impl ApiError {
             // model through FastAPI's validation handler, which names the
             // HTTP status instead of an error class.
             Self::JsonParseError { message } => ("Bad Request", message.clone(), None),
-            // A query value that fails validation takes the same handler.
-            Self::InvalidQuery { message, param } => {
+            // A query or form value that fails validation takes the same
+            // handler.
+            Self::InvalidQuery { message, param } | Self::InvalidForm { message, param } => {
                 ("Bad Request", message.clone(), param.clone())
             }
             // Python has no error class for 409; like its `HTTPException`

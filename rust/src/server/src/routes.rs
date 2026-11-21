@@ -19,6 +19,7 @@ mod profile;
 pub(super) mod render;
 mod server_info;
 mod sleep;
+mod speech_to_text;
 mod tokenize;
 mod version;
 mod weight_checker;
@@ -219,10 +220,13 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
     // Python registers these only for models that support transcription, so
     // other models answer 404 for them.
     if gates.transcription {
-        // TODO(#69115): implement the speech-to-text APIs.
-        router = router
-            .route("/v1/audio/transcriptions", post(not_supported))
-            .route("/v1/audio/translations", post(not_supported));
+        router = match speech_to_text::SpeechToTextModel::resolve(&state.chat) {
+            Some(model) => speech_to_text::register(router, model),
+            // TODO(#69115): serve the other transcription families.
+            None => router
+                .route("/v1/audio/transcriptions", post(not_supported))
+                .route("/v1/audio/translations", post(not_supported)),
+        };
     }
 
     if state.api_server_options.enable_tokenizer_info_endpoint {
