@@ -6,6 +6,8 @@ The community frequently requests the ability to extend vLLM with custom feature
 
 Plugins are user-registered code that vLLM executes. Given vLLM's architecture (see [Arch Overview](arch_overview.md)), multiple processes may be involved, especially when using distributed inference with various parallelism techniques. To enable plugins successfully, every process created by vLLM needs to load the plugin. This is done by the [load_plugins_by_group][vllm.plugins.load_plugins_by_group] function in the `vllm.plugins` module.
 
+A spawned worker can receive a named attention backend in its configuration before its plugins load. Register the same backend name and implementation in each process using `register_backend`.
+
 ## How vLLM Discovers Plugins
 
 vLLM's plugin system uses the standard Python `entry_points` mechanism. This mechanism allows developers to register functions in their Python packages for use by other packages. An example of a plugin:
