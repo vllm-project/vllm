@@ -242,6 +242,15 @@ class ServingGenerativeScoring(BaseServing):
         if len(request.items) == 0:
             return self.create_error_response("items must contain at least one item.")
 
+        if not request.apply_softmax and self.model_config.logprobs_mode not in (
+            "raw_logprobs",
+            "processed_logprobs",
+        ):
+            return self.create_error_response(
+                "apply_softmax=false requires --logprobs-mode raw_logprobs or "
+                f"processed_logprobs, got {self.model_config.logprobs_mode}."
+            )
+
         # Note: Mixed item types (string and token list) are validated by
         # Pydantic at request parsing time, so we don't need to check here.
 
