@@ -13,7 +13,10 @@ on every rank:
 - no allocator block appeared or disappeared, and the peak stays bounded;
 - reloaded A decodes exactly as cold A, reloaded B close to fresh B.
 
-Unless a case names B, B is A perturbed by `_perturb`.
+Unless a case names B, B is A perturbed by `_perturb`. A `planned` case
+reloads as a load-plan engine does, in-process: `plan_loads` at the first
+update, then `load_planned` for every chunk, so the same checks hold for the
+plan path; its fallbacks must match the case's allowlist.
 """
 
 import asyncio
@@ -22,15 +25,18 @@ import gc
 import glob
 import hashlib
 import itertools
+import json
 import os
 import shutil
 import uuid
 from collections import deque
 from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import pytest
+import regex as re
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -40,7 +46,9 @@ from tests.models.utils import check_logprobs_close
 from tests.utils import wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
 from vllm.config import set_current_vllm_config
+from vllm.distributed.weight_transfer.base import ParamMeta
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.model_executor.model_loader.reload import load_planned, plan_loads
 from vllm.model_executor.model_loader.reload.direct import direct_reload_active
 from vllm.model_executor.model_loader.weight_checksum import _tensors
 from vllm.model_executor.model_loader.weight_utils import (
@@ -63,10 +71,12 @@ NOT_COMPARED = (
     ".num_unpadded_tokens_tensors",
     "._ckpt_",
     "._direct_reload",
+    "name_or_path",
     "._aot_",
     ".compiled",
     ".was_aot_compile_fn_loaded_from_disk",
     "._ocp_mx_scheme",
+    ".impl._workspace_buffer",  # attention backend scratch
 )
 SCALARS = (bool, int, float, str, type(None), enum.Enum)
 # engine and model configs (below, also any PreTrainedConfig): same in both
@@ -178,11 +188,45 @@ def _active_blocks() -> set[tuple[int, int]]:
     }
 
 
-def _stream_reload(worker, folder: str) -> dict:
+def _metadata(folder: str) -> list[ParamMeta]:
+    """What a trainer declares at init: every checkpoint tensor's name, dtype
+    and shape, read without the values (an empty slice keeps the dtype)."""
+    metas = []
+    for path in _safetensors(folder):
+        with safe_open(path, "pt") as f:
+            for n in f.keys():  # noqa: SIM118
+                s = f.get_slice(n)
+                shape = tuple(s.get_shape())
+                t = s[(slice(0, 0),) * len(shape)] if shape else f.get_tensor(n)
+                metas.append(ParamMeta(n, t.dtype, shape))
+    return metas
+
+
+def _plan_at_start(worker, folder: str) -> None:
+    """Make the engine's `start_weight_update` plan at the first update, right
+    after `start_reload` and before the worker lends the KV cache, as the NCCL
+    engine with `use_load_plan` does."""
+    engine = worker.weight_transfer_engine
+    if hasattr(engine, "_refit_start"):
+        return
+    engine._refit_start = engine.start_weight_update
+    metadata = _metadata(folder)
+    worker._refit_plan = None
+
+    def start() -> None:
+        engine._refit_start()
+        if worker._refit_plan is None:
+            model = worker.model_runner.get_model()
+            worker._refit_plan = plan_loads(model, metadata)
+
+    engine.start_weight_update = start
+
+
+def _stream_reload(worker, folder: str, planned: bool = False) -> dict:
     """Reload `folder` through the worker's weight-update session; return the
     mode seen inside it, the allocator blocks it added or freed, and whether
     its peak stayed within a chunk plus twice the largest transformed
-    parameter (embeddings aren't)."""
+    parameter (embeddings aren't). `planned`: as a load-plan engine."""
     weights = safetensors_weights_iterator(_safetensors(folder), use_tqdm_on_load=False)
     model = worker.model_runner.get_model()
     largest_param = max(
@@ -197,15 +241,20 @@ def _stream_reload(worker, folder: str) -> dict:
     base = torch.accelerator.memory_allocated()
     torch.accelerator.reset_peak_memory_stats()
 
+    if planned:
+        _plan_at_start(worker, folder)
     worker.start_weight_update()
     mode = "direct" if direct_reload_active(model) else "layerwise"
     with set_current_vllm_config(worker.vllm_config):
+        load = model.load_weights
+        if planned:
+            load = partial(load_planned, model, worker._refit_plan)
         while batch := [
             (n, t.to(worker.device)) for n, t in itertools.islice(weights, BATCH_SIZE)
         ]:
             largest_batch = max(largest_batch, sum(t.nbytes for _, t in batch))
             # one call per transfer chunk, so no call sees the whole checkpoint
-            model.load_weights(iter(batch))
+            load(batch)
             torch.accelerator.synchronize()
             del batch  # one chunk in flight
     worker.finish_weight_update()
@@ -220,6 +269,28 @@ def _stream_reload(worker, folder: str) -> dict:
         "freed_blocks": sorted(before - after),
         "peak_bounded": peak <= largest_batch + 2 * largest_param,
     }
+
+
+def _fallbacks(worker) -> dict[str, str]:
+    """This rank's fallback names and why (`plan_loads` logs the rest)."""
+    entries = worker._refit_plan.entries.values()
+    return {e.name: e.reason for e in entries if e.writes is None}
+
+
+def _unexpected(fallbacks: dict[str, str], allowed: dict[str, str]) -> dict:
+    """Fallbacks no allowlist entry (name regex: reason) matches, with that
+    reason."""
+    return {
+        n: r
+        for n, r in fallbacks.items()
+        if not any(re.fullmatch(p, n) and r == why for p, why in allowed.items())
+    }
+
+
+def _stale(per_rank: list[dict[str, str]], allowed: dict[str, str]) -> list[str]:
+    """Allowlist entries no rank's fallback matches."""
+    names = {n for fallbacks in per_rank for n in fallbacks}
+    return [p for p in allowed if not any(re.fullmatch(p, n) for n in names)]
 
 
 def _diff(before: dict, after: dict) -> dict:
@@ -237,6 +308,68 @@ def _download(model: str) -> str:
     folder = download_weights_from_hf(model, None, ["*.safetensors"])
     hf_api().snapshot_download(model, allow_patterns=CONFIG_FILES)
     return folder
+
+
+_LAYER = re.compile(r"\.layers\.(\d+)\.")
+_EXPERT = re.compile(r"\.experts\.(\d+)\.")
+# What the cut families' configs and checkpoints name (gpt-oss, Qwen3 MoE,
+# Qwen3.5): per-layer lists, routed-expert counts, stacked experts and routers.
+_PER_LAYER_KEYS = ("layer_types",)
+_EXPERT_KEYS = ("num_experts", "num_local_experts")
+_STACKED = re.compile(r".*\.mlp\.(experts\.[a-z_]+|router\.\w+|gate\.weight)")
+
+
+def _reduce_config(cfg: dict, layers: int, experts: int) -> int:
+    """Cut the decoder's config to `layers` layers and `experts` routed
+    experts in place; return the original expert count."""
+    cfg = cfg.get("text_config", cfg)
+    for k in _PER_LAYER_KEYS:
+        if k in cfg:
+            cfg[k] = cfg[k][:layers]
+    cfg["num_hidden_layers"] = layers
+    keys = [k for k in _EXPERT_KEYS if k in cfg]
+    if len(keys) != 1:
+        raise ValueError(f"expected one routed-expert count of {_EXPERT_KEYS}")
+    key = keys[0]
+    num_experts, cfg[key] = cfg[key], experts
+    return num_experts
+
+
+def _reduced(model: str, layers: int, experts: int, out: Path) -> str:
+    """A checkpoint of `model` cut to its first `layers` decoder layers and
+    first `experts` routed experts, with real names, dtypes, quantization and
+    values; only the shards holding kept tensors are downloaded."""
+    src = hf_api().snapshot_download(model, allow_patterns=CONFIG_FILES)
+    cfg = json.loads(Path(src, "config.json").read_text())
+    num_experts = _reduce_config(cfg, layers, experts)
+
+    def keep(name: str) -> bool:
+        layer, expert = _LAYER.search(name), _EXPERT.search(name)
+        return not (
+            (layer and int(layer.group(1)) >= layers)
+            or (expert and int(expert.group(1)) >= experts)
+        )
+
+    weight_map = json.loads(Path(src, "model.safetensors.index.json").read_text())
+    files = sorted({f for n, f in weight_map["weight_map"].items() if keep(n)})
+    src = hf_api().snapshot_download(model, allow_patterns=[*CONFIG_FILES, *files])
+    out.mkdir(parents=True)
+    for pattern in CONFIG_FILES:
+        for f in glob.glob(os.path.join(src, pattern)):
+            if not f.endswith(".index.json"):
+                shutil.copy(f, out)
+    (out / "config.json").write_text(json.dumps(cfg, indent=2))
+    tensors = {}
+    for file in files:
+        with safe_open(os.path.join(src, file), "pt") as f:
+            for n in filter(keep, f.keys()):
+                sl = f.get_slice(n)
+                if _STACKED.fullmatch(n) and sl.get_shape()[0] == num_experts:
+                    tensors[n] = sl[:experts].contiguous()
+                else:
+                    tensors[n] = f.get_tensor(n)
+    save_file(tensors, out / "model.safetensors", metadata={"format": "pt"})
+    return str(out)
 
 
 def _counts(t: torch.Tensor) -> bool:
@@ -389,6 +522,11 @@ class RefitCase:
     # level-2 sleep before each reload, waking weights before and the KV
     # cache after it, as RL colocated with training does
     sleep: bool = False
+    # A cut to (decoder layers, routed experts) at test time, see `_reduced`
+    reduce: tuple[int, int] | None = None
+    # reload through a load plan; fallback names must match `fallbacks`
+    planned: bool = False
+    fallbacks: dict[str, str] = field(default_factory=dict)  # name regex: reason
 
     @property
     def tp(self) -> int:
@@ -405,7 +543,13 @@ class RefitCase:
     @property
     def reference_key(self) -> tuple:
         """Cases that differ only in sleep share a fresh-B reference."""
-        return (self.model, self.model_b, repr(self.parallel), repr(self.engine))
+        return (
+            self.model,
+            self.model_b,
+            self.reduce,
+            repr(self.parallel),
+            repr(self.engine),
+        )
 
     @property
     def id(self) -> str:
@@ -415,6 +559,7 @@ class RefitCase:
         layout += ["ep"] if p.get("enable_expert_parallel") else []
         layout += ["eplb"] if p.get("enable_eplb") else []
         layout += ["sleep"] if self.sleep else []
+        layout += ["planned"] if self.planned else []
         return "-".join([self.family, self.quant, *layout])
 
 
@@ -431,6 +576,10 @@ NIGHTLY = (pytest.mark.slow_test,)  # CI runs these in the nightly step only
 GPT_OSS = "openai/gpt-oss-20b"
 # pinned: the only TRT-LLM MXFP4 reload coverage, not left to the oracle
 TRTLLM_MOE = dict(kernel_config={**KERNEL_CONFIG, "moe_backend": "flashinfer_trtllm"})
+
+QWEN3_MOE = "Qwen/Qwen3-30B-A3B"
+PLAN_QWEN3_MOE = dict(planned=True, reduce=(2, 16))  # top-8 routing
+PLAN_GPT_OSS = dict(planned=True, reduce=(2, 8))  # sliding and full attention
 
 REFIT_CASES = [
     # one GPU
@@ -453,6 +602,33 @@ REFIT_CASES = [
         for parallel in (TP2, TP2_EP, TP2_EP_EPLB, DP2_EP)
     ),
     RefitCase("qwen3-moe", "fp8-block", "Qwen/Qwen3-30B-A3B-FP8", TP2_EP),
+    # load plan (one case per RL family), on checkpoints cut at test time
+    *(
+        RefitCase(family, quant, model, parallel, engine=engine, **plan)
+        for family, quant, model, engine, plan in (
+            ("qwen3-moe", "bf16", QWEN3_MOE, {}, dict(PLAN_QWEN3_MOE, marks=NIGHTLY)),
+            ("qwen3-moe", "fp8-block", f"{QWEN3_MOE}-FP8", {}, PLAN_QWEN3_MOE),
+            ("gpt-oss", "mxfp4", GPT_OSS, TRTLLM_MOE, PLAN_GPT_OSS),
+        )
+        for parallel in ({}, TP2_EP)
+    ),
+    # the plan's destination views must survive a level-2 sleep
+    RefitCase(
+        "gpt-oss", "mxfp4", GPT_OSS, engine=TRTLLM_MOE, sleep=True, **PLAN_GPT_OSS
+    ),
+    # Gated DeltaNet and full attention, FP8
+    RefitCase(
+        "qwen3.5-moe",
+        "fp8",
+        "Qwen/Qwen3.5-35B-A3B-FP8",
+        engine={"limit_mm_per_prompt": {"image": 0, "video": 0}},
+        # the cut downloads 24 GB before the engines start
+        marks=(*NIGHTLY, pytest.mark.timeout(1800)),
+        planned=True,
+        reduce=(4, 32),
+        # RFC #64418 L11: the GDN conv1d loader's `view` is not traced as one
+        fallbacks={r".*\.linear_attn\.conv1d\.weight": "applies view.default to it"},
+    ),
 ]
 
 
@@ -460,12 +636,17 @@ REFIT_CASES = [
 def checkpoints(tmp_path_factory):
     """A's and B's local folders for a case, and the checkpoint tensors equal
     in both; derived B is written once per model."""
-    cache: dict[tuple[str, str | None], tuple[str, str, list[str]]] = {}
+    cache: dict[tuple, tuple[str, str, list[str]]] = {}
 
     def get(case: RefitCase) -> tuple[str, str, list[str]]:
-        key = (case.model, case.model_b)
+        key = (case.model, case.model_b, case.reduce)
         if key not in cache:
-            a = _download(case.model)
+            if case.reduce is None:
+                a = _download(case.model)
+            else:
+                a = _reduced(
+                    case.model, *case.reduce, tmp_path_factory.mktemp("reduced") / "a"
+                )
             if case.model_b is None:
                 b = str(tmp_path_factory.mktemp("derived") / "b")
                 unchanged = _derive_b(a, Path(b))
@@ -494,7 +675,14 @@ def _gpu_marks(num_gpus: int) -> list:
 @pytest.mark.parametrize(
     "case",
     [
-        pytest.param(c, id=c.id, marks=[*c.marks, *_gpu_marks(c.num_gpus)])
+        pytest.param(
+            c,
+            id=c.id,
+            marks=[
+                *c.marks,
+                *_gpu_marks(c.num_gpus),
+            ],
+        )
         for c in REFIT_CASES
     ],
 )
@@ -536,7 +724,9 @@ async def test_refit_equals_fresh(
                 await asyncio.wait_for(engine.sleep(level=2), TIMEOUT_S)
                 result[f"reload_{name}_slept"] = await engine.is_sleeping()
                 await asyncio.wait_for(engine.wake_up(tags=["weights"]), TIMEOUT_S)
-            result[f"reload_{name}"] = await _rpc(engine, _stream_reload, folder)
+            result[f"reload_{name}"] = await _rpc(
+                engine, _stream_reload, folder, case.planned
+            )
             if case.sleep:
                 result[f"reload_{name}_woke"] = await asyncio.wait_for(
                     engine.wake_up(tags=["kv_cache"]), TIMEOUT_S
@@ -546,6 +736,12 @@ async def test_refit_equals_fresh(
             differs[name] = list(map(_diff, expected, digests))
             result[f"reload_{name}_moved"] = list(map(_diff, ptrs, moved))
 
+        if case.planned:
+            per_rank = await _rpc(engine, _fallbacks)
+            result["unexpected_fallbacks"] = [
+                _unexpected(f, case.fallbacks) for f in per_rank
+            ]
+            result["stale_allowlist"] = _stale(per_rank, case.fallbacks)
     for name, per_rank in differs.items():
         result[f"reload_{name}_differs"] = per_rank
     # one assert, so a failure reports everything
@@ -561,6 +757,11 @@ async def test_refit_equals_fresh(
             for key, value in (("", reload), ("_differs", {}), ("_moved", {}))
         },
         **{f"reload_{name}{key}": v for name in ("b", "a") for key, v in sleep.items()},
+        **(
+            {"unexpected_fallbacks": [{}] * ranks, "stale_allowlist": []}
+            if case.planned
+            else {}
+        ),
     }
     # same engine, same graphs: reloading A must reproduce its cold outputs
     assert tokens["a"] == cold_a_tokens
