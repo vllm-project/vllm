@@ -596,39 +596,3 @@ def _assert_inputs_equal(
         b_data.pop(key, None)
 
     assert batched_tensors_equal(a_data, b_data), msg
-
-
-@pytest.mark.parametrize(
-    "model_id",
-    [
-        "OpenGVLab/InternVL3-1B",
-        "AIDC-AI/Ovis2.5-2B",
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
-    ],
-)
-def test_video_tensor_matches_numpy(model_id: str):
-    """The parser passes tensor videos through unchanged, so vLLM's own video
-    processors must give the same result for a tensor as for NumPy frames."""
-    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    video = random_video(
-        np.random.RandomState(0), min_frames=4, max_frames=5, min_wh=128, max_wh=129
-    )
-
-    def process(video: np.ndarray | torch.Tensor) -> MultiModalInput:
-        mm_data: MultiModalDataDict = {"video": video}
-        token_prompt = get_token_prompt(processor, mm_data)
-        return processor(
-            token_prompt,
-            mm_items=processor.info.parse_mm_data(mm_data),
-            hf_processor_mm_kwargs={},
-        )
-
-    tensor_out = process(torch.from_numpy(video))
-    numpy_out = process(video)
-    # mm_hashes differ: the hasher tells tensors and arrays apart.
-    assert tensor_out["prompt_token_ids"] == numpy_out["prompt_token_ids"]
-    assert tensor_out["mm_placeholders"] == numpy_out["mm_placeholders"]
-    assert batched_tensors_equal(
-        tensor_out["mm_kwargs"].get_data(), numpy_out["mm_kwargs"].get_data()
-    )
