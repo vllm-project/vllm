@@ -1337,8 +1337,10 @@ def fastsafetensors_weights_iterator(
 
 
 _ENGRAM_WEIGHT_RE = re.compile(
-    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
-    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"  # DeepSeek-V4.1
+    r"engram(?:_layer)?\.multi_head_embedding\."  # HY4 Flash
+    r"embedding\.weight(?:_scale_inv)?|"  # HY4 Flash
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"  # Qwen4 Exp
 )
 
 
