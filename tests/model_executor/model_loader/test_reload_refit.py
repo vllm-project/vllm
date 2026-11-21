@@ -76,6 +76,7 @@ NOT_COMPARED = (
     ".compiled",
     ".was_aot_compile_fn_loaded_from_disk",
     "._ocp_mx_scheme",
+    ".impl._workspace_buffer",  # attention backend scratch
 )
 SCALARS = (bool, int, float, str, type(None), enum.Enum)
 # engine and model configs (below, also any PreTrainedConfig): same in both
