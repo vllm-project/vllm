@@ -340,15 +340,19 @@ void reshape_and_cache_nvfp4_dispatch(
   // HND: head stride > block_offset stride.
   bool is_hnd = key_cache.stride(2) > key_cache.stride(1);
 
+  // NVFP4 packs fp4 data and fp8 block scales side-contiguously per page
+  // ([data | scale]); that packing is only valid for head-major pages. A
+  // token-major page interleaves data and scale per head, which this writer
+  // (and nvfp4_split_data_scale) cannot address, so reject it instead of
+  // silently writing garbage.
+  STD_TORCH_CHECK(is_hnd,
+                  "nvfp4 KV cache requires a head-major layout "
+                  "(BLHNC/LBHNC); token-major layouts (BLNHC/LBNHC) are not "
+                  "supported");
+
   int64_t data_block_stride = key_cache.stride(0);  // page_bytes
-  int64_t data_head_stride, data_block_offset_stride;
-  if (is_hnd) {
-    data_head_stride = (int64_t)block_size * data_dim;
-    data_block_offset_stride = data_dim;
-  } else {
-    data_head_stride = data_dim;
-    data_block_offset_stride = (int64_t)num_heads * data_dim;
-  }
+  int64_t data_head_stride = (int64_t)block_size * data_dim;
+  int64_t data_block_offset_stride = data_dim;
 
   // Page layout: [K_data | K_scale | V_data | V_scale]
   // Scale follows data within each KV side.
@@ -360,14 +364,8 @@ void reshape_and_cache_nvfp4_dispatch(
 
   // Scale strides: same page stride, inner strides from layout.
   int64_t scale_block_stride = data_block_stride;
-  int64_t scale_head_stride, scale_block_offset_stride;
-  if (is_hnd) {
-    scale_head_stride = (int64_t)block_size * scale_dim;
-    scale_block_offset_stride = scale_dim;
-  } else {
-    scale_head_stride = scale_dim;
-    scale_block_offset_stride = (int64_t)num_heads * scale_dim;
-  }
+  int64_t scale_head_stride = (int64_t)block_size * scale_dim;
+  int64_t scale_block_offset_stride = scale_dim;
 
   const float* k_scale_ptr = k_scale.const_data_ptr<float>();
   const float* v_scale_ptr = v_scale.const_data_ptr<float>();
