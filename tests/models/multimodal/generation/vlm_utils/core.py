@@ -123,6 +123,8 @@ def run_test(
 
     hf_runner_kwargs = dict(hf_runner_kwargs or {})
     hf_runner_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
+    # EngineCore can be killed before CUDA has reclaimed its memory.
+    hf_runner_kwargs.setdefault("wait_for_cuda_memory", True)
     if model_info.tokenizer:
         hf_runner_kwargs["tokenizer_name"] = model_info.tokenizer
     if hf_processor is not None:

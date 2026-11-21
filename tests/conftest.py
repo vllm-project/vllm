@@ -21,9 +21,11 @@ import os
 import socket
 import tempfile
 import threading
+import time
 from collections.abc import Generator
 from contextlib import nullcontext
 from enum import Enum
+from itertools import chain
 from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING, Optional
 
 import numpy as np
@@ -405,6 +407,28 @@ def _fix_v4_tied_weights_keys(model_cls: type) -> None:
 
 
 class HfRunner:
+    @staticmethod
+    def _wait_for_cuda_model_memory(model: nn.Module) -> None:
+        # Check the visible CUDA device directly, including on MIG runners.
+        required = sum(
+            tensor.nbytes
+            for tensor in chain(model.parameters(), model.buffers())
+            if tensor.device.type == "cpu"
+        )
+        if not required:
+            return
+
+        deadline = time.monotonic() + 30
+        free, _ = torch.cuda.mem_get_info()
+        while free < required:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"HF reference model needs {required / 2**20:.0f} MiB on CUDA, "
+                    f"but only {free / 2**20:.0f} MiB is free after 30 seconds"
+                )
+            time.sleep(0.2)
+            free, _ = torch.cuda.mem_get_info()
+
     def get_default_device(self):
         from vllm.platforms import current_platform
 
@@ -441,6 +465,7 @@ class HfRunner:
         processor: Any | None = None,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
+        wait_for_cuda_memory: bool = False,
     ) -> None:
         init_ctx = (
             nullcontext()
@@ -461,6 +486,7 @@ class HfRunner:
                 auto_cls=auto_cls,
                 tokenizer_name=tokenizer_name,
                 processor=processor,
+                wait_for_cuda_memory=wait_for_cuda_memory,
             )
 
     def _init(
@@ -477,6 +503,7 @@ class HfRunner:
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
         tokenizer_name: str | None = None,
         processor: Any | None = None,
+        wait_for_cuda_memory: bool = False,
     ) -> None:
         model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
@@ -594,6 +621,12 @@ class HfRunner:
                         parameter.data = parameter.data.to(dtype=self.dtype)
 
             if len({p.device for p in model.parameters()}) < 2:
+                if (
+                    wait_for_cuda_memory
+                    and self.device == "cuda"
+                    and current_platform.is_cuda()
+                ):
+                    self._wait_for_cuda_model_memory(model)
                 model = model.to(device=self.device)
 
             self.model = model
