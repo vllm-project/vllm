@@ -198,10 +198,7 @@ class AuxOutputSchedulerConnector:
             return request.num_tokens - 1
         assert request.sampling_params is not None
         # A P/D prefiller may cut the prompt short of the requested start.
-        return min(
-            request.sampling_params.routed_experts_prompt_start,
-            request.num_prompt_tokens,
-        )
+        return min(request.sampling_params.aux_prompt_start, request.num_prompt_tokens)
 
     def max_cache_hit(self, request: Request) -> int:
         if self._skips(request):

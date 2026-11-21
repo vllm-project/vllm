@@ -439,15 +439,16 @@ class InputProcessor:
             # prompts, requests and even engines by the caller.
             assert watermarking is not None
             self.apply_watermarking(sampling_params, watermarking)
+            sampling_params._fold_prompt_start_alias()
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )
-            if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
+            if not 0 <= sampling_params.aux_prompt_start <= prompt_len:
                 raise VLLMValidationError(
-                    f"routed_experts_prompt_start must be between 0 and "
+                    f"aux_prompt_start must be between 0 and "
                     f"the prompt length ({prompt_len}), inclusive.",
-                    parameter="routed_experts_prompt_start",
-                    value=sampling_params.routed_experts_prompt_start,
+                    parameter="aux_prompt_start",
+                    value=sampling_params.aux_prompt_start,
                 )
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:

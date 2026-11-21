@@ -441,12 +441,7 @@ class SamplingParams(
 
     # Debugging / RL-specific parameters. Not intended for production serving.
     routed_experts_prompt_start: int = 0
-    """When enable_return_routed_experts is active, skip the first
-    routed_experts_prompt_start prompt tokens from the returned routing
-    data. In multi-turn agent scenarios, set this to the length of the
-    already-returned prefix to avoid duplicating routing for prompt tokens
-    covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
+    """Deprecated alias of `aux_prompt_start`."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
@@ -456,6 +451,11 @@ class SamplingParams(
     are neither recorded nor returned, and it gets no sampling masks, sample
     logprobs or logprob_token_ids. Its prefix-cache blocks are kept apart from
     those of requests that record routed experts."""
+    aux_prompt_start: int = 0
+    """Number of leading prompt positions whose auxiliary outputs the client
+    already holds: they are not returned. In multi-turn agent scenarios, set
+    this to the length of the already-returned prefix. Default 0 returns all
+    prompt positions. At most the prompt length."""
 
     @staticmethod
     def from_optional(
@@ -615,6 +615,7 @@ class SamplingParams(
         if self.stop and not self.include_stop_str_in_output:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
 
+        self._fold_prompt_start_alias()
         self._verify_args()
 
         if (
@@ -645,6 +646,24 @@ class SamplingParams(
                 self.prompt_logprobs is not None
                 or self.prompt_logprob_token_ids is not None
             )
+
+    def _fold_prompt_start_alias(self) -> None:
+        """Fold the deprecated `routed_experts_prompt_start` into
+        `aux_prompt_start`; 0 counts as unset."""
+        alias = self.routed_experts_prompt_start
+        if not alias:
+            return
+        logger.warning_once(
+            "routed_experts_prompt_start is deprecated; use aux_prompt_start."
+        )
+        if self.aux_prompt_start not in (0, alias):
+            raise VLLMValidationError(
+                f"aux_prompt_start ({self.aux_prompt_start}) and "
+                f"routed_experts_prompt_start ({alias}) disagree.",
+                parameter="aux_prompt_start",
+            )
+        self.aux_prompt_start = alias
+        self.routed_experts_prompt_start = 0
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
