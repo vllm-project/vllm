@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen's 32B dense reasoning model, validated for Intel Xeon 6 CPU execution."
   date_added: 2026-08-17
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Validated for Intel Xeon 6 CPU execution"
@@ -12,6 +12,7 @@ meta:
     - "Qwen/Qwen3-32B"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "Qwen/QwQ-32B"
@@ -70,6 +71,16 @@ variants:
     extra_args:
       - "--quantization"
       - "awq"
+  redhat_fp8_dynamic:
+    model_id: "RedHatAI/QwQ-32B-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHatAI)"
+    vram_minimum_gb: 39
+    description: "RedHatAI FP8 with static per-channel weights and dynamic per-token activation quantization"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
 
 compatible_strategies:
   - single_node_tp
@@ -154,6 +165,8 @@ guide: |
   latency/throughput goals.
 
   ## References
+
+  - [RedHatAI QwQ-32B FP8 Dynamic checkpoint](https://huggingface.co/RedHatAI/QwQ-32B-FP8-dynamic)
 
   - [Model card](https://huggingface.co/Qwen/QwQ-32B)
   - [W8A8 variant](https://huggingface.co/RedHatAI/QwQ-32B-quantized.w8a8)
