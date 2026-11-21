@@ -167,6 +167,17 @@ class StructuredOutputsParams:
             )
         )
 
+    def reasoning_separator_newlines(self) -> int:
+        """How many newlines the answer may start with after a reasoning end.
+
+        Chat templates put up to two there (Qwen3 puts `\\n\\n` after
+        `</think>`) and models emit them, but a constraint on the answer doesn't
+        match them. The engine lets them through without feeding them to the
+        grammar, and the parser drops them from the content. A structural tag
+        describes all the text after reasoning, so it allows them itself.
+        """
+        return 0 if self.structural_tag is not None else 2
+
 
 @dataclass
 class RepetitionDetectionParams:
