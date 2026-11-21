@@ -287,7 +287,7 @@ mod tests {
 
         fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
             let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
+            Ok(String::from_utf8_lossy_owned(bytes))
         }
 
         fn token_to_id(&self, _token: &str) -> Option<u32> {

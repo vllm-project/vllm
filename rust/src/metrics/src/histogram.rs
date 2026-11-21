@@ -58,7 +58,7 @@ impl Histogram {
             .unwrap_or(inner.upper_bounds.len() - 1);
         inner.bucket_counts[index].fetch_add(1, Ordering::Relaxed);
         // The closure always returns `Some`, so the update cannot fail.
-        let _ = inner.sum_bits.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+        let _ = inner.sum_bits.try_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
             Some((f64::from_bits(bits) + value).to_bits())
         });
     }

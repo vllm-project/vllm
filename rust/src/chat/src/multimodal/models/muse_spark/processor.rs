@@ -349,7 +349,7 @@ fn append_normalized_planes(rgb: &RgbImage, mean: [f64; 3], std: [f64; 3], out: 
     let pixels = (rgb.width() as usize) * (rgb.height() as usize);
     let base = out.len();
     out.resize(base + 3 * pixels, 0.0);
-    for (i, px) in rgb.as_raw().chunks_exact(3).enumerate() {
+    for (i, px) in rgb.as_raw().as_chunks::<3>().0.iter().enumerate() {
         for c in 0..3 {
             let scaled = px[c] as f32 / 255.0;
             out[base + c * pixels + i] = (scaled - mean[c] as f32) / std[c] as f32;
