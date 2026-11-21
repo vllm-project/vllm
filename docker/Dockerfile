@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -15,8 +16,8 @@
 # PHASE 1, build environment (FROM the manylinux image; nothing from phases 1-2
 # ships in a final image, only the wheels they build):
 #   toolchain            compilers, sccache, uv venv           (no Python packages)
-#   ├─ requirement-pins  the PyTorch and FlashInfer pins cut out of requirements/cuda.txt,
-#   │                    and the Rubin pins (empty unless INSTALL_RUBIN_PRERELEASE=true)
+#   ├─ requirement-pins  PyTorch/FlashInfer/Rubin pins plus [tool.uv] and requires-python
+#   │                    cut out of pyproject.toml (each cached by content)
 #   └─ base              + PyTorch                             (changes only with the pins)
 #
 # PHASE 2, build artifacts (each top-level stage names its phase 1 parent):
@@ -36,7 +37,7 @@
 # PHASE 4, CI test image (`--target test`):
 #   test-deps  [vllm-runtime-base]  + every test requirement, DeepEP  (changes with requirements/)
 #   ├─ test-wheel     helper: installs the vLLM wheel, sorts its files by how often they change
-#   ├─ test-src       helper: lays out the source tree
+#   ├─ test-src [toolchain]  helper: lays out the source tree (no .git)
 #   └─ test           CI image: test-deps + one layer per tree from the two helpers
 #
 # PHASE 5, release image (`--target vllm-openai`):
@@ -280,6 +281,24 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
     else \
         : > /pins/rubin-prerelease.txt; \
     fi
+# The [tool.uv] section and requires-python pin cut out of pyproject.toml,
+# so unrelated pyproject.toml edits leave test-deps and csrc-build's DeepGEMM
+# Python venvs cached. Both fail closed if tomllib disagrees.
+COPY pyproject.toml /tmp/pyproject.toml
+RUN { echo '[tool.uv]'; \
+        awk '/^\[tool\.uv\][[:space:]]*$/{f=1; next} /^\[/{f=0} \
+            f && !/^[[:space:]]*(#|$)/' /tmp/pyproject.toml; \
+    } > /pins/uv-pyproject.toml \
+    && { echo '[project]'; \
+        awk '/^\[project\][[:space:]]*$/{f=1; next} /^\[/{f=0} \
+            f && /^requires-python[[:space:]]*=/' /tmp/pyproject.toml; \
+    } > /pins/requires-python.toml \
+    && python3 -c "import tomllib; \
+        full = tomllib.load(open('/tmp/pyproject.toml', 'rb')); \
+        uv_stub = tomllib.load(open('/pins/uv-pyproject.toml', 'rb')); \
+        rp_stub = tomllib.load(open('/pins/requires-python.toml', 'rb')); \
+        assert full.get('tool', {}).get('uv', {}) == uv_stub.get('tool', {}).get('uv', {}), '[tool.uv] extraction mismatch'; \
+        assert full['project']['requires-python'] == rp_stub['project']['requires-python'], 'requires-python extraction mismatch'"
 
 #################### STAGE: base ####################
 # toolchain + PyTorch: all that the native builds (csrc-build, extensions-build,
@@ -463,8 +482,20 @@ FROM build-deps AS csrc-build
 
 WORKDIR /workspace
 
+# Provision one bare Python per `requires-python` entry; cmake reads
+# DEEPGEMM_PYTHON_INTERPRETERS to build DeepGEMM `_C` for each. Placed
+# before copying native sources and keyed only on the extracted
+# requires-python pin, so edits to csrc/, cmake/, setup.py, vllm/envs.py
+# or elsewhere in pyproject.toml keep these venvs cached.
+# See cmake/external_projects/deepgemm.cmake for the full picture.
+COPY --from=requirement-pins /pins/requires-python.toml pyproject.toml
+COPY tools/setup_deepgemm_pythons.sh tools/setup_deepgemm_pythons.sh
+ENV DEEPGEMM_VENV_PREFIX=/opt/dgenv
+RUN --mount=type=cache,target=/opt/uv/cache \
+    tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
+
 COPY pyproject.toml setup.py CMakeLists.txt ./
-COPY tools/build_rust.py tools/build_rust.py
+COPY tools/build_rust.py tools/build_deepgemm_C.py tools/
 COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
@@ -491,14 +522,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         python3 tools/use_existing_torch.py --prefix; \
     fi
-
-# Provision one bare Python per `requires-python` entry; cmake reads
-# DEEPGEMM_PYTHON_INTERPRETERS to build DeepGEMM `_C` for each. See
-# cmake/external_projects/deepgemm.cmake for the full picture.
-COPY tools/setup_deepgemm_pythons.sh tools/build_deepgemm_C.py tools/
-ENV DEEPGEMM_VENV_PREFIX=/opt/dgenv
-RUN --mount=type=cache,target=/root/.cache/uv \
-    tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
 
 # Build the vLLM wheel
 # if USE_SCCACHE is set, use sccache to speed up compilation
@@ -567,7 +590,9 @@ WORKDIR /workspace
 
 # Copy pre-built csrc wheel directly
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
-COPY . .
+# Exclude .git (~362 MB) so it is not exported in the mode=max cache
+# layer on every commit; the RUNs below bind-mount .git when needed.
+COPY --exclude=.git . .
 
 # Drop the pre-built Rust artifacts into the source tree. setup.py detects
 # them and ships them as-is, skipping the local Rust build.
@@ -752,9 +777,6 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
-# uv reads `[tool.uv] exclude-dependencies` from here when recompiling below.
-COPY pyproject.toml pyproject.toml
-COPY tools/use_existing_torch.py tools/use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
@@ -857,7 +879,19 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         libnuma-dev \
         # numactl CLI for NUMA binding at runtime
         numactl && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    # Drop unused CUDA static archives (~1.2 GB) that runtime JIT never links
+    # (FlashInfer/DeepGEMM/DeepEP link the shared libraries, not *_static.a).
+    # Exact filenames, NOT a *_static.a wildcard: nvcc links libcudart_static.a
+    # by default and -rdc device linking needs libcudadevrt.a, so both stay.
+    # libnvptxcompiler_static.a moves to libnvptxcompiler-dev in CUDA 13.5, so
+    # remove it only when present.
+    rm /usr/local/cuda/lib64/libcublas_static.a \
+       /usr/local/cuda/lib64/libcublasLt_static.a \
+       /usr/local/cuda/lib64/libcurand_static.a \
+       /usr/local/cuda/lib64/libnvrtc_static.a \
+       /usr/local/cuda/lib64/libnvrtc-builtins_static.a && \
+    rm -f /usr/local/cuda/lib64/libnvptxcompiler_static.a
 
 # Ensures nvcc/ptxas (installed above, needed at runtime for FlashInfer/
 # DeepGEMM/EP kernel JIT compilation) are reachable on PATH. Harmless no-op
@@ -883,8 +917,8 @@ RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ] \
 
 ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 
-# Install uv for faster pip installs
-RUN python3 -m pip install uv
+# Install uv for faster pip installs (--no-cache-dir avoids baking pip's wheel cache)
+RUN python3 -m pip install --no-cache-dir uv
 
 # Environment for uv
 # Redirect uv's managed Python and download cache out of /root/ so downstream
@@ -1094,8 +1128,10 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
-# uv reads `[tool.uv] exclude-dependencies` from here when recompiling below.
-COPY pyproject.toml pyproject.toml
+# uv reads `[tool.uv]` (exclude-dependencies, no-build-isolation-package)
+# from here. Keyed on the extracted section so unrelated pyproject.toml
+# edits leave test-deps cached.
+COPY --from=requirement-pins /pins/uv-pyproject.toml pyproject.toml
 COPY tools/use_existing_torch.py tools/use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1224,18 +1260,20 @@ RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
 
 #################### STAGE: test-src ####################
 # Helper, not shipped: the source tree as the test image lays it out.
-FROM test-deps AS test-src
-COPY . /src
+# Branches from toolchain (which already has git) rather than test-deps so
+# this stage runs in parallel with vllm-runtime-base/test-deps and does not
+# invalidate on requirements/ edits.
+FROM toolchain AS test-src
+# Exclude .git (~362 MB) so it never enters the image or the mode=max cache
+# layer. The one thing tests read from it, the merge base with main, is
+# recorded in .ci-merge-base from a read-only bind mount.
+COPY --exclude=.git . /src
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
-#
-# The image carries no .git: it is several hundred MB that every host would
-# pull again with each commit. The one thing tests read from it, the merge
-# base with main, is recorded in .ci-merge-base instead.
-RUN cd /src && mkdir src && mv vllm src/vllm \
-    && { git merge-base HEAD origin/main > .ci-merge-base 2>/dev/null || rm -f .ci-merge-base; } \
-    && rm -rf .git
+RUN --mount=type=bind,source=.git,target=/git \
+    cd /src && mkdir src && mv vllm src/vllm \
+    && { git -c safe.directory='*' --git-dir=/git merge-base HEAD origin/main > .ci-merge-base 2>/dev/null || rm -f .ci-merge-base; }
 
 #################### STAGE: test ####################
 # image to run unit testing suite
@@ -1315,10 +1353,6 @@ ARG INSTALL_KV_CONNECTORS=false
 ARG EFA_INSTALLER_VERSION
 ARG EFA_INSTALLER_SHA256
 ARG TRITON_INSTALL_FROM_SOURCE_REPO
-ARG VLLM_BUILD_COMMIT
-ARG VLLM_BUILD_PIPELINE
-ARG VLLM_BUILD_URL
-ARG VLLM_IMAGE_TAG
 
 # install kv_connectors if requested
 # Do not add +PTX here; see the main TORCH_CUDA_ARCH_LIST comment above.
@@ -1386,6 +1420,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         /tmp/install_triton_from_source.sh \
         /tmp/triton-source-wheel.sha256
 
+# Declared below the KV/EFA/Rubin/Triton RUNs so rebuilding the same commit
+# with a new build URL or tag does not invalidate them.
+ARG VLLM_BUILD_COMMIT
+ARG VLLM_BUILD_PIPELINE
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
     VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE:-local} \
@@ -1414,7 +1454,7 @@ FROM vllm-openai-base AS vllm-openai
 # To run the image as non-root, either build the `vllm-openai-nonroot` target
 # below, or in a derived Dockerfile uncomment the following line and ensure
 # any additional layers chgrp-0 / chmod-g+rwX paths they write to. The `vllm`
-# user (UID 2000, GID 0) is already created in the `vllm-base` stage.
+# user (UID 2000, GID 0) is already created in the `vllm-runtime-base` stage.
 # See docs/deployment/docker.md.
 # USER vllm
 ENTRYPOINT ["vllm", "serve"]
@@ -1425,7 +1465,7 @@ ENTRYPOINT ["vllm", "serve"]
 #       -f docker/Dockerfile .
 #
 # Runtime behavior:
-#   * Default USER is `vllm` (UID 2000, GID 0) created in `vllm-base`.
+#   * Default USER is `vllm` (UID 2000, GID 0) created in `vllm-runtime-base`.
 #   * HOME is /home/vllm, pre-created group-0-writable so arbitrary UIDs in
 #     group 0 (OpenShift / `--user <uid>:0`) can also use the image.
 #   * Entrypoint wrapper handles the "UID not in /etc/passwd" case for truly

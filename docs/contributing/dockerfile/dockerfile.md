@@ -28,7 +28,10 @@ PyTorch pins, so the native builds on top of it (`csrc-build`,
 every edit to `requirements/`. It also passes on
 `requirements/rubin-prerelease.txt`, as an empty file unless
 `INSTALL_RUBIN_PRERELEASE=true`, so an edit to the Rubin pins rebuilds only
-the Rubin images. `rust-build-cache` branches from `toolchain` and
+the Rubin images, and extracts `[tool.uv]` and `requires-python` from
+`pyproject.toml` (verified with `tomllib`, failing closed on mismatch) so
+unrelated `pyproject.toml` edits leave `test-deps` and `csrc-build`'s
+DeepGEMM Python venvs cached. `rust-build-cache` branches from `toolchain` and
 depends on no Python requirements. `vllm-runtime-base` installs PyTorch,
 FlashInfer with its precompiled kernels, and the remaining requirements as
 three layers in that order, so a routine dependency bump rebuilds only the last.
@@ -39,16 +42,18 @@ invalidate CUDA dependency layers and their downstream native builds.
 
 The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
 requirements remain cached independently of per-commit vLLM wheels and source.
-It ends by installing vLLM's own runtime requirements, so the per-commit wheel
-install has nothing left to change; the `test-wheel` stage fails the build if
-it still does.
+It ends by installing vLLM's own runtime requirements, `tests/vllm_test_utils`,
+and DeepEP, so the per-commit wheel install has nothing left to change; the
+`test-wheel` stage fails the build if it still does.
 
 The `test` image adds four `COPY --link` layers to `test-deps`: the compiled
 extensions, the Rust frontend, the Python files of the vLLM wheel, and the
 source tree. The first three come from `test-wheel`, which installs the wheel
 and sorts its files with `tools/ci/split_vllm_install.sh`; the last comes from
-`test-src`. A host that has the previous commit's image pulls only the layers
-whose files changed.
+`test-src` (which branches from `toolchain` and uses `COPY --exclude=.git`,
+bind-mounting `.git` only to write `.ci-merge-base`, so `.git` never enters the
+image or the `mode=max` cache). A host that has the previous commit's image
+pulls only the layers whose files changed.
 
 The `hybrid-test-wheels` stage builds the `mamba-ssm` and `causal-conv1d`
 wheels that `test-deps` installs. It branches from `base`, so it rebuilds with
