@@ -1671,6 +1671,25 @@ def add_vllm_package_data(filename: str) -> None:
         vllm_files.append(filename)
 
 
+def compile_render_protos() -> None:
+    """Generate the Python `vllm.Render` gRPC stubs from `rust/proto`.
+
+    Best effort: without grpcio-tools the build continues and
+    `vllm launch render --grpc-port` reports how to generate them.
+    """
+    script = ROOT_DIR / "vllm/entrypoints/scale_out/render/grpc/compile_protos.py"
+    try:
+        namespace: dict = {"__name__": "compile_render_protos", "__file__": str(script)}
+        exec(compile(script.read_text(), str(script), "exec"), namespace)
+        if namespace["compile_protos"]() != 0:
+            logger.warning("Skipped generating the vllm.Render gRPC stubs")
+    except Exception as exc:
+        logger.warning("Skipped generating the vllm.Render gRPC stubs: %s", exc)
+
+
+if not is_metadata_only_build():
+    compile_render_protos()
+
 # PEP 517 invokes setup.py for metadata before invoking the actual build.
 if USE_PRECOMPILED_RUST_FRONTEND and not is_metadata_only_build():
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()

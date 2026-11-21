@@ -359,7 +359,8 @@ def launch_render_parser():
     "cli_args, error",
     [
         (["--enable-auto-tool-choice"], TypeError),
-        (["--grpc-port", "50051"], ValueError),
+        (["--grpc-port", "65536"], ValueError),
+        (["--grpc-port", "8000"], ValueError),
     ],
 )
 def test_launch_render_validates_serve_args(
@@ -371,6 +372,23 @@ def test_launch_render_validates_serve_args(
     assert args.subparser == "launch"
     with pytest.raises(error):
         validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize("rust_enabled", [False, True])
+@pytest.mark.parametrize(
+    "extra_args", [[], ["--port", "8100"], ["--uds", "/tmp/render.sock"]]
+)
+def test_launch_render_accepts_grpc_port(
+    launch_render_parser, monkeypatch, rust_enabled, extra_args
+):
+    """`vllm launch render` serves the Python `vllm.Render` gRPC service on
+    `--grpc-port`, without the Rust frontend."""
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1" if rust_enabled else "0")
+    args = launch_render_parser.parse_args(
+        args=["launch", "render", "--grpc-port", "50051", *extra_args]
+    )
+    validate_parsed_serve_args(args)
+    assert args.grpc_port == 50051
 
 
 def test_subcommand_without_serve_args_skips_validation():

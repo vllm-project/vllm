@@ -257,3 +257,6 @@ csrc/cpu/cpu_attn_dispatch_generated.h
 /.rocm-version/
 /.rocm-wheel/
 /.rocm-kernel-map/
+
+# Generated from rust/proto by vllm/entrypoints/scale_out/render/grpc/compile_protos.py
+vllm/entrypoints/scale_out/render/grpc/*_pb2*.py*

@@ -17,6 +17,8 @@ from .app_state import init_render_app_state
 
 logger = init_logger("vllm.entrypoints.launchers.render.entry")
 
+_GRPC_SHUTDOWN_GRACE_S = 5.0
+
 
 async def build_and_serve_renderer(
     vllm_config: VllmConfig,
@@ -38,28 +40,66 @@ async def build_and_serve_renderer(
     app = build_app(args, ("render",))
     await init_render_app_state(vllm_config, app.state, args)
 
+    grpc_server = None
+    if getattr(args, "grpc_port", None) is not None:
+        from vllm.entrypoints.scale_out.render.grpc.server import (
+            start_render_grpc_server,
+        )
+
+        serving_render = getattr(app.state, "serving_render", None)
+        if serving_render is None:
+            raise ValueError("--grpc-port needs a model that supports rendering")
+        grpc_server = await start_render_grpc_server(
+            serving_render, _grpc_host(args), args.grpc_port
+        )
+
     logger.info("Starting vLLM server on %s", listen_address)
 
-    return await serve_http(
-        app,
-        sock=sock,
-        enable_ssl_refresh=args.enable_ssl_refresh,
-        host=args.host,
-        port=args.port,
-        log_level=args.uvicorn_log_level,
-        # NOTE: When the 'disable_uvicorn_access_log' value is True,
-        # no access log will be output.
-        access_log=not args.disable_uvicorn_access_log,
-        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
-        ssl_keyfile=args.ssl_keyfile,
-        ssl_certfile=args.ssl_certfile,
-        ssl_ca_certs=args.ssl_ca_certs,
-        ssl_cert_reqs=args.ssl_cert_reqs,
-        ssl_ciphers=args.ssl_ciphers,
-        h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
-        h11_max_header_count=args.h11_max_header_count,
-        **uvicorn_kwargs,
-    )
+    try:
+        shutdown_task = await serve_http(
+            app,
+            sock=sock,
+            enable_ssl_refresh=args.enable_ssl_refresh,
+            host=args.host,
+            port=args.port,
+            log_level=args.uvicorn_log_level,
+            # NOTE: When the 'disable_uvicorn_access_log' value is True,
+            # no access log will be output.
+            access_log=not args.disable_uvicorn_access_log,
+            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+            ssl_keyfile=args.ssl_keyfile,
+            ssl_certfile=args.ssl_certfile,
+            ssl_ca_certs=args.ssl_ca_certs,
+            ssl_cert_reqs=args.ssl_cert_reqs,
+            ssl_ciphers=args.ssl_ciphers,
+            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
+            h11_max_header_count=args.h11_max_header_count,
+            **uvicorn_kwargs,
+        )
+    except BaseException:
+        if grpc_server is not None:
+            await grpc_server.stop(grace=None)
+        raise
+    if grpc_server is None:
+        return shutdown_task
+
+    async def _shutdown_with_grpc() -> None:
+        try:
+            await shutdown_task
+        finally:
+            await grpc_server.stop(grace=_GRPC_SHUTDOWN_GRACE_S)
+
+    return asyncio.create_task(_shutdown_with_grpc())
+
+
+def _grpc_host(args: Namespace) -> str:
+    """GRPC follows the HTTP TCP host, or IPv4 loopback with `--uds`, like
+    `vllm-rs render --grpc-port`."""
+    if args.uds:
+        return "127.0.0.1"
+    if not args.host:
+        return "[::]"
+    return f"[{args.host}]" if ":" in args.host else args.host
 
 
 async def run_launch_fastapi(args: argparse.Namespace) -> None:
