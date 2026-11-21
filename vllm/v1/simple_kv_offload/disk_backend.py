@@ -19,6 +19,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.host_memory import pin_tensor
+from vllm.v1.simple_kv_offload.copy_backend import CopyEvent
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
@@ -192,7 +193,7 @@ class DiskBackend:
         dst_blocks: list[int],
         is_store: bool,
         event_idx: int,
-        events_list: list[tuple[int, torch.Event]],
+        events_list: list[tuple[int, CopyEvent]],
         wait_event: torch.Event | None = None,
     ) -> None:
         q = self._store_queue if is_store else self._load_queue
