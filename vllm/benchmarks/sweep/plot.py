@@ -414,10 +414,21 @@ def _plot_fig(
     else:
         g.set_titles("")
 
-    if scale_x:
-        g.set(xscale=scale_x)
-    if scale_y:
-        g.set(yscale=scale_y)
+    for ax in g.axes.flat:
+        for set_scale, scale in ((ax.set_xscale, scale_x), (ax.set_yscale, scale_y)):
+            if scale == "sqrt":
+                import numpy as np
+
+                # Preserve the sign so the scale stays invertible across zero.
+                set_scale(
+                    "function",
+                    functions=(
+                        lambda x: np.sign(x) * np.sqrt(np.abs(x)),
+                        lambda x: np.sign(x) * np.square(x),
+                    ),
+                )
+            elif scale:
+                set_scale(scale)
 
     g.savefig(fig_path, dpi=fig_dpi)
     plt.close(g.figure)
