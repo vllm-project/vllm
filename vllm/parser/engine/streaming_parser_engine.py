@@ -276,7 +276,15 @@ class StreamingParserEngine:
         events: list[SemanticEvent] = []
         for item in items:
             if isinstance(item, PreLexedTerminal):
-                events.extend(self._process_lex_tokens(self._lexer.flush()))
+                # If the lexer is holding a buffered prefix of this same
+                # terminal (spelled out via subword tokens), discard it
+                # instead of flushing it as content.
+                if self._lexer.buffer and item.text.startswith(
+                    self._lexer.buffer
+                ):
+                    self._lexer.reset()
+                else:
+                    events.extend(self._process_lex_tokens(self._lexer.flush()))
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
                 if not item.text and item.token_count:
