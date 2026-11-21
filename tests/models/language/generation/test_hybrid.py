@@ -205,7 +205,7 @@ def test_mamba_cache_cg_padding(
     """
     _set_conv_state_layout(monkeypatch, conv_state_layout)
 
-    vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
+    vllm_config = EngineArgs(model=model).create_engine_config()
     compilation_config = vllm_config.compilation_config
     if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         pytest.skip("CUDA/XPU graph is disabled. Please enable it to run this test.")
@@ -349,6 +349,64 @@ def test_pipeline_parallel_correctness(
     check_logprobs_close(
         outputs_0_lst=vllm_outputs_pp_1,
         outputs_1_lst=vllm_outputs_pp_2,
+        name_0="vllm_pp_1",
+        name_1="vllm_pp_2",
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", ["ibm-granite/granite-4.0-tiny-preview"])
+def test_pipeline_parallel_mamba_only_stage_prefix_caching(
+    vllm_runner, monkeypatch, model: str
+) -> None:
+    """A pipeline stage that holds only Mamba layers uses the KV cache block
+    size of the stages with attention layers, so prefix caching reuses the
+    same tokens as without pipeline parallelism.
+
+    The model's first attention layer is layer 5, so a 5/35 split leaves the
+    first stage with Mamba layers only. Each prompt extends the previous one
+    and is generated alone, which makes the cache hits deterministic.
+    """
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "5,35")
+    lines = [
+        f"Record {i}: the code for item {i} is {i * 7919 % 10007}.\n"
+        for i in range(160)
+    ]
+    prompts = [
+        "".join(lines[:n]) + "The code for item 3 is" for n in (40, 80, 120, 160)
+    ]
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=16, logprobs=5)
+    outputs = {}
+    num_cached_tokens = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            model,
+            pipeline_parallel_size=pp_size,
+            max_num_seqs=MAX_NUM_SEQS,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            max_model_len=4096,
+            distributed_executor_backend="mp",
+        ) as vllm_model:
+            results = [
+                vllm_model.llm.generate(prompt, sampling_params)[0]
+                for prompt in prompts
+            ]
+        num_cached_tokens[pp_size] = [result.num_cached_tokens for result in results]
+        outputs[pp_size] = [
+            (
+                list(result.outputs[0].token_ids),
+                result.outputs[0].text,
+                result.outputs[0].logprobs,
+            )
+            for result in results
+        ]
+
+    assert any(num_cached_tokens[1]), num_cached_tokens
+    assert num_cached_tokens[2] == num_cached_tokens[1], num_cached_tokens
+    check_logprobs_close(
+        outputs_0_lst=outputs[1],
+        outputs_1_lst=outputs[2],
         name_0="vllm_pp_1",
         name_1="vllm_pp_2",
     )

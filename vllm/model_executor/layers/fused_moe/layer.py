@@ -9,6 +9,7 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
+    divide,
     get_dp_group,
     get_pcp_group,
     get_tensor_model_parallel_world_size,
@@ -147,6 +148,7 @@ def FusedMoEFactory(
     moe_config_cls: type[FusedMoEConfig] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
     skip_padding: bool = False,
+    intermediate_size_unpadded: int | None = None,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -228,7 +230,11 @@ def FusedMoEFactory(
         routed_experts_cls: Custom RoutedExperts class (None = use default)
         moe_config_cls: Custom FusedMoEConfig class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
-        skip_padding: Whether grouped routing should invalidate padding rows.
+        skip_padding: With ROCm AITER fused MoE, let grouped routing mask
+            padding rows under DeepEP v2; otherwise it follows
+            VLLM_MOE_SKIP_PADDING.
+        intermediate_size_unpadded: Global intermediate size the checkpoint
+            holds, when `intermediate_size` is padded (None = not padded)
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
@@ -343,6 +349,8 @@ def FusedMoEFactory(
                 )
                 else 1.0
             ),
+            # MoERunner appends the shared-expert gate logits only in this case.
+            has_shared_expert_gate=gate is not None and shared_expert_gate is not None,
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
@@ -369,6 +377,12 @@ def FusedMoEFactory(
         hidden_dim=hidden_size,
         intermediate_size=intermediate_size,
         intermediate_pad=intermediate_pad,
+        intermediate_size_per_partition_unpadded=(
+            None
+            if intermediate_size_unpadded is None
+            # the divisor FusedMoEConfig splits intermediate_size by
+            else divide(intermediate_size_unpadded, moe_parallel_config.tp_size)
+        ),
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,

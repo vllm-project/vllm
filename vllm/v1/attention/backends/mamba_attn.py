@@ -8,6 +8,10 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.abstract import (
+    get_kv_cache_checkpoint_alignment,
+    get_mamba_num_speculative_blocks,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -50,7 +54,7 @@ class BaseMambaAttentionMetadata:
     # Includes the bonus token (so minimum is 1)
     num_accepted_tokens: torch.Tensor | None  # shape: [batch,]
 
-    # The following tensor is only used for prefix caching in align mode
+    # The following tensor is only used for prefix caching
     seq_lens: torch.Tensor
 
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
@@ -70,7 +74,7 @@ class BaseMambaAttentionMetadata:
     # plus (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for
     # precomputed B·C products. The first layer of each cache group fills the
     # cursor and flag on the GPU from per-slot ring counters (see
-    # plan_replayssm_decode); align mode also reads the rows' sequence lengths.
+    # plan_replayssm_decode); prefix caching also reads the rows' sequence lengths.
     # All None when use_replayssm is disabled or ReplaySSM trackers are used.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
@@ -101,6 +105,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
+            vllm_config, layer_names
+        )
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -470,7 +478,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
+            self.num_speculative_blocks,
         )
 
         if state_indices_tensor.dim() == 1:
@@ -523,7 +532,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.use_replayssm and not self.use_replayssm_trackers and num_decodes > 0:
             write_pos_d = self.decode_write_pos_d[:num_decodes]
             is_flush_d = self.decode_is_flush_d[:num_decodes]
-            if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            if self.vllm_config.cache_config.enable_prefix_caching:
                 # All rows, so a padded full-CUDA-graph batch can reuse it.
                 replayssm_seq_lens_d = common_attn_metadata.seq_lens[:num_reqs]
                 replayssm_align_block_size = self.kv_cache_spec.block_size
@@ -662,7 +671,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             blk_table,
             metadata.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
+            self.num_speculative_blocks,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

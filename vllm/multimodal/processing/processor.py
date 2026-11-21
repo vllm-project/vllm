@@ -89,7 +89,7 @@ class _GetTextMatchIndex(Protocol):
     ) -> int | None: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptIndex:
     """Resolves to an index in the prompt."""
 
@@ -172,7 +172,7 @@ instead of a function if it does not depend on the input.
 """
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdateDetails:
     """Details about the token sequence that is part of the update."""
 
@@ -244,7 +244,7 @@ class UpdateMode(StrEnum):
     REPLACE = "replace"
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdate(ABC):
     """Defines how to update a prompt with placeholder tokens.
 
@@ -306,7 +306,7 @@ class PromptUpdate(ABC):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptInsertion(PromptUpdate):
     """Defines how to insert placeholder tokens into a prompt.
 
@@ -374,7 +374,7 @@ class PromptInsertion(PromptUpdate):
         return UpdateMode.INSERT
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptReplacement(PromptUpdate):
     """Defines how to replace portions of an input prompt with placeholder tokens.
 
@@ -455,7 +455,7 @@ class PromptTargetMatch(NamedTuple):
     end_idx: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedPromptUpdate:
     """A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] with its
     lazy attributes resolved.
@@ -576,7 +576,7 @@ def replace_token_matches(
     return flatten_2d_lists(out_seqs)
 
 
-@dataclass
+@dataclass(slots=True)
 class PlaceholderFeaturesInfo:
     modality: str
     item_idx: int
@@ -1273,7 +1273,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        mm_inputs: Mapping[str, object],
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
@@ -1363,6 +1363,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         }
 
         mm_missing_data = {}
+        mm_missing_idxs_without_data: dict[str, list[int]] = {}
         for modality, idxs in mm_missing_idxs.items():
             if not idxs:
                 continue
@@ -1371,14 +1372,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for idx in idxs:
                 data = mm_data_items[modality][idx]
                 if data is None:
-                    raise ValueError(
-                        f"Cache miss for {modality} at index {idx} "
-                        f"but data is not provided."
-                    )
+                    mm_missing_idxs_without_data.setdefault(modality, []).append(idx)
                 else:
                     missing_modality_data.append(data)
 
             mm_missing_data[modality] = missing_modality_data
+
+        if mm_missing_idxs_without_data:
+            missing_items = "; ".join(
+                f"{modality} at index {', '.join(map(str, idxs))}"
+                for modality, idxs in mm_missing_idxs_without_data.items()
+            )
+            raise ValueError(
+                f"Cache miss for {missing_items} but data is not provided."
+            )
 
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 

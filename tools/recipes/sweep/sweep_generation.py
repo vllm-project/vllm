@@ -40,7 +40,7 @@ MIN_NUM_PROMPTS = 100
 MAX_NUM_PROMPTS = 1000
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ModelParallelMetadata:
     """Model dimensions needed to reject invalid MoE layouts before startup."""
 

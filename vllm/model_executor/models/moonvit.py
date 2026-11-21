@@ -317,34 +317,6 @@ class Rope2DPosEmb(nn.Module):
         """
         return self.get_freqs_cis_by_seqlens_list(grid_hws.tolist())
 
-    def get_freqs_cis_by_idx(
-        self, pos_idx: torch.Tensor, pos_idx_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Args:
-            pos_idx: tensor of shape (..., 2), It contains the (h, w) position indices of each 2D token.
-            pos_idx_mask: a mask of shape (...), the leading dimensions should be the same as pos_idx.
-                Rope will only be applied to the tokens with True mask. `freqs_cis` for the tokens with False mask with be ones.
-
-        Return:
-            freqs_cis: tensor of shape (..., dim//2)
-
-        """
-        assert (
-            pos_idx.shape[:-1] == pos_idx_mask.shape
-            and pos_idx.shape[-1] == 2
-            and pos_idx.ndim == pos_idx_mask.ndim + 1
-        ), (pos_idx.shape, pos_idx_mask.shape)
-        assert pos_idx_mask.dtype == torch.bool, pos_idx_mask.dtype
-
-        shp = pos_idx_mask.shape + (self.dim // 2,)  # ..., head_dim/2
-        freqs_cis = torch.ones(
-            shp, dtype=torch.complex64, device=self.device
-        )  # ..., head_dim/2
-        freqs_cis[pos_idx_mask] = self.precomputed_freqs_cis[
-            pos_idx[..., 0][pos_idx_mask], pos_idx[..., 1][pos_idx_mask]
-        ]
-        return freqs_cis
-
 
 class MLP2(nn.Module):
     """Args:
