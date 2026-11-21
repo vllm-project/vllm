@@ -28,9 +28,8 @@ engine drives on your behalf:
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
 Checkpoint-format backends reload in the mode set by the `VLLM_RELOAD_MODE`
-environment variable. For RL weight updates, prefer
-[direct reload](../direct_reload.md) (`VLLM_RELOAD_MODE=direct`) over the
-default [layerwise reload](../layerwise.md).
+environment variable: by default [direct reload](../direct_reload.md) where it
+applies, else [layerwise reload](../layerwise.md).
 
 ## Available Backends
 

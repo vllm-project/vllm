@@ -731,7 +731,7 @@ impl Usage {
         }
     }
 
-    /// Fold in the usage of another choice of the same request. Like Python
+    /// Fold in the usage of another choice of the same prompt. Like Python
     /// for `n > 1`, the prompt counts once, while completion and reasoning
     /// tokens add up over the choices.
     pub(crate) fn add_choice(&mut self, other: &Usage) {
@@ -747,6 +747,21 @@ impl Usage {
             details.reasoning_tokens += other.reasoning_tokens;
         }
         self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
+    }
+
+    /// Fold in the usage of the first choice of another prompt of the same
+    /// request. Like Python for a batch of prompts, prompt tokens add up over
+    /// the prompts, on top of [`Self::add_choice`].
+    pub(crate) fn add_prompt(&mut self, other: &Usage) {
+        self.prompt_tokens += other.prompt_tokens;
+        if let (Some(details), Some(other)) = (
+            &mut self.prompt_tokens_details,
+            &other.prompt_tokens_details,
+        ) {
+            details.cached_tokens += other.cached_tokens;
+            details.created_cache_tokens += other.created_cache_tokens;
+        }
+        self.add_choice(other);
     }
 }
 

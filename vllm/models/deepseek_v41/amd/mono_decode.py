@@ -43,6 +43,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.models.deepseek_v41.amd.mono.stages.dims import Dims
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -70,9 +71,15 @@ DRAFT_UG_GROUPS = 1
 # (gfx942), where the kernels compute the same layer with FNUZ FP8 MFMAs on
 # their own copies of the weights (mono/weights942.py).
 CDNA_VERSIONS = (3, 4)
-# The routed experts' intermediate width a rank at TP 4 (2304 / 4). vLLM pads
-# it to 640 on gfx942, and the gfx942 copies keep only the real columns.
-INTER_TP4 = 576
+
+
+def _routed_inter_942() -> int:
+    """The routed experts' real intermediate width on this rank (576 at TP4,
+    288 at TP8). Read at weight-copy time, so a test that sets the TP group
+    per case gets that case's width."""
+    return Dims(get_tensor_model_parallel_world_size()).inter_real
+
+
 MERGE_WIDTHS: dict[tuple[int, bool], tuple[int, ...]] = {
     (8, False): (7,),
     (8, True): (6,),
@@ -213,7 +220,7 @@ def _capture_plain_experts(experts) -> None:
                     _scale_bytes(layer.w13_weight_scale.data),
                     layer.w2_weight.data,
                     _scale_bytes(layer.w2_weight_scale.data),
-                    INTER_TP4,
+                    _routed_inter_942(),
                 ),
             )
         return original(layer)
@@ -341,8 +348,7 @@ def _select(
         kv_score = torch.mm(
             normed, comp.fused_wkv_wgate.weight.T, out_dtype=torch.float32
         )
-        latent = comp(kv_score, positions)
-        comp.insert_cache(latent, positions, attn.rotary_emb)
+        latent = comp(kv_score, positions, attn.rotary_emb)
         indexer._produce_k(latent, positions, attn.indexer_rotary_emb)
     weights, _ = indexer.weights_proj(normed)
     q, q_scale, weights = indexer.forward_q(
@@ -460,8 +466,8 @@ class MonoDecodeLayer:
             # stream to bf16 before its RMSNorm there, which the kernels'
             # fused seam does not, so the two paths differ by that rounding.
             why = "needs aiter's fused mHC seam"
-        elif gfx942 and get_tensor_model_parallel_world_size() != 4:
-            why = "gfx942 builds for tensor parallel size 4 only"
+        elif gfx942 and get_tensor_model_parallel_world_size() not in (4, 8):
+            why = "gfx942 builds for tensor parallel size 4 or 8"
         elif (
             ffn.shared_experts is None
             or ffn.gate.tid2eid is not None
@@ -612,7 +618,7 @@ class MonoDecodeLayer:
             sw2=sw2,
             sw2_s=sw2_s,
         )
-        weights.check_942(f.n_routed_experts)
+        weights.check_942(get_tensor_model_parallel_world_size(), f.n_routed_experts)
         return weights
 
     @staticmethod
