@@ -100,7 +100,7 @@ def ssl_server():
 
 
 @pytest.mark.benchmark
-def test_bench_serve(server):
+def test_bench_serve(server, tmp_path: Path):
     # Test default model detection and input/output len
     command = [
         "vllm",
@@ -116,12 +116,20 @@ def test_bench_serve(server):
         "4",
         "--num-prompts",
         "5",
+        "--plot-timeline",
+        "--result-dir",
+        str(tmp_path),
+        "--result-filename",
+        "benchmark.json",
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    timeline = (tmp_path / "benchmark.timeline.html").read_text()
+    assert "Plotly.newPlot" in timeline
+    assert "TTFT" in timeline
 
 
 @pytest.mark.benchmark
