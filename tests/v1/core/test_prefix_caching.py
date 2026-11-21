@@ -64,6 +64,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
     DFlashSlidingWindowManager,
     HiSparseHotManager,
+    HiSparsePrefillSourceManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
 )
@@ -223,6 +224,7 @@ def make_hisparse_kv_cache_config(
     *,
     transfer_device_cache: bool = False,
     num_resident_groups: int = 1,
+    layerwise: bool = False,
 ) -> KVCacheConfig:
     source_spec = AttentionSpec(
         block_size=HISPARSE_BLOCK_SIZE,
@@ -234,7 +236,9 @@ def make_hisparse_kv_cache_config(
         new_kv_cache_group(
             ["source"],
             source_spec,
-            HiSparseSourceManager.config(),
+            (
+                HiSparsePrefillSourceManager if layerwise else HiSparseSourceManager
+            ).config(),
             host_resident=True,
         ),
         new_kv_cache_group(
@@ -244,6 +248,14 @@ def make_hisparse_kv_cache_config(
             role=KVCacheGroupRole.HISPARSE_INDEXER,
         ),
     ]
+    if layerwise:
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=groups,
+            hisparse_host_num_blocks=host_num_blocks,
+            hisparse_prefill_indexer_group=1,
+        )
     groups.append(
         new_kv_cache_group(
             ["resident"],
@@ -348,6 +360,65 @@ def _resident_block_ids(manager: KVCacheManager, request_id: str) -> list[int]:
     return [block.block_id for block in resident.get_residency_row(request_id)]
 
 
+def test_layerwise_prefix_publication_and_shared_reads():
+    page = HISPARSE_BLOCK_SIZE
+    manager = make_hisparse_kv_cache_manager(
+        32, 16, enable_caching=True, layerwise=True
+    )
+    owner = make_request("owner", list(range(2 * page + 1)), page, sha256)
+    assert manager.allocate_slots(owner, 2 * page + 1)
+    coordinator = get_hisparse_coordinator(manager)
+    step = coordinator.plan_layerwise_step([("owner", 0, 2 * page + 1)])
+    assert not step.reads
+    assert [length for _, _, length in step.writes] == [page, page, 1]
+    probe = make_request("probe", owner.prompt_token_ids, page, sha256)
+    assert manager.get_computed_blocks(probe)[1] == 0
+    counts = dict.fromkeys(step.sealed_pages, 2)
+    coordinator.update_spills(counts, dict.fromkeys(counts, 1))
+    assert manager.get_computed_blocks(probe)[1] == 0
+    coordinator.update_spills({}, dict.fromkeys(counts, 1))
+    assert manager.get_computed_blocks(probe)[1] == 2 * page
+    manager.free(owner)
+
+    for name in ("left", "right"):
+        req = make_request(
+            name, list(range(2 * page)) + [900 + len(name)], page, sha256
+        )
+        hit, n, _ = manager.get_computed_blocks(req)
+        assert n == 2 * page
+        assert manager.allocate_slots(
+            req, 1, num_new_computed_tokens=n, new_computed_blocks=hit
+        )
+    append = coordinator.plan_layerwise_step(
+        [("right", 2 * page, 1), ("left", 2 * page, 1)]
+    )
+    assert [length for _, _, length in append.reads] == [page, page]
+    assert len({host for host, _, _ in append.writes}) == 2
+    assert [length for _, _, length in append.writes] == [1, 1]
+    assert not append.sealed_pages
+
+
+def test_layerwise_preemption_holds_source_until_ack():
+    page = HISPARSE_BLOCK_SIZE
+    manager = make_hisparse_kv_cache_manager(16, 5, layerwise=True, enable_caching=True)
+    req = make_request("req", list(range(page + 1)), page, sha256)
+    assert manager.allocate_slots(req, page + 1)
+    coordinator = get_hisparse_coordinator(manager)
+    old = coordinator.plan_layerwise_step([("req", 0, page + 1)])
+    old_block = manager.get_block_ids("req")[0][0]
+    manager.free(req)
+    assert manager.allocate_slots(req, page + 1)
+    assert manager.get_block_ids("req")[0][0] != old_block
+    new = coordinator.plan_layerwise_step([("req", 0, page + 1)])
+    counts = dict.fromkeys(old.sealed_pages, 1)
+    coordinator.update_spills(counts, counts)
+    probe = make_request("probe", req.prompt_token_ids, page, sha256)
+    assert manager.get_computed_blocks(probe)[1] == 0
+    counts = dict.fromkeys(new.sealed_pages, 1)
+    coordinator.update_spills(counts, counts)
+    assert manager.get_computed_blocks(probe)[1] == page
+
+
 def test_hisparse_does_not_write_back_reprefillable_tokens():
     """Multi-module MTP re-prefills the last tokens, so they are not final."""
     manager = make_hisparse_kv_cache_manager(32, 16, num_reprefillable_tokens=2)
@@ -387,7 +458,7 @@ def test_hisparse_builds_dma_row_mirrors_across_pages():
 
 def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     """Unresolved drafts must not leave gaps in the eager host mirror."""
-    coordinator = MagicMock(host_group_id=0)
+    coordinator = MagicMock(host_group_id=0, layerwise_indexer=None)
     coordinator.take_residency_updates.return_value = {}
     coordinator.build_offload_command.return_value = None
     coordinator.build_row_mirrors.return_value = ()

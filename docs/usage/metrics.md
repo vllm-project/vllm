@@ -55,6 +55,10 @@ blocks count as free. With `--kv-cache-metrics`, the
 residency, like the device `vllm:kv_block_*_seconds` histograms, which cover
 only the GPU pool.
 
+Layerwise prefill reports `vllm:hisparse_prefill_h2d_bytes_total` for historical
+Main KV loaded into GPU buffers and `vllm:hisparse_prefill_d2h_bytes_total` for
+new Main KV written to DRAM. Both counters measure payload bytes.
+
 --8<-- "gen:metrics-hisparse"
 
 ## Simple CPU Offload Connector Metrics

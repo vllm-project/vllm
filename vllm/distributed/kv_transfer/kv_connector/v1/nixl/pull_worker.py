@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
     _RegionPairs,
+    _RemoteDramDescriptors,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HB_NOTIF_PREFIX,
@@ -499,6 +500,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     local_xfer_side_handle=local_xfer_side_handle,
                     local_dram_handle=local_dram_handle,
                     remote_xfer_side_handle=stage.xfer_side_handles[spec.remote_rank],
+                    remote_dram=stage.dram_descriptors.get(spec.remote_rank),
                     expected_consumers=plan.local_consumers,
                     awaiting_kvs=meta.awaiting_kvs,
                     region_pairs=stage.pairs,
@@ -548,6 +550,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         region_pairs: _RegionPairs,
         remote_region_num_blocks: list[int],
         remote_agent: str,
+        remote_dram: _RemoteDramDescriptors | None = None,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -672,6 +675,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_xfer_side_handle=remote_xfer_side_handle,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
+                    remote_dram=remote_dram,
                     notif_agent=remote_agent,
                     notif_id=notif_id,
                 )
@@ -718,6 +722,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_block_descs_ids: np.ndarray,
         notif_agent: str,
         notif_id: bytes,
+        remote_dram: _RemoteDramDescriptors | None = None,
     ) -> None:
         """Split a READ across the local DRAM and device descriptor lists."""
         desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
@@ -735,21 +740,29 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_ids = remote_ids[keep]
             is_dram = is_dram[keep]
             self._recving_transfers.setdefault(request_id, [])
+        remote_dram_handle = remote_xfer_side_handle
+        if remote_dram is not None:
+            if not np.array_equal(is_dram, remote_dram.is_dram[remote_ids]):
+                raise ValueError(
+                    "Producer and consumer transfer regions have different memory types"
+                )
+            remote_ids = remote_dram.positions[remote_ids]
+            remote_dram_handle = remote_dram.handle
         assert local_dram_handle is not None or not is_dram.any()
         reads = (
-            (is_dram, local_dram_handle),
-            (~is_dram, local_device_handle),
+            (is_dram, local_dram_handle, remote_dram_handle),
+            (~is_dram, local_device_handle, remote_xfer_side_handle),
         )
         handles: list[int] = []
         try:
-            for mask, local_handle in reads:
+            for mask, local_handle, remote_handle in reads:
                 if mask.any():
                     handles.append(
                         self.nixl_wrapper.make_prepped_xfer(
                             "READ",
                             local_handle,
                             desc_pos[local_ids[mask]],
-                            remote_xfer_side_handle,
+                            remote_handle,
                             remote_ids[mask],
                         )
                     )

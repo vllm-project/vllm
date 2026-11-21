@@ -684,7 +684,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     try:
         with torch.inference_mode(), autotune_context:
             hisparse_enabled = (
-                runner.vllm_config.attention_config.hisparse_config is not None
+                runner.vllm_config.attention_config.use_hisparse_decode_cache
             )
             skip_attn = skip_attn or hisparse_enabled
             if hisparse_enabled:

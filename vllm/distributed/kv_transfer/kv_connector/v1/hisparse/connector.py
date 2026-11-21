@@ -35,8 +35,10 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+from vllm.v1.hisparse.layerwise import LayerwiseWorker
 from vllm.v1.hisparse.layout import get_hisparse_steady_state_concurrency
 from vllm.v1.hisparse.types import (
+    LayerwiseStep,
     SparseKVOffloadCommand,
     SparseKVResidencyUpdate,
     SparseKVRowMirror,
@@ -61,6 +63,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
     all_context_pages_resident: bool
     residency_updates: dict[str, SparseKVResidencyUpdate]
+    layerwise: LayerwiseStep | None = None
 
 
 @dataclass
@@ -150,6 +153,16 @@ class HiSparseConnectorScheduler:
                 scheduler_output.num_scheduled_tokens.items()
             )
         )
+        if self.coordinator.layerwise_indexer is not None:
+            return HiSparseConnectorMetadata(
+                None,
+                self.coordinator.take_host_block_copies(),
+                (),
+                {},
+                False,
+                {},
+                self.coordinator.plan_layerwise_step(scheduled_requests),
+            )
         # Runs first: it plans this step's transfers and residency changes.
         self.coordinator.advance_scheduled(
             (
@@ -239,7 +252,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         if kv_cache_config.hisparse_host_num_blocks is None:
             raise ValueError("HiSparseConnector requires a HiSparse host pool")
         self.connector_scheduler: HiSparseConnectorScheduler | None = None
-        self.connector_worker: HiSparseConnectorWorker | None = None
+        self.connector_worker: HiSparseConnectorWorker | LayerwiseWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             speculative_config = vllm_config.speculative_config
             self.connector_scheduler = HiSparseConnectorScheduler(
@@ -267,9 +280,12 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                 steady_concurrency,
             )
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = HiSparseConnectorWorker(
-                vllm_config, kv_cache_config
-            )
+            if kv_cache_config.hisparse_prefill_indexer_group is not None:
+                self.connector_worker = LayerwiseWorker(vllm_config, kv_cache_config)
+            else:
+                self.connector_worker = HiSparseConnectorWorker(
+                    vllm_config, kv_cache_config
+                )
         else:
             raise ValueError(f"Unsupported KV connector role: {role}")
 
@@ -306,8 +322,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def reset_capture_state(self) -> None:
-        assert self.connector_worker is not None
-        self.connector_worker.reset_hot_state()
+        if isinstance(self.connector_worker, HiSparseConnectorWorker):
+            self.connector_worker.reset_hot_state()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is not None:
@@ -339,9 +355,12 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, HiSparseConnectorMetadata)
+        if isinstance(self.connector_worker, LayerwiseWorker):
+            self.connector_worker.start(metadata)
+            return
+        assert self.connector_worker is not None
         request_state_indices = kwargs.get("request_state_indices")
         assert request_state_indices is None or isinstance(
             request_state_indices, torch.Tensor
@@ -374,6 +393,16 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        if isinstance(self.connector_worker, LayerwiseWorker):
+            completed, self.connector_worker.completed = (
+                self.connector_worker.completed,
+                [],
+            )
+            copied, self.connector_worker.copied = self.connector_worker.copied, []
+            if not completed and not copied:
+                return None
+            counts = dict.fromkeys(completed, 1)
+            return HiSparseConnectorWorkerMetadata(counts, counts, tuple(copied))
         assert self.connector_worker is not None
         enqueued, completed = self.connector_worker.take_transfer_updates()
         host_copies = self.connector_worker.take_completed_host_copies()

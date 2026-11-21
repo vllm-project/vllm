@@ -35,6 +35,10 @@ class HiSparseConfig:
     resident-only and evicted pages are copied to host at spill time. Prefill
     rows are always mirrored during the forward."""
 
+    prefill_layerwise_num_buffers: int = Field(default=0, ge=0)
+    """GPU Main KV layer buffers per compatible layout on an eager DSA prefill
+    producer. Zero uses the standard HiSparse resident and hot caches."""
+
 
 @config
 class AttentionConfig:
@@ -260,6 +264,12 @@ class AttentionConfig:
         if self.indexer_logits_dtype == "auto":
             return default
         return self.indexer_logits_dtype
+
+    @property
+    def use_hisparse_decode_cache(self) -> bool:
+        return self.hisparse_config is not None and not (
+            self.hisparse_config.prefill_layerwise_num_buffers
+        )
 
     def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs

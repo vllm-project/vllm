@@ -861,6 +861,9 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    hisparse_prefill_indexer_group: int | None = None
+    """GPU page-address group used by the layerwise Main KV workspace."""
+
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
 

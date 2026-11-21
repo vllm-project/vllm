@@ -35,6 +35,7 @@ from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend, HiSparseBackend
+from vllm.v1.hisparse.dma import HiSparseDMA
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
@@ -113,6 +114,7 @@ def test_hisparse_group_prefetch_requires_bounded_decode_only(
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
     worker.backend = CUDAHiSparseBackend()
+    worker.dma = HiSparseDMA(worker.backend)
     worker._in_step = True
     worker._slot_mapping_staging = None
     worker._row_mirror_num_rows = 0
@@ -120,8 +122,6 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._submitted_mirror_layers = set()
     worker._draft_layers = ()
     worker._draft_mirror_pending = False
-    worker._pending_dma_descriptors = deque()
-    worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
     worker.host_write_event = worker.host_write_events[1]
     worker._next_host_write_event = 0
@@ -174,6 +174,8 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "cache_hits": [12],
         "cache_misses": [4],
         "host_to_device_bytes": [64],
+        "prefill_h2d_bytes": [],
+        "prefill_d2h_bytes": [],
         "host_cache_usage_perc": [],
         "pending_page_transfers": [],
         "host_block_lifetime_seconds": [],
@@ -656,7 +658,6 @@ def test_hisparse_transfer_builds_page_descriptors(monkeypatch):
     worker.cache_handles = _as_cache_handles(
         SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0))
     )
-    worker._dma_free_descriptors = []
     submit_dma_descriptors = MagicMock()
     monkeypatch.setattr(worker, "_submit_dma_descriptors", submit_dma_descriptors)
 
@@ -734,12 +735,8 @@ def test_hisparse_tail_restore_preserves_imported_rows(
             for i in range(2)
         )
     )
-    record_transfer_completion = MagicMock()
-    monkeypatch.setattr(
-        worker, "_record_transfer_completion", record_transfer_completion
-    )
-    stream = torch.cuda.current_stream() if device == "cuda" else MagicMock()
-    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: stream)
+    worker._pending_transfer_events = deque()
+    worker._enqueued_transfer_ids = []
     transfer = SparseKVPageTransfer(7, 2, (1, 3), restore=True)
 
     restore_pages = worker._restore_pages
@@ -760,7 +757,10 @@ def test_hisparse_tail_restore_preserves_imported_rows(
         cache[block, 2:] = 999
         assert torch.equal(cache[block, :2].cpu(), host[8:10])
         assert torch.all(cache[0] == -1)
-    record_transfer_completion.assert_called_once_with([transfer], stream=stream)
+    assert worker.take_transfer_updates() == (
+        [transfer.transfer_id],
+        [transfer.transfer_id],
+    )
 
 
 def test_hisparse_lazy_mirror_copies_transfer_pages(monkeypatch):
@@ -797,8 +797,6 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     )
     worker.dma_stream = MagicMock()
     worker.host_write_event = MagicMock()
-    worker._dma_free_descriptors = []
-    worker._pending_dma_descriptors = deque()
     worker._pending_transfer_events = deque()
     worker._enqueued_transfer_ids = []
     worker._dma_submitted = False
@@ -841,7 +839,6 @@ def test_hisparse_row_dma_uses_resident_spans(monkeypatch):
             SparseKVRowMirror((2,), 9, 1),
         )
     )
-    worker._dma_free_descriptors = []
     submit_dma_descriptors = MagicMock()
     monkeypatch.setattr(worker, "_submit_dma_descriptors", submit_dma_descriptors)
 
@@ -1052,8 +1049,6 @@ def test_hisparse_finish_forward_orders_next_forward_after_dma(monkeypatch):
         )
     )
     worker._post_forward_transfers = []
-    worker._pending_dma_descriptors = deque()
-    worker._dma_free_descriptors = []
     worker._forward_ready_event = MagicMock()
     monkeypatch.setattr(worker, "_finish_mirror_phase", MagicMock())
     monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)

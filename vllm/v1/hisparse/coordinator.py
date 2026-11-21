@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -21,6 +21,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.hisparse.types import (
     ACTIVE_TAIL_PAGES,
+    LayerwiseStep,
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
     SparseKVResidencyUpdate,
@@ -33,6 +34,32 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+
+def _page_spans(
+    host: Sequence[KVCacheBlock],
+    gpu: Sequence[KVCacheBlock],
+    main_page_size: int,
+    index_page_size: int,
+    start: int,
+    end: int,
+) -> Iterator[tuple[int, int, int]]:
+    """Map a logical interval across independent host and GPU block tables."""
+    while start < end:
+        host_page, host_offset = divmod(start, main_page_size)
+        gpu_page, gpu_offset = divmod(start, index_page_size)
+        rows = min(
+            end - start, main_page_size - host_offset, index_page_size - gpu_offset
+        )
+        host_block, gpu_block = host[host_page], gpu[gpu_page]
+        if host_block.is_null or gpu_block.is_null:
+            raise RuntimeError("Layerwise Main KV span references a null page")
+        yield (
+            host_block.block_id * main_page_size + host_offset,
+            gpu_block.block_id * index_page_size + gpu_offset,
+            rows,
+        )
+        start += rows
 
 
 @dataclass(slots=True)
@@ -124,6 +151,8 @@ class HiSparseCoordinator:
                 assert not group.host_resident
             if isinstance(manager, (HiSparseHotManager, HiSparseResidentManager)):
                 manager.coordinator = self
+        indexer = kv_cache_config.hisparse_prefill_indexer_group
+        self.layerwise_indexer = managers[indexer] if indexer is not None else None
         self.resident_managers = tuple(resident_managers)
         self.hot_managers = tuple(hot_managers)
         self.host_manager: HiSparseSourceManager | None = None
@@ -193,6 +222,8 @@ class HiSparseCoordinator:
 
     @property
     def gpu_pool(self) -> BlockPool:
+        if self.layerwise_indexer is not None:
+            return self.layerwise_indexer.block_pool
         return self.resident_managers[0].block_pool
 
     def _num_resident_pages(self, request_id: str) -> int:
@@ -776,6 +807,63 @@ class HiSparseCoordinator:
     # Worker-facing views
     # ------------------------------------------------------------------
 
+    def plan_layerwise_step(
+        self, scheduled: Iterable[tuple[str, int, int]]
+    ) -> LayerwiseStep:
+        """Gather the batch's unique history pages and fence sealed host writes."""
+        source = self.host_manager
+        indexer = self.layerwise_indexer
+        assert source is not None and indexer is not None
+        reads: dict[int, tuple[int, int]] = {}
+        writes: list[tuple[int, int, int]] = []
+        sealed: list[int] = []
+        for req_id, start, count in scheduled:
+            host = source.req_to_blocks[req_id]
+            gpu = indexer.req_to_blocks[req_id]
+            state = self._get_request_state(req_id)
+            # At admission the source manager already owns the durable APC hit.
+            state.ready_prefix_pages = max(
+                state.ready_prefix_pages,
+                min(source.num_cached_block.get(req_id, 0), start // source.block_size),
+            )
+            for host_row, gpu_row, num_rows in _page_spans(
+                host, gpu, source.block_size, indexer.block_size, 0, start
+            ):
+                if gpu_row not in reads or num_rows > reads[gpu_row][1]:
+                    reads[gpu_row] = (host_row, num_rows)
+            writes.extend(
+                _page_spans(
+                    host,
+                    gpu,
+                    source.block_size,
+                    indexer.block_size,
+                    start,
+                    start + count,
+                )
+            )
+            for page in range(
+                start // source.block_size, (start + count) // source.block_size
+            ):
+                if page < state.ready_prefix_pages or page in state.pending_pages:
+                    continue
+                block = host[page]
+                source.block_pool.touch([block])
+                transfer_id = self.next_spill_id
+                self.next_spill_id += 1
+                self.pending_spills[transfer_id] = _PendingSpill(
+                    transfer_id, (req_id, page), state, block, ()
+                )
+                state.pending_pages[page] = transfer_id
+                sealed.append(transfer_id)
+        return LayerwiseStep(
+            tuple(
+                (host_row, gpu_row, num_rows)
+                for gpu_row, (host_row, num_rows) in reads.items()
+            ),
+            tuple(dict.fromkeys(writes)),
+            tuple(sealed),
+        )
+
     def build_row_mirrors(
         self,
         requests: Iterable[tuple[str, int, int]],
@@ -973,7 +1061,10 @@ class HiSparseCoordinator:
                 if not pending.restore:
                     pending.request_state.valid_pages.add(page_idx)
                 completed_request_ids[request_id] = None
-                if page_idx in pending.request_state.valid_pages:
+                if (
+                    self.resident_managers
+                    and page_idx in pending.request_state.valid_pages
+                ):
                     pending.request_state.pinned_clean.add(page_idx)
                     if clean_runs and clean_runs[-1][0] == request_id:
                         clean_runs[-1][1].append(page_idx)

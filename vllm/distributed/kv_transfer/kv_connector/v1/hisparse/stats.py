@@ -37,6 +37,8 @@ class HiSparseKVConnectorStats(KVConnectorStats):
     def reset(self):
         # Must be serializable
         self.data: dict[str, list[int | float]] = {
+            "prefill_h2d_bytes": [],
+            "prefill_d2h_bytes": [],
             "cache_hits": [],
             "cache_misses": [],
             "host_to_device_bytes": [],
@@ -65,7 +67,7 @@ class HiSparseKVConnectorStats(KVConnectorStats):
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
             for k, v in other.data.items():
-                accumulator = self.data[k]
+                accumulator = self.data.setdefault(k, [])
                 assert isinstance(accumulator, list)
                 if k in _HISPARSE_LEVEL_KEYS:
                     accumulator.extend(v[-1:])
@@ -80,6 +82,9 @@ class HiSparseKVConnectorStats(KVConnectorStats):
             "HiSparse hot-buffer misses": sum(self.data["cache_misses"]),
             "HiSparse host-to-device bytes": sum(self.data["host_to_device_bytes"]),
         }
+        for direction in ("h2d", "d2h"):
+            if values := self.data.get(f"prefill_{direction}_bytes"):
+                reduced[f"HiSparse prefill {direction.upper()} bytes"] = sum(values)
         if self.data["host_cache_usage_perc"]:
             usage = self.data["host_cache_usage_perc"][-1]
             reduced["HiSparse host KV cache usage %"] = round(100 * usage, 1)
@@ -127,6 +132,19 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
                 counter_host_to_device_bytes, self.per_engine_labelvalues
             ),
         }
+
+        for key, direction in (
+            ("prefill_h2d_bytes", "loaded into GPU layer buffers"),
+            ("prefill_d2h_bytes", "written back to host Main KV"),
+        ):
+            counter = self._counter_cls(
+                name=f"vllm:hisparse_{key}",
+                documentation=f"HiSparse prefill bytes {direction}.",
+                labelnames=labelnames,
+            )
+            self.hisparse_counters[key] = create_metric_per_engine(
+                counter, self.per_engine_labelvalues
+            )
 
         gauge_host_cache_usage = self._gauge_cls(
             name="vllm:hisparse_host_cache_usage_perc",

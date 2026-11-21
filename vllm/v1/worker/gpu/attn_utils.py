@@ -410,6 +410,16 @@ def init_kv_cache(
     with allocation_context:
         if vllm_config.attention_config.hisparse_config is not None:
             assert block_tables is not None
+            slots = None
+            if kv_cache_config.hisparse_prefill_indexer_group is not None:
+                from vllm.v1.hisparse.layerwise import allocate_layer_buffers
+
+                slots = allocate_layer_buffers(
+                    kv_cache_config,
+                    vllm_config.attention_config.hisparse_config.prefill_layerwise_num_buffers,
+                    kernel_block_sizes,
+                    device,
+                )
             kv_caches = init_hisparse_kv_cache(
                 kv_cache_config,
                 device,
@@ -419,6 +429,15 @@ def init_kv_cache(
                 block_tables,
                 allocate=allocate,
             )
+            if slots is not None:
+                bind_kv_caches(
+                    kv_caches | slots,
+                    forward_context,
+                    kv_cache_config,
+                    vllm_config,
+                    attn_groups,
+                )
+                return kv_caches
         else:
             kv_caches = allocate_kv_cache(
                 kv_cache_config,
@@ -456,6 +475,9 @@ def build_slot_mappings_by_layer(
     slot_mappings_by_layer: dict[str, torch.Tensor] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
+        indexer = kv_cache_config.hisparse_prefill_indexer_group
+        if kv_cache_group.host_resident and indexer is not None:
+            slot_mapping = slot_mappings[indexer]
         for layer_name in kv_cache_group.layer_names:
             slot_mappings_by_layer[layer_name] = slot_mapping
     return slot_mappings_by_layer
@@ -516,6 +538,24 @@ def build_attn_metadata(
             continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
+        indexer = kv_cache_config.hisparse_prefill_indexer_group
+        if kv_cache_config.kv_cache_groups[i].host_resident and indexer is not None:
+            slot_mapping = slot_mappings[indexer]
+            ratio = (
+                kv_cache_config.kv_cache_groups[indexer].block_size
+                // kv_cache_config.kv_cache_groups[i].block_size
+            )
+            index_pages = block_tables[indexer]
+            block_table = index_pages
+            if ratio > 1:
+                offsets = torch.arange(
+                    ratio, dtype=index_pages.dtype, device=index_pages.device
+                )
+                pages = index_pages.unsqueeze(-1)
+                block_table = torch.where(
+                    pages > 0, pages * ratio + offsets, pages
+                ).flatten(1)
+            block_table = block_table[:, : block_tables[i].shape[1]].contiguous()
         # Per-group causal for hybrid drafters (mixed SWA/full attention).
         group_causal = (
             causal if isinstance(causal, (bool, torch.Tensor)) else causal.get(i, True)

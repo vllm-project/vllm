@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 
 import prometheus_client
@@ -85,7 +86,7 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
             if isinstance(child, HiSparseConnector)
         )
     assert isinstance(connector, HiSparseConnector)
-    assert connector.connector_worker is not None
+    assert isinstance(connector.connector_worker, HiSparseConnectorWorker)
     return connector.connector_worker
 
 
@@ -525,3 +526,77 @@ def test_hisparse_terminal_prefix_reuse(
         assert repeated.outputs[0].token_ids == first.outputs[0].token_ids
         drain_pending_work()
         assert not coordinator.has_pending_work()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA DMA and sparse MLA")
+@pytest.mark.parametrize("num_buffers", [1, 2, 4])
+@pytest.mark.parametrize("cache_dtype", ["bfloat16", "fp8_ds_mla"])
+@fork_new_process_for_each_test
+def test_layerwise_prefill_matches_gpu_main_kv(vllm_runner, num_buffers, cache_dtype):
+    """Cold chunks, shared-prefix hits and a final one-token append."""
+    from tests.models.utils import check_logprobs_close
+
+    checkpoint = os.getenv("VLLM_TEST_HISPARSE_GLM_MODEL")
+    model = checkpoint or MODEL
+    model_args = (
+        {} if checkpoint else dict(load_format="dummy", hf_overrides=_shrink_config)
+    )
+    tp = int(os.getenv("VLLM_TEST_HISPARSE_TP", "1"))
+    host_gib = float(os.getenv("VLLM_TEST_HISPARSE_HOST_GIB", "1"))
+    prefix_len = 4096 if checkpoint else 256
+    prefix = [1000 + i % 71 for i in range(prefix_len)]
+    prompts = [prefix + [901], prefix + [902, 903, 904]]
+    outputs = []
+    for count in (0, num_buffers):
+        attention = AttentionConfig(sparse_mla_force_mqa=True)
+        transfer = None
+        if count:
+            attention.hisparse_config = HiSparseConfig(
+                prefill_layerwise_num_buffers=count
+            )
+            transfer = KVTransferConfig(
+                kv_connector="HiSparseConnector",
+                kv_role="kv_producer",
+                kv_connector_extra_config={"host_pool_gib": host_gib},
+            )
+        with vllm_runner(
+            model,
+            **model_args,
+            tensor_parallel_size=tp,
+            dtype="bfloat16",
+            enforce_eager=True,
+            enable_prefix_caching=True,
+            enable_chunked_prefill=True,
+            block_size=64,
+            max_num_batched_tokens=128,
+            max_num_seqs=4,
+            max_model_len=prefix_len + 64,
+            kv_cache_dtype=cache_dtype,
+            attention_config=attention,
+            kv_transfer_config=transfer,
+            attention_backend="FLASHMLA_SPARSE",
+        ) as runner:
+            params = SamplingParams(temperature=0, max_tokens=2, logprobs=5)
+            runner.llm.generate([{"prompt_token_ids": prefix + [900]}], params)
+            results = runner.llm.generate(
+                [{"prompt_token_ids": ids} for ids in prompts], params
+            )
+            for result in results:
+                assert result.num_cached_tokens >= prefix_len - 64
+            outputs.append(
+                [
+                    (
+                        list(r.outputs[0].token_ids),
+                        r.outputs[0].text,
+                        r.outputs[0].logprobs,
+                    )
+                    for r in results
+                ]
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="GPU Main KV",
+        name_1="layerwise Main KV",
+        always_check_logprobs=True,
+    )
