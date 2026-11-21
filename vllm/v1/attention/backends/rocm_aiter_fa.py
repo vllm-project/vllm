@@ -3,7 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass, field, replace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 
@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends import rocm_aiter_triton_fp8_prefill as _fp8_prefill
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
@@ -1207,6 +1208,27 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "cross-attention."
             )
 
+        vllm_config = get_current_vllm_config_or_none()
+        self.fp8_prefill = _fp8_prefill.enabled(
+            vllm_config is not None
+            and vllm_config.attention_config.use_prefill_query_quantization,
+            head_size,
+            kv_cache_dtype,
+            alibi_slopes is None and sliding_window is None and sinks is None,
+        )
+        self._prefill_attn = (
+            _fp8_prefill.prefill_attn()
+            if self.fp8_prefill
+            else rocm_aiter_ops.flash_attn_varlen_func
+        )
+        # The profile run's batch is split under microbatching, so size the FP8
+        # reservation from the scheduler's width instead.
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+            if self.fp8_prefill and vllm_config is not None
+            else 0
+        )
+
     def _get_kv_cache_descales(
         self,
         layer: AttentionLayer,
@@ -1299,6 +1321,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         slot_mapping: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
+        kv_descales: dict[str, torch.Tensor],
     ):
         if self.sliding_window[0] != -1:
             self.extend_for_sliding_window(
@@ -1314,10 +1337,19 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
-        out, lse = rocm_aiter_ops.flash_attn_varlen_func(
+        # The causal call and every context chunk quantize the same q to the same scale.
+        q_quant: dict[str, Any] = {}
+        kv_quant: dict[str, Any] = {}
+        if self.fp8_prefill:
+            q_quant["quantized_q"], kv_quant["quantized_kv"] = (
+                _fp8_prefill.quantize_prefill(query, key, value, cu_seqlens_q)
+            )
+        out, lse = self._prefill_attn(
             q=query,
             k=key,
             v=value,
+            **q_quant,
+            **kv_quant,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
@@ -1330,6 +1362,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             alibi_slopes=self.alibi_slopes,
             return_lse=True,
             sink_ptr=self.sinks,
+            **kv_descales,
         )
         assert attn_metadata.extend_metadata is not None
         chunk_context_metadata = attn_metadata.extend_metadata.chunk_context_metadata
@@ -1341,6 +1374,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
         token_to_batch = chunk_context_metadata.token_to_batch
         total_token_per_batch = chunk_context_metadata.total_token_per_batch
         key_fetched, value_fetched = workspace[0], workspace[1]
+        # Only validated on NHD; the shuffle layout still requantises the context.
+        fp8_context = (
+            self.fp8_prefill and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
+        context_descales: dict[str, Any] = {}
+        if fp8_context:
+            fp8_workspace = workspace.view(-1).view(current_platform.fp8_dtype())
+            key_fetched, value_fetched = (
+                fp8_workspace[: workspace.numel()].view(workspace.shape).unbind(0)
+            )
+            context_descales = dict(descale_k=k_scale, descale_v=v_scale)
         chunked_output = None
         chunked_lse = None
         for chunk_idx in range(num_chunks):
@@ -1355,17 +1399,20 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_kv=cu_seqlens_kv[chunk_idx],
                 token_to_batch=token_to_batch[chunk_idx],
                 seq_starts=chunk_starts[chunk_idx],
-                dequant=is_quantized_kv_cache(self.kv_cache_dtype),
+                dequant=is_quantized_kv_cache(self.kv_cache_dtype) and not fp8_context,
                 kv_cache_layout="SHUFFLE"
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
                 else "NHD",
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
-            suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
+            # Rows past total_tokens are stale or uninitialised.
+            n_ctx = total_token_per_batch[chunk_idx]
+            suf_out, suf_lse = self._prefill_attn(
                 q=query,
-                k=key_fetched,
-                v=value_fetched,
+                k=key_fetched[:n_ctx],
+                v=value_fetched[:n_ctx],
+                **q_quant,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
@@ -1380,6 +1427,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 # The causal call above already adds the sink to each query's
                 # LSE; adding it per context chunk would overcount it on merge.
                 sink_ptr=None,
+                **context_descales,
             )
             if chunked_output is None:
                 chunked_output = suf_out
@@ -1449,6 +1497,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
+            if self.fp8_prefill:
+                num_tokens = max(self.max_num_batched_tokens, query.shape[0])
+                kv_tokens = num_tokens
+                if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                    kv_tokens = max(kv_tokens, _CP_TOKENS_PER_ITER_ROCM)
+                _fp8_prefill.profile(
+                    query, self.num_heads, self.num_kv_heads, kv_tokens, num_tokens
+                )
             return output.fill_(0)
 
         # IMPORTANT!
@@ -1479,6 +1535,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_extend_tokens = attn_metadata.num_extend_tokens
+        kv_descales: dict[str, Any] = {}
         if (self.kv_sharing_target_layer_name is not None or key is None) and (
             num_prefills > 0 or num_extends > 0
         ):
@@ -1486,7 +1543,20 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # target cache for the direct prefill and extend suffix kernels.
             shared = attn_metadata.kv_sharing_metadata
             assert shared is not None
-            key, value = shared.workspace[:, :num_actual_tokens].unbind(0)
+            shared_workspace = shared.workspace
+            # NHD only, as for the context chunks above.
+            fp8_shared = (
+                self.fp8_prefill and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            )
+            if fp8_shared:
+                # View the whole workspace; the token slice below is not contiguous.
+                shared_workspace = (
+                    shared_workspace.view(-1)
+                    .view(current_platform.fp8_dtype())[: shared_workspace.numel()]
+                    .view(shared_workspace.shape)
+                )
+                kv_descales = dict(descale_k=layer._k_scale, descale_v=layer._v_scale)
+            key, value = shared_workspace[:, :num_actual_tokens].unbind(0)
             cp_mha_gather_cache(
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -1498,7 +1568,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_kv=shared.query_start_loc,
                 token_to_batch=shared.token_to_batch,
                 seq_starts=shared.seq_starts,
-                dequant=is_quantized_kv_cache(self.kv_cache_dtype),
+                dequant=is_quantized_kv_cache(self.kv_cache_dtype) and not fp8_shared,
                 kv_cache_layout="SHUFFLE"
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
                 else "NHD",
@@ -1513,7 +1583,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             prefill_key = key[num_decode_tokens + num_extend_tokens :]
             prefill_value = value[num_decode_tokens + num_extend_tokens :]
 
-            rocm_aiter_ops.flash_attn_varlen_func(
+            self._prefill_attn(
                 q=prefill_query,
                 k=prefill_key,
                 v=prefill_value,
@@ -1529,6 +1599,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
                 sink_ptr=self.sinks,
+                **kv_descales,
             )
 
         # calculate for extends
@@ -1563,6 +1634,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 ],
                 k_scale=k_scale,
                 v_scale=v_scale,
+                kv_descales=kv_descales,
             )
 
         # calculate for decodes
