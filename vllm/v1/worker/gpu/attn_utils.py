@@ -137,7 +137,14 @@ class FastPrefillHelper:
 def get_kv_cache_layer_configs(
     vllm_config: VllmConfig,
 ) -> dict[str, KVCacheLayerConfig]:
-    layer_configs: dict[str, KVCacheLayerConfig] = {}
+    from vllm.model_executor.layers.state import PersistentStateLayerBase
+
+    layer_configs: dict[str, KVCacheLayerConfig] = {
+        name: layer.get_kv_cache_config(vllm_config)
+        for name, layer in get_layers_from_vllm_config(
+            vllm_config, PersistentStateLayerBase
+        ).items()
+    }
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
@@ -442,8 +449,15 @@ def bind_kv_caches(
     """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
+    state_names = {
+        name for group in kv_cache_config.state_groups for name in group.layer_names
+    }
     bindable_caches = map_kv_caches_to_kernel_blocks(
-        {name: cache for name, cache in kv_caches.items() if name in forward_context},
+        {
+            name: cache
+            for name, cache in kv_caches.items()
+            if name in forward_context and name not in state_names
+        },
         attn_groups,
     )
     bind_kv_cache_to_layers(bindable_caches, forward_context)
