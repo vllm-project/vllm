@@ -476,18 +476,15 @@ class LLM(
             generated completions in the same order as the input prompts.
 
         Raises:
-            VLLMValidationError: If the loaded model is not configured for
-                generation.
+            RuntimeError: If the loaded model is not configured for generation.
 
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
-            raise VLLMValidationError(
+            raise RuntimeError(
                 "LLM.generate() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
-                "generative model.",
-                parameter="runner",
-                value=runner_type,
+                "generative model."
             )
 
         if sampling_params is None:
@@ -537,17 +534,12 @@ class LLM(
             A list of request IDs for the enqueued requests.
 
         Raises:
-            VLLMValidationError: If the loaded model is not configured for
-                generation.
+            RuntimeError: If the loaded model is not configured for generation.
 
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
-            raise VLLMValidationError(
-                "LLM.enqueue() is only supported for generative models.",
-                parameter="runner",
-                value=runner_type,
-            )
+            raise RuntimeError("LLM.enqueue() is only supported for generative models.")
 
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
@@ -718,19 +710,16 @@ class LLM(
             responses in the same order as the input messages.
 
         Raises:
-            VLLMValidationError: If the loaded model is not configured for
-                generation.
+            RuntimeError: If the loaded model is not configured for generation.
 
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            raise VLLMValidationError(
+            raise RuntimeError(
                 "LLM.chat() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
-                "generative model.",
-                parameter="runner",
-                value=runner_type,
+                "generative model."
             )
 
         if sampling_params is None:
@@ -807,19 +796,16 @@ class LLM(
             A list of request IDs for the enqueued requests.
 
         Raises:
-            VLLMValidationError: If the loaded model is not configured for
-                generation.
+            RuntimeError: If the loaded model is not configured for generation.
 
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            raise VLLMValidationError(
+            raise RuntimeError(
                 "LLM.enqueue_chat() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
-                "generative model.",
-                parameter="runner",
-                value=runner_type,
+                "generative model."
             )
 
         if sampling_params is None:
