@@ -58,6 +58,7 @@ def test_numa_bind_cli_start_method(monkeypatch, start_method, numa_args, force_
     for check in (
         "is_in_ray_actor",
         "cuda_is_initialized",
+        "cuda_driver_is_initialized",
         "xpu_is_initialized",
         "in_wsl",
     ):
@@ -66,6 +67,58 @@ def test_numa_bind_cli_start_method(monkeypatch, start_method, numa_args, force_
     _maybe_force_spawn()
     expected_method = "spawn" if force_spawn else start_method
     assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == expected_method
+
+
+@pytest.mark.parametrize("driver_initialized", [True, False])
+def test_external_cuda_driver_init_forces_spawn(monkeypatch, driver_initialized):
+    """A CUDA driver initialized outside torch (cuInit called by the host
+    process) must force spawn, like torch's own CUDA initialization does."""
+    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
+    monkeypatch.setattr(sys, "argv", ["vllm", "serve"])
+    for check in (
+        "is_in_ray_actor",
+        "cuda_is_initialized",
+        "xpu_is_initialized",
+        "in_wsl",
+    ):
+        monkeypatch.setattr(system_utils, check, lambda: False)
+    monkeypatch.setattr(
+        system_utils, "cuda_driver_is_initialized", lambda: driver_initialized
+    )
+
+    _maybe_force_spawn()
+    expected_method = "spawn" if driver_initialized else None
+    assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == expected_method
+
+
+def test_cuda_driver_is_initialized_tracks_cuinit():
+    """The probe is False in a fresh process and True right after cuInit,
+    without torch having initialized CUDA."""
+    code = """
+import ctypes, sys
+import torch
+from vllm.utils.platform_utils import cuda_driver_is_initialized
+try:
+    libcuda = ctypes.CDLL("libcuda.so.1")
+except OSError:
+    print("NOLIB")
+    sys.exit(0)
+before = cuda_driver_is_initialized()
+rc = libcuda.cuInit(0)
+after = cuda_driver_is_initialized()
+print(before, rc, after, torch.cuda.is_initialized())
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    if out == "NOLIB":
+        pytest.skip("libcuda.so.1 is not available")
+    before, rc, after, torch_initialized = out.split()
+    assert before == "False"
+    if rc != "0":
+        pytest.skip(f"cuInit failed with {rc}; no usable CUDA device")
+    assert after == "True"
+    assert torch_initialized == "False"
 
 
 def test_suppress_stdout_when_sys_stdout_has_no_fd(capfd):
