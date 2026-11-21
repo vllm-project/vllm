@@ -107,6 +107,7 @@ async def init_render_app_state(
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+        max_tokenize_tokens=args.max_tokenize_tokens,
     )
 
     init_render_state(

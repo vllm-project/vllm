@@ -86,7 +86,7 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorTransferResults:
     """Asynchronous transfer completions from one worker snapshot.
 
@@ -199,8 +199,9 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector supports core lookahead hashing."""
-        return False
+        """Whether the connector supports hash lookahead. If False, EAGLE/MTP
+        acceptance may drop."""
+        return True
 
     @classmethod
     def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
@@ -324,6 +325,18 @@ class KVConnectorBase_V1(ABC):
         Args:
             kv_caches: dictionary of layer names, kv cache
 
+        """
+        return
+
+    def on_kv_cache_ready(self) -> None:
+        """Finish deferred registration after final KV sizing.
+
+        Called on each worker before requests, after preceding device work.
+        Normally follows warmup and capture. With VLLM_ELASTIC_EP_SCALE_UP_LAUNCH,
+        it precedes deferred warmup/capture in warm_and_capture().
+        Must return in bounded time: an unbounded wait blocks engine startup.
+        No hook timeout or cancellation is provided. Exceptions fail startup;
+        background tasks are not awaited. Not called on sleep/wake.
         """
         return
 
