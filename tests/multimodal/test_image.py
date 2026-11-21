@@ -267,7 +267,7 @@ def test_normalize_image_default_preserves_caller_image():
 @pytest.mark.parametrize("mode", ["RGB", "RGBA", "L", "P"])
 @pytest.mark.parametrize("orientation", [None, *range(1, 9)])
 def test_normalize_image_in_place_matches_copy(mode: str, orientation: int | None):
-    """in_place=True mutates the given image and matches non-in-place output."""
+    """in_place=True reuses the image when no transform is needed and matches copy."""
     data = make_test_png_bytes(mode, orientation)
     img_ref = Image.open(BytesIO(data))
     img_in_place = Image.open(BytesIO(data))
@@ -275,7 +275,7 @@ def test_normalize_image_in_place_matches_copy(mode: str, orientation: int | Non
     expected = normalize_image(img_ref)
     actual = normalize_image(img_in_place, in_place=True)
 
-    assert actual is img_in_place
+    assert (actual is img_in_place) == (orientation not in range(2, 9))
     assert actual.mode == expected.mode
     assert actual.size == expected.size
     np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
@@ -311,3 +311,24 @@ def test_normalize_image_in_place_without_exif(mode: str):
         assert actual.getpalette() == expected.getpalette()
     assert dict(actual.getexif()) == dict(expected.getexif()) == {}
     assert actual.info == expected.info
+
+
+def test_normalize_image_in_place_exif_cleanup_failure_discards_rotation(monkeypatch):
+    """If EXIF rewrite raises during transposition, in_place=True must not leave
+    rotated pixels paired with the original Orientation tag."""
+    data = make_test_png_bytes("RGB", orientation=6)
+    img = Image.open(BytesIO(data))
+    img.load()
+    orig_size = img.size
+    orig_bytes = img.tobytes()
+
+    def _boom_tobytes(self):
+        raise RuntimeError("EXIF serialize failed")
+
+    monkeypatch.setattr(Image.Exif, "tobytes", _boom_tobytes)
+    out = normalize_image(img, in_place=True)
+
+    assert out is img
+    assert out.size == orig_size
+    assert out.tobytes() == orig_bytes
+    assert out.getexif().get(0x0112) == 6

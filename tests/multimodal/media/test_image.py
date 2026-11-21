@@ -934,3 +934,29 @@ def test_image_media_io_load_bytes_keeps_copy_for_stateful_formats(
     if image_mode is None:
         assert type(actual.media) is Image.Image
     _assert_same_loaded_image(actual, expected)
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "WEBP"])
+def test_image_media_io_load_bytes_exif_cleanup_failure_discards_rotation(
+    monkeypatch, fmt: str
+):
+    """If EXIF metadata rewrite raises during orientation transpose, load_bytes()
+    must discard the rotated pixels and keep the original unrotated pixels + tag."""
+    base_img = Image.new("RGB", (6, 4), (10, 20, 30))
+    base_img.putpixel((0, 0), (250, 5, 15))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    data = _encode(base_img, fmt, exif=exif.tobytes())
+    unrotated_ref = Image.open(BytesIO(data))
+    unrotated_ref.load()
+
+    def _boom_tobytes(self):
+        raise RuntimeError("corrupt EXIF IFD serialization")
+
+    monkeypatch.setattr(Image.Exif, "tobytes", _boom_tobytes)
+    loaded = ImageMediaIO(image_mode=None).load_bytes(data)
+
+    assert type(loaded.media) is Image.Image
+    assert loaded.media.size == (6, 4)
+    np.testing.assert_array_equal(np.asarray(loaded.media), np.asarray(unrotated_ref))
+    assert loaded.media.getexif().get(0x0112) == 6

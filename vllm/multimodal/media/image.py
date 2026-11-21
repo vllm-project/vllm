@@ -38,9 +38,10 @@ MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generat
 IMAGE_BACKENDS = ("pil", "torchcodec")
 
 # Single-frame files of these formats behave like a detached `Image.Image` once
-# loaded, so EXIF orientation can be normalized in place without changing what
-# the loader returns. Other formats keep frame or tag state (e.g. TIFF IFD tags,
-# PSD layers, ICO sizes) that the copy drops.
+# loaded, so when no EXIF orientation transform is needed we can skip
+# `exif_transpose`'s full-image copy and detach via `_new(im)`. Other formats
+# keep frame or tag state (e.g. TIFF IFD tags, PSD layers, ICO sizes) that the
+# copy drops.
 _IN_PLACE_EXIF_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "BMP"})
 
 
