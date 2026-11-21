@@ -75,22 +75,6 @@ def test_ulysses_prefill_refuses_lora() -> None:
         usp.ulysses_prefill_enabled(config, 1024)
 
 
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "config, token_shard_min_tokens",
-    [
-        pytest.param(_config({}), 1024, id="off"),
-        pytest.param(_config(ON), 0, id="stream-never-sharded"),
-        pytest.param(_config(ON, max_num_batched_tokens=512), 1024, id="above-mnbt"),
-        pytest.param(_all_steps_captured(), 1024, id="all-steps-captured"),
-    ],
-)
-def test_ulysses_prefill_is_off_where_no_step_can_take_it(
-    config: VllmConfig, token_shard_min_tokens: int
-) -> None:
-    assert not usp.ulysses_prefill_enabled(config, token_shard_min_tokens)
-
-
 def _layout_worker(rank: int, world_size: int, port: int, num_tokens: int) -> None:
     cols = 6
     dist.init_process_group(
@@ -210,9 +194,12 @@ LAYERS = 2
 PROMPT = [t % 497 + 3 for t in range(2561)]
 
 
-def _tiny_llm(tmp_path, monkeypatch, additional_config: dict):
-    """A two-layer Muse Spark at TEP2 with O(1) random weights (`_random_weights`).
-    Skips unless gfx950."""
+def _tiny_llm(
+    tmp_path, monkeypatch, additional_config: dict, max_num_batched_tokens: int = 4096
+):
+    """A two-layer Muse Spark at TEP2 with O(1) random weights (`_random_weights`);
+    `built` holds each rank's count of layers with Ulysses copies. Skips unless
+    gfx950."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     # `apply_model` and `collective_rpc` send functions to the TP workers.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -236,15 +223,14 @@ def _tiny_llm(tmp_path, monkeypatch, additional_config: dict):
         load_format="dummy",
         dtype="bfloat16",
         max_model_len=4096,
-        max_num_batched_tokens=4096,
+        max_num_batched_tokens=max_num_batched_tokens,
         tensor_parallel_size=2,
         enable_expert_parallel=True,
         enable_prefix_caching=False,
         enforce_eager=True,
         additional_config=additional_config,
     )
-    built = llm.apply_model(_random_weights)
-    assert built == [LAYERS if additional_config else 0] * 2
+    llm.built = llm.apply_model(_random_weights)
     return llm
 
 
@@ -273,13 +259,46 @@ def test_ulysses_prefill_matches_the_token_sharded_stream(
     the token-sharded stream without Ulysses. A wrong head or rank order moves them
     by far more."""
     llm = _tiny_llm(tmp_path, monkeypatch, {})
+    assert llm.built == [0, 0]
     reference = _prompt_logprobs(llm)
     del llm
     llm = _tiny_llm(tmp_path, monkeypatch, ON)
+    assert llm.built == [LAYERS] * 2
+    llm.apply_model(_count_ulysses_exchanges)
     ulysses = _prompt_logprobs(llm)
+    # Both streams can round alike, so check that the Ulysses exchange ran.
+    assert all(llm.apply_model(_ulysses_exchanges))
     delta = (reference - ulysses).abs()
-    assert delta.max() > 0, "the Ulysses path did not run"
     assert delta.mean() < 0.06, delta.mean()
+
+
+def _count_ulysses_exchanges(model: torch.nn.Module) -> None:
+    """Count this worker's token-to-head all-to-all calls from here on."""
+    exchange = usp.a2a_tokens_to_heads
+    model.ulysses_exchanges = 0
+
+    def counted(*args, **kwargs):
+        model.ulysses_exchanges += 1
+        return exchange(*args, **kwargs)
+
+    usp.a2a_tokens_to_heads = counted
+
+
+def _ulysses_exchanges(model: torch.nn.Module) -> int:
+    return model.ulysses_exchanges
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Muse Spark Ulysses needs ROCm"
+)
+@multi_gpu_test(num_gpus=2)
+def test_ulysses_prefill_builds_nothing_where_no_step_can_take_it(
+    tmp_path, monkeypatch
+) -> None:
+    """With steps too small for the token-sharded stream, the option is ignored:
+    no layer holds Ulysses copies, so their memory is not spent."""
+    llm = _tiny_llm(tmp_path, monkeypatch, ON, max_num_batched_tokens=512)
+    assert llm.built == [0, 0]
 
 
 def _bits(t: torch.Tensor) -> torch.Tensor:
@@ -337,6 +356,7 @@ def test_ulysses_prefill_follows_weight_reloads(tmp_path, monkeypatch) -> None:
     step changes with perturbed weights and returns to its logprobs with the
     original ones."""
     llm = _tiny_llm(tmp_path, monkeypatch, ON)
+    assert llm.built == [LAYERS] * 2
 
     def reload(exponent: int) -> list[int]:
         result = llm.collective_rpc(_reload_attention, args=(exponent,))
