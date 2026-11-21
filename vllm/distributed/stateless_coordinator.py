@@ -136,6 +136,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
         self.tcp_store_group = self_tcp_store_group
+        self.dead_dp_ranks: set[int] = set()
 
         if current_platform.is_cuda_alike():
             visible_device_index = (

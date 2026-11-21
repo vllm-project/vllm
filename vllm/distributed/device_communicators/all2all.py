@@ -520,6 +520,13 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         if make_active:
             state.active_ep_size = ep_size
 
+    def disconnect_ranks(self, ranks: list[int]) -> None:
+        """Disconnect EP peers."""
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            assert state is not None
+            state.buffer.disconnect_ranks(ranks)
+
     def _disconnect_to_ep_size(self, ep_size: int) -> None:
         assert NixlEPAll2AllManager._buffer is not None
         state = NixlEPAll2AllManager._buffer
