@@ -60,6 +60,8 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 !!! note
     The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
 
+    Native Transformers `GteConfig` uses RoPE even when `position_embedding_type` is absent; vLLM handles this automatically.
+
 !!! note
     `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
     You need to manually set mean pooling by passing `--pooler-config '{"pooling_type": "MEAN"}'`.
