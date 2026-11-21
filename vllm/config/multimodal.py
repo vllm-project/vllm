@@ -309,7 +309,8 @@ class MultiModalConfig:
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
-    Defaults to 999 for each modality.
+    Defaults to 999 for each modality unless the model processor provides a
+    lower default.
 
     Legacy format (count only):
         {"image": 16, "video": 2}

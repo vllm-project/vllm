@@ -3,12 +3,73 @@
 """E2E tests for render endpoints via `vllm launch` (GPU-less serving)."""
 
 import httpx
+import numpy as np
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.multimodal.utils import encode_video_url
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+
+
+@pytest.mark.parametrize(
+    ("model", "budget", "cache_gb"),
+    [
+        ("Qwen/Qwen3-VL-Reranker-2B", 512 * 1024, 0),
+        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", 3 * 1024**2, 1),
+    ],
+)
+def test_chat_render_rejects_over_budget_video_tensors(
+    model: str, budget: int, cache_gb: int
+):
+    """Each clip fits alone, but the combined preprocessing tensors do not."""
+    args = [
+        "--host",
+        "127.0.0.1",
+        "--dtype",
+        "float32",
+        "--max-model-len",
+        "4096",
+        "--limit-mm-per-prompt",
+        '{"image": 0, "video": 2}',
+        "--mm-processor-cache-gb",
+        str(cache_gb),
+        "--mm-device-do-normalize",
+    ]
+    videos = [
+        {"type": "video_url", "video_url": {"url": encode_video_url(frames)}}
+        for frames in (
+            np.zeros((4, 128, 128, 3), dtype=np.uint8),
+            np.full((4, 128, 128, 3), 128, dtype=np.uint8),
+        )
+    ]
+    with RemoteLaunchRenderServer(
+        model,
+        args,
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(budget)},
+    ) as server:
+        url = server.url_for("v1/chat/completions/render")
+        response = httpx.post(
+            url,
+            json={"model": model, "messages": [{"role": "user", "content": videos}]},
+            timeout=30,
+        )
+        assert response.status_code == 400, response.text[:1000]
+        assert (
+            "VLLM_MAX_MEDIA_PREPROCESSING_BYTES" in response.json()["error"]["message"]
+        )
+
+        for video in videos:
+            response = httpx.post(
+                url,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": [video]}],
+                },
+                timeout=30,
+            )
+            assert response.status_code == 200, response.text[:1000]
 
 
 @pytest.fixture(scope="module")

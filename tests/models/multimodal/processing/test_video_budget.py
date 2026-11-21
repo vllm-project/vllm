@@ -3,12 +3,33 @@
 import numpy as np
 import pytest
 
+from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
 
 from ...utils import build_model_context
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "Qwen/Qwen3-VL-Reranker-2B",
+        "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+    ],
+)
+def test_video_item_limit_defaults_to_32_and_honors_explicit_limit(model_id: str):
+    model_config = ModelConfig(model=model_id)
+    info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+    info.validate_num_items("video", 32)
+    with pytest.raises(VLLMValidationError, match="At most 32 video"):
+        info.validate_num_items("video", 33)
+
+    model_config = ModelConfig(model=model_id, limit_mm_per_prompt={"video": 33})
+    info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+    info.validate_num_items("video", 33)
 
 
 @pytest.mark.parametrize(

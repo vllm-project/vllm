@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, get_type_hints, overload
+from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints, overload
 
 import torch
 from typing_extensions import TypeVar
 
+from vllm import envs
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -41,6 +43,28 @@ else:
     TokenizeParams = object
 
 logger = init_logger(__name__)
+
+_profiling_media: ContextVar[bool] = ContextVar("_profiling_media", default=False)
+
+
+@contextmanager
+def profiling_media() -> Iterator[None]:
+    """Exclude internally generated profiling inputs from request limits."""
+    token = _profiling_media.set(True)
+    try:
+        yield
+    finally:
+        _profiling_media.reset(token)
+
+
+def validate_video_preprocessing_budget(size_bytes: int) -> None:
+    limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+    if limit > 0 and size_bytes > limit and not _profiling_media.get():
+        raise VLLMValidationError(
+            f"Video preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
+            parameter="video",
+        )
+
 
 # HuggingFace processors accept a shared flat namespace in addition to the
 # nested processor kwarg scopes ``text_kwargs`` / ``images_kwargs`` /
@@ -450,6 +474,8 @@ class InputProcessingContext:
 class BaseProcessingInfo:
     """Base class to provide the information necessary for data processing."""
 
+    default_mm_limits: ClassVar[Mapping[str, int]] = {}
+
     def __init__(self, ctx: InputProcessingContext) -> None:
         super().__init__()
 
@@ -596,6 +622,10 @@ class BaseProcessingInfo:
         allowed_limits = dict[str, int]()
         for modality, supported_limit in self.supported_mm_limits.items():
             user_limit = mm_config.get_limit_per_prompt(modality)
+            if modality not in mm_config.limit_per_prompt:
+                user_limit = min(
+                    user_limit, self.default_mm_limits.get(modality, user_limit)
+                )
 
             allowed_limits[modality] = (
                 user_limit

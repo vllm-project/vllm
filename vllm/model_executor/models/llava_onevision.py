@@ -30,6 +30,7 @@ from vllm.multimodal.parse import (
     VideoProcessorItems,
 )
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing.context import validate_video_preprocessing_budget
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -126,6 +127,8 @@ class LlavaOnevisionInputsByModality(TypedDict, total=False):
 
 
 class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
+    default_mm_limits = {"video": 32}
+
     def get_hf_config(self) -> LlavaOnevisionLikeConfig:
         return self.ctx.get_hf_config(LlavaOnevisionConfig)
 
@@ -370,6 +373,7 @@ class LlavaOnevisionMultiModalProcessor(
             image_outputs = {}
 
         pixel_values_videos = []
+        video_tensor_bytes = 0
         for video in videos:
             item_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**hf_kwargs),
@@ -377,7 +381,10 @@ class LlavaOnevisionMultiModalProcessor(
                 hf_kwargs,
             )
 
-            pixel_values_videos.append(item_outputs["pixel_values_videos"][0])
+            video_pixels = item_outputs["pixel_values_videos"][0]
+            video_tensor_bytes += video_pixels.untyped_storage().nbytes()
+            validate_video_preprocessing_budget(video_tensor_bytes)
+            pixel_values_videos.append(video_pixels)
 
         video_outputs = {"pixel_values_videos": pixel_values_videos}
 
