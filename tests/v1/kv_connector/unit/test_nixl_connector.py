@@ -2542,6 +2542,7 @@ def recv_worker():
     worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
         remote_block_size=16, remote_physical_blocks_per_logical=1
     )
+    worker.block_size = 16
     worker._physical_blocks_per_logical_kv_block = 1
     worker._recving_metadata = {"request": MagicMock(local_block_ids=([1, 2, 3],))}
     worker._engine_clock_offset = {}
@@ -4659,6 +4660,81 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
     results = worker.get_transfer_results()
     assert results.finished_recving == results.failed_recving == set()
     assert worker.get_block_ids_with_load_errors() == set()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("collect_in_step", [False, True])
+def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_step):
+    worker = recv_worker
+    worker._early_recved = set()
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    assert worker.poll_finished_recving() == set()
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    if collect_in_step:
+        assert worker.get_transfer_results().finished_recving == set()
+    assert worker.poll_finished_recving() == {"request"}
+    assert worker.poll_finished_recving() == set()
+    assert worker.get_transfer_results().finished_recving == set()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("permute,remote_block_size", [(True, 16), (False, 8)])
+def test_early_recv_leaves_post_processing_to_the_step(
+    recv_worker, permute, remote_block_size
+):
+    """Layout conversion and heterogeneous blocks finish only through step output."""
+    worker = recv_worker
+    worker._early_recved = set()
+    worker.enable_permute_local_kv = permute
+    worker.transfer_topo.get_engine_info.return_value.remote_block_size = (
+        remote_block_size
+    )
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    assert not worker.has_pending_recving()
+    assert worker.poll_finished_recving() == set()
+    assert worker.get_transfer_results().finished_recving == {"request"}
+    assert worker.poll_finished_recving() == set()
+
+
+@pytest.mark.cpu_test
+def test_early_recv_leaves_failures_to_the_step(recv_worker):
+    worker = recv_worker
+    worker._early_recved = set()
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
+    worker.nixl_wrapper.release_xfer_handle.side_effect = [
+        RuntimeError("release"),
+        None,
+    ]
+    assert worker.poll_finished_recving() == set()
+    assert not worker.has_pending_recving()
+    assert worker.poll_finished_recving() == set()
+    assert worker.nixl_wrapper.check_xfer_state.call_count == 1
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+
+
+@pytest.mark.cpu_test
+def test_early_recv_leaves_lease_lapsed_reads_to_the_step(recv_worker):
+    """A read that may have outlived the remote's lease is never reported as
+    loaded early; the step output reports it failed."""
+    worker = recv_worker
+    worker._early_recved = set()
+    worker._lease_safety_margin = 0.0
+    remote = worker._recving_metadata["request"].remote
+    remote.blocks_expiry_time = 0.0
+    worker._engine_clock_offset[remote.engine_id] = 0.0
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    with patch.object(worker.xfer_stats, "record_declined_expired_read") as declined:
+        assert worker.poll_finished_recving() == set()
+        results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+    assert declined.call_count == 1
 
 
 def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):
