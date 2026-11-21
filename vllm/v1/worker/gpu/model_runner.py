@@ -446,7 +446,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 self._moe_lora_layers = _collect_moe_lora_layers(
                     self.model,
-                    pcp_manager is None or pcp_manager.expert_lora_supported,
+                    pcp_manager is not None and pcp_manager.expert_lora_supported,
                 )
 
             if self.use_aux_hidden_state_outputs:

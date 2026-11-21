@@ -1340,12 +1340,13 @@ class LoRAModelManager:
     def _moe_wrapper_candidates(self, prefix: str) -> list[str]:
         candidates = [prefix]
         if getattr(self, "supports_mm", False):
-            lm_prefix = self.mm_mapping.language_model[0].rstrip(".") + "."
-            if not prefix.startswith(lm_prefix):
-                candidates.append(f"{lm_prefix}{prefix}")
-                if prefix.startswith("model."):
-                    # The language model may be mounted as a bare decoder.
-                    candidates.append(f"{lm_prefix}{prefix.removeprefix('model.')}")
+            for raw_prefix in self.mm_mapping.language_model:
+                lm_prefix = raw_prefix.rstrip(".") + "."
+                if not prefix.startswith(lm_prefix):
+                    candidates.append(f"{lm_prefix}{prefix}")
+                    if prefix.startswith("model."):
+                        # The language model may be mounted as a bare decoder.
+                        candidates.append(f"{lm_prefix}{prefix.removeprefix('model.')}")
         return candidates
 
     def _validate_moe_lora_targets(self, lora_model: LoRAModel) -> None:
@@ -1365,7 +1366,7 @@ class LoRAModelManager:
             )
         )
         missing_wrappers = []
-        if not self._is_moe_model_config or not experts_targeted:
+        if not (self._is_moe or self._is_moe_model_config) or not experts_targeted:
             missing_wrappers = expert_modules
         else:
             prefixes = {

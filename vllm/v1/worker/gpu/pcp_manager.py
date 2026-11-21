@@ -179,7 +179,7 @@ class PCPManager:
         expert_modules = sorted(
             module_name
             for module_name in lora_model.loras
-            if ".experts" in module_name or module_name.startswith("experts")
+            if "experts" in module_name.split(".")
         )
         if expert_modules:
             raise NotImplementedError(
@@ -472,6 +472,8 @@ class PCPManager:
             global_batch.num_scheduled_tokens,
         )
         mapping = global_mapping[self._padded_gather_idx_np]
+        # `_padded_num_tokens` is the CUDA-graph bucket size set by
+        # partition_batch(); it must match the PCP all-gather row stride.
         for rank, n in enumerate(self._per_rank_num_tokens):
             start = rank * self._padded_num_tokens
             mapping[start + n : start + self._padded_num_tokens] = -1

@@ -119,6 +119,18 @@ def test_validate_lora_adapter_rejects_expert_weights_with_ep():
     assert "model.layers.0.mlp.experts" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "model.layers.0.mlp.shared_experts.down_proj",
+        "model.layers.0.mlp.experts_gate",
+    ],
+)
+def test_validate_lora_adapter_allows_non_expert_segments(module_name):
+    adapter = _make_lora_adapter(2, module_name)
+    PCPManager.validate_lora_adapter(adapter, expert_lora_supported=False)
+
+
 def test_validate_lora_adapter_accepts_pcp_only_expert_weights():
     adapter = _make_lora_adapter(2, "model.layers.0.mlp.experts")
     PCPManager.validate_lora_adapter(adapter, expert_lora_supported=True)
@@ -197,6 +209,43 @@ def test_moe_lora_mapping_follows_sharded_rows_and_padding(monkeypatch):
     assert mapping.dtype == torch.int32
     assert mapping.data_ptr() == manager._pcp_moe_lora_mapping.data_ptr()
     assert mapping.tolist() == [0, 2, -1, -1, 3, -1, -1, -1]
+
+
+def test_moe_lora_mapping_uses_graph_bucket_stride_and_clears_padding(monkeypatch):
+    """Graph buckets pad each rank without carrying over preceding mappings."""
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    state = _make_mapping_lora_state([3, 4])
+    global_batch = SimpleNamespace(
+        idx_mapping_np=np.array([0, 1], dtype=np.int32),
+        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
+    )
+
+    for bucket in (8, 4, 8):
+        manager._build_batch_layout(
+            num_scheduled_tokens=global_batch.num_scheduled_tokens,
+            num_computed_tokens=np.zeros(2, dtype=np.int32),
+            is_prefilling=np.zeros(2, dtype=np.bool_),
+            query_start_loc_np=np.array([0, 1, 2], dtype=np.int32),
+            padded_num_tokens=bucket,
+        )
+        mapping = manager.build_moe_lora_mapping(
+            state, global_batch, lora_index_to_id=[3, 4]
+        )
+
+        assert manager._padded_num_tokens == bucket
+        assert mapping is not None
+        assert mapping.numel() == bucket * manager.pcp_world_size
+        for rank, n in enumerate(manager._per_rank_num_tokens):
+            rank_mapping = mapping[rank * bucket : (rank + 1) * bucket]
+            assert torch.all(rank_mapping[n:] == -1)
 
 
 def test_moe_lora_mapping_preserves_replicated_and_split_prefill_rows(monkeypatch):

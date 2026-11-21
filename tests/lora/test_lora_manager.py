@@ -117,11 +117,17 @@ def test_moe_format_validation_allows_supported_layouts(
 
 
 def _make_moe_target_manager(
-    *, target_modules=None, modules=None, model=None, model_is_moe=True
+    *,
+    target_modules=None,
+    modules=None,
+    model=None,
+    model_is_moe=True,
+    is_moe=None,
 ) -> LoRAModelManager:
     manager = LoRAModelManager.__new__(LoRAModelManager)
     manager.modules = modules or {}
     manager.model = model or nn.Module()
+    manager._is_moe = model_is_moe if is_moe is None else is_moe
     manager._is_moe_model_config = model_is_moe
     manager.lora_config = LoRAConfig(target_modules=target_modules)
     manager.packed_modules_mapping = {}
@@ -185,6 +191,18 @@ def test_allow_expert_lora_with_matching_wrappers():
             )
 
 
+def test_allow_expert_lora_when_model_detection_has_no_config_flag():
+    manager = _make_moe_target_manager(
+        modules={
+            "model.layers.0.mlp.experts": FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)
+        }
+    )
+    manager._is_moe_model_config = False
+    manager._validate_moe_lora_targets(
+        _make_module_lora("model.layers.0.mlp.experts.0.down_proj")
+    )
+
+
 @pytest.mark.parametrize(
     "wrapper_prefix",
     [
@@ -198,6 +216,17 @@ def test_allow_expert_lora_with_mm_text_prefix(wrapper_prefix):
     )
     manager.supports_mm = True
     manager.mm_mapping = MultiModelKeys(language_model=["language_model"])
+    manager._validate_moe_lora_targets(
+        _make_module_lora("model.layers.0.mlp.experts.0.down_proj")
+    )
+
+
+def test_allow_expert_lora_with_any_mm_language_prefix():
+    manager = _make_moe_target_manager(
+        modules={"llm.layers.0.mlp.experts": FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)}
+    )
+    manager.supports_mm = True
+    manager.mm_mapping = MultiModelKeys(language_model=["language_model", "llm"])
     manager._validate_moe_lora_targets(
         _make_module_lora("model.layers.0.mlp.experts.0.down_proj")
     )
@@ -217,7 +246,12 @@ def test_allow_expert_lora_on_pipeline_rank_without_moe(target_modules, module_n
     model.model.add_module(
         "layers", nn.ModuleList([PPMissingLayer() for _ in range(10)])
     )
-    manager = _make_moe_target_manager(target_modules=target_modules, model=model)
+    manager = _make_moe_target_manager(
+        target_modules=target_modules,
+        model=model,
+        model_is_moe=True,
+        is_moe=False,
+    )
     manager._validate_moe_lora_targets(_make_module_lora(module_name))
 
 
