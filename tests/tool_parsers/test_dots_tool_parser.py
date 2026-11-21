@@ -275,3 +275,40 @@ def test_streaming_emits_complete_json_before_end_marker_without_duplication(
         '{"query": "chairs"}'
     )
     assert messages[-1].tool_calls == calls
+
+
+def test_non_stream_keeps_text_after_tool_call(parser: DotsToolParser) -> None:
+    request = _request([_tool("get_weather", {"city": {"type": "string"}})])
+    model_output = (
+        "let me check the weather."
+        "<dots_function_call>"
+        '<invoke name="get_weather"><parameter name="city">Paris</parameter></invoke>'
+        "</dots_function_call>"
+        "It is 30 degrees."
+    )
+    result = parser.extract_tool_calls(model_output, request)
+    assert result.content == "let me check the weather.It is 30 degrees."
+    assert result.tool_calls[0].function.name == "get_weather"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}
+
+
+def test_stream_keeps_text_after_tool_call(parser: DotsToolParser) -> None:
+    request = _request([_tool("get_weather", {"city": {"type": "string"}})])
+    model_output = (
+        "let me check the weather."
+        "<dots_function_call>"
+        '<invoke name="get_weather"><parameter name="city">Paris</parameter></invoke>'
+        "</dots_function_call>"
+        "It is 30 degrees."
+    )
+    messages = _stream(
+        parser,
+        [model_output[i : i + 7] for i in range(0, len(model_output), 7)],
+        request,
+    )
+    content = "".join(m.content or "" for m in messages)
+    calls = [c for m in messages for c in m.tool_calls]
+    assert content == "let me check the weather.It is 30 degrees."
+    assert get_function_delta(calls[0]).name == "get_weather"
+    streamed_args = "".join(get_function_delta(c).arguments or "" for c in calls)
+    assert streamed_args == '{"city": "Paris"}'

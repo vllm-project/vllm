@@ -247,7 +247,13 @@ class DotsToolParser(ToolParser):
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 logger.warning("Failed to parse Dots tool call: %s", exc)
 
-        normal_text = model_output[:marker_index].strip()
+        tool_calls_end = model_output.rfind(self.tool_call_end_token)
+        normal_text = model_output[:marker_index]
+        if tool_calls_end != -1:
+            normal_text += model_output[
+                tool_calls_end + len(self.tool_call_end_token) :
+            ]
+        normal_text = normal_text.strip()
         if not tool_calls:
             return ExtractedToolCallInformation(
                 tools_called=False,
