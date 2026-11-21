@@ -21,10 +21,12 @@ import ctypes
 import mmap
 import os
 import platform
+import re
 import sys
 import tempfile
+import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 
 import numpy as np
@@ -509,6 +511,114 @@ def _engram_head_shard_weight_loader(
         f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
     )
     param.data.copy_(shard)
+
+
+_ENGRAM_CHECKPOINT_LAYER_RE = re.compile(
+    r"(?:^|\.)layers\.(\d+)\.engram\.embed\.(weight|scale)$"
+)
+_ENGRAM_MODULE_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.engram\.embed_tokens$")
+# Checkpoint tensor suffix -> parameter of ParallelEngramEmbedding.
+_ENGRAM_PARAM_BY_SUFFIX = {"weight": "weight", "scale": "weight_scale_inv"}
+_TORCH_DTYPE = {
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E8M0": torch.float8_e8m0fnu,
+    "BF16": torch.bfloat16,
+    "F16": torch.float16,
+    "F32": torch.float32,
+    "F64": torch.float64,
+    "I8": torch.int8,
+    "U8": torch.uint8,
+    "I16": torch.int16,
+    "I32": torch.int32,
+    "I64": torch.int64,
+}
+
+
+def _ranged_engram_modules(model: nn.Module) -> dict[int, nn.Module]:
+    """CPU-offloaded Engram tables by layer, cached on the model."""
+    modules = getattr(model, "_ranged_engram_modules", None)
+    if modules is None:
+        modules = {
+            int(match.group(1)): module
+            for name, module in model.named_modules()
+            if isinstance(module, ParallelEngramEmbedding)
+            and module.cpu_offload
+            and (match := _ENGRAM_MODULE_RE.search(name))
+        }
+        model._ranged_engram_modules = modules  # type: ignore[attr-defined]
+    return modules
+
+
+def is_engram_ranged_checkpoint_weight(model: nn.Module, name: str) -> bool:
+    """Whether this checkpoint tensor is an Engram table loaded by row range."""
+    match = _ENGRAM_CHECKPOINT_LAYER_RE.search(name)
+    return match is not None and int(match.group(1)) in _ranged_engram_modules(model)
+
+
+def load_engram_ranged_checkpoint_weights(
+    model: nn.Module,
+    checkpoint_files: Mapping[str, str],
+    source: str,
+) -> list[tuple[str, torch.Tensor]]:
+    """Fill this rank's Engram rows from the checkpoint shards directly.
+
+    Reads only the local row range of each table from object storage, instead
+    of streaming the whole table. Requires the tables on CPU (`cpu_offload`).
+    Non-Engram tensors sharing the excluded shards are returned for the loader
+    to pass to `load_weights`.
+    """
+    from vllm.model_executor.model_loader.ranged_weights import (
+        ObjectStorageRowReader,
+        read_tensor,
+    )
+
+    modules = _ranged_engram_modules(model)
+    extras: list[tuple[str, torch.Tensor]] = []
+    total_bytes, start = 0, time.perf_counter()
+    for name, shard in checkpoint_files.items():
+        uri = f"{source.rstrip('/')}/{shard}"
+        if not is_engram_ranged_checkpoint_weight(model, name):
+            data, dtype, shape = read_tensor(uri, name)
+            tensor = torch.frombuffer(
+                bytearray(data), dtype=_TORCH_DTYPE[dtype]
+            ).reshape(shape)
+            extras.append((name, tensor))
+            continue
+        match = _ENGRAM_CHECKPOINT_LAYER_RE.search(name)
+        assert match is not None
+        layer = int(match.group(1))
+        module = modules[layer]
+        parameter = getattr(module, _ENGRAM_PARAM_BY_SUFFIX[match.group(2)])
+        param = parameter.data
+        if param.device.type != "cpu":
+            raise RuntimeError(
+                "row-ranged Engram loading needs the Engram table on CPU "
+                f"(engram cpu_offload); layer {layer} is on {param.device}"
+            )
+        reader = ObjectStorageRowReader.from_uri(uri, name)
+        began = time.perf_counter()
+        length = reader.copy_rows_into(
+            param.view(torch.uint8).view(-1).numpy(),
+            parameter.engram_vocab_start,
+        )
+        elapsed = time.perf_counter() - began
+        total_bytes += length
+        logger.info(
+            "Engram layer %d %s: %d local rows, %.2f GiB in %.1fs (%.2f GiB/s)",
+            layer,
+            match.group(2),
+            param.shape[0],
+            length / 2**30,
+            elapsed,
+            length / 2**30 / elapsed,
+        )
+    logger.info(
+        "Engram ranged phase: %d tensors, %.2f GiB in %.1fs",
+        len(checkpoint_files),
+        total_bytes / 2**30,
+        time.perf_counter() - start,
+    )
+    return extras
 
 
 # Branching on SORTED at runtime intermittently crashes Triton 3.8's

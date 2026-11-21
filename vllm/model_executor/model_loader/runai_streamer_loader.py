@@ -5,6 +5,7 @@ import os
 import posixpath
 import tempfile
 from collections.abc import Callable, Generator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -17,6 +18,7 @@ from vllm.config.load import LoadConfig
 from vllm.distributed import get_world_group, in_single_pp_stage
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.ranged_weights import select_ranged_files
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -31,6 +33,21 @@ from vllm.transformers_utils.runai_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _read_local_weight_map(metadata_dir: str) -> dict[str, str] | None:
+    """Read a checkpoint's weight map from the local config directory."""
+    try:
+        with open(os.path.join(metadata_dir, SAFE_WEIGHTS_INDEX_NAME)) as index:
+            weight_map = json.load(index)["weight_map"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(weight_map, dict) or not all(
+        isinstance(name, str) and isinstance(shard, str)
+        for name, shard in weight_map.items()
+    ):
+        return None
+    return weight_map
 
 
 def _get_remote_checkpoint_keys(files: list[str]) -> list[list[str]]:
@@ -227,6 +244,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_or_path: str,
         revision: str | None,
         is_unused_weight: Callable[[str], bool] | None = None,
+        exclude: set[str] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
@@ -257,6 +275,12 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             else:
                 # Do not substitute another node's local checkpoint paths.
                 selected_files = hf_weights_files
+        if exclude:
+            selected_files = [
+                path for path in selected_files if os.path.basename(path) not in exclude
+            ]
+        if not selected_files:
+            return
         return runai_safetensors_weights_iterator(
             selected_files, self.load_config.use_tqdm_on_load, is_distributed
         )
@@ -273,10 +297,65 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
+        is_unused_weight = getattr(model, "is_unused_checkpoint_weight", None)
+        is_ranged_weight = getattr(model, "is_ranged_checkpoint_weight", None)
+        if (
+            callable(is_ranged_weight)
+            and os.environ.get("VLLM_RUNAI_RANGED_WEIGHTS", "1") != "0"
+            and model_weights.startswith("s3://")
+        ):
+            weight_map = _read_local_weight_map(model_config.model)
+            ranged_names: dict[str, str] = {}
+            excluded: set[str] = set()
+            if weight_map is None:
+                logger.warning(
+                    "%s not found; streaming every checkpoint tensor, including "
+                    "row-ranged weights",
+                    os.path.join(model_config.model, SAFE_WEIGHTS_INDEX_NAME),
+                )
+            else:
+                ranged_names, excluded = select_ranged_files(
+                    weight_map, is_ranged_weight
+                )
+            if ranged_names:
+                excluded_names = {
+                    name: shard
+                    for name, shard in weight_map.items()
+                    if os.path.basename(shard) in excluded
+                }
+                logger.info(
+                    "RunAI ranged weights: %d tensors from %d shards handled "
+                    "outside the stream",
+                    len(ranged_names),
+                    len(excluded),
+                )
+                # Params for these tensors are allocated before loading and
+                # nothing else writes them, so filling them overlaps the
+                # stream instead of following it. Tensors sharing their shards
+                # come back to be loaded normally.
+                filler = ThreadPoolExecutor(1, thread_name_prefix="ranged-weights")
+                fill = filler.submit(
+                    model.load_ranged_checkpoint_weights,
+                    excluded_names,
+                    model_weights,
+                )
+                filler.shutdown(wait=False)
+                extras: list[tuple[str, torch.Tensor]] = []
+                try:
+                    yield from self._get_weights_iterator(
+                        model_weights,
+                        model_config.revision,
+                        is_unused_weight,
+                        exclude=excluded,
+                    )
+                finally:
+                    extras = fill.result()
+                yield from extras
+                return
         yield from self._get_weights_iterator(
             model_weights,
             model_config.revision,
-            getattr(model, "is_unused_checkpoint_weight", None),
+            is_unused_weight,
         )
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
