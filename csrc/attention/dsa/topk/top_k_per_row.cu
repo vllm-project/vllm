@@ -560,13 +560,15 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
       nullptr, logits, rowStart, rowEnd, outIndices, nullptr, stride1, topK);
 }
 
+// A split launch writes the rows no longer than k straight to rowOutIndices,
+// and the merge skips them.
 template <int kNumThreadsPerBlock, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
     const float* logits, const int* seqLens, int* outIndices, int stride0,
     int stride1, const int topK, int next_n, int seqLensIs2D = 0,
     float* outLogits = nullptr, const int numBlocksToMerge = 0,
-    const int* indices = nullptr) {
+    const int* indices = nullptr, int* rowOutIndices = nullptr) {
   // The number of bins in the histogram.
   static constexpr int kNumBins = 2048;
 
@@ -590,14 +592,24 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
   if constexpr (!multipleBlocksPerRow && !mergeBlocks) {
     outIndices += static_cast<int64_t>(rowIdx) * topK;
   } else if constexpr (multipleBlocksPerRow) {
-    const auto blockSize = rowEnd / gridDim.y;  // 16384 / 2 = 8192
-    rowStart = blockSize * blockIdx.y;          // 8192 * 1 = 8192
-    rowEnd = gridDim.y == blockIdx.y + 1 ? rowEnd : rowStart + blockSize;
-    outIndices +=
-        static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
     outLogits +=
         static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
+    if (rowEnd <= topK) {
+      // Splitting the row would leave each block fewer than k logits, so the
+      // blocks would pad their candidates with -FLT_MAX and the merge's
+      // histogram atomics would serialize on them. The row's result is all of
+      // its indices, which the first block writes.
+      if (blockIdx.y > 0) return;
+      outIndices = rowOutIndices + static_cast<int64_t>(rowIdx) * topK;
+    } else {
+      const auto blockSize = rowEnd / gridDim.y;  // 16384 / 2 = 8192
+      rowStart = blockSize * blockIdx.y;          // 8192 * 1 = 8192
+      rowEnd = gridDim.y == blockIdx.y + 1 ? rowEnd : rowStart + blockSize;
+      outIndices +=
+          static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
+    }
   } else if constexpr (mergeBlocks) {
+    if (rowEnd <= topK) return;
     rowEnd = numBlocksToMerge * topK;
     indices += static_cast<int64_t>(rowIdx) * numBlocksToMerge * topK;
     outIndices += static_cast<int64_t>(rowIdx) * topK;
@@ -805,8 +817,9 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
             static_cast<int>(next_n), seqLensIs2D);
-  } else if (numColumns < kSplitWorkThreshold) {
-    // From this threshold, use radix sort instead
+  } else if (numColumns < kSplitWorkThreshold || stride1 != 1) {
+    // From this threshold, use radix sort instead. Strided logits are not
+    // split because the split kernels assume stride1 == 1.
     vllm::topKPerRowDecode<kNumThreadsPerBlock, true>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
@@ -886,7 +899,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
               outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
               static_cast<int>(stride1), static_cast<int>(topK),
               static_cast<int>(next_n), seqLensIs2D,
-              outLogitsAux.mutable_data_ptr<float>());
+              outLogitsAux.mutable_data_ptr<float>(), 0, nullptr,
+              indices.mutable_data_ptr<int>());
     } else {
       vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true>
           <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
@@ -895,7 +909,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
               outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
               static_cast<int>(stride1), static_cast<int>(topK),
               static_cast<int>(next_n), seqLensIs2D,
-              outLogitsAux.mutable_data_ptr<float>());
+              outLogitsAux.mutable_data_ptr<float>(), 0, nullptr,
+              indices.mutable_data_ptr<int>());
     }
 
     constexpr int kNumThreadsPerBlockMerge = 1024;

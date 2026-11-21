@@ -667,6 +667,129 @@ def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
     _assert_exact_topk(logits, indices, lengths)
 
 
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_decode_split_work_strided_logits(top_k: int) -> None:
+    """Logits wide enough for the split-work path, with stride(1) != 1, still
+    return row-local indices."""
+    set_random_seed(0)
+    width = 262_144
+    row_ends = torch.tensor(
+        [top_k - 1, 3 * top_k, 100_003, width], dtype=torch.int32, device="cuda"
+    )
+    rows = row_ends.numel()
+    logits = torch.randn(rows, 2 * width, device="cuda")[:, ::2]
+    indices = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("top_k_per_row_decode", logits, row_ends, indices, top_k, width)
+    _assert_exact_topk(logits, indices, row_ends)
+
+
+# Logits at least this wide take the split-work decode path.
+SPLIT_WORK_WIDTH = 262_144
+
+
+def _decode_row_ends(lengths: torch.Tensor, next_n: int) -> torch.Tensor:
+    offsets = torch.arange(next_n, dtype=torch.int32, device=lengths.device)
+    return (lengths[:, None] - next_n + offsets + 1).clamp_min(0)
+
+
+def _fill_with_tail_garbage(logits: torch.Tensor, row_ends: torch.Tensor) -> None:
+    """BF16-rounded values for many ties; anything selected past a row's end
+    is a huge garbage value."""
+    rows, width = logits.shape
+    values = torch.randn(rows, width, device=logits.device).bfloat16().float()
+    columns = torch.arange(width, device=logits.device)
+    logits.copy_(values.masked_fill(columns >= row_ends.reshape(-1, 1), 1e20))
+
+
+@pytest.mark.parametrize("seq_lens_2d", [False, True])
+@pytest.mark.parametrize("next_n", [1, 2])
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_decode_split_work_short_rows(
+    top_k: int, next_n: int, seq_lens_2d: bool
+) -> None:
+    """Rows no longer than k skip the split and return all of their indices,
+    then -1 padding, next to longer rows that are split."""
+    set_random_seed(0)
+    lengths = torch.tensor(
+        [0, 1, top_k - 1, top_k, top_k + 1, 3 * top_k, 100_003, SPLIT_WORK_WIDTH],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    row_ends = _decode_row_ends(lengths, next_n)
+    rows = row_ends.numel()
+    storage = torch.empty(
+        (rows, SPLIT_WORK_WIDTH + 8), dtype=torch.float32, device="cuda"
+    )
+    logits = storage[:, 1 : SPLIT_WORK_WIDTH + 1]
+    _fill_with_tail_garbage(logits, row_ends)
+    indices = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+
+    seq_lens = row_ends if seq_lens_2d else lengths
+    _run_topk_backend(
+        "top_k_per_row_decode",
+        logits,
+        seq_lens,
+        indices,
+        top_k,
+        SPLIT_WORK_WIDTH,
+        next_n,
+    )
+    _assert_exact_topk(logits, indices, row_ends)
+    _assert_leading_topk(indices, row_ends)
+
+
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_decode_split_work_graph_replay(top_k: int) -> None:
+    """One captured graph stays exact as device-side lengths move rows across
+    k, between one block and the split."""
+    set_random_seed(0)
+    next_n, width = 2, SPLIT_WORK_WIDTH
+    steps = [
+        [1, top_k, 3 * top_k, 100_003],
+        [width, top_k + 1, 0, top_k],
+        [top_k - 1, width - 1, top_k + 2, 1],
+    ]
+    lengths = torch.tensor(steps[0], dtype=torch.int32, device="cuda")
+    rows = lengths.numel() * next_n
+    logits = torch.empty((rows, width), dtype=torch.float32, device="cuda")
+    indices = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+
+    def run() -> None:
+        _run_topk_backend(
+            "top_k_per_row_decode", logits, lengths, indices, top_k, width, next_n
+        )
+
+    _fill_with_tail_garbage(logits, _decode_row_ends(lengths, next_n))
+    run()
+    _assert_exact_topk(logits, indices, _decode_row_ends(lengths, next_n))
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+
+    for step in steps:
+        lengths.copy_(torch.tensor(step, dtype=torch.int32, device="cuda"))
+        row_ends = _decode_row_ends(lengths, next_n)
+        _fill_with_tail_garbage(logits, row_ends)
+        indices.fill_(-777)
+        graph.replay()
+        _assert_exact_topk(logits, indices, row_ends)
+        _assert_leading_topk(indices, row_ends)
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
