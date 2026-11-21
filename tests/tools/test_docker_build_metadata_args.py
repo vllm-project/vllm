@@ -173,7 +173,7 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
         assert expected in dockerfile
 
 
-def test_rust_build_cache_excludes_git_metadata() -> None:
+def test_rust_build_excludes_git_metadata() -> None:
     import torch
 
     from vllm.platforms import current_platform
@@ -186,14 +186,9 @@ def test_rust_build_cache_excludes_git_metadata() -> None:
         dockerfile_names.append("Dockerfile.xpu")
     for name in dockerfile_names:
         dockerfile = (REPO_ROOT / "docker" / name).read_text()
-        cached_stage, exact_version_stage = dockerfile.split(
-            "FROM rust-build-cache AS rust-build", maxsplit=1
-        )
-        exact_version_stage = exact_version_stage.split("\nFROM ", maxsplit=1)[0]
-        cached_run = cached_stage.rsplit("RUN ", maxsplit=1)[1]
+        rust_stage = dockerfile.split(" AS rust-build\n", maxsplit=1)[1]
+        rust_stage = rust_stage.split("\nFROM ", maxsplit=1)[0]
 
-        assert 'SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache"' in cached_run
-        assert "source=.git,target=.git" not in cached_run
-        assert "source=.git,target=.git" in exact_version_stage
-        assert 'SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"' in exact_version_stage
-        assert "bash tools/build_rust.sh" in exact_version_stage
+        assert 'SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache"' in rust_stage
+        assert "source=.git,target=.git" not in rust_stage
+        assert "bash tools/build_rust.sh" in rust_stage

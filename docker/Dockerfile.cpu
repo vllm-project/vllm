@@ -190,7 +190,7 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the wheel build
 # stage doesn't need the rust toolchain. This stage runs in parallel
 # with the main vllm-build stage.
-FROM base AS rust-build-cache
+FROM base AS rust-build
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
@@ -227,8 +227,8 @@ COPY tools/build_rust.sh tools/build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Build with a stable version so this target snapshot is keyed only by Rust
-# inputs. The child stage below relinks the crates that embed the exact version.
+# setuptools-scm needs a version without .git; vllm-rs reads the real package
+# version at run time, so this stage is keyed only by Rust inputs.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
@@ -245,18 +245,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     fi && \
     SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash tools/build_rust.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
-
-# tools/build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
-# child stage below finds it on disk instead of re-downloading it.
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Relink with the exact Git-derived package version.
-FROM rust-build-cache AS rust-build
-
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
-    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 
 ######################### SOURCE PREP IMAGE #########################
 # Shared prep (source, rust artifacts, build deps) for both vllm-build and

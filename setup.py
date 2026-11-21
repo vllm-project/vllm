@@ -1708,10 +1708,7 @@ if (
 ):
     cmdclass["build_rust"] = precompiled_build_rust
 
-# Resolve the Python version first because get_vllm_version() may set
-# SETUPTOOLS_SCM_PRETEND_VERSION, which the Rust version should inherit.
 vllm_version = get_vllm_version()
-rust_build.prepare_build_environment()
 
 # Rust artifacts, built via setuptools-rust and installed into the package
 # directory alongside the Python modules.
