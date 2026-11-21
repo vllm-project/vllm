@@ -75,6 +75,7 @@ def test_record_releases_in_flight_and_observes_duration(registry, fail):
     "operation,route,body",
     [
         ("init", api_router.init_weight_transfer_engine, {"init_info": {}}),
+        ("shutdown", api_router.shutdown_weight_transfer_engine, None),
         ("start", api_router.start_weight_update, None),
         ("start_draft", api_router.start_draft_weight_update, None),
         ("update", api_router.update_weights, {"update_info": {}}),

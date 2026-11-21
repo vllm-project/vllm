@@ -641,7 +641,7 @@ class MultiModalDataParser:
         if isinstance(audio, np.ndarray):
             return audio, None
         if isinstance(audio, torch.Tensor):
-            return audio.numpy(), None
+            return audio.detach().cpu().numpy(), None
 
         assert_never(audio)
 
@@ -776,6 +776,14 @@ class MultiModalDataParser:
             for item in data_items
         ]
 
+        data_items = [
+            np.ascontiguousarray(item)
+            if isinstance(item, np.ndarray)
+            and any(stride < 0 for stride in item.strides)
+            else item
+            for item in data_items
+        ]
+
         return ImageProcessorItems(data_items)
 
     def _parse_video_data(
@@ -821,6 +829,8 @@ class MultiModalDataParser:
                 metadata_lst.append(None)
                 continue
             video, metadata = self._get_video_with_metadata(data_item)
+            if isinstance(video, np.ndarray) and any(s < 0 for s in video.strides):
+                video = np.ascontiguousarray(video)
             if self.video_needs_metadata:
                 if metadata is None:
                     raise ValueError(

@@ -28,7 +28,7 @@ MISTRAL_FORMAT_ARGS = [
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 
 
-def test_realtime_generation_preserves_watermarking():
+def test_realtime_generation_preserves_watermarking(monkeypatch):
     transcription_outputs = []
 
     class EngineClient:
@@ -60,7 +60,7 @@ def test_realtime_generation_preserves_watermarking():
     )
     connection.audio_queue = asyncio.Queue()
     connection._is_connected = True
-    connection.send = send
+    monkeypatch.setattr(connection, "send", send)
 
     asyncio.run(connection._run_generation(streaming_input(), asyncio.Queue()))
 
@@ -208,8 +208,8 @@ async def test_empty_commit_does_not_crash_engine(
 
     Regression test for https://github.com/vllm-project/vllm/issues/34532.
     An empty commit (no prior input_audio_buffer.append) used to trigger
-    ``AssertionError: For realtime you must provide a multimodal_embedding
-    at every step`` which killed the entire engine process, disconnecting
+    `AssertionError: For realtime you must provide a multimodal_embedding
+    at every step` which killed the entire engine process, disconnecting
     every connected client.
     """
     server_args = ["--enforce-eager", "--max-model-len", "2048"]

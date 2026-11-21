@@ -48,8 +48,8 @@ def apply_rotary_emb(freqs, t, start_index=0, scale=1.0, seq_dim=-2):
     end_index = start_index + rot_dim
 
     assert rot_dim <= t.shape[-1], (
-        "feature dimension {} is not of sufficient size to rotate in all the "
-        "positions {}".format(t.shape[-1], rot_dim)
+        f"feature dimension {t.shape[-1]} is not of sufficient size to rotate in "
+        f"all the positions {rot_dim}"
     )
 
     t_left, t, t_right = (

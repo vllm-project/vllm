@@ -23,6 +23,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
@@ -73,7 +75,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
     SupportsReplaySSM,
@@ -87,7 +88,6 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 
 class NemotronHMLP(nn.Module):
@@ -249,7 +249,7 @@ class NemotronHMoE(nn.Module):
             routed_input_transform=self.fc1_latent_proj,
             routed_output_transform=self.fc2_latent_proj,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -585,6 +585,8 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern
@@ -662,9 +664,6 @@ class NemotronHModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
-        return weight_name.startswith("mtp.")
-
     def _get_max_n_routed_experts(self) -> int:
         """Get max n_routed_experts from config or block_configs for puzzle models.
 
@@ -725,7 +724,6 @@ class NemotronHForCausalLM(
     IsHybrid,
     SupportsQuant,
     MixtureOfExperts,
-    SupportsMambaPrefixCaching,
     SupportsReplaySSM,
 ):
     # Relevant only if self.has_moe is True

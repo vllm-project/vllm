@@ -41,11 +41,13 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 
+from ..common.dsa_cache import packed_dsa_block_size
 from ..common.mm_preprocess import (
     KimiK3DummyInputsBuilder,
     KimiK3MultiModalProcessor,
     KimiK3ProcessingInfo,
 )
+from .encoder_cudagraph import KimiK3EncoderCudaGraphMixin
 from .linear import KimiLinearForCausalLM
 
 
@@ -57,6 +59,7 @@ from .linear import KimiLinearForCausalLM
 class KimiK3ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    KimiK3EncoderCudaGraphMixin,
     SupportsPP,
     SupportsQuant,
     SupportsEagle3,
@@ -78,7 +81,7 @@ class KimiK3ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality in ("image", "image_embeds"):
             return "<|kimi_image_placeholder|>"
         raise ValueError(f"Unsupported modality: {modality}")
 
@@ -90,6 +93,7 @@ class KimiK3ForConditionalGeneration(
         super().__init__()
         model_config = vllm_config.model_config
         config: KimiK3Config = model_config.hf_config
+        self.model_config = model_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -117,6 +121,7 @@ class KimiK3ForConditionalGeneration(
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
+                out_hidden_size=config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
@@ -193,6 +198,10 @@ class KimiK3ForConditionalGeneration(
         return media_features
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
+        if (image_embeds := kwargs.get("image_embeds")) is not None:
+            assert isinstance(image_embeds, torch.Tensor)
+            num_tokens = cast(torch.Tensor, kwargs["image_num_tokens"])
+            return image_embeds.split(num_tokens.flatten().tolist())
         media_input = self._parse_and_validate_media_input(**kwargs)
         if media_input is None:
             return None
@@ -219,6 +228,9 @@ class KimiK3ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
 
+    def get_model_state_cls(self) -> type:
+        return self.language_model.get_model_state_cls()
+
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(
             input_buffers, **kwargs
@@ -244,6 +256,18 @@ class KimiK3ForConditionalGeneration(
     @classmethod
     def get_mamba_state_copy_func(cls):
         return KimiLinearForCausalLM.get_mamba_state_copy_func()
+
+    @classmethod
+    def get_packed_hybrid_block_size(
+        cls,
+        vllm_config: VllmConfig,
+        attn_page_size_1_token: int,
+        mamba_page_size: int,
+        alignment: int,
+    ) -> int | None:
+        return packed_dsa_block_size(
+            vllm_config, attn_page_size_1_token, mamba_page_size, alignment
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

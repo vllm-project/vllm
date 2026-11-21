@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
 )
@@ -82,7 +84,8 @@ def test_build_kv_connector_stats_round_trip():
     assert rebuilt.reduce() == stats.reduce()
 
 
-def test_prom_metrics_observe_host_usage_gauges():
+@pytest.mark.parametrize("kv_cache_metrics", [True, False])
+def test_prom_metrics_observe_host_metrics(kv_cache_metrics: bool):
     from types import SimpleNamespace
     from typing import Any
 
@@ -91,12 +94,14 @@ def test_prom_metrics_observe_host_usage_gauges():
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.stats import (
         HiSparsePromMetrics,
     )
+    from vllm.v1.metrics.stats import KVCacheEvictionEvent
 
     class _FakeMetric:
         def __init__(self, **kwargs: Any):
             self.kwargs = kwargs
             self.increments: list[int | float] = []
             self.set_values: list[int | float] = []
+            self.observed: list[float] = []
 
         def labels(self, *labelvalues: object) -> "_FakeMetric":
             return self
@@ -107,6 +112,9 @@ def test_prom_metrics_observe_host_usage_gauges():
         def set(self, value: int | float) -> None:
             self.set_values.append(value)
 
+        def observe(self, value: float) -> None:
+            self.observed.append(value)
+
     created: dict[str, _FakeMetric] = {}
 
     class _NamedFake(_FakeMetric):
@@ -115,7 +123,12 @@ def test_prom_metrics_observe_host_usage_gauges():
             created[kwargs["name"]] = self
 
     prom = HiSparsePromMetrics(
-        vllm_config=SimpleNamespace(kv_transfer_config=None),
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=None,
+            observability_config=SimpleNamespace(
+                kv_cache_metrics=kv_cache_metrics, custom_histogram_buckets=None
+            ),
+        ),
         metric_types={Gauge: _NamedFake, Counter: _NamedFake, Histogram: _NamedFake},
         labelnames=["model_name"],
         per_engine_labelvalues={0: ["model"]},
@@ -125,9 +138,21 @@ def test_prom_metrics_observe_host_usage_gauges():
     stats.record_snapshot(hits=3, misses=2, host_to_device_bytes=32)
     stats.record_host_usage(usage=0.5, pending_page_transfers=1)
     stats.record_host_usage(usage=0.75, pending_page_transfers=3)
-    prom.observe(stats.to_dict())
+    stats.record_host_evictions([KVCacheEvictionEvent(5.0, 2.0, (1.0, 2.0))])
+    later = HiSparseKVConnectorStats()
+    later.record_host_evictions([KVCacheEvictionEvent(3.0, 3.0, ())])
+    prom.observe(stats.aggregate(later).to_dict())
 
     assert created["vllm:hisparse_cache_hits"].increments == [3]
     assert created["vllm:hisparse_host_to_device_bytes"].increments == [32]
     assert created["vllm:hisparse_host_cache_usage_perc"].set_values == [0.75]
     assert created["vllm:hisparse_pending_page_transfers"].set_values == [3]
+    if not kv_cache_metrics:
+        assert not any("host_block" in name for name in created)
+        return
+    assert created["vllm:hisparse_host_block_lifetime_seconds"].observed == [5.0, 3.0]
+    assert created["vllm:hisparse_host_block_idle_before_evict_seconds"].observed == [
+        2.0,
+        3.0,
+    ]
+    assert created["vllm:hisparse_host_block_reuse_gap_seconds"].observed == [1.0, 2.0]

@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Build DeepGEMM's TORCH_LIBRARY extension and copy vendored artifacts.
 
-DeepGEMM now registers ops via TORCH_LIBRARY into ``deep_gemm._C_extension``
-(abi3) and exposes the legacy API through ``deep_gemm/_C.py``. This driver
-delegates to DeepGEMM's ``setup.py build_ext --inplace`` and copies the shim
+DeepGEMM now registers ops via TORCH_LIBRARY into `deep_gemm._C_extension`
+(abi3) and exposes the legacy API through `deep_gemm/_C.py`. This driver
+delegates to DeepGEMM's `setup.py build_ext --inplace` and copies the shim
 plus extension into the cmake output directory.
 
 Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR>
@@ -35,8 +35,9 @@ env = os.environ.copy()
 env.pop("DG_SKIP_CUDA_BUILD", None)
 
 print(f"[build_deepgemm_C] building in {src} with {sys.executable}", flush=True)
+# CMake decides when to rebuild; setuptools would only check python_api.cpp.
 subprocess.check_call(
-    [sys.executable, "setup.py", "build_ext", "--inplace"],
+    [sys.executable, "setup.py", "build_ext", "--inplace", "--force"],
     cwd=src,
     env=env,
 )

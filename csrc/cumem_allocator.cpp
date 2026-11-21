@@ -116,6 +116,24 @@ void ensure_context(unsigned long long device) {
   }
 }
 
+#ifdef USE_ROCM
+// hipMemUnmap and hipMemSetAccess check their range against HIP's allocation
+// map past the range end, and fail on a hipHostRegister'ed buffer that starts
+// there (ROCm/rocm-systems#15169). Each reservation ends with an unmapped
+// granule so that no other buffer can start at the end of an allocation.
+size_t rocm_va_guard(unsigned long long device) {
+  CUmemAllocationProp prop = {};
+  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.id = device;
+  prop.allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
+  size_t granularity = 0;
+  CUDA_CHECK(cuMemGetAllocationGranularity(&granularity, &prop,
+                                           CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+  return granularity;
+}
+#endif
+
 void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 #ifndef USE_ROCM
                     CUmemGenericAllocationHandle* p_memHandle) {
@@ -226,28 +244,6 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     return;
   }
 
-#ifdef USE_ROCM
-  // ROCm-only: zero the freshly (re)mapped region.
-  //
-  // On some amdgpu driver versions the physical VRAM backing a buffer is not
-  // scrubbed on release, so the pages handed back here (e.g. on wake_up after a
-  // sleep that discarded a tag) can still contain stale data from a previously
-  // freed allocation -- possibly from another process. Callers of the device
-  // allocator expect newly mapped memory to be well defined; in particular
-  // hybrid Mamba / gated-delta-net (GDN) models keep a persisted conv/recurrent
-  // state cache, and a new sequence that reads an unzeroed slot will propagate
-  // garbage/NaN, collapsing generation to token id 0 (decoded as "!").
-  //
-  // This is scoped to the ROCm path on purpose: the CUDA path is unchanged.
-  // Use CUDA_CHECK so a failure sets the global error_code; the Python caller
-  // (python_create_and_map) only inspects error_code, so returning without
-  // setting it would make a failed memset look successful and still hand back
-  // unzeroed memory.
-  CUDA_CHECK((CUresult)hipMemset(reinterpret_cast<void*>(d_mem), 0, size));
-  if (error_code != 0) {
-    return;
-  }
-#endif
   // std::cout << "create_and_map: device=" << device << ", size=" << size << ",
   // d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
 }
@@ -385,7 +381,8 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
     return nullptr;
   }
 #else
-  CUDA_CHECK(reserve_rocm_address(&d_mem, alignedSize, granularity));
+  CUDA_CHECK(
+      reserve_rocm_address(&d_mem, alignedSize + granularity, granularity));
   if (error_code != 0) {
     return nullptr;
   }
@@ -723,14 +720,15 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   // then immediately re-reserve the SAME address as an empty placeholder so
   // the regular allocator cannot hand it out while we sleep. wake_up remaps
   // physical chunks into this placeholder.
+  size_t reserved_size = recv_size + rocm_va_guard(recv_device);
   if (error_code == no_error) {
-    CUDA_CHECK(cuMemAddressFree(d_mem_ptr, recv_size));
+    CUDA_CHECK(cuMemAddressFree(d_mem_ptr, reserved_size));
     if (error_code == no_error) {
       CUdeviceptr reserved = 0;
-      CUDA_CHECK(reserve_rocm_address(&reserved, recv_size, /*alignment=*/0,
-                                      d_mem_ptr));
+      CUDA_CHECK(reserve_rocm_address(&reserved, reserved_size,
+                                      /*alignment=*/0, d_mem_ptr));
       if (error_code == no_error && reserved != d_mem_ptr) {
-        (void)cuMemAddressFree(reserved, recv_size);
+        (void)cuMemAddressFree(reserved, reserved_size);
         snprintf(error_msg, sizeof(error_msg),
                  "failed to re-reserve placeholder address on sleep "
                  "(requested %#llx, got %#llx)",

@@ -71,10 +71,10 @@ class SchedulerInterface(ABC):
         preparing inputs to the model.
 
         Args:
-            throttle_prefills: DP prefill balancing. When True (set by the DP
-                engine core on non-cadence-aligned steps), new prefill compute is
-                deferred to a later step so prefills stay aligned across DP ranks;
-                automatically overridden when the rank is saturated.
+            throttle_prefills: When True (set by the engine core on steps between
+                `prefill_schedule_interval` multiples), new prefill compute is
+                deferred to a later step; automatically overridden when the
+                engine is saturated.
 
         Returns:
             A SchedulerOutput object containing information about the scheduled
@@ -144,6 +144,12 @@ class SchedulerInterface(ABC):
             request: The new request being added.
 
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_request(self, request_id: str) -> bool:
+        """Returns True if the scheduler holds the request, including an open
+        streaming-input session waiting for its next input."""
         raise NotImplementedError
 
     @abstractmethod

@@ -10,6 +10,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.utils.async_utils import make_async
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
+    check_torch_archive_size,
     safe_to_dense,
 )
 
@@ -40,7 +41,7 @@ def _truncated_reason(exc: Exception) -> str:
 
 def safe_load_prompt_embeds(
     model_config: "ModelConfig",
-    embed: bytes,
+    embed: bytes | str,
 ) -> torch.Tensor:
     if not model_config.enable_prompt_embeds:
         raise VLLMValidationError(
@@ -51,6 +52,7 @@ def safe_load_prompt_embeds(
     # Decoded outside the try below so that a body which is not base64 keeps
     # raising binascii.Error, which is a ValueError and already answered 400.
     payload: Final = pybase64.b64decode(embed, validate=True)
+    check_torch_archive_size(payload, parameter="prompt_embeds")
 
     with check_sparse_tensor_invariants_threadsafe():
         try:
@@ -91,11 +93,17 @@ def safe_load_prompt_embeds(
             parameter="prompt_embeds",
         )
 
-    # Pin each tensor to the model's hidden_size. Validating here
+    # Pin each tensor to the model's text embedding width. Validating here
     # also transitively guarantees cross-tensor consistency for requests that
     # include multiple `prompt_embeds` parts, which is required by downstream
     # concatenation in `_build_mixed_prompt_embeds`.
-    expected_hidden_size = model_config.get_hidden_size()
+    # OPT projects token embeddings to hidden_size inside its decoder. CLIP
+    # and SigLIP still accept text embeddings at hidden_size, not projection_dim.
+    expected_hidden_size = getattr(
+        model_config.hf_text_config,
+        "word_embed_proj_dim",
+        model_config.get_hidden_size(),
+    )
     if tensor.shape[1] != expected_hidden_size:
         raise VLLMValidationError(
             f"`prompt_embeds` hidden_size {tensor.shape[1]} does not match "
