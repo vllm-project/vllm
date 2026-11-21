@@ -121,7 +121,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "int n_local_expert,"
       "int topk, Tensor! permuted_input, Tensor! "
       "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
-      "permuted_idx)->()");
+      "permuted_idx, Tensor? input_scale=None, "
+      "Tensor!? permuted_input_scale=None)->()");
 
   m.def(
       "moe_permute_with_scratch(Tensor input, Tensor topk_ids,"
@@ -130,7 +131,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "int topk, Tensor! permuted_input, Tensor! "
       "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
       "permuted_idx, Tensor! sort_workspace, Tensor! permuted_experts_id, "
-      "Tensor! sorted_row_idx, Tensor! topk_ids_for_sort)->()");
+      "Tensor! sorted_row_idx, Tensor! topk_ids_for_sort, "
+      "Tensor? input_scale=None, Tensor!? permuted_input_scale=None)->()");
 
   m.def(
       "moe_prepare_scatter(Tensor topk_ids, Tensor token_expert_indices, "
