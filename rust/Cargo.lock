@@ -5831,8 +5831,11 @@ dependencies = [
  "expect-test",
  "itertools 0.14.0",
  "prometheus-client",
+ "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
+ "serde_with",
 ]
 
 [[package]]

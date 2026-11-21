@@ -212,7 +212,11 @@ mod tests {
             .get_or_create_owned(&labels);
         metrics.request.request_prompt_tokens.get_or_create_owned(&labels);
         metrics.request.request_params_n.get_or_create_owned(&labels);
-        metrics.scheduler.kv_block_lifetime_seconds.get_or_create_owned(&labels);
+        metrics
+            .scheduler
+            .kv_cache_residency
+            .kv_block_lifetime_seconds
+            .get_or_create_owned(&labels);
 
         let output = metrics.render().unwrap();
         let bounds = [

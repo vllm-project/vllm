@@ -134,60 +134,67 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                 // `iteration_stats.prompt_token_stats.computed`.
                 prompt_tokens_computed: m.request.prompt_tokens_by_source.get_or_create_owned(&pt),
                 generation_tokens: m.request.generation_tokens.get_or_create_owned(&el),
-                prefix_cache_queries: m.scheduler.prefix_cache_queries.get_or_create_owned(&el),
-                prefix_cache_hits: m.scheduler.prefix_cache_hits.get_or_create_owned(&el),
+                prefix_cache_queries: m.scheduler.prefix_cache.queries.get_or_create_owned(&el),
+                prefix_cache_hits: m.scheduler.prefix_cache.hits.get_or_create_owned(&el),
                 external_prefix_cache_queries: m
                     .scheduler
-                    .external_prefix_cache_queries
+                    .prefix_cache
+                    .external_queries
                     .get_or_create_owned(&el),
                 external_prefix_cache_hits: m
                     .scheduler
-                    .external_prefix_cache_hits
+                    .prefix_cache
+                    .external_hits
                     .get_or_create_owned(&el),
                 num_preemptions: m.request.num_preemptions.get_or_create_owned(&el),
                 request_success: RequestSuccessCounters::resolve(model_name, engine),
-                spec_decode_num_drafts: m.scheduler.spec_decode_num_drafts.get_or_create_owned(&el),
+                spec_decode_num_drafts: m.scheduler.spec_decode.num_drafts.get_or_create_owned(&el),
                 spec_decode_num_draft_tokens: m
                     .scheduler
-                    .spec_decode_num_draft_tokens
+                    .spec_decode
+                    .num_draft_tokens
                     .get_or_create_owned(&el),
                 spec_decode_num_accepted_tokens: m
                     .scheduler
-                    .spec_decode_num_accepted_tokens
+                    .spec_decode
+                    .num_accepted_tokens
                     .get_or_create_owned(&el),
                 spec_decode_num_verified_tokens: m
                     .scheduler
-                    .spec_decode_num_verified_tokens
+                    .spec_decode
+                    .num_verified_tokens
                     .get_or_create_owned(&el),
                 estimated_flops_per_gpu: m
                     .scheduler
+                    .perf
                     .estimated_flops_per_gpu
                     .get_or_create_owned(&el),
                 estimated_read_bytes_per_gpu: m
                     .scheduler
+                    .perf
                     .estimated_read_bytes_per_gpu
                     .get_or_create_owned(&el),
                 estimated_write_bytes_per_gpu: m
                     .scheduler
+                    .perf
                     .estimated_write_bytes_per_gpu
                     .get_or_create_owned(&el),
                 log_stats: m.scheduler.log_stats.get_or_create_owned(&el),
-                scheduler_running: m.scheduler.scheduler_running.get_or_create_owned(&el),
-                scheduler_waiting: m.scheduler.scheduler_waiting.get_or_create_owned(&el),
+                scheduler_running: m.scheduler.state.running.get_or_create_owned(&el),
+                scheduler_waiting: m.scheduler.state.waiting.get_or_create_owned(&el),
                 scheduler_deferred: m
                     .scheduler
-                    .scheduler_waiting_by_reason
+                    .state
+                    .waiting_by_reason
                     .get_or_create_owned(&deferred),
                 scheduler_kv_fetch_by_stage: KvFetchReqsByStage::STAGES.map(|stage| {
-                    m.scheduler.scheduler_kv_fetch_by_stage.get_or_create_owned(
-                        &KvFetchStageLabels {
-                            model_name: model_name.to_string(),
-                            engine,
-                            stage,
-                        },
-                    )
+                    m.scheduler.state.kv_fetch_by_stage.get_or_create_owned(&KvFetchStageLabels {
+                        model_name: model_name.to_string(),
+                        engine,
+                        stage,
+                    })
                 }),
-                kv_cache_usage: m.scheduler.kv_cache_usage.get_or_create_owned(&el),
+                kv_cache_usage: m.scheduler.state.kv_cache_usage.get_or_create_owned(&el),
             }
         })
         .collect()
