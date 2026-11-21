@@ -32,9 +32,13 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming is only supported on CUDA"
         if not has_humming():
             return False, "Humming is not installed"
-        if c.act_type.itemsize == 1 and c.act_type not in _ACT_QUANT_KEYS:
+        if c.act_type not in (torch.float16, torch.bfloat16, *_ACT_QUANT_KEYS):
             return False, f"Activation type ({c.act_type}) not supported by Humming"
         return True, None
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.layers.quantization.utils.humming import (

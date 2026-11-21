@@ -1045,6 +1045,12 @@ def choose_mp_linear_kernel(
         compute_capability=compute_capability,
     )
 
+    prefer_batch_invariant = envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda()
+    if prefer_batch_invariant:
+        platform_kernels = sorted(
+            platform_kernels, key=lambda k: not k.supports_batch_invariance()
+        )
+
     failure_reasons = []
     for kernel in platform_kernels:
         if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
@@ -1059,6 +1065,14 @@ def choose_mp_linear_kernel(
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
+            if prefer_batch_invariant and not kernel.supports_batch_invariance():
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT is set, but no batch-invariant "
+                    "mixed-precision linear kernel can implement this layer. "
+                    "Selected %s, whose output can depend on the batch size.",
+                    kernel.__name__,
+                )
+                return kernel
             logger.debug_once("Using %s for mixed-precision linear", kernel.__name__)
             return kernel
         else:
