@@ -1,26 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit test for ``_memcpy_u64_tiled``.
+"""Unit test for `_memcpy_u64_tiled`.
 
 Guards the head/body/tail alignment handling and the u64 body's tile
-partitioning used by ``postprocess_mamba_fused_kernel`` and
-``precopy_mamba_align_fused_kernel``. The device function must be
-byte-identical to a ``dst[dst_off:dst_off+copy_size] = src[src_off:src_off+
-copy_size]`` slice copy for every combination of:
+partitioning used by `postprocess_mamba_fused_kernel` and
+`precopy_mamba_align_fused_kernel`. The device function must be
+byte-identical to a `dst[dst_off:dst_off+copy_size] = src[src_off:src_off+
+copy_size]` slice copy for every combination of:
 
-* ``copy_size``: the degenerate 0-byte case, sub-8B (head-only), 8B-aligned
-  bodies, and a multi-tile body that spans several ``COPY_BLOCK_SIZE``
+* `copy_size`: the degenerate 0-byte case, sub-8B (head-only), 8B-aligned
+  bodies, and a multi-tile body that spans several `COPY_BLOCK_SIZE`
   iterations.
-* ``(src_off, dst_off)`` pairs: aligned, shared sub-8B misalignment (fast
+* `(src_off, dst_off)` pairs: aligned, shared sub-8B misalignment (fast
   path exercising head/tail masking), and mismatched src/dst alignment
-  (byte-fallback path). The kernel branches on ``(src ^ dst) & 7``, so a
+  (byte-fallback path). The kernel branches on `(src ^ dst) & 7`, so a
   full 5x5 product would re-exercise the same two codepaths.
-* ``NUM_TILES``: 1 (SD conv callsite, single-CTA memcpy) and
-  ``_TEMPORAL_TILES`` (temporal callsite, u64 range partitioned across
+* `NUM_TILES`: 1 (SD conv callsite, single-CTA memcpy) and
+  `_TEMPORAL_TILES` (temporal callsite, u64 range partitioned across
   CTAs).
-* ``COPY_BLOCK_SIZE``: the production value 1024 (single-tile at these
-  sizes) and a small value 8 so the existing ``copy_size`` cases actually
-  cross tile boundaries under ``NUM_TILES=_TEMPORAL_TILES``. The
+* `COPY_BLOCK_SIZE`: the production value 1024 (single-tile at these
+  sizes) and a small value 8 so the existing `copy_size` cases actually
+  cross tile boundaries under `NUM_TILES=_TEMPORAL_TILES`. The
   partitioning math is COPY_BLOCK_SIZE-agnostic, so testing at a small
   value covers boundary arithmetic for all values.
 """
@@ -37,8 +37,8 @@ try:
     import pytest
 
     pytestmark = pytest.mark.skipif(
-        not current_platform.is_cuda(),
-        reason="_memcpy_u64_tiled needs CUDA/Triton",
+        not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+        reason="_memcpy_u64_tiled needs CUDA/XPU Triton",
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
@@ -112,7 +112,7 @@ _TILE_BLOCK_CONFIGS = [
 def test_memcpy_u64_tiled_matches_slice_copy(
     copy_size, src_off, dst_off, num_tiles, copy_block_size
 ):
-    device = torch.device("cuda")
+    device = torch.device(current_platform.device_type)
     torch.manual_seed(0)
 
     # Pad by the max possible offset so the reference slice is in-bounds.

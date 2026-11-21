@@ -4,7 +4,7 @@ from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
 
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     validate_json_request,

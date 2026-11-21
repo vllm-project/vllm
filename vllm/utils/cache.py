@@ -102,8 +102,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         return self.currsize / self.maxsize
 
     def stat(self, *, delta: bool = False) -> CacheInfo:
-        """
-        Gets the cumulative number of hits and queries against this cache.
+        """Gets the cumulative number of hits and queries against this cache.
 
         If `delta=True`, instead gets these statistics
         since the last call that also passed `delta=True`.
@@ -120,6 +119,16 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
     def touch(self, key: _K) -> None:
         if key in self:
             self._LRUCache__order.move_to_end(key)  # type: ignore
+
+    @overload
+    def peek(self, key: _K, /) -> _V | None: ...
+
+    @overload
+    def peek(self, key: _K, /, default: _V | _T) -> _V | _T: ...
+
+    def peek(self, key: _K, /, default: _V | _T | None = None) -> _V | _T | None:
+        """Look up a value without copying the cache or updating order or stats."""
+        return self._Cache__data.get(key, default)  # type: ignore
 
     @overload
     def get(self, key: _K, /) -> _V | None: ...
@@ -165,6 +174,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
 
         Returns:
             `True` if the item was cached, otherwise `False`.
+
         """
         try:
             self[key] = value
@@ -175,8 +185,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         return True
 
     def pin(self, key: _K) -> None:
-        """
-        Pins a key in the cache preventing it from being
+        """Pins a key in the cache preventing it from being
         evicted in the LRU order.
         """
         if key not in self:
@@ -184,8 +193,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         self.pinned_items.add(key)
 
     def _unpin(self, key: _K) -> None:
-        """
-        Unpins a key in the cache allowing it to be
+        """Unpins a key in the cache allowing it to be
         evicted in the LRU order.
         """
         self.pinned_items.remove(key)

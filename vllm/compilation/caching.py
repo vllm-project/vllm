@@ -6,7 +6,8 @@ import hashlib
 import inspect
 import os
 import pickle
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
@@ -23,7 +24,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
 
 try:
     from torch._dynamo.aot_compile import SerializableCallable
@@ -33,6 +33,32 @@ except ImportError:
 assert isinstance(SerializableCallable, type)
 
 logger = init_logger(__name__)
+
+
+def read_code_files(files: Iterable[Path]) -> dict[Path, str | None]:
+    """Read traced source files. Files that can't be read map to None."""
+    contents: dict[Path, str | None] = {}
+    for path in files:
+        try:
+            contents[path] = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            # e.g. <string> from exec() or <frozen ...> modules
+            if not str(path).startswith("<"):
+                logger.warning("Failed to read file %s", path)
+            contents[path] = None
+    return contents
+
+
+def get_code_factors(contents: Mapping[Path, str | None]) -> list[dict[str, str]]:
+    """Per-file factors for the compile cache key, sorted by path."""
+    code_factors: list[dict[str, str]] = []
+    for path, content in sorted(contents.items()):
+        entry = {"path": str(path)}
+        # Dynamically generated code (e.g. <string> from exec) can't be checked.
+        if content is not None and not str(path).startswith("<"):
+            entry["hash"] = hash_factors({"content": content})
+        code_factors.append(entry)
+    return code_factors
 
 
 class StandaloneCompiledArtifacts:
@@ -172,8 +198,7 @@ def patch_pytree_map_over_slice():
 
 
 class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
-    """
-    A wrapper around a compiled function by vllm. It will forward the tensor
+    """A wrapper around a compiled function by vllm. It will forward the tensor
     inputs to the compiled function and return the result.
     It also implements a serialization interface to support PyTorch's precompile
     with custom backend, so that we can save and load the compiled function on
@@ -268,7 +293,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         for node in state["graph_module"].graph.nodes:
             node.meta.pop("source_fn_stack", None)
             node.meta.pop("nn_module_stack", None)
-        for name, submod in state["graph_module"].named_children():
+        for _, submod in state["graph_module"].named_children():
             if hasattr(submod, "graph"):
                 for node in submod.graph.nodes:
                     node.meta.pop("source_fn_stack", None)
@@ -410,10 +435,22 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
     @property
     def co_name(self) -> Literal["VllmSerializableFunction"]:
-        """
-        Used for depyf debugging.
-        """
+        """Used for depyf debugging."""
         return "VllmSerializableFunction"
+
+
+def compute_env_and_config_hashes(
+    vllm_config: VllmConfig,
+) -> tuple[str, str, dict[str, object], dict[str, object]]:
+    """Return the hashed environment factors, config hash, and raw factors.
+    Both AOT and JIT cache paths rely on this helper to ensure their cache keys
+    stay in sync.
+    """
+    env_factors = envs.compile_factors()
+    env_hash = hash_factors(env_factors)
+    config_factors = vllm_config.compile_factors()
+    config_hash = hash_factors(config_factors)
+    return env_hash, config_hash, env_factors, config_factors
 
 
 def reconstruct_serializable_fn_from_mega_artifact(
@@ -445,6 +482,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     If modifying the backend creation/wrapping logic, consider updating both.
 
     Args:
+        fake_mode: FakeTensorMode used to unpickle the cached graph.
         state: Deserialized state dict containing graph_module, example_inputs,
             prefix, sym_tensor_indices, is_encoder, etc.
         standalone_compile_artifacts: The StandaloneCompiledArtifacts containing
@@ -455,6 +493,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
     Returns:
         A VllmSerializableFunction that can be called directly.
+
     """
     from vllm.compilation.backends import (
         VllmBackend,
@@ -572,14 +611,9 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
 def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
     factors = []
-    # 0. factors come from the env, for example, The values of
-    # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = hash_factors(envs.compile_factors())
+    # 0/1. factors come from env and vllm config.
+    env_hash, config_hash, _, _ = compute_env_and_config_hashes(vllm_config)
     factors.append(env_hash)
-
-    # 1. factors come from the vllm_config (it mainly summarizes how the
-    #    model is created)
-    config_hash = vllm_config.compute_hash()
     factors.append(config_hash)
 
     # 2. inductor factors if applicable
@@ -587,34 +621,3 @@ def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
         factors.extend(get_inductor_factors())
 
     return factors
-
-
-def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
-    items = list(sorted(file_contents.items(), key=lambda x: x[0]))
-    hash_content = []
-    for filepath, content in items:
-        hash_content.append(filepath)
-        if filepath == "<string>":
-            # This means the function was dynamically generated, with
-            # e.g. exec(). We can't actually check these.
-            continue
-        hash_content.append(content)
-    result: str = safe_hash(
-        "\n".join(hash_content).encode(), usedforsecurity=False
-    ).hexdigest()
-    return result
-
-
-def _compute_code_hash(files: set[str]) -> str:
-    logger.debug(
-        "Traced files (to be considered for compilation cache):\n%s", "\n".join(files)
-    )
-    file_contents = {}
-    for filepath in files:
-        # Skip files that don't exist (e.g., <string>, <frozen modules>, etc.)
-        if not os.path.isfile(filepath):
-            file_contents[filepath] = ""
-        else:
-            with open(filepath) as f:
-                file_contents[filepath] = f.read()
-    return _compute_code_hash_with_content(file_contents)

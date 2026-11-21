@@ -7,7 +7,7 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 
-MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
+MODEL_NAME = "vllm-project/Qwen2.5-1.5B-apeach"
 DTYPE = "float32"  # Use float32 to avoid NaN issue
 input_text = "This product was excellent and exceeded my expectations"
 input_tokens = [1986, 1985, 572, 9073, 323, 33808, 847, 16665]
@@ -45,6 +45,7 @@ async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: st
     poolings = PoolingResponse.model_validate(response.json())
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == 8
+    assert isinstance(poolings.data[0].data[0], list)
     assert len(poolings.data[0].data[0]) == 2
 
 

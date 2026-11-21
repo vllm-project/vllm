@@ -26,7 +26,7 @@ _HYBRID_GROUP_SIZES = (32, 64, 128)
 
 
 def _expected_rocm_kernel(weight_type, group_size: int) -> str:
-    """Mirror the ROCm priority order in ``_POSSIBLE_KERNELS[ROCM]``:
+    """Mirror the ROCm priority order in `_POSSIBLE_KERNELS[ROCM]`:
     RDNA3 (gfx1100, symmetric uint4b8) -> Hybrid (gfx11/gfx12) -> Triton.
     """
     if on_gfx1100() and weight_type == scalar_types.uint4b8:
@@ -47,7 +47,6 @@ def test_choose_mp_linear_kernel_uint4b8():
         act_type=torch.float16,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
 
     kernel_type = choose_mp_linear_kernel(config)
@@ -65,7 +64,6 @@ def test_choose_mp_linear_kernel_uint4_asymmetric():
         act_type=torch.bfloat16,
         group_size=64,
         zero_points=True,
-        has_g_idx=False,
     )
 
     kernel_type = choose_mp_linear_kernel(config)

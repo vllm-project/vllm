@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   update-description:
+    if: github.repository_owner == 'vllm-project'
     runs-on: ubuntu-latest
     steps:
       - name: Update PR description
@@ -52,6 +53,7 @@ jobs:
             }
 
   reminder-comment:
+    if: github.repository_owner == 'vllm-project'
     runs-on: ubuntu-latest
     steps:
       - name: Post welcome comment for first-time contributors

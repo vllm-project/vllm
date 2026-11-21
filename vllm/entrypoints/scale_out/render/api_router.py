@@ -3,13 +3,16 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import validate_json_request
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.api_utils import (
+    create_json_response,
+    validate_json_request,
+)
 from vllm.logger import init_logger
 
 from ..token_in_token_out.protocol import GenerateRequest
@@ -42,12 +45,9 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             "The model does not support Chat Completions Render API"
         )
 
-    result = await handler.render_chat_request(request)
+    result = await handler.render_chat_request(request, raw_request)
 
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
-
-    return JSONResponse(content=result.model_dump())
+    return create_json_response(result)
 
 
 @router.post(
@@ -66,12 +66,9 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
     if handler is None:
         raise NotImplementedError("The model does not support Messages Render API")
 
-    result = await handler.render_messages_request(request)
+    result = await handler.render_messages_request(request, raw_request)
 
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
-
-    return JSONResponse(content=result.model_dump())
+    return create_json_response(result)
 
 
 @router.post(
@@ -89,9 +86,26 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Completions Render API")
 
-    result = await handler.render_completion_request(request)
+    result = await handler.render_completion_request(request, raw_request)
 
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+    return create_json_response(result)
 
-    return JSONResponse(content=[item.model_dump() for item in result])
+
+@router.post(
+    "/v1/responses/render",
+    dependencies=[Depends(validate_json_request)],
+    response_model=GenerateRequest,
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def render_responses(request: ResponsesRequest, raw_request: Request):
+    handler = render(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Responses Render API")
+
+    result = await handler.render_responses_request(request)
+    return create_json_response(result)

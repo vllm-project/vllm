@@ -37,7 +37,9 @@ def _xpu_qnorm_rope_kernel(
     cos_sin_cache layout: [max_pos, ROPE_DIM] with first HALF_ROPE=cos,
     second HALF_ROPE=sin.
     """
-    token_idx = tl.program_id(0)
+    # int64: token_idx * num_heads * HEAD_DIM exceeds int32 past 2^31 q elements
+    # (e.g. 65536 tokens x 64 heads), which faults the device.
+    token_idx = tl.program_id(0).to(tl.int64)
     head_idx = tl.program_id(1)
 
     if token_idx >= num_tokens:
@@ -88,10 +90,13 @@ def _xpu_qnorm_rope_kernel(
         kv_base = kv_ptr + token_idx * HEAD_DIM
         kv_out_base = kv_out_ptr + token_idx * HEAD_DIM
 
-        # Copy full KV unchanged first
+        # Copy only the NoPE portion; the RoPE region is written exclusively
+        # by the rotated stores below. Masking avoids a write-after-write
+        # hazard on the overlapping RoPE addresses (matches the Q branch).
         offs = tl.arange(0, HEAD_DIM)
         kv_full = tl.load(kv_base + offs)
-        tl.store(kv_out_base + offs, kv_full)
+        nope_mask = offs < NOPE_DIM
+        tl.store(kv_out_base + offs, kv_full, mask=nope_mask)
 
         # GPT-J interleaved RoPE on the last ROPE_DIM dimensions
         even_offs = NOPE_DIM + rope_pair_idx * 2
