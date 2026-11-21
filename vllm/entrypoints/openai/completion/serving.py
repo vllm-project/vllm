@@ -434,7 +434,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 *(prompt_logprobs or []),
                                 *(output.logprobs or []),
                             ]
-                        prompt_token_ids_to_return = prompt_token_ids
+                        if request.return_token_ids:
+                            prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
                         # return just the delta

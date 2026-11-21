@@ -113,3 +113,39 @@ def test_non_stream_response_omits_null_prompt_tokens_details():
     )
 
     assert "prompt_tokens_details" not in response.model_dump()["usage"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [False, True])
+async def test_stream_echo_returns_prompt_token_ids_only_on_request(
+    return_token_ids: bool,
+):
+    async def results():
+        yield 0, _output("".join(TEXT_DELTAS), [0, 1, 2], finished=True)
+
+    request = CompletionRequest(
+        model="m",
+        prompt="Hi",
+        max_tokens=8,
+        echo=True,
+        return_token_ids=return_token_ids,
+        stream=True,
+    )
+    chunks = [
+        json.loads(line.removeprefix("data: "))
+        async for line in _serving().completion_stream_generator(
+            request,
+            [tokens_input([9], prompt="Hi")],
+            results(),
+            "r",
+            0,
+            "m",
+            num_prompts=1,
+            tokenizer=None,
+            request_metadata=RequestResponseMetadata(request_id="r"),
+        )
+        if "[DONE]" not in line
+    ]
+
+    expected = [9] if return_token_ids else None
+    assert chunks[0]["choices"][0]["prompt_token_ids"] == expected
