@@ -22,6 +22,11 @@ authorization uses; the fence detects the unit mismatch and refuses every
 such repair loudly (the request falls back to recompute). Supporting those
 layouts needs the manager unit plumbed into the work descriptor.
 
+The decoder layer stack is resolved through find_repair_fence_layer across
+the model-zoo container names instead of assuming `model.model.layers`, so
+the capability verdict and the repair-time replay always target the same
+stack; hardware-plugin layout gates import the same resolver.
+
 The module lives beside the GPU model runner because the old
 kv_connector_model_runner_mixin module no longer exists upstream: its
 connector plumbing was absorbed into vllm/v1/worker/gpu/kv_connector.py.
@@ -109,6 +114,145 @@ def _replay_inert_kwargs(layer: Any, kwargs: dict[str, Any]) -> bool:
     return True
 
 
+# Decoder-stack container names in precedence order: the standard vLLM
+# wrapper (model.layers), the HF-heritage names (ChatGLM
+# transformer.encoder.layers, Falcon/GPT-2 transformer.h, MPT
+# transformer.blocks), multimodal wrappers nesting the backbone below
+# language_model, and a bare stack on the model itself. Hardware-plugin
+# layout gates import find_repair_fence_layer, so their init-time checks
+# and this executor's repair-time lookup resolve the same layer.
+_REPAIR_STACK_CONTAINERS: tuple[tuple[str, ...], ...] = (
+    ("model", "layers"),
+    ("transformer", "encoder", "layers"),
+    ("transformer", "h"),
+    ("transformer", "blocks"),
+    ("language_model", "model", "layers"),
+    ("language_model", "transformer", "encoder", "layers"),
+    ("layers",),
+)
+
+
+def _tried_stack_paths() -> str:
+    """The container paths a stack lookup walked, for refusal texts."""
+    return ", ".join(".".join(path) for path in _REPAIR_STACK_CONTAINERS)
+
+
+def _walk_repair_stack(model: Any, path: tuple[str, ...]) -> Any:
+    """The stack node at one container path, or None when the path does
+    not resolve to a non-empty stack."""
+    node = model
+    for attr in path:
+        node = getattr(node, attr, None)
+        if node is None:
+            break
+    if not node:
+        return None
+    return node
+
+
+def _resolve_model_layer_stack(model: Any) -> tuple[Any, Any]:
+    """The stack the model's own forward drives, and the module owning it.
+
+    The replay canary's lookup: the first non-empty container, whatever
+    its layers expose -- the canary verifies the FORWARD, and the cache
+    seam is the capability verdict's own check, so a canary-compatible
+    model must not lose its probe over a seam it does not carry yet.
+    The owner is the module the path descends through: the replay's
+    embedding seam and the probe-forward module (model.model for the
+    standard layout, model.transformer for Falcon-style transformer.h
+    stacks).
+
+    Returns:
+        (stack, owner), or (None, None) when no known container resolves.
+
+    """
+    for path in _REPAIR_STACK_CONTAINERS:
+        node = _walk_repair_stack(model, path)
+        if node is None:
+            continue
+        try:
+            iter(node)
+        except TypeError:
+            continue
+        owner = model
+        for attr in path[:-1]:
+            owner = getattr(owner, attr, None)
+        return node, owner
+    return None, None
+
+
+def _resolve_repair_stack(
+    model: Any,
+) -> tuple[Any, Any, Any, tuple[str, ...] | None]:
+    """The executor's replay stack: the first container holding a layer
+    with the repair fence's cache seam (self_attn.attn).
+
+    A container whose layers keep no seam can be neither fenced nor
+    re-zeroed, and a leading seam-less container is never mistaken for
+    the decoder (a vision encoder's attention keeps no KV-cache seam the
+    fence reads). Whenever the init capability verdict authorized
+    repairs this is also the canary's stack: the verdict requires the
+    first non-empty container's layer 0 to carry the seam, which makes
+    that container the first seam-bearing one.
+
+    Returns:
+        (stack, owner, fence_layer, path), or
+        (None, None, None, None) when no known container resolves.
+
+    """
+    for path in _REPAIR_STACK_CONTAINERS:
+        node = _walk_repair_stack(model, path)
+        if node is None:
+            continue
+        fence = None
+        try:
+            for layer in node:
+                seam = getattr(getattr(layer, "self_attn", None), "attn", None)
+                if seam is not None:
+                    fence = layer
+                    break
+        except TypeError:
+            continue
+        if fence is None:
+            continue
+        owner = model
+        for attr in path[:-1]:
+            owner = getattr(owner, attr, None)
+        return node, owner, fence, path
+    return None, None, None, None
+
+
+def find_repair_fence_layer(model: Any) -> tuple[Any, Any]:
+    """Locate the first decoder layer the repair fence reads the cache of.
+
+    The repair executor reaches every layer's cache through
+    layer.self_attn.attn.kv_cache and derives the block size from that
+    cache's geometry (_repair_block_size), but model zoos name the
+    decoder stack differently (ChatGLM transformer.encoder.layers,
+    Falcon transformer.h, MPT transformer.blocks) and multimodal
+    wrappers nest the backbone below language_model. Discover the first
+    layer that actually carries the fence's cache seam (self_attn.attn),
+    which cannot pick up an unrelated attention module (e.g. a vision
+    encoder, whose attention keeps no KV-cache seam the fence reads).
+    Hardware-plugin layout gates import this resolver so an init-time
+    capability check never accepts a stack the executor's repair-time
+    lookup would refuse.
+
+    Args:
+        model: The model the runner hands to the repair executor.
+
+    Returns:
+        (layer, path) of the first candidate with the seam, or
+        (None, tried_paths); the caller refuses with an actionable error
+        instead of deriving a block size from a wrong module.
+
+    """
+    stack, _owner, fence, path = _resolve_repair_stack(model)
+    if stack is None:
+        return None, _REPAIR_STACK_CONTAINERS
+    return fence, ".".join(path)
+
+
 def verify_replay_compatibility(model: Any) -> None:
     """Refuse the repair policy unless the model's own forward reduces to
     exactly what the replay executes: embed_input_ids feeding
@@ -143,12 +287,13 @@ def verify_replay_compatibility(model: Any) -> None:
             kv_load_failure_policy='repair'.
 
     """
-    inner = model.model
-    layers = getattr(inner, "layers", None)
-    if not layers:
+    layers, inner = _resolve_model_layer_stack(model)
+    if layers is None:
         raise RuntimeError(
             "kv_load_failure_policy='repair' requires a native model with "
-            "a layer stack (none found on the inner model)"
+            "a layer stack (none found on this model; tried "
+            + _tried_stack_paths()
+            + ")"
         )
     embed_fn = getattr(inner, "embed_input_ids", None)
     if embed_fn is None:
@@ -380,9 +525,8 @@ def _repair_capability(model: Any) -> int:
     preflight can afford, and a divergent code still aborts the step
     on every rank through the consensus below.
     """
-    inner = getattr(model, "model", None)
-    layers = getattr(inner, "layers", None)
-    if not layers:
+    layers, inner = _resolve_model_layer_stack(model)
+    if layers is None:
         return 1
     if getattr(inner, "embed_input_ids", None) is None:
         return 2
@@ -446,7 +590,14 @@ def _execute_preflight(
             f"fewer than the work's window [{lo}, {hi})"
         )
 
-        layers = model.model.layers
+        layers, _inner, _fence, _stack_path = _resolve_repair_stack(model)
+        if layers is None:
+            raise RuntimeError(
+                "hole repair: no decoder layer stack with the repair "
+                "fence's cache seam (self_attn.attn) was found on this "
+                "model (tried " + _tried_stack_paths() + "); the repair "
+                "write set cannot be fenced"
+            )
         assert work.layer_end <= len(layers), (
             f"hole repair: layer_end {work.layer_end} exceeds the stack "
             f"({len(layers)} layers)"
@@ -671,9 +822,22 @@ def repair_capability(model: Any) -> dict[str, Any]:
         else:
             verdict["reason_code"] = "layer_signature"
         return verdict
-    layer0 = model.model.layers[0]
+    layers, _owner = _resolve_model_layer_stack(model)
+    if layers is None:
+        # Unreachable when verify_replay_compatibility passed above (the
+        # canary refuses the same condition); kept fail-closed so the
+        # verdict stays a verdict, never an AttributeError.
+        verdict["reason_code"] = "no_layer_stack"
+        verdict["detail"] = (
+            "kv_load_failure_policy='repair' requires a native model with "
+            "a layer stack (none found on this model; tried "
+            + _tried_stack_paths()
+            + ")"
+        )
+        return verdict
+    layer0 = layers[0]
     self_attn = getattr(layer0, "self_attn", None)
-    for layer in model.model.layers:
+    for layer in layers:
         attn = getattr(getattr(layer, "self_attn", None), "attn", None)
         if getattr(attn, "kv_sharing_target_layer_name", None) is not None:
             # KV-shared layers (Gemma4 YOCO cross-decoder, eagle sharing)
@@ -964,11 +1128,19 @@ def execute_repair_only(
             # that collective's backend timeout -- containment is
             # fail-closed, not latency-free.
             try:
-                layers = model.model.layers
+                layers, inner, _fence, _stack_path = _resolve_repair_stack(model)
+                if layers is None:
+                    raise RuntimeError(
+                        "hole repair: no decoder layer stack with the "
+                        "repair fence's cache seam (self_attn.attn) was "
+                        "found on this model (tried "
+                        + _tried_stack_paths()
+                        + "); the repair write set cannot be fenced"
+                    )
                 attn_metadata = get_forward_context().attn_metadata
                 assert isinstance(attn_metadata, dict) and attn_metadata
                 meta = next(iter(attn_metadata.values()))
-                hidden_states = model.model.embed_input_ids(input_ids[lo:hi])
+                hidden_states = inner.embed_input_ids(input_ids[lo:hi])
                 residual = None
                 for idx, layer in enumerate(layers[: work.layer_end]):
                     try:

@@ -24,7 +24,7 @@ from tests.v1.core.test_scheduler_repair_budget import (
     make_scheduler,
 )
 from tests.v1.kv_connector.unit.utils import create_request, create_vllm_config
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     RepairWork,
@@ -701,6 +701,157 @@ def test_replay_canary_refuses_unprobeable_forward():
 
     with pytest.raises(RuntimeError, match="cannot verify"):
         verify_replay_compatibility(SimpleNamespace(model=_BrokenInner()))
+
+
+# ---- The shared decoder-stack resolver (model-zoo container names) ----
+
+
+class _WritingLayer(torch.nn.Module):
+    """The fake layer plus a KV write on replay: a successful repair must
+    be observable in the cache, not only in the verdict. The write indexes
+    the layer's own cache through the metadata the replay resolves, the
+    same seam the fence validates."""
+
+    def __init__(self, layer_name: str):
+        super().__init__()
+        attn = SimpleNamespace(
+            kv_cache=[
+                torch.zeros(4, BS, 8),
+                torch.zeros(4, BS, 8),
+            ],
+            layer_name=layer_name,
+        )
+        self.self_attn = SimpleNamespace(attn=attn)
+
+    def forward(self, positions, hidden_states, residual):
+        name = self.self_attn.attn.layer_name
+        meta = get_forward_context().attn_metadata[name]
+        slots = meta.slot_mapping.long()
+        for cache in self.self_attn.attn.kv_cache:
+            cache[slots // cache.shape[1], slots % cache.shape[1]] += 1.0
+        return hidden_states + 1.0, residual
+
+
+class _FalconStyleInner(torch.nn.Module):
+    """A Falcon-style stack owner: the decoder lives at transformer.h
+    (there is no model.layers anywhere), and the owner module itself
+    exposes the replay's embed seam."""
+
+    def __init__(self, layers):
+        super().__init__()
+        self.h = layers
+
+    def embed_input_ids(self, input_ids):
+        return torch.zeros(input_ids.shape[0], 8)
+
+    def forward(self, input_ids, positions, intermediate_tensors, inputs_embeds=None):
+        hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+        for layer in self.h:
+            hidden_states, residual = layer(positions, hidden_states, residual)
+        return hidden_states
+
+
+class _FalconStyleModel(torch.nn.Module):
+    """The Falcon/GPT-2 wrapper shape: the inner model is bound at
+    transformer, so the decoder stack sits at transformer.h."""
+
+    def __init__(self, n_layers: int):
+        super().__init__()
+        self.transformer = _FalconStyleInner(
+            [_WritingLayer(f"transformer.h.{i}") for i in range(n_layers)]
+        )
+
+
+def test_fence_resolver_accepts_falcon_style_stack():
+    """The fence layer resolves across the model-zoo container names, not
+    only model.model.layers: a Falcon-style transformer.h stack is found
+    with its container path named, and a model without any known stack
+    reports the paths it tried."""
+    from vllm.v1.worker.gpu.repair_executor import find_repair_fence_layer
+
+    model = _FalconStyleModel(3)
+    layer, path = find_repair_fence_layer(model)
+    assert path == "transformer.h"
+    assert layer is model.transformer.h[0]
+
+    layer, tried = find_repair_fence_layer(SimpleNamespace())
+    assert layer is None
+    assert ("model", "layers") in tried
+    assert ("transformer", "h") in tried
+
+
+def test_fence_resolver_skips_containers_without_the_seam():
+    """A container whose layers keep no self_attn.attn seam is never
+    picked: the scan falls through to the next container that carries
+    the fence seam."""
+    from vllm.v1.worker.gpu.repair_executor import find_repair_fence_layer
+
+    model = SimpleNamespace(
+        transformer=SimpleNamespace(
+            h=[SimpleNamespace(self_attn=SimpleNamespace(attn=None))]
+        ),
+        language_model=SimpleNamespace(
+            model=SimpleNamespace(layers=[_FakeLayer("language_model.model.layers.0")])
+        ),
+    )
+    layer, path = find_repair_fence_layer(model)
+    assert path == "language_model.model.layers"
+    assert layer is model.language_model.model.layers[0]
+
+
+def test_replay_canary_accepts_falcon_style_stack():
+    """The canary probes the resolved stack's owning module: a
+    Falcon-style model (stack at transformer.h, embed seam on the
+    transformer module) is replay-compatible. The pre-resolver tree
+    raised a bare AttributeError on model.model before any verdict."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    verify_replay_compatibility(_FalconStyleModel(3))
+
+
+def test_repair_capability_verdict_accepts_falcon_style_stack():
+    """The init capability verdict resolves the same stack the executor
+    replays: a Falcon-style model with the fence seam is compatible."""
+    from vllm.v1.worker.gpu.repair_executor import repair_capability
+
+    verdict = repair_capability(_FalconStyleModel(3))
+    assert verdict["compatible"] is True
+    assert verdict["reason_code"] == "ok"
+
+
+def test_repair_executes_over_falcon_style_stack():
+    """A Falcon-style model (decoder at transformer.h, no model.layers)
+    passes a REAL repair through the executor: the pre-write fence
+    authorizes the span, the native replay runs over the alternative
+    stack, and the replayed layer actually writes its KV rows.
+
+    The pre-resolver tree read model.model.layers directly, so every
+    repair on such a model was refused (and the init verdict crashed on
+    the missing model attribute) -- the exact gap the vllm-ascend review
+    of the layout gate flagged."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    sub = _sub_output(works, tokens)
+    model = _FalconStyleModel(2)
+    ctx = {"transformer.h.0": meta, "transformer.h.1": meta}
+    with set_forward_context(ctx, create_vllm_config(model="facebook/opt-125m")):
+        results = execute_repair_only(model, sub, input_ids, positions, list(works))
+
+    (result,) = results
+    assert result.request_id == "req-a"
+    assert result.executed_layers == 1
+    assert not result.aborted
+    assert result.structural_check
+    # The replay wrote exactly the authorized span's rows on layer 0 of
+    # the alternative stack (block 2, the work's only authorized block).
+    for cache in model.transformer.h[0].self_attn.attn.kv_cache:
+        assert cache[2].eq(1.0).all()
+        for block in (0, 1, 3):
+            assert cache[block].eq(0.0).all()
+    # layer_end=1: the deeper layer of the alternative stack was never
+    # replayed.
+    for cache in model.transformer.h[1].self_attn.attn.kv_cache:
+        assert cache.eq(0.0).all()
 
 
 # ---- Authorization-shape battery: aliasing and grid-range geometry ----
