@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Internal prefill checkpoints for Mamba2 prefix caching."""
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import (
@@ -10,6 +11,8 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     register_mamba_layers,
 )
+from vllm.config import SpeculativeConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
@@ -77,11 +80,24 @@ def _create_mamba2_builder(
     enable_prefix_caching: bool = True,
     num_prefill_checkpoint_blocks: int = 1,
     prefill_checkpoint_alignment: int | None = 1,
+    num_speculative_tokens: int = 0,
+    full_cudagraph: bool = False,
+    pipeline_parallel_size: int = 1,
+    use_replayssm: bool = False,
 ) -> Mamba2AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=MAMBA_BLOCK_SIZE
     )
     vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    vllm_config.cache_config.use_replayssm = use_replayssm
+    vllm_config.parallel_config.pipeline_parallel_size = pipeline_parallel_size
+    if num_speculative_tokens:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=num_speculative_tokens,
+        )
+    if full_cudagraph:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
     # get_mamba_chunk_size() reads `mamba_chunk_size` then `chunk_size`.
     vllm_config.model_config.hf_text_config.mamba_chunk_size = CHUNK_SIZE
     spec = MambaSpec(
@@ -103,6 +119,99 @@ def _create_mamba2_builder(
     vllm_config.cache_config.hash_block_size = MAMBA_BLOCK_SIZE
     vllm_config.cache_config.cache_hit_alignment_tokens = MAMBA_BLOCK_SIZE
     return builder
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("num_speculative_tokens", [0, 2])
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
+def test_mrv2_graph_inputs_alias_aligned_metadata(
+    num_speculative_tokens: int,
+    pipeline_parallel_size: int,
+) -> None:
+    builder = _create_mamba2_builder(
+        num_prefill_checkpoint_blocks=0,
+        prefill_checkpoint_alignment=None,
+        num_speculative_tokens=num_speculative_tokens,
+        full_cudagraph=True,
+        pipeline_parallel_size=pipeline_parallel_size,
+    )
+    num_reqs = 2
+    num_slots = 1 + num_speculative_tokens
+    aligned = torch.arange(
+        builder.decode_cudagraph_max_bs * num_slots,
+        dtype=torch.int32,
+    ).view(builder.decode_cudagraph_max_bs, num_slots)
+    accepted = (
+        torch.arange(
+            1,
+            builder.decode_cudagraph_max_bs + 1,
+            dtype=torch.int32,
+        )
+        if num_speculative_tokens
+        else None
+    )
+    builder.mamba_aligned_state_indices = aligned[:num_reqs]
+    builder.bind_mrv2_graph_inputs(aligned, accepted)
+
+    query_len = 1 + num_speculative_tokens
+    common = create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[32, 48],
+            query_lens=[query_len, query_len],
+        ),
+        MAMBA_BLOCK_SIZE,
+        DEVICE,
+        arange_block_indices=True,
+    ).replace(is_prefilling=torch.zeros(num_reqs, dtype=torch.bool))
+    metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=None if accepted is None else accepted[:num_reqs],
+        num_decode_draft_tokens_cpu=(
+            None
+            if not num_speculative_tokens
+            else torch.full((num_reqs,), num_speculative_tokens, dtype=torch.int32)
+        ),
+    )
+
+    assert metadata.state_indices_tensor_d is not None
+    assert metadata.state_indices_tensor_d.data_ptr() == aligned.data_ptr()
+    torch.testing.assert_close(
+        metadata.state_indices_tensor_d,
+        aligned[:num_reqs],
+    )
+    if accepted is None:
+        assert metadata.num_accepted_tokens is None
+    else:
+        assert metadata.num_accepted_tokens is not None
+        assert metadata.num_accepted_tokens.data_ptr() == accepted.data_ptr()
+        torch.testing.assert_close(
+            metadata.num_accepted_tokens,
+            accepted[:num_reqs],
+        )
+
+
+@torch.inference_mode()
+def test_mrv2_graph_inputs_keep_state_staging_for_replayssm() -> None:
+    builder = _create_mamba2_builder(
+        num_prefill_checkpoint_blocks=0,
+        prefill_checkpoint_alignment=None,
+        num_speculative_tokens=2,
+        full_cudagraph=True,
+        use_replayssm=True,
+    )
+    original_state_indices = builder.state_indices_tensor_d
+    aligned = torch.arange(
+        builder.decode_cudagraph_max_bs, dtype=torch.int32
+    ).unsqueeze(-1)
+    accepted = torch.ones(builder.decode_cudagraph_max_bs, dtype=torch.int32)
+
+    builder.bind_mrv2_graph_inputs(aligned, accepted)
+
+    assert (
+        builder.state_indices_tensor_d.data_ptr() == original_state_indices.data_ptr()
+    )
+    assert builder.decode_num_accepted_tokens.data_ptr() == accepted.data_ptr()
 
 
 def _build(builder, seq_lens, query_lens):
