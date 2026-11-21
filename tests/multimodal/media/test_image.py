@@ -17,8 +17,12 @@ from vllm.multimodal import image as image_utils
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.image import ALLOWED_IMAGE_FORMATS, open_image
 from vllm.multimodal.media import ImageMediaIO, MediaConnector, MediaDecodedBudget
+from vllm.multimodal.media import image as media_image_module
+from vllm.multimodal.media.base import MediaWithBytes
 from vllm.multimodal.media.video import VideoMediaIO
 from vllm.utils.import_utils import has_torchcodec_image_decoding
+
+from ..test_image import make_test_png_bytes
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -718,3 +722,241 @@ def test_torchcodec_backend_jpeg_frame_list_video():
     actual = load(ImageMediaIO(image_backend="torchcodec"))
     assert actual.shape == (2, 32, 48, 3)
     np.testing.assert_array_equal(actual, expected)
+
+
+def _load_in_place_and_copy(monkeypatch, image_io: ImageMediaIO, data: bytes):
+    """Load `data` as-is and with EXIF normalization forced onto the copy path."""
+    seen_in_place: list[bool] = []
+    orig_normalize = media_image_module.normalize_image
+
+    def _recording_normalize(img: Image.Image, *, in_place: bool = False):
+        seen_in_place.append(in_place)
+        return orig_normalize(img, in_place=in_place)
+
+    monkeypatch.setattr(media_image_module, "normalize_image", _recording_normalize)
+    actual = image_io.load_bytes(data)
+    monkeypatch.setattr(
+        media_image_module,
+        "normalize_image",
+        lambda img, *, in_place=False: orig_normalize(img, in_place=False),
+    )
+    expected = image_io.load_bytes(data)
+    return actual, expected, seen_in_place
+
+
+def _seek_result(image: Image.Image, frame: int) -> str:
+    try:
+        image.seek(frame)
+    except Exception as e:
+        return type(e).__name__
+    return "ok"
+
+
+def _assert_same_loaded_image(actual: MediaWithBytes, expected: MediaWithBytes):
+    assert type(actual.media) is Image.Image
+    assert type(expected.media) is Image.Image
+    assert actual.media.format == expected.media.format
+    assert actual.media.mode == expected.media.mode
+    assert actual.media.size == expected.media.size
+    np.testing.assert_array_equal(np.asarray(actual.media), np.asarray(expected.media))
+    np.testing.assert_array_equal(
+        np.asarray(actual.media.convert("RGB")),
+        np.asarray(expected.media.convert("RGB")),
+    )
+    if actual.media.mode == "P":
+        assert actual.media.getpalette() == expected.media.getpalette()
+    assert dict(actual.media.getexif()) == dict(expected.media.getexif())
+    assert actual.media.info == expected.media.info
+    assert actual.io_config == expected.io_config
+    assert getattr(actual.media, "n_frames", 1) == 1
+    for image in (actual.media, expected.media):
+        assert image.tell() == 0
+    assert _seek_result(actual.media, 1) == _seek_result(expected.media, 1)
+    assert _seek_result(actual.media, 0) == _seek_result(expected.media, 0) == "ok"
+
+    rt_actual = type(actual.media).__new__(type(actual.media))
+    rt_actual.__setstate__(actual.media.__getstate__())
+    rt_expected = type(expected.media).__new__(type(expected.media))
+    rt_expected.__setstate__(expected.media.__getstate__())
+    assert type(rt_actual) is Image.Image
+    assert rt_actual.format == rt_expected.format
+    np.testing.assert_array_equal(np.asarray(rt_actual), np.asarray(rt_expected))
+    assert rt_actual.tell() == rt_expected.tell() == 0
+    assert _seek_result(rt_actual, 1) == _seek_result(rt_expected, 1)
+    assert _seek_result(rt_actual, 0) == _seek_result(rt_expected, 0) == "ok"
+
+
+@pytest.mark.parametrize("orientation", [None, 1])
+def test_image_media_io_load_bytes_in_place_avoids_pixel_copy(
+    monkeypatch, orientation: int | None
+):
+    """Detaching via _new(im) shares the decoded ImagingCore without a pixel copy."""
+    data = make_test_png_bytes("RGB", orientation)
+    image_io = ImageMediaIO()
+    orig_open = media_image_module.open_image
+    orig_normalize = media_image_module.normalize_image
+
+    opened_in_place: list[Image.Image] = []
+    monkeypatch.setattr(
+        media_image_module,
+        "open_image",
+        lambda fp: (opened_in_place.append(im := orig_open(fp)), im)[1],
+    )
+    actual = image_io.load_bytes(data)
+
+    opened_copy: list[Image.Image] = []
+    monkeypatch.setattr(
+        media_image_module,
+        "open_image",
+        lambda fp: (opened_copy.append(im := orig_open(fp)), im)[1],
+    )
+    monkeypatch.setattr(
+        media_image_module,
+        "normalize_image",
+        lambda img, *, in_place=False: orig_normalize(img, in_place=False),
+    )
+    expected = image_io.load_bytes(data)
+
+    assert type(actual.media) is Image.Image
+    assert actual.media is not opened_in_place[0]
+    assert actual.media.im is opened_in_place[0].im
+    assert expected.media.im is not opened_copy[0].im
+
+
+@pytest.mark.parametrize("image_mode", ["RGB", None])
+@pytest.mark.parametrize("mode", ["RGB", "RGBA", "L", "P"])
+@pytest.mark.parametrize("orientation", [None, *range(1, 9)])
+def test_image_media_io_load_bytes_exif_in_place_parity(
+    monkeypatch, image_mode: str | None, mode: str, orientation: int | None
+):
+    """Static PNGs are normalized in place with identical output and hashes."""
+    data = make_test_png_bytes(mode, orientation)
+    image_io = ImageMediaIO(image_mode=image_mode)
+    actual, expected, seen_in_place = _load_in_place_and_copy(
+        monkeypatch, image_io, data
+    )
+
+    assert seen_in_place == [True]
+    _assert_same_loaded_image(actual, expected)
+    assert actual.original_bytes == expected.original_bytes == data
+    assert MultiModalHasher.hash_kwargs(
+        "blake3", image=actual
+    ) == MultiModalHasher.hash_kwargs("blake3", image=expected)
+
+
+@pytest.mark.parametrize("image_mode", ["RGB", None])
+@pytest.mark.parametrize(
+    ("fmt", "orientation"),
+    [("JPEG", None), ("JPEG", 6), ("WEBP", None), ("WEBP", 6), ("BMP", None)],
+)
+def test_image_media_io_load_bytes_in_place_other_formats(
+    monkeypatch, image_mode: str | None, fmt: str, orientation: int | None
+):
+    """Other allowlisted static formats also match the copy path exactly."""
+    save_kwargs: dict[str, object] = {}
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        save_kwargs["exif"] = exif.tobytes()
+    data = _encode(_noisy_rgb_image(), fmt, **save_kwargs)
+    image_io = ImageMediaIO(image_mode=image_mode)
+    actual, expected, seen_in_place = _load_in_place_and_copy(
+        monkeypatch, image_io, data
+    )
+
+    assert seen_in_place == [True]
+    _assert_same_loaded_image(actual, expected)
+
+
+def _single_layer_psd(width: int = 6, height: int = 4) -> bytes:
+    """Pillow can't write PSDs, so build a valid RGB file with one layer."""
+    pixels = np.arange(3 * height * width, dtype=np.uint8).reshape(3, height, width)
+    header = b"8BPS" + struct.pack(">H6xHIIHH", 1, 3, height, width, 8, 3)
+    record = struct.pack(">iiiiH", 0, 0, height, width, 3)
+    record += b"".join(struct.pack(">hI", c, 2 + width * height) for c in range(3))
+    extra = struct.pack(">II", 0, 0) + b"\x00" * 4  # no mask/ranges, empty name
+    record += b"8BIMnorm" + bytes([255, 0, 0, 0]) + struct.pack(">I", len(extra))
+    record += extra
+    channels = b"".join(b"\x00\x00" + pixels[c].tobytes() for c in range(3))
+    layer_info = struct.pack(">h", 1) + record + channels
+    layer_info += b"\x00" * (len(layer_info) % 2)
+    layers = struct.pack(">I", len(layer_info)) + layer_info + struct.pack(">I", 0)
+    composite = b"\x00\x00" + pixels.tobytes()
+    return header + struct.pack(">III", 0, 0, len(layers)) + layers + composite
+
+
+def _two_frame_png(orientation: int | None) -> bytes:
+    save_kwargs: dict[str, object] = {
+        "save_all": True,
+        "append_images": [_noisy_rgb_image().transpose(Image.FLIP_LEFT_RIGHT)],
+    }
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        save_kwargs["exif"] = exif.tobytes()
+    return _encode(_noisy_rgb_image(), "PNG", **save_kwargs)
+
+
+def _tiff(orientation: int | None) -> bytes:
+    save_kwargs: dict[str, object] = {}
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        save_kwargs["exif"] = exif.tobytes()
+    return _encode(_noisy_rgb_image(), "TIFF", **save_kwargs)
+
+
+@pytest.mark.parametrize("image_mode", ["RGB", None])
+@pytest.mark.parametrize(
+    "data",
+    [
+        _two_frame_png(None),
+        _two_frame_png(6),
+        _tiff(None),
+        _tiff(1),
+        _tiff(6),
+        _single_layer_psd(),
+        _encode(_noisy_rgb_image(), "ICO", sizes=[(16, 16), (32, 32), (48, 48)]),
+        _encode(_noisy_rgb_image(), "GIF"),
+    ],
+    ids=["apng", "apng_o6", "tiff", "tiff_o1", "tiff_o6", "psd", "ico", "gif"],
+)
+def test_image_media_io_load_bytes_keeps_copy_for_stateful_formats(
+    monkeypatch, image_mode: str | None, data: bytes
+):
+    """Multi-frame and format-specific files still load as a detached image."""
+    image_io = ImageMediaIO(image_mode=image_mode)
+    actual, expected, seen_in_place = _load_in_place_and_copy(
+        monkeypatch, image_io, data
+    )
+
+    assert seen_in_place == [False]
+    if image_mode is None:
+        assert type(actual.media) is Image.Image
+    _assert_same_loaded_image(actual, expected)
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "WEBP"])
+def test_image_media_io_load_bytes_exif_cleanup_failure_discards_rotation(
+    monkeypatch, fmt: str
+):
+    """If EXIF metadata rewrite raises during orientation transpose, load_bytes()
+    must discard the rotated pixels and keep the original unrotated pixels + tag."""
+    base_img = Image.new("RGB", (6, 4), (10, 20, 30))
+    base_img.putpixel((0, 0), (250, 5, 15))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    data = _encode(base_img, fmt, exif=exif.tobytes())
+    unrotated_ref = Image.open(BytesIO(data))
+    unrotated_ref.load()
+
+    def _boom_tobytes(self):
+        raise RuntimeError("corrupt EXIF IFD serialization")
+
+    monkeypatch.setattr(Image.Exif, "tobytes", _boom_tobytes)
+    loaded = ImageMediaIO(image_mode=None).load_bytes(data)
+
+    assert type(loaded.media) is Image.Image
+    assert loaded.media.size == (6, 4)
+    np.testing.assert_array_equal(np.asarray(loaded.media), np.asarray(unrotated_ref))
+    assert loaded.media.getexif().get(0x0112) == 6

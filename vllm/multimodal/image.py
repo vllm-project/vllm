@@ -6,7 +6,7 @@ import struct
 from typing import Any
 
 import torch
-from PIL import Image, ImageOps
+from PIL import ExifTags, Image, ImageOps
 
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule, has_torchcodec_image_decoding
@@ -87,9 +87,25 @@ def rescale_image_size(
     return image
 
 
-def normalize_image(image: Image.Image) -> Image.Image:
-    """Normalize EXIF orientation so the pixel data matches visual display."""
+_EXIF_TRANSPOSE_ORIENTATIONS: frozenset[int] = frozenset(range(2, 9))
+
+
+def normalize_image(image: Image.Image, *, in_place: bool = False) -> Image.Image:
+    """Normalize EXIF orientation so the pixel data matches visual display.
+
+    When `in_place=True`, skips `exif_transpose`'s full-image copy and returns
+    `image` directly when no orientation transform (`2..8`) is needed, while
+    keeping the copy path when a transform is required so failed EXIF metadata
+    rewrites never leave rotated pixels with the original orientation tag.
+    """
     with contextlib.suppress(Exception):
+        if in_place:
+            image.load()
+            if (
+                image.getexif().get(ExifTags.Base.Orientation, 1)
+                not in _EXIF_TRANSPOSE_ORIENTATIONS
+            ):
+                return image
         image = ImageOps.exif_transpose(image)
     return image
 
