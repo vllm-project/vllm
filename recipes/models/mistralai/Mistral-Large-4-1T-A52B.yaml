@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
 #
-# Every flag below comes from a launcher that ran on GB300, B300, B200, H200 or
-# MI350X; untested options are left out.
+# Every flag below comes from a launcher that ran on GB300, B300, B200, H200,
+# MI350X or MI325X; untested options are left out.
 
 meta:
   title: "Mistral-Large-4-1T-A52B"
@@ -9,7 +9,7 @@ meta:
   provider: "Mistral AI"
   description: "Mistral Large 4: a 1T-total / 49B-active multimodal MoE with sparse MLA attention, a built-in DSpark drafter, tool calling and reasoning, in FP8, NVFP4 and AMD MXFP4 checkpoints."
   date_added: 2026-10-28
-  date_updated: 2026-11-17
+  date_updated: 2026-11-18
   tasks:
     - multimodal
   performance_headline: "8x GB300, NVFP4 + DSpark: TP8 c1 TPOT 3.1 ms; 1P1D (4+4) P DP4/EP → D TP4 reaches 241 output tok/s/GPU at 32k input"
@@ -26,6 +26,7 @@ meta:
     h200: verified
     mi350x: verified
     mi355x: verified
+    mi325x: verified
 
 model:
   model_id: "mistralai/Mistral-Large-4-1T-A52B"
@@ -81,7 +82,8 @@ features:
       - "mistral"
   spec_decoding:
     description: "DSpark speculative decoding with the drafter shipped in both checkpoints. Depth 3 is fixed by the checkpoint."
-    # Not validated with pipeline parallelism.
+    # Not validated with pipeline parallelism. Greedy DSpark at TP8 was run on
+    # 8× MI325X (block-FP8). Probabilistic drafting was not.
     strategies:
       - single_node_tp
       - multi_node_tp
@@ -98,6 +100,10 @@ features:
       dspark_probabilistic:
         label: "DSpark (probabilistic)"
         description: "Probabilistic drafting for sampled serving at T ≥ 1 without top-p: AL 2.04 → 2.36–2.53 at T=1.5."
+        # Measured on GB300. The MI325X run used greedy drafting only.
+        hardware:
+          mi325x: unsupported
+          mi300x: unsupported
         args:
           - "--speculative-config"
           - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
@@ -122,16 +128,24 @@ variants:
     precision: fp8
     # ceil(1060.6 GB checkpoint × 1.2)
     vram_minimum_gb: 1273
-    supported_hardware: [gb300, b300, h200, mi350x, mi355x]
-    description: "FP8 block-scaled weights with the DSpark drafter (~128 GiB of weights per GPU on 8 GPUs). On AMD the routed experts are re-quantized to MXFP4 at load, which also fits TP4. Validated on GB300, B300, H200 and MI350X."
+    supported_hardware: [gb300, b300, h200, mi350x, mi355x, mi325x, mi300x]
+    # Block-FP8 does not fit four 256 GB MI325X GPUs (~265 GB of weights per
+    # rank at TP4). MXFP4 requant is what makes TP4 fit on MI350 Series.
+    tp:
+      mi325x: 8
+      mi300x: 8
+    description: "FP8 block-scaled weights with the DSpark drafter (~128 GiB of weights per GPU on 8 GPUs). On MI350 Series the routed experts are re-quantized to MXFP4 at load, which also fits TP4. On MI300 Series (gfx942) they stay block-FP8 and need TP8. Validated on GB300, B300, H200, MI350X and MI325X."
     hardware_overrides:
-      amd:
+      # Requant stays on MI350 Series, where it was measured. The MI325X
+      # run kept the block-FP8 experts.
+      mi350x: &fp8_mxfp4_requant
         extra_env:
           # FP8 → MXFP4 routed experts, layer by layer at load (peak memory:
           # the MXFP4 model plus one layer of FP8 experts). a8w4 = FP8
           # activations; a4w4 (MXFP4 activations) measured level with it at TP4.
           VLLM_FP8_MOE_REQUANT: "mxfp4"
           VLLM_FP8_MOE_REQUANT_ACT: "a8w4"
+      mi355x: *fp8_mxfp4_requant
   mxfp4:
     model_id: "amd/Mistral-Large-4-1T-A52B-Quark-MXFP4"
     precision: mxfp4
@@ -147,6 +161,8 @@ variants:
 #   B300:  one 8-GPU node (TP8, NVFP4 and FP8)
 #   B200:  one 8-GPU node (TP8) and 1P1D with one node per side
 #   H200:  2 x 8-GPU nodes (TP16, PP2 x TP8)
+#   MI325X / MI300X (gfx942): one 8-GPU node, FP8 checkpoint, block-FP8
+#          experts, TP8. MI300X is the same path and has not been smoke-tested.
 compatible_strategies: []
 
 strategy_hardware:
@@ -156,6 +172,8 @@ strategy_hardware:
     b200: supported
     mi350x: supported
     mi355x: supported
+    mi325x: supported
+    mi300x: supported
   multi_node_tp:
     gb300: supported
     h200: supported
@@ -716,27 +734,45 @@ notes:
       TP16 with DSpark (3 tokens), `fp8_ds_mla` and CUDA graphs scored 0.960 on
       GSM8K (500 questions, 5-shot, chat template, greedy). No performance
       numbers were taken on H200.
-  - title: "AMD: MXFP4 experts and AITER"
+  - title: "AMD: AITER"
     when:
       hardware: [amd]
     body: |
-      ROCm has no NVFP4 kernels. Serve the FP8 checkpoint, whose routed
-      experts are re-quantized to OCP MXFP4 at load
-      (`VLLM_FP8_MOE_REQUANT=mxfp4`; expert weights drop from ~125 to ~69 GiB
-      per GPU at TP8), or the AMD Quark MXFP4 checkpoint.
+      ROCm has no NVFP4 kernels. `VLLM_ROCM_USE_AITER=1` runs the MoE, GEMMs,
+      MLA decode, RMSNorm and the TP all-reduce on AITER; every AMD number
+      here was measured with it on. The latent KV cache is FP8 (E4M3) by
+      default on ROCm, 1.86x the capacity of bf16; `--kv-cache-dtype bfloat16`
+      opts out.
+  - title: "MI350 Series: MXFP4 experts"
+    when:
+      hardware: [mi350x, mi355x]
+    body: |
+      Serve the FP8 checkpoint, whose routed experts are re-quantized to OCP
+      MXFP4 at load (`VLLM_FP8_MOE_REQUANT=mxfp4`; expert weights drop from
+      ~125 to ~69 GiB per GPU at TP8), or the AMD Quark MXFP4 checkpoint.
       `VLLM_FP8_MOE_REQUANT_ACT` picks the activation format: `a8w4` (FP8, the
       default) or `a4w4` (MXFP4, required by the specialized decode).
-      `VLLM_ROCM_USE_AITER=1` runs the MoE, GEMMs, MLA decode, RMSNorm and the
-      TP all-reduce on AITER; every AMD number here was measured with it on.
-      The latent KV cache is FP8 (E4M3) by default on ROCm, 1.86x the capacity
-      of bf16; `--kv-cache-dtype bfloat16` opts out.
-  - title: "AMD: TP8 with DSpark not yet validated"
+  - title: "MI300 Series (gfx942): block-FP8 experts, TP8"
     when:
-      hardware: [amd]
+      hardware: ["arch:gfx942"]
+    body: |
+      - Block-FP8 experts on AITER at TP8, one 8-GPU node (~128 GiB of
+        weights per GPU). MXFP4 requant was not tested on gfx942.
+      - Validated on 8× MI325X: GSM8K 96.7% with and without greedy DSpark,
+        80–86% draft acceptance, 136–187 vs 60–71 tok/s for one request.
+      - Not tested: probabilistic drafting, MI300X, and prompts near 262144
+        (the KV pool holds 7 such sequences).
+      - The startup warning that `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA` is
+        ignored on gfx942 is expected.
+  - title: "MI350 Series: TP8 with DSpark not yet validated"
+    when:
+      hardware: [mi350x, mi355x]
       features: [spec_decoding]
     body: |
-      DSpark was measured at TP4 on MI350X (see the TP4 presets). TP8 serves
-      without spec decoding; TP8 with DSpark has not been run yet.
+      DSpark was measured at TP4 on MI350X (see the TP4 presets). TP8 on
+      MI350 Series serves without spec decoding; TP8 with DSpark has not been
+      run there. On MI325X, greedy DSpark at TP8 has been run (see the gfx942
+      note).
   - title: "Pipeline parallelism needs a layer partition"
     when:
       strategies: [multi_node_tp_pp]
@@ -796,7 +832,7 @@ guide: |
   | Variant | Checkpoint | Weights | Validated on |
   |---|---|---|---|
   | NVFP4 (default) | [`mistralai/Mistral-Large-4-1T-A52B-NVFP4`](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B-NVFP4) | ModelOpt NVFP4 experts, FP8 attention / shared experts, ~610 GB | GB300, B200 |
-  | FP8 (default on AMD) | [`mistralai/Mistral-Large-4-1T-A52B`](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B) | FP8 block-scaled, ~1.06 TB (on AMD: MXFP4 experts at load) | GB300, H200, MI350X |
+  | FP8 (default on AMD) | [`mistralai/Mistral-Large-4-1T-A52B`](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B) | FP8 block-scaled, ~1.06 TB (MI350 Series: MXFP4 experts at load; MI300 Series: block-FP8) | GB300, H200, MI350X, MI325X |
   | MXFP4 (Quark) | [`amd/Mistral-Large-4-1T-A52B-Quark-MXFP4`](https://huggingface.co/amd/Mistral-Large-4-1T-A52B-Quark-MXFP4) | AMD Quark OCP MXFP4 routed experts, rest unchanged, ~578 GB | MI350 Series |
 
   Both checkpoints ship the DSpark drafter. The speculative depth is fixed at 3 by
@@ -818,7 +854,7 @@ guide: |
     two trays with NVFP4 and FP8), 8x B300 (NVFP4 and FP8), 8x B200 (NVFP4) and
     2x 8 H200 (FP8, TP16 or PP2 x TP8). FP8 needs ~128 GiB of weights per GPU on
     8 GPUs, NVFP4 ~76 GiB. AMD Instinct MI350X (8 GPUs, TP8 or two TP4 replicas)
-    with the ROCm image.
+    with the ROCm image, and 8× MI325X (TP8, block-FP8).
 
   ## Choosing a configuration
 
@@ -856,24 +892,30 @@ guide: |
 
   ## AMD (ROCm)
 
-  Mistral Large 4 runs on AMD Instinct MI350 Series GPUs (gfx950) with the ROCm build
-  of vLLM (image `vllm/vllm-openai-rocm:v0.34.0`). The routed experts run as
-  OCP MXFP4 on AITER's fused MoE, either from the
-  AMD Quark MXFP4 checkpoint or from the FP8 checkpoint re-quantized at load
-  (`VLLM_FP8_MOE_REQUANT=mxfp4`, layer by layer, so peak load memory stays low). With
-  MXFP4 experts the model fits four GPUs, so one 8-GPU node serves two TP4 replicas.
-  The sparse MLA runs on AITER's MLA decode kernels (`ROCM_AITER_MLA_SPARSE`), the
-  DSA indexer on AITER's gfx950 indexer kernels, and the latent KV cache is plain FP8
-  (E4M3) by default, 1.86x the capacity of bf16. The builder adds the AITER
-  environment on AMD.
+  Mistral Large 4 runs on AMD Instinct with the ROCm build of vLLM (image
+  `vllm/vllm-openai-rocm:v0.34.0`). The latent KV cache is plain FP8 (E4M3) by
+  default, 1.86x the capacity of bf16. The builder adds the AITER environment
+  on AMD.
+
+  On MI350 Series (gfx950) the routed experts run as OCP MXFP4 on AITER's fused
+  MoE, either from the AMD Quark MXFP4 checkpoint or from the FP8 checkpoint
+  re-quantized at load (`VLLM_FP8_MOE_REQUANT=mxfp4`, layer by layer, so peak
+  load memory stays low). With MXFP4 experts the model fits four GPUs, so one
+  8-GPU node serves two TP4 replicas. The sparse MLA runs on AITER's MLA decode
+  kernels (`ROCM_AITER_MLA_SPARSE`), and the DSA indexer on AITER's gfx950
+  indexer kernels.
 
   | Goal | Configuration | Why |
   |---|---|---|
-  | Default | TP8 | one replica per node; DSpark at TP8 not yet validated on ROCm |
+  | Default | TP8 | one replica per node; DSpark at TP8 not yet validated on MI350 Series |
   | Interactive, more replicas | TP4 + DSpark (preset) | AL 3.1; TPOT 2.7x / 1.9x / 1.8x lower than no spec at c1 / c8 / c32 |
   | Lowest latency, 1–4 users | TP4 specialized decode (preset) | one fused kernel per MoE layer: TPOT 1.5x lower at c1; 2.9x with DSpark |
 
   MXFP4 vs FP8 experts at TP8: +22–71% output tok/s at 1–64 concurrent requests.
+
+  On MI300 Series (gfx942) the FP8 checkpoint stays block-FP8 and needs TP8 on
+  one 8-GPU node (TP4 does not fit a 256 GB GPU), with greedy DSpark. Validated
+  on 8× MI325X; see the MI300 Series note for results.
 
   ## Accuracy
 
@@ -918,7 +960,9 @@ guide: |
   - DSpark doesn't run on a DCP decode node in P/D yet.
   - DSpark wasn't validated with pipeline parallelism.
   - AMD: NVFP4 checkpoints, DCP / PCP, NIXL P/D and HiSparse aren't supported on
-    ROCm yet; TP8 with DSpark and MI300 Series (gfx942) are not validated.
+    ROCm yet. TP8 with DSpark is not validated on MI350 Series. On gfx942,
+    probabilistic DSpark, the Quark MXFP4 checkpoint and the gfx950 specialized
+    decode are not offered, and MI300X has not been smoke-tested.
 
   ## References
 
