@@ -1146,6 +1146,8 @@ fn args_json_reads_env_only_settings_from_env() {
         Some(32 * 1024 * 1024)
     );
 
+    assert_eq!(args.api_server_options().max_tokenize_tokens, None);
+
     let args = apply(&[
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
@@ -1154,6 +1156,7 @@ fn args_json_reads_env_only_settings_from_env() {
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
         ("VLLM_SERVER_DEV_MODE", " 1"),
         ("VLLM_MAX_N_SEQUENCES", " 8 "),
+        ("VLLM_MAX_TOKENIZE_TOKENS", " 100 "),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
@@ -1162,6 +1165,7 @@ fn args_json_reads_env_only_settings_from_env() {
     assert!(args.api_server_options().skip_model_name_validation);
     assert!(args.api_server_options().server_dev_mode);
     assert_eq!(args.api_server_options().max_n_sequences, 8);
+    assert_eq!(args.api_server_options().max_tokenize_tokens, Some(100));
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -1180,6 +1184,7 @@ fn args_json_reads_env_only_settings_from_env() {
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
         apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
         apply(&[("VLLM_MAX_N_SEQUENCES", "1e3")]).unwrap_err(),
+        apply(&[("VLLM_MAX_TOKENIZE_TOKENS", "invalid")]).unwrap_err(),
     ];
     expect![[r#"
         [
@@ -1190,6 +1195,7 @@ fn args_json_reads_env_only_settings_from_env() {
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
             "invalid VLLM_SERVER_DEV_MODE: `true` is not an integer",
             "invalid VLLM_MAX_N_SEQUENCES: `1e3` is not an integer",
+            "invalid VLLM_MAX_TOKENIZE_TOKENS: `invalid` is not an integer",
         ]
     "#]]
     .assert_debug_eq(&errors);
@@ -1233,6 +1239,44 @@ fn log_error_stack_defaults_to_server_dev_mode() {
     assert!(!json(model_only, &[]));
     assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
     assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
+}
+
+/// CLI args take precedence over environment variables for `--max-tokenize-tokens`.
+#[test]
+fn max_tokenize_tokens_arg_takes_precedence_over_env() {
+    let json = |args_json: &str, vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .unwrap();
+        args.api_server_options().max_tokenize_tokens
+    };
+
+    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
+    let explicit_cli_positive = r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":200}"#;
+    let explicit_cli_disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":0}"#;
+
+    // Falls back to env when not set in CLI/args-json
+    assert_eq!(
+        json(model_only, &[("VLLM_MAX_TOKENIZE_TOKENS", "100")]),
+        Some(100)
+    );
+
+    // CLI args take precedence over env
+    assert_eq!(
+        json(
+            explicit_cli_positive,
+            &[("VLLM_MAX_TOKENIZE_TOKENS", "100")]
+        ),
+        Some(200)
+    );
+    assert_eq!(
+        json(
+            explicit_cli_disabled,
+            &[("VLLM_MAX_TOKENIZE_TOKENS", "100")]
+        ),
+        Some(0)
+    );
 }
 
 /// `--enable-scale-out` falls back to `VLLM_SERVER_DEV_MODE`, like

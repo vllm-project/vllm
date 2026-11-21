@@ -1039,7 +1039,8 @@ impl SharedRuntimeArgs {
                 .map_err(|error| format!("invalid VLLM_MAX_N_SEQUENCES: {error}"))?;
             self.max_n_sequences = Some(max_n_sequences);
         }
-        if let Some(value) = lookup("VLLM_MAX_TOKENIZE_TOKENS")
+        if self.max_tokenize_tokens.is_none()
+            && let Some(value) = lookup("VLLM_MAX_TOKENIZE_TOKENS")
             && !value.trim().is_empty()
         {
             let max_tokenize_tokens = parse_int(&value)
