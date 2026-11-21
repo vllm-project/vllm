@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+
 import pytest
 import torch
 from torch import nn
+from transformers import LlamaConfig, Qwen2Config
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
@@ -284,3 +287,47 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         # num_cudagraph_sizes * num cudagraphable graphs to capture
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
+
+
+@support_torch_compile
+class PositionalArgsModule(nn.Module):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        dim: int,
+        act: Callable[[torch.Tensor], torch.Tensor],
+        *names: str,
+    ) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+def _no_compile_config() -> VllmConfig:
+    return VllmConfig(compilation_config=CompilationConfig(mode=CompilationMode.NONE))
+
+
+def test_positional_args_checked_against_own_parameter():
+    """Each positional argument is checked against its own annotation (#60202)."""
+    with set_current_vllm_config(_no_compile_config()):
+        PositionalArgsModule(LlamaConfig(), 8, torch.relu, "a", "b")
+
+
+def test_positional_args_config_not_checked():
+    """A config parameter may get vLLM's own or a re-imported config class."""
+    with set_current_vllm_config(_no_compile_config()):
+        PositionalArgsModule(Qwen2Config(), 8, torch.relu)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("8", torch.relu), (8, torch.relu, "a", 1)],
+    ids=["positional_param", "var_positional"],
+)
+def test_positional_args_type_mismatch_raises(args):
+    with (
+        set_current_vllm_config(_no_compile_config()),
+        pytest.raises(TypeError, match=r"annotate 'PositionalArgsModule\.__init__'"),
+    ):
+        PositionalArgsModule(LlamaConfig(), *args)
