@@ -76,11 +76,13 @@ class MyAdminEndpointPlugin:
 
 A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
-## Optional startup and cleanup
+## Startup and cleanup (Optional)
 
 An endpoint plugin can implement [`SupportsStart`][vllm.plugins.endpoint_plugins.interface.SupportsStart], [`SupportsStop`][vllm.plugins.endpoint_plugins.interface.SupportsStop], or both. These capabilities are independent of `EndpointPlugin`; existing plugins need no new methods.
 
 The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. On Uvicorn 0.50 and later a failed or cancelled plugin startup exits the process with status 3; on earlier versions it exits with status 0. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
+
+The server gives each plugin with a `start` or `stop` hook its own task, which runs `start`, waits for shutdown, then runs `stop`. Some resources are bound to the task that entered them. anyio cancel scopes and task groups, which an MCP `ClientSession` uses, raise `RuntimeError` when exited from another task, and `asyncio.timeout` and `asyncio.TaskGroup` cancel the task that entered them. Because both hooks run in one task, a plugin can enter such a resource in `start` and exit it in `stop`, and a context variable set in `start` keeps its value in `stop`. The same task also means a plugin's `stop` cannot run while its `start` is running. Each task starts with a copy of the lifespan context, so a context variable set in one plugin's `start` is not visible to other plugins. If something other than server shutdown cancels the task after `start` returns, the task logs a warning and calls `stop` before it ends, with its own stop time limit. Event loop teardown cancels the task this way, and so does the failure of a child task in an anyio task group the plugin opened in `start`. The server calls each `stop` at most once.
 
 SIGINT, SIGTERM and `request_shutdown()` cancel pending plugin startup after engine shutdown. Watchdog exit cancels pending startup without waiting for engine shutdown. Cancellation targets plugin startup, not listener binding; the server waits for binding to finish before HTTP teardown. A startup hook must propagate cancellation after releasing partially acquired resources. Cancellation remains cooperative: a `start` hook that ignores it can keep the process alive until a process manager kills it.
 
