@@ -58,6 +58,61 @@ async def client(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
+async def test_layout_only_features_return_bad_request_and_server_recovers(
+    client, test_image
+):
+    """Layout-only render output must fail before reaching the model runner."""
+    render_payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": encode_image_url(test_image, format="PNG")
+                        },
+                    },
+                    {"type": "text", "text": "What color is this image?"},
+                ],
+            }
+        ],
+        "mm_payload": "none",
+    }
+    rendered = await client.post(RENDER_ENDPOINT, json=render_payload)
+    rendered.raise_for_status()
+    data = rendered.json()
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": data["token_ids"],
+            "features": data["features"],
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+    assert response.status_code == 400
+    assert "payload data or metadata" in response.json()["error"]["message"]
+
+    render_payload["mm_payload"] = "tensors"
+    rendered = await client.post(RENDER_ENDPOINT, json=render_payload)
+    rendered.raise_for_status()
+    data = rendered.json()
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": data["token_ids"],
+            "features": data["features"],
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+    response.raise_for_status()
+    assert response.json()["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
 async def test_render_to_generate_roundtrip(client, test_image):
     """End-to-end: render a multimodal chat -> feed into generate -> decode.
 
