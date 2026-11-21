@@ -324,6 +324,15 @@ def test_fused_post_conv_int64_token_offset():
             torch.float32,
             id="ratio2-16reqs-ragged",
         ),
+        # Enough requests for no V split: 16-bit state runs the separate kernel.
+        pytest.param(
+            3,
+            1,
+            (4,) * 7 + (2, 0),
+            torch.float16,
+            torch.bfloat16,
+            id="ratio3-9reqs-fp16",
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])

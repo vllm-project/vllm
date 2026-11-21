@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -12,6 +13,7 @@
 
 #include "../torch_utils.h"
 #include "core/cuda_compat.h"
+#include "fused_gdn_decode.h"
 
 namespace {
 
@@ -107,20 +109,7 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
-constexpr int kMaxMtpTokens = 9;
 constexpr int kTokenPasses = (kMaxMtpTokens + kWarps - 1) / kWarps;
-constexpr int kDtBiasFloat32 = 0;
-constexpr int kDtBiasBFloat16 = 1;
-constexpr int kDtBiasFloat16 = 2;
-
-struct GdnDecodeStrides {
-  int64_t mixed_row;
-  int64_t a_row;
-  int64_t b_row;
-  int64_t gate_row;
-  int64_t state_slot;
-};
-
 __device__ __forceinline__ float sigmoid_fast(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
@@ -500,6 +489,30 @@ void launch_gdn_decode_post_conv_mtp(
   const int num_requests = static_cast<int>(state_indices.size(0));
   const int split_v = choose_split_v(num_requests * num_value_heads,
                                      mixed_qkv.get_device_index());
+  // Without a V split, 16-bit state runs fused_gdn_decode_16bit_kernel.cu.
+  if constexpr (!std::is_same_v<StateT, float>) {
+    if (split_v == 1) {
+      const cudaError_t error =
+          launch_gdn_decode_post_conv_mtp_16bit<StateT, ValueHeadsPerKeyHead,
+                                                SigmoidGate>(
+              dim3(num_requests, num_value_heads), stream,
+              static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
+              static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
+              static_cast<const int*>(state_indices.data_ptr()),
+              static_cast<const int*>(cu_seqlens.data_ptr()),
+              static_cast<const int*>(num_accepted_tokens.data_ptr()),
+              static_cast<StateT*>(state.data_ptr()), output_gate,
+              norm_weight.data_ptr(),
+              static_cast<__nv_bfloat16*>(out.data_ptr()), num_key_heads,
+              num_value_heads, static_cast<int>(state_indices.size(1)),
+              dt_bias_type, norm_weight.scalar_type() == ScalarType::BFloat16,
+              static_cast<float>(scale), static_cast<float>(norm_eps), strides);
+      STD_TORCH_CHECK(error == cudaSuccess,
+                      "GDN decode MTP post-conv kernel launch failed: ",
+                      cudaGetErrorString(error));
+      return;
+    }
+  }
   const auto launch = [&]<int SplitV>() {
     return launch_split<StateT, ValueHeadsPerKeyHead, SigmoidGate, SplitV>(
         dim3(num_requests, num_value_heads, SplitV), stream,
