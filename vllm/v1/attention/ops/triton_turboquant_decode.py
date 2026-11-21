@@ -3,7 +3,8 @@
 """Triton fused TurboQuant decode attention.
 
 Decode path: Triton stage1 (split-KV tiled attention scoring + value
-accumulation) + stage2 (log-sum-exp reduction across splits).
+accumulation) + stage2 (log-sum-exp reduction across splits). MSE-key presets
+with GQA use a grouped stage 1 (one program per KV head) with tensor-core dots.
 
 Supports FP8 (E4M3) keys, 3-bit and 4-bit uniform quantized values.
 """
@@ -15,9 +16,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_decode_attention import (
-    _fwd_kernel_stage2,
-)
 
 _FP8_E4B15: dict[int, int] = {}
 
@@ -314,6 +312,349 @@ def _tq_decode_stage1(
 
 
 # ---------------------------------------------------------------------------
+# Stage 1 for MSE keys, GQA-grouped: one program per (batch, KV head, split).
+# Each K/V tile is unpacked once and shared by the KV_GROUP_SIZE query heads
+# of the group, and the scores and P @ V run as fp16 tensor-core dots with
+# fp32 accumulation. Writes the same mid_o layout as _tq_decode_stage1.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _tq_unpack_tile(
+    KV_cache_ptr,
+    bases,  # [BLOCK_KV] int64 byte offset of the packed field
+    kv_mask,  # [BLOCK_KV]
+    BITS: tl.constexpr,  # 3 or 4
+    BLOCK_KV: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Unpack a [BLOCK_KV, BLOCK_D] tile of LSB-first packed BITS-bit codes
+    (element d at bit d * BITS) with contiguous byte loads. Returns int32
+    codes in natural d order. Requires BLOCK_D == HEAD_DIM (power of 2, >= 8)."""
+    m = kv_mask[:, None]
+    if BITS == 4:
+        b_offs = tl.arange(0, BLOCK_D // 2)
+        raw = tl.load(KV_cache_ptr + bases[:, None] + b_offs[None, :], mask=m, other=0)
+        raw = raw.to(tl.int32)
+        codes = tl.join(raw & 0xF, raw >> 4)  # [BLOCK_KV, D/2, 2]
+    else:  # BITS == 3: 8 codes per 3 bytes
+        g_offs = tl.arange(0, BLOCK_D // 8) * 3
+        ptr = KV_cache_ptr + bases[:, None] + g_offs[None, :]
+        w = (
+            tl.load(ptr, mask=m, other=0).to(tl.int32)
+            | (tl.load(ptr + 1, mask=m, other=0).to(tl.int32) << 8)
+            | (tl.load(ptr + 2, mask=m, other=0).to(tl.int32) << 16)
+        )
+        # final [.., a, b, c] holds code j = 4a + 2b + c (bits 3j of w)
+        f0 = tl.join(
+            tl.join(w & 7, (w >> 12) & 7), tl.join((w >> 6) & 7, (w >> 18) & 7)
+        )
+        f1 = tl.join(
+            tl.join((w >> 3) & 7, (w >> 15) & 7), tl.join((w >> 9) & 7, (w >> 21) & 7)
+        )
+        codes = tl.join(f0, f1)  # [BLOCK_KV, D/8, 2, 2, 2]
+    return tl.reshape(codes, [BLOCK_KV, BLOCK_D])
+
+
+@triton.jit
+def _tq_load_f16(KV_cache_ptr, bases, kv_mask):
+    """fp16 stored as 2 little-endian bytes at bases -> fp32 [BLOCK_KV]."""
+    lo = tl.load(KV_cache_ptr + bases, mask=kv_mask, other=0).to(tl.uint16)
+    hi = tl.load(KV_cache_ptr + bases + 1, mask=kv_mask, other=0).to(tl.uint16)
+    return (lo | (hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+
+
+@triton.jit
+def _tq_fwht(x, ROWS: tl.constexpr, D: tl.constexpr, LOG2_D: tl.constexpr):
+    """Unnormalized Walsh-Hadamard transform of each row of x [ROWS, D], i.e.
+    x @ H_D with the +-1 Sylvester matrix. Constant-geometry form: every stage
+    maps (x[2k], x[2k+1]) to (y[k], y[k + D/2]) = (x[2k] + x[2k+1], x[2k] -
+    x[2k+1])."""
+    for _ in tl.static_range(LOG2_D):
+        a, b = tl.split(tl.reshape(x, [ROWS, D // 2, 2]))
+        x = tl.reshape(tl.permute(tl.join(a + b, a - b), [0, 2, 1]), [ROWS, D])
+    return x
+
+
+@triton.jit
+def _tq_load_q_group(
+    Q_ptr,
+    bid,
+    kv_head,
+    stride_qb,
+    stride_qh,
+    KV_GROUP_SIZE: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    ROT_Q: tl.constexpr,
+    LOG2_D: tl.constexpr,
+    ROT_SCALE: tl.constexpr,
+):
+    """Rotated query block of one KV group as fp16 `[BLOCK_H, BLOCK_D]` (padded
+    rows are 0) and an fp32 factor to multiply its dot products by. ROT_Q=1:
+    Q_ptr is the raw query, rotated here by the Hadamard transform in fp32
+    (q @ H / sqrt(D)); else Q_ptr holds q_rot.
+
+    Rows whose |q_rot| can reach 2^15 (|q_rot| <= max|q| * sqrt(D) when rotating
+    here) are divided by a power of 2 before the transform so the fp16 cast
+    stays finite; the returned per-row factor `[BLOCK_H]` undoes it. Both steps
+    are exact, and rows below the bound (all real queries) are unchanged.
+    Scaling the raw query (not q_rot) keeps the fp16 operand in registers."""
+    h_offs = tl.arange(0, BLOCK_H)
+    d_offs = tl.arange(0, BLOCK_D)
+    q_heads = kv_head * KV_GROUP_SIZE + h_offs
+    q = tl.load(
+        Q_ptr + bid * stride_qb + q_heads[:, None] * stride_qh + d_offs[None, :],
+        mask=(h_offs < KV_GROUP_SIZE)[:, None],
+        other=0.0,
+    ).to(tl.float32)
+    amax = tl.max(tl.abs(q), 1)
+    exponent = ((amax.to(tl.int32, bitcast=True) >> 23) & 0xFF) - 127
+    if ROT_Q:
+        exponent += (LOG2_D + 1) // 2  # ceil(log2(sqrt(D)))
+    shift = tl.maximum(exponent - 14, 0)
+    q = q * ((127 - shift) << 23).to(tl.float32, bitcast=True)[:, None]
+    if ROT_Q:
+        q = _tq_fwht(q, BLOCK_H, BLOCK_D, LOG2_D) * ROT_SCALE
+    return q.to(tl.float16), ((127 + shift) << 23).to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _tq_decode_stage1_mse_gqa(
+    Q_ptr,  # [B, Hq, D]: raw query (ROT_Q=1) or float32 q_rot
+    KV_cache_ptr,  # [num_blocks, block_size, Hk, padded_slot] uint8
+    Block_table_ptr,  # [B, max_num_blocks] int32
+    Seq_lens_ptr,  # [B] int32
+    Centroids_ptr,  # [n_centroids] float32
+    Mid_o_ptr,  # [B, Hq, NUM_KV_SPLITS, D+1] float32
+    stride_qb,
+    stride_qh,
+    stride_cache_block,
+    stride_cache_pos,
+    stride_cache_head,
+    stride_bt_b,
+    stride_mid_b,
+    stride_mid_h,
+    stride_mid_s,
+    HEAD_DIM: tl.constexpr,  # power of 2
+    BLOCK_SIZE: tl.constexpr,
+    NUM_KV_SPLITS: tl.constexpr,
+    KV_GROUP_SIZE: tl.constexpr,
+    MSE_BITS: tl.constexpr,  # 3 or 4
+    MSE_BYTES: tl.constexpr,
+    KPS: tl.constexpr,
+    VQB: tl.constexpr,  # 3 or 4
+    VAL_DATA_BYTES: tl.constexpr,
+    ATTN_SCALE: tl.constexpr,
+    BLOCK_KV: tl.constexpr,  # tokens per tile, >= 16
+    BLOCK_H: tl.constexpr,  # padded group size (>= 16, or >= 8 if HEADS_ON_N)
+    NORM_CORRECTION: tl.constexpr,
+    ROT_Q: tl.constexpr,
+    LOG2_D: tl.constexpr,
+    ROT_SCALE: tl.constexpr,
+    HEADS_ON_N: tl.constexpr,
+):
+    """HEADS_ON_N=0: scores = q @ K^T ([BLOCK_H, D] x [D, BLOCK_KV]) and
+    acc += p @ V, heads on the MMA M dimension (padded to 16).
+    HEADS_ON_N=1: the transposed products scores^T = K @ q^T and
+    acc^T += V^T @ p^T, heads on N (padded to 8): smaller accumulator and
+    query registers, faster for some formats (see _MSE_GQA_LAUNCH).
+
+    All operands are fp16 with fp32 accumulation: q_rot, the centroids and
+    p * v_scale are rounded once to fp16; the value codes are exact in fp16;
+    value = code * scale + zero is applied as (p * scale) @ code + p @ zero.
+    """
+    bid = tl.program_id(0)  # batch index
+    kv_head = tl.program_id(1)  # kv head index
+    sid = tl.program_id(2)  # kv split index
+
+    seq_len = tl.load(Seq_lens_ptr + bid)
+    split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
+    split_start = split_len * sid
+    split_end = tl.minimum(split_start + split_len, seq_len)
+    if split_start >= split_end:
+        return
+
+    d_offs = tl.arange(0, HEAD_DIM)
+    kv_range = tl.arange(0, BLOCK_KV)
+    h_offs = tl.arange(0, BLOCK_H)
+    h_mask = h_offs < KV_GROUP_SIZE
+    q_heads = kv_head * KV_GROUP_SIZE + h_offs
+
+    q, q_scale = _tq_load_q_group(
+        Q_ptr,
+        bid,
+        kv_head,
+        stride_qb,
+        stride_qh,
+        KV_GROUP_SIZE,
+        BLOCK_H,
+        HEAD_DIM,
+        ROT_Q,
+        LOG2_D,
+        ROT_SCALE,
+    )
+    if HEADS_ON_N:
+        qT = tl.trans(q)  # [D, BLOCK_H]
+        onesT = tl.full([HEAD_DIM, BLOCK_H], 1.0, dtype=tl.float16)
+        acc = tl.zeros([HEAD_DIM, BLOCK_H], dtype=tl.float32)
+    else:
+        ones = tl.full([BLOCK_H, HEAD_DIM], 1.0, dtype=tl.float16)
+        acc = tl.zeros([BLOCK_H, HEAD_DIM], dtype=tl.float32)
+    qk_scale = q_scale * ATTN_SCALE  # [BLOCK_H]
+    m_prev = tl.full([BLOCK_H], -float("inf"), dtype=tl.float32)
+    l_prev = tl.zeros([BLOCK_H], dtype=tl.float32)
+
+    bt_base = bid * stride_bt_b
+    kv_head_off = tl.cast(kv_head, tl.int64) * stride_cache_head
+
+    for start_n in range(split_start, split_end, BLOCK_KV):
+        kv_offs = start_n + kv_range
+        kv_mask = kv_offs < split_end
+        page_idx = kv_offs // BLOCK_SIZE
+        page_off = kv_offs % BLOCK_SIZE
+        block_nums = tl.load(
+            Block_table_ptr + bt_base + page_idx, mask=kv_mask, other=0
+        ).to(tl.int64)
+        slot_bases = (
+            block_nums * stride_cache_block
+            + page_off.to(tl.int64) * stride_cache_pos
+            + kv_head_off
+        )
+
+        # ---- scores (q . c on the raw centroids; per-token norms after) ----
+        mse_idx = _tq_unpack_tile(
+            KV_cache_ptr, slot_bases, kv_mask, MSE_BITS, BLOCK_KV, HEAD_DIM
+        )
+        c_vals = tl.load(Centroids_ptr + mse_idx, mask=kv_mask[:, None], other=0.0)
+        c16 = c_vals.to(tl.float16)
+        vec_norms = _tq_load_f16(KV_cache_ptr, slot_bases + MSE_BYTES, kv_mask)
+        if HEADS_ON_N:
+            s = vec_norms[:, None] * tl.dot(c16, qT) * qk_scale[None, :]
+            if NORM_CORRECTION:
+                # |c|^2 per token as a ones-column MMA (lands in score layout)
+                nsq = tl.dot((c_vals * c_vals).to(tl.float16), onesT)
+                s = s / tl.sqrt(nsq + 1e-16)
+            s = tl.where(kv_mask[:, None], s, -float("inf"))
+            n_e_max = tl.maximum(tl.max(s, 0), m_prev)
+            re_scale = tl.exp(m_prev - n_e_max)
+            p = tl.exp(s - n_e_max[None, :])
+        else:
+            s = vec_norms[None, :] * tl.dot(q, tl.trans(c16)) * qk_scale[:, None]
+            if NORM_CORRECTION:
+                nsq = tl.dot(ones, tl.trans((c_vals * c_vals).to(tl.float16)))
+                s = s / tl.sqrt(nsq + 1e-16)
+            s = tl.where(kv_mask[None, :], s, -float("inf"))
+            n_e_max = tl.maximum(tl.max(s, 1), m_prev)
+            re_scale = tl.exp(m_prev - n_e_max)
+            p = tl.exp(s - n_e_max[:, None])
+
+        # ---- values: codes [BLOCK_KV, D], value = code * scale + zero ----
+        val_bases = slot_bases + KPS
+        v_idx = _tq_unpack_tile(
+            KV_cache_ptr, val_bases, kv_mask, VQB, BLOCK_KV, HEAD_DIM
+        )
+        v_scales = _tq_load_f16(KV_cache_ptr, val_bases + VAL_DATA_BYTES, kv_mask)
+        v_zeros = _tq_load_f16(KV_cache_ptr, val_bases + VAL_DATA_BYTES + 2, kv_mask)
+        if HEADS_ON_N:
+            ps = (p * v_scales[:, None]).to(tl.float16)
+            pv = tl.dot(tl.trans(v_idx.to(tl.float16)), ps)  # [D, BLOCK_H]
+            pv += tl.sum(p * v_zeros[:, None], 0)[None, :]
+            acc = acc * re_scale[None, :] + pv
+            l_prev = l_prev * re_scale + tl.sum(p, 0)
+        else:
+            ps = (p * v_scales[None, :]).to(tl.float16)
+            pv = tl.dot(ps, v_idx.to(tl.float16))  # [BLOCK_H, D]
+            pv += tl.sum(p * v_zeros[None, :], 1)[:, None]
+            acc = acc * re_scale[:, None] + pv
+            l_prev = l_prev * re_scale + tl.sum(p, 1)
+        m_prev = n_e_max
+
+    out_base = bid * stride_mid_b + sid * stride_mid_s
+    head_off = q_heads * stride_mid_h
+    safe_l = tl.where(l_prev > 0.0, l_prev, 1.0)
+    if HEADS_ON_N:
+        out = acc / safe_l[None, :]
+        out_ptrs = Mid_o_ptr + out_base + head_off[None, :] + d_offs[:, None]
+        tl.store(out_ptrs, out, mask=h_mask[None, :])
+    else:
+        out = acc / safe_l[:, None]
+        out_ptrs = Mid_o_ptr + out_base + head_off[:, None] + d_offs[None, :]
+        tl.store(out_ptrs, out, mask=h_mask[:, None])
+    lse = m_prev + tl.log(safe_l)
+    tl.store(Mid_o_ptr + out_base + head_off + HEAD_DIM, lse, mask=h_mask)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: log-sum-exp merge of the split partials. One program per (batch,
+# query head, head_dim chunk). The splits are reduced as [BLOCK_S, BLOCK_DC]
+# tiles whose loads are independent, instead of one dependent load chain per
+# split, so small batches with many splits are not latency bound.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _tq_decode_stage2(
+    Mid_o_ptr,  # [B, Hq, NUM_KV_SPLITS, D+1] float32
+    O_ptr,  # [B, Hq, D] query dtype
+    Lse_ptr,  # [B, Hq] float32
+    Seq_lens_ptr,  # [B] int32
+    stride_mid_b,
+    stride_mid_h,
+    stride_mid_s,
+    stride_ob,
+    stride_oh,
+    stride_lse_b,
+    NUM_KV_SPLITS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_S: tl.constexpr,
+    BLOCK_DC: tl.constexpr,
+):
+    bid = tl.program_id(0)
+    hid = tl.program_id(1)
+    dc = tl.program_id(2)
+
+    seq_len = tl.load(Seq_lens_ptr + bid)
+    split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
+    base = Mid_o_ptr + bid.to(tl.int64) * stride_mid_b + hid * stride_mid_h
+    d_offs = dc * BLOCK_DC + tl.arange(0, BLOCK_DC)
+    d_mask = d_offs < HEAD_DIM
+    s_range = tl.arange(0, BLOCK_S)
+
+    m = tl.full([], -float("inf"), dtype=tl.float32)
+    l_sum = tl.zeros([], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_DC], dtype=tl.float32)
+    for s0 in tl.static_range(0, NUM_KV_SPLITS, BLOCK_S):
+        s = s0 + s_range
+        # stage 1 wrote split s iff its start (s * split_len) < seq_len
+        valid = (s < NUM_KV_SPLITS) & (s * split_len < seq_len)
+        lse_s = tl.load(
+            base + s * stride_mid_s + HEAD_DIM, mask=valid, other=-float("inf")
+        )
+        tile = tl.load(
+            base + s[:, None] * stride_mid_s + d_offs[None, :],
+            mask=valid[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+        m_new = tl.maximum(m, tl.max(lse_s, 0))
+        m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+        w = tl.exp(lse_s - m_safe)  # 0 for invalid splits
+        alpha = tl.exp(m - m_safe)
+        acc = acc * alpha + tl.sum(w[:, None] * tile, 0)
+        l_sum = l_sum * alpha + tl.sum(w, 0)
+        m = m_new
+
+    safe_l = tl.where(l_sum > 0.0, l_sum, 1.0)
+    tl.store(
+        O_ptr + bid * stride_ob + hid * stride_oh + d_offs,
+        (acc / safe_l).to(O_ptr.dtype.element_ty),
+        mask=d_mask,
+    )
+    if dc == 0:
+        tl.store(Lse_ptr + bid * stride_lse_b + hid, m + tl.log(safe_l))
+
+
+# ---------------------------------------------------------------------------
 # Pre-dequant kernel: Bulk dequant K (MSE+norms) and V to fp16
 # ---------------------------------------------------------------------------
 
@@ -456,10 +797,6 @@ def _tq_full_dequant_kv(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: Reuse from triton_decode_attention.py
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Launcher — cached constants + fused GEMM
 # ---------------------------------------------------------------------------
 
@@ -483,6 +820,29 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
     return cfg
 
 
+# Grouped MSE-key stage 1 launch settings, from an H200 sweep (D in {128,
+# 256}, batch 1-32, context 4K-128K): (heads on MMA N, BLOCK_KV, num_warps),
+# keyed by (D <= 128, MSE key bits, value bits).
+_MSE_GQA_LAUNCH: dict[tuple[bool, int, int], tuple[int, int, int]] = {
+    (True, 4, 4): (0, 16, 1),  # turboquant_4bit_nc
+    (True, 3, 4): (1, 32, 1),  # turboquant_k3v4_nc
+    (True, 3, 3): (0, 16, 2),  # turboquant_3bit_nc
+}
+_MSE_GQA_LAUNCH_D256 = (0, 16, 2)
+
+
+def _use_mse_gqa(key_fp8: bool, kv_group_size: int, head_dim: int) -> bool:
+    """Grouped stage 1 is used on CUDA for MSE keys with GQA at the tuned and
+    tested head sizes; everything else runs _tq_decode_stage1. (ROCm gfx950
+    uses FlyDSL.)"""
+    return (
+        current_platform.is_cuda()
+        and not key_fp8
+        and kv_group_size > 1
+        and head_dim in (128, 256)
+    )
+
+
 def triton_turboquant_decode_attention(
     query: torch.Tensor,  # [B, Hq, D] — original query
     kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
@@ -503,6 +863,7 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    pi_is_hadamard: bool = False,  # Pi is the Sylvester Hadamard / sqrt(D)
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -515,12 +876,18 @@ def triton_turboquant_decode_attention(
     device = query.device
 
     cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
+    grouped = _use_mse_gqa(key_fp8, kv_group_size, D)
+    # The grouped kernel rotates the query itself (fast Walsh-Hadamard
+    # transform in registers) when Pi is the Sylvester Hadamard.
+    rotate_in_kernel = grouped and pi_is_hadamard
 
     # Compute q_rot = q @ Pi.T (rotated query for MSE key scoring)
     # FP8 path: pass query directly (float16); kernel casts inline.
-    # MSE path: still needs external GEMM (cuBLAS), so q_rot is float32.
+    # MSE path: external GEMM (cuBLAS), float32, unless rotated in-kernel.
     if key_fp8:
         q_rot = query.contiguous()
+    elif rotate_in_kernel:
+        q_rot = query if query.stride(-1) == 1 else query.contiguous()
     else:
         q_float = query.float()
         if PiT is None:
@@ -548,44 +915,89 @@ def triton_turboquant_decode_attention(
             buf_holder._tq_mid_o_buf = mid_o
 
     # Stage 1: split-KV tiled attention scoring + value accumulation
-    fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
-    BLOCK_KV = 4
-    grid = (B, Hq, NUM_KV_SPLITS)
-    _tq_decode_stage1[grid](
-        q_rot,
-        kv_cache,
-        block_table,
-        seq_lens,
-        centroids,
-        mid_o,
-        q_rot.stride(0),
-        q_rot.stride(1),
-        kv_cache.stride(0),
-        kv_cache.stride(1),
-        kv_cache.stride(2),
-        block_table.stride(0),
-        mid_o.stride(0),
-        mid_o.stride(1),
-        mid_o.stride(2),
-        NUM_KV_HEADS=Hk,
-        HEAD_DIM=D,
-        BLOCK_SIZE=block_size,
-        NUM_KV_SPLITS=NUM_KV_SPLITS,
-        KV_GROUP_SIZE=kv_group_size,
-        MSE_BITS=mse_bits,
-        MSE_BYTES=cfg["mse_bytes"],
-        KPS=key_packed_size,
-        VQB=value_quant_bits,
-        VAL_DATA_BYTES=cfg["val_data_bytes"],
-        ATTN_SCALE=scale,
-        BLOCK_D=cfg["BLOCK_D"],
-        BLOCK_KV=BLOCK_KV,
-        KEY_FP8=1 if key_fp8 else 0,
-        NORM_CORRECTION=1 if norm_correction else 0,
-        FP8_E4B15=fp8_e4b15,
-        num_warps=1,
-        num_stages=1,
-    )
+    if grouped:
+        if D <= 128:
+            heads_on_n, block_kv, num_warps = _MSE_GQA_LAUNCH.get(
+                (True, mse_bits, value_quant_bits), (0, 16, 1)
+            )
+        else:
+            heads_on_n, block_kv, num_warps = _MSE_GQA_LAUNCH_D256
+        block_h = max(8 if heads_on_n else 16, triton.next_power_of_2(kv_group_size))
+        _tq_decode_stage1_mse_gqa[(B, Hk, NUM_KV_SPLITS)](
+            q_rot,
+            kv_cache,
+            block_table,
+            seq_lens,
+            centroids,
+            mid_o,
+            q_rot.stride(0),
+            q_rot.stride(1),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group_size,
+            MSE_BITS=mse_bits,
+            MSE_BYTES=cfg["mse_bytes"],
+            KPS=key_packed_size,
+            VQB=value_quant_bits,
+            VAL_DATA_BYTES=cfg["val_data_bytes"],
+            ATTN_SCALE=scale,
+            BLOCK_KV=block_kv,
+            BLOCK_H=block_h,
+            NORM_CORRECTION=1 if norm_correction else 0,
+            ROT_Q=1 if rotate_in_kernel else 0,
+            LOG2_D=int(math.log2(D)),
+            ROT_SCALE=1.0 / math.sqrt(D),
+            HEADS_ON_N=heads_on_n,
+            num_warps=num_warps,
+            num_stages=1,
+        )
+    else:
+        fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
+        BLOCK_KV = 4
+        grid = (B, Hq, NUM_KV_SPLITS)
+        _tq_decode_stage1[grid](
+            q_rot,
+            kv_cache,
+            block_table,
+            seq_lens,
+            centroids,
+            mid_o,
+            q_rot.stride(0),
+            q_rot.stride(1),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            NUM_KV_HEADS=Hk,
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group_size,
+            MSE_BITS=mse_bits,
+            MSE_BYTES=cfg["mse_bytes"],
+            KPS=key_packed_size,
+            VQB=value_quant_bits,
+            VAL_DATA_BYTES=cfg["val_data_bytes"],
+            ATTN_SCALE=scale,
+            BLOCK_D=cfg["BLOCK_D"],
+            BLOCK_KV=BLOCK_KV,
+            KEY_FP8=1 if key_fp8 else 0,
+            NORM_CORRECTION=1 if norm_correction else 0,
+            FP8_E4B15=fp8_e4b15,
+            num_warps=1,
+            num_stages=1,
+        )
 
     # Stage 2: Reduce across KV splits
     # Output in query dtype — eliminates float16_copy kernel after stage2
@@ -607,8 +1019,8 @@ def triton_turboquant_decode_attention(
         if buf_holder is not None:
             buf_holder._tq_lse_buf = lse
 
-    grid2 = (B, Hq)
-    _fwd_kernel_stage2[grid2](
+    block_dc = min(32 if B * Hq < 2048 else 64, cfg["BLOCK_D"])
+    _tq_decode_stage2[(B, Hq, triton.cdiv(D, block_dc))](
         mid_o,
         output,
         lse,
@@ -620,11 +1032,11 @@ def triton_turboquant_decode_attention(
         output.stride(1),
         lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
-        BLOCK_DV=cfg["BLOCK_D"],
-        Lv=D,
-        OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
-        num_warps=4,
-        num_stages=2,
+        HEAD_DIM=D,
+        BLOCK_S=min(triton.next_power_of_2(NUM_KV_SPLITS), 128),
+        BLOCK_DC=block_dc,
+        num_warps=2,
+        num_stages=1,
     )
 
     return output  # already in query dtype

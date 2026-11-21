@@ -61,6 +61,7 @@ from vllm.v1.attention.ops.flydsl_turboquant_decode import (
 from vllm.v1.attention.ops.triton_turboquant_decode import (
     _tq_full_dequant_kv,
     _use_fp8_e4b15,
+    _use_mse_gqa,
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
@@ -75,6 +76,34 @@ logger = init_logger(__name__)
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+# The grouped MSE-key decode kernel launches one program per (batch, KV head,
+# split), so small batches use more KV splits to fill the GPU. Batch size is
+# fixed per CUDA graph, so the split count is too.
+_DECODE_SPLIT_FACTORS = ((4, 4), (16, 2))  # (max batch size, factor)
+
+
+def _decode_kv_splits(batch_size: int, max_num_kv_splits: int) -> int:
+    for max_batch, factor in _DECODE_SPLIT_FACTORS:
+        if batch_size <= max_batch:
+            return max_num_kv_splits * factor
+    return max_num_kv_splits
+
+
+def _max_decode_split_rows(max_batch: int, max_num_kv_splits: int) -> int:
+    """Largest batch x splits product decode can request, for buffer sizing."""
+    sizes = {max_batch} | {min(max_batch, b) for b, _ in _DECODE_SPLIT_FACTORS}
+    return max(b * _decode_kv_splits(b, max_num_kv_splits) for b in sizes)
+
+
+def _uses_decode_split_tiers(
+    use_flydsl: bool, key_fp8: bool, num_heads: int, num_kv_heads: int, head_size: int
+) -> bool:
+    """Tiered splits apply only to the grouped MSE-key Triton decode."""
+    return not use_flydsl and _use_mse_gqa(
+        key_fp8, num_heads // num_kv_heads, head_size
+    )
+
 
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
 # use the TQ decode kernel directly instead of full-dequant + flash_attn.
@@ -227,6 +256,9 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     def _reserve_workspace(self) -> None:
         if not is_workspace_manager_initialized():
             return
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            TurboQuantConfig,
+        )
 
         scheduler_config = self.vllm_config.scheduler_config
         model_config = self.vllm_config.model_config
@@ -240,8 +272,26 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             self.vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
+        quant_mode = self.kv_cache_spec.kv_quant_mode
+        if quant_mode.is_turboquant and _uses_decode_split_tiers(
+            is_flydsl_available(),
+            TurboQuantConfig.from_cache_dtype(
+                quant_mode.name.lower(), head_size
+            ).key_fp8,
+            num_heads,
+            num_kv_heads,
+            head_size,
+        ):
+            mid_o = (
+                _max_decode_split_rows(max_num_reqs, max_num_splits),
+                num_heads,
+                1,
+                head_size + 1,
+            )
+        else:
+            mid_o = (max_num_reqs, num_heads, max_num_splits, head_size + 1)
         current_workspace_manager().get_simultaneous(
-            ((max_num_reqs, num_heads, max_num_splits, head_size + 1), torch.float32),
+            (mid_o, torch.float32),
             ((max_num_reqs, num_heads, head_size), model_config.dtype),
             ((max_num_reqs, num_heads), torch.float32),
         )
@@ -405,6 +455,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             fa_version=self.fa_version,
         )
 
+    def _uses_split_tiers(self) -> bool:
+        return _uses_decode_split_tiers(
+            self._use_flydsl,
+            self.tq_config.key_fp8,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+        )
+
     def _ensure_on_device(self, layer, device):
         """One-time derivation of TQ buffers (rotation matrix, midpoints).
 
@@ -441,8 +500,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 D = self.head_size
                 Hq = self.num_heads
                 S = self.max_num_kv_splits
+                mid_rows = (
+                    _max_decode_split_rows(B_max, S)
+                    if self._uses_split_tiers()
+                    else B_max * S
+                )
                 _pre_warm_bytes = (
-                    B_max * Hq * (S * (D + 1) + D) * 4  # fp32 mid_o + fp32 lse
+                    Hq * (mid_rows * (D + 1) + B_max * D) * 4  # fp32 mid_o + lse
                     + B_max * Hq * D * 2  # query-dtype output (bf16 = 2 B)
                     + 512  # alignment padding
                 )
@@ -883,6 +947,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                             key_fp8=self.tq_config.key_fp8,
                             norm_correction=self.tq_config.norm_correction,
                             PiT=PiT,
+                            pi_is_hadamard=True,
                         )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -1113,6 +1178,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         B = query.shape[0]
         D = self.head_size
         S = self.max_num_kv_splits
+        if self._uses_split_tiers():
+            S = _decode_kv_splits(B, S)
         Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
         if is_workspace_manager_initialized():
@@ -1220,7 +1287,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             output_buf=output_buf,
             lse_buf=lse_buf,
             buf_holder=layer,
-            max_num_kv_splits=self.max_num_kv_splits,
+            max_num_kv_splits=S,
+            pi_is_hadamard=True,
         )
         return result
 
