@@ -49,7 +49,7 @@ except (ImportError, AttributeError):  # pragma: no cover - optional FlashInfer 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import ignore_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, CompilationMode, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -402,6 +402,42 @@ def is_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
         and pc.enable_expert_parallel
         and pc.tensor_parallel_size > 1
     )
+
+
+def replicates_attention(vllm_config: VllmConfig) -> bool:
+    """Whether every TP rank keeps whole attention layers (no o_proj all-reduce)."""
+    if not envs.VLLM_MUSE_SPARK_REPLICATE_ATTN:
+        return False
+    pc = vllm_config.parallel_config
+    # These shard heads, tokens or KV by TP rank on their own.
+    for unsupported, what in (
+        (
+            is_sequence_parallel_enabled(vllm_config) or pc.use_sequence_parallel_moe,
+            "sequence-parallel MoE",
+        ),
+        (
+            pc.decode_context_parallel_size > 1 or pc.prefill_context_parallel_size > 1,
+            "context parallel",
+        ),
+        # Turns the TP-synced autotune off: replicated attention would drift.
+        (pc.enable_expert_parallel, "expert parallelism"),
+        # Inductor tunes the replicated DSpark draft layers per process.
+        (
+            vllm_config.compilation_config.mode != CompilationMode.NONE,
+            "torch.compile (Muse runs with breakable CUDA graphs by default)",
+        ),
+        (bool(vllm_config.cache_config.kv_cache_dtype_skip_layers), "KV skip layers"),
+        (vllm_config.kv_transfer_config is not None, "KV transfer connectors"),
+    ):
+        if unsupported:
+            raise NotImplementedError(
+                f"VLLM_MUSE_SPARK_REPLICATE_ATTN is not supported with {what}."
+            )
+    # Nothing re-syncs ranks after a replicated block: autotune must agree.
+    from vllm.triton_utils.tp_synced_autotune import install
+
+    install()
+    return True
 
 
 class MuseSparkMoE(nn.Module):
@@ -1053,6 +1089,7 @@ class MuseSparkAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        replicate: bool = False,
     ) -> None:
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
@@ -1082,7 +1119,8 @@ class MuseSparkAttention(nn.Module):
         zero_centered_gamma = config.norm_zero_centered_gamma if is_draft else True
         gain_center_type = config.post_norm_gain_center_type if is_draft else "one"
 
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -1164,6 +1202,7 @@ class MuseSparkAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
+                disable_tp=replicate,
             )
         else:
             self.qkv_proj = MuseSparkQKVOGateParallelLinear(
@@ -1173,6 +1212,7 @@ class MuseSparkAttention(nn.Module):
                 total_num_kv_heads=self.total_num_kv_heads,
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
+                disable_tp=replicate,
             )
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
@@ -1180,6 +1220,7 @@ class MuseSparkAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
         self.is_sequence_parallel_output = False
         self.sp_min_tokens = 0
@@ -1463,6 +1504,8 @@ class MuseSparkDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            # The DSpark draft layers subclass this one and replicate too.
+            replicate=replicates_attention(vllm_config),
         )
         self.is_moe_layer = (
             (

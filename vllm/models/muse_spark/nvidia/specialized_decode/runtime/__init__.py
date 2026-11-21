@@ -96,6 +96,8 @@ def unsupported(vllm_config) -> str | None:
         ),
         (parallel.use_ubatching, "DBO"),
         (parallel.decode_context_parallel_size != 1, "decode context parallel"),
+        # Its fused kernels assume TP-sharded heads and the o_proj all-reduce.
+        (envs.VLLM_MUSE_SPARK_REPLICATE_ATTN, "replicated attention"),
         # The fused Markov loop keeps the draft logits cache replicated; the
         # batch-sharded verification of it is not validated here.
         (bool(parallel.enable_batch_sharded_sampling), "batch-sharded sampling"),
