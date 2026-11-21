@@ -5,10 +5,10 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
-from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
+from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -38,7 +38,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
     response ends: "\n</answer>": [524, 9399, 29]
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         self.think_start_expr = r"<think>\n"
         self.think_end_expr = r"\n</think>\n"
@@ -112,10 +112,11 @@ class HunyuanA13BReasoningParser(ReasoningParser):
                 response_content = None
             return reasoning, response_content
 
-        fallback_regex = self.half_match_reasoning_regex
-        fallback_match = fallback_regex.findall(model_output)
+        # Anchored, so text before <think> falls through to the plain-content
+        # return below instead of being dropped.
+        fallback_match = self.half_match_reasoning_regex.match(model_output)
         if fallback_match:
-            reasoning, response_content = fallback_match[0]
+            reasoning, response_content = fallback_match.groups()
 
             if response_content.endswith(self.response_end_expr):
                 response_content = response_content[: -len(self.response_end_expr)]
