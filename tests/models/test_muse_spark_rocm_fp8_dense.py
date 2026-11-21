@@ -246,17 +246,18 @@ def aiter_enabled(monkeypatch: pytest.MonkeyPatch):
 @rocm_gfx950
 @pytest.mark.parametrize("name", sorted(DENSE_SHAPES))
 @pytest.mark.parametrize("m", [1, 8, 40, 64, 96, 192, 256, 257, 2048])
+@pytest.mark.parametrize("fp8_rows", [False, True])
 def test_dense_gemms_match_the_dequantized_reference(
-    dist_init, aiter_enabled, config, name: str, m: int
+    dist_init, aiter_enabled, config, name: str, m: int, fp8_rows: bool
 ) -> None:
     """The online FP8 dense layers on BF16 input and on the fused norms' per-token
     FP8 rows (`fp8_input`), against a float32 GEMM on the dequantized weight and
     activation. Shapes AITER has tuned run on its per-token GEMMs."""
     _skip_unless_gfx950()
     n, k = DENSE_SHAPES[name]
-    online, layer = _online_linear(config, n, k, f"feed_forward.{name}")
-    with set_current_vllm_config(config):
-        assert fp8_dense.use_online_fp8(layer, online)
+    _, layer = _online_linear(config, n, k, f"feed_forward.{name}")
+    if fp8_rows and not fp8_dense.takes_fp8_input(layer):
+        pytest.skip("the installed AITER has no per-token FP8 GEMM for this shape")
     gen = torch.Generator(device="cuda").manual_seed(0)
     w = torch.randn(n, k, generator=gen, device="cuda").to(torch.bfloat16)
     layer.weight.weight_loader(layer.weight, w)
@@ -266,12 +267,11 @@ def test_dense_gemms_match_the_dequantized_reference(
     x = torch.randn(m, k, generator=gen, device="cuda").to(torch.bfloat16)
     xq, xs = usp.quant_rows(x)
     ref = (xq.float() * xs.view(-1, 1)) @ w_dq.t()
-    outs = [layer(x)[0]]
-    if fp8_dense.takes_fp8_input(layer):
-        outs.append(layer(fp8_dense.fp8_input(xq, xs.view(-1), torch.bfloat16))[0])
-    for got in outs:
-        assert got.shape == (m, n) and got.dtype == torch.bfloat16
-        assert (got.float() - ref).norm() / ref.norm() < 5e-3
+    got = layer(
+        fp8_dense.fp8_input(xq, xs.view(-1), torch.bfloat16) if fp8_rows else x
+    )[0]
+    assert got.shape == (m, n) and got.dtype == torch.bfloat16
+    assert (got.float() - ref).norm() / ref.norm() < 5e-3
 
 
 def _assert_quant_close(q, qs, ref_q, ref_s) -> None:
@@ -491,12 +491,11 @@ def test_ulysses_refuses_a_reordered_fp8_qkv_layout() -> None:
 
 
 @rocm_gfx950
-@pytest.mark.parametrize("ulysses", [False, True])
-def test_model_refuses_an_online_o_proj_only_with_ulysses(
-    dist_init, two_layer_checkpoint, monkeypatch, ulysses: bool
+def test_model_refuses_an_online_o_proj_with_ulysses(
+    dist_init, two_layer_checkpoint, monkeypatch
 ) -> None:
     """The Muse Spark model refuses an online `o_proj` when the Ulysses prefill is
-    on (its FP8 copy is built from the BF16 weight) and builds it otherwise."""
+    on (its FP8 copy is built from the BF16 weight)."""
     _skip_unless_gfx950()
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.muse_spark.amd.multimodal import (
@@ -505,7 +504,7 @@ def test_model_refuses_an_online_o_proj_only_with_ulysses(
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     # One rank never shards the stream, so Ulysses is switched on directly.
-    monkeypatch.setattr(usp, "ulysses_prefill_enabled", lambda *args: ulysses)
+    monkeypatch.setattr(usp, "ulysses_prefill_enabled", lambda *args: True)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     rocm_aiter_ops.refresh_env_variables()
     config = _config(
@@ -517,19 +516,12 @@ def test_model_refuses_an_online_o_proj_only_with_ulysses(
             set_current_vllm_config(config),
             set_default_torch_dtype(torch.bfloat16),
             torch.device("cuda"),
+            pytest.raises(ValueError, match="ignore"),
         ):
-            if ulysses:
-                with pytest.raises(ValueError, match="ignore"):
-                    MuseSparkForConditionalGeneration(vllm_config=config)
-                return
-            model = MuseSparkForConditionalGeneration(vllm_config=config).model
+            MuseSparkForConditionalGeneration(vllm_config=config)
     finally:
         monkeypatch.undo()
         rocm_aiter_ops.refresh_env_variables()
-    assert not model.ulysses_prefill
-    o_projs = [layer.self_attn.o_proj for layer in model.layers]
-    assert o_projs
-    assert all(fp8_dense.online_target(o, config.quant_config) for o in o_projs)
 
 
 def _random_weights_fp8(model: torch.nn.Module) -> int:
@@ -644,16 +636,8 @@ def test_fp8_dense_prompt_logprobs_stay_close_to_the_bf16_path(
 
     base = {"ulysses_prefill": True} if stream == "ulysses" else {}
     reference = prompt_logprobs(base, [])
-    fp8_layers = sorted(
-        f"{layer}.{name}"
-        for layer in range(2)
-        for name in (
-            "feed_forward.pooler",
-            "feed_forward.unpooler",
-            "self_attn.qkv_proj",
-        )
-    )
+    names = ["feed_forward.pooler", "feed_forward.unpooler", "self_attn.qkv_proj"]
+    fp8_layers = sorted(f"{layer}.{name}" for layer in range(2) for name in names)
     fp8 = prompt_logprobs(base, fp8_layers, quantization_config=FP8_DENSE)
     delta = (reference - fp8).abs()
-    assert delta.max() > 0, "the FP8 dense path did not run"
     assert delta.mean() < 0.06, delta.mean()

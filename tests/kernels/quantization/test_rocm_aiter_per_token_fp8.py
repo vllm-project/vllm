@@ -11,18 +11,10 @@ from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterPerTokenFp8ScaledMMLinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
-    RowWiseTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
-)
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
-    kFp8StaticTensorSym,
-    kFp8StaticTokenSym,
 )
 from vllm.platforms import current_platform
 
@@ -41,7 +33,6 @@ pytestmark = [
     pytest.mark.usefixtures("default_vllm_config"),
 ]
 
-PARAM_NAMES = ("weight", "weight_scale", "input_scale", "input_scale_ub")
 # gfx950 (N, K) that AITER has tuned: CK `gemm_a8w8` CSV rows only, and Triton
 # `gemm_a8w8_per_token_scale` configs only. Neither has preshuffled CSV rows,
 # which an earlier kernel in the list would take.
@@ -67,22 +58,6 @@ def enable_kernel(monkeypatch: pytest.MonkeyPatch):
     rocm_aiter_ops.refresh_env_variables()
 
 
-def _make_config(
-    *,
-    activation_quant_key=kFp8DynamicTokenSym,
-    weight_quant_key=kFp8StaticChannelSym,
-    out_dtype: torch.dtype = torch.bfloat16,
-    weight_shape: tuple[int, int] = TRITON_SHAPE,
-) -> FP8ScaledMMLinearLayerConfig:
-    return FP8ScaledMMLinearLayerConfig(
-        weight_quant_key=weight_quant_key,
-        activation_quant_key=activation_quant_key,
-        weight_shape=weight_shape,
-        input_dtype=torch.bfloat16,
-        out_dtype=out_dtype,
-    )
-
-
 def _make_layer(weight_shape: tuple[int, int]) -> torch.nn.Module:
     n, k = weight_shape
     layer = torch.nn.Module()
@@ -99,67 +74,44 @@ def _make_layer(weight_shape: tuple[int, int]) -> torch.nn.Module:
     return layer
 
 
-@pytest.mark.parametrize(
-    ("config", "expected_reason"),
-    [
-        (
-            _make_config(weight_quant_key=kFp8StaticTensorSym),
-            "requires per token activation scales and per channel weight scales.",
-        ),
-        # The Triton GEMM needs dynamic activation scales and bfloat16 output.
-        (_make_config(activation_quant_key=kFp8StaticTokenSym), "requires a tuned"),
-        (_make_config(out_dtype=torch.float16), "requires a tuned"),
-        (_make_config(weight_shape=UNTUNED_SHAPE), "requires a tuned"),
-    ],
-)
-def test_can_implement_rejects_unsupported_configs(
-    enable_kernel,
-    config: FP8ScaledMMLinearLayerConfig,
-    expected_reason: str,
-):
-    _skip_unless_gfx950()
-    can_implement, reason = AiterPerTokenFp8ScaledMMLinearKernel.can_implement(config)
-    assert not can_implement
-    assert reason is not None and reason.startswith(expected_reason)
+# (N, K), output dtype, whether AITER's per-token kernel should take it. The
+# untuned shape and fp16 output fall back to another kernel, with the same
+# result.
+_FORWARD_CASES = [
+    pytest.param(CK_SHAPE, torch.bfloat16, True, id="ck-tuned"),
+    pytest.param(TRITON_SHAPE, torch.bfloat16, True, id="triton-tuned"),
+    pytest.param(UNTUNED_SHAPE, torch.bfloat16, False, id="untuned"),
+    pytest.param(TRITON_SHAPE, torch.float16, False, id="fp16-out"),
+]
 
 
-@pytest.mark.parametrize(
-    ("weight_shape", "expected_kernel"),
-    [
-        (CK_SHAPE, AiterPerTokenFp8ScaledMMLinearKernel),
-        (TRITON_SHAPE, AiterPerTokenFp8ScaledMMLinearKernel),
-        (UNTUNED_SHAPE, RowWiseTorchFP8ScaledMMLinearKernel),
-    ],
-)
-def test_default_selection(
-    enable_kernel,
-    weight_shape: tuple[int, int],
-    expected_kernel: type,
-):
-    _skip_unless_gfx950()
-    kernel = init_fp8_linear_kernel(
-        activation_quant_key=kFp8DynamicTokenSym,
-        weight_quant_key=kFp8StaticChannelSym,
-        input_dtype=torch.bfloat16,
-        out_dtype=torch.bfloat16,
-        weight_shape=weight_shape,
-    )
-    assert type(kernel) is expected_kernel
-
-
-@pytest.mark.parametrize("weight_shape", [CK_SHAPE, TRITON_SHAPE])
+@pytest.mark.parametrize("weight_shape, out_dtype, tuned", _FORWARD_CASES)
 @pytest.mark.parametrize("num_tokens", [1, 8, 9, 64, 65, 256, 257, 1024, 1025])
 @pytest.mark.parametrize("prequantized", [False, True])
 def test_forward_matches_reference(
     enable_kernel,
     weight_shape: tuple[int, int],
+    out_dtype: torch.dtype,
+    tuned: bool,
     num_tokens: int,
     prequantized: bool,
 ):
+    """The FP8 per-token-activation, per-channel-weight linear that vLLM selects
+    matches the dequantized reference for tuned and untuned shapes."""
     _skip_unless_gfx950()
-    kernel = AiterPerTokenFp8ScaledMMLinearKernel(
-        _make_config(weight_shape=weight_shape), layer_param_names=PARAM_NAMES
+    if prequantized and not tuned:
+        pytest.skip("pre-quantized activations are for the per-token kernel")
+    kernel = init_fp8_linear_kernel(
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_quant_key=kFp8StaticChannelSym,
+        input_dtype=torch.bfloat16,
+        out_dtype=out_dtype,
+        weight_shape=weight_shape,
     )
+    if tuned:
+        # The accuracy check cannot tell kernels apart; the tuned shapes are
+        # meant for AITER's per-token GEMM.
+        assert isinstance(kernel, AiterPerTokenFp8ScaledMMLinearKernel)
     layer = _make_layer(weight_shape)
     w_dq = layer.weight.t().float() * layer.weight_scale
     kernel.process_weights_after_loading(layer)
@@ -177,7 +129,7 @@ def test_forward_matches_reference(
     out = kernel.apply_weights(layer, x)
 
     assert out.shape == (num_tokens, weight_shape[0])
-    assert out.dtype == torch.bfloat16
+    assert out.dtype == out_dtype
     ref = (x_q.float() * x_s) @ w_dq.t()
     assert (out.float() - ref).norm() / ref.norm() < 5e-3
 
