@@ -51,7 +51,6 @@ arrives, and an update that delivers only one of them fails at finish.
 
 - Weight offloading, `torchao` quantization, `draft_lm_head_quantization`, and
   the `sharded_rdt` weight transfer backend.
-- LoRA, in `auto` mode only.
 - Online quantization. With `VLLM_RELOAD_MODE=direct` the schemes in the table
   above reload directly, except `mxfp4` and `mxfp4_hadamard32` linear layers,
   `int8_per_channel_weight_only`, `lut_b_moe`, a quantized lm_head, activation
@@ -64,3 +63,6 @@ arrives, and an update that delivers only one of them fails at finish.
 
 The NCCL weight transfer load plan (`use_load_plan`) requires direct reload and
 refuses online quantization.
+
+LoRA engines reload directly, except that MoE experts do not load from plain
+checkpoint names yet: such an update is not refused but fails at finish.
