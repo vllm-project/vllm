@@ -52,6 +52,7 @@ class Granite20bFCToolParser(ToolParser):
         self.bot_token = "<function_call>"
         self.tool_start_token = self.bot_token
         self.tool_call_regex = re.compile(r"<function_call>\s*")
+        self.streamed_content_len = 0
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
@@ -121,13 +122,31 @@ class Granite20bFCToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if len(current_text) < len(self.bot_token) and self.bot_token.startswith(
-            current_text
-        ):
-            return None
+        bot_pos = current_text.find(self.bot_token)
+        if bot_pos == -1:
+            for n in range(min(len(current_text), len(self.bot_token) - 1), 0, -1):
+                if self.bot_token.startswith(current_text[-n:]):
+                    safe_len = len(current_text) - n
+                    if safe_len > self.streamed_content_len:
+                        delta = current_text[self.streamed_content_len:safe_len]
+                        self.streamed_content_len = safe_len
+                        return DeltaMessage(content=delta)
+                    # Held-back prefix turned out to be plain text (marker
+                    # never completed). Stream the newly arrived text so nothing
+                    # held back is lost.
+                    delta = current_text[len(previous_text):]
+                    self.streamed_content_len = len(current_text)
+                    return DeltaMessage(content=delta)
+            delta = current_text[self.streamed_content_len:]
+            self.streamed_content_len = len(current_text)
+            return DeltaMessage(content=delta)
 
-        if not current_text.startswith(self.bot_token):
-            return DeltaMessage(content=delta_text)
+        content_delta = None
+        if bot_pos > self.streamed_content_len:
+            content_delta = current_text[self.streamed_content_len : bot_pos]
+            self.streamed_content_len = bot_pos
+
+        tool_text = current_text[bot_pos:]
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
@@ -139,20 +158,22 @@ class Granite20bFCToolParser(ToolParser):
             is_complete = []
             try:
                 start_idx = len(self.bot_token)
-                start_idx = consume_space(start_idx, current_text)
+                start_idx = consume_space(start_idx, tool_text)
 
-                while start_idx < len(current_text):
-                    (obj, end_idx) = partial_json_loads(current_text[start_idx:], flags)
+                while start_idx < len(tool_text):
+                    (obj, end_idx) = partial_json_loads(tool_text[start_idx:], flags)
                     is_complete.append(
-                        is_complete_json(current_text[start_idx : start_idx + end_idx])
+                        is_complete_json(tool_text[start_idx : start_idx + end_idx])
                     )
                     start_idx += end_idx
-                    start_idx = consume_space(start_idx, current_text)
+                    start_idx = consume_space(start_idx, tool_text)
                     start_idx += len(self.bot_token)
-                    start_idx = consume_space(start_idx, current_text)
+                    start_idx = consume_space(start_idx, tool_text)
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug("not enough tokens to parse into JSON yet")
+                if content_delta:
+                    return DeltaMessage(content=content_delta)
                 return None
 
             # select as the current tool call the one we're on the state at
@@ -163,6 +184,8 @@ class Granite20bFCToolParser(ToolParser):
             # case -- if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
             if len(tool_call_arr) == 0:
+                if content_delta:
+                    return DeltaMessage(content=content_delta)
                 return None
 
             # case: we are starting a new tool in the array
@@ -265,6 +288,11 @@ class Granite20bFCToolParser(ToolParser):
                         )
 
             self.prev_tool_call_arr = tool_call_arr
+            if content_delta:
+                if delta is None:
+                    delta = DeltaMessage(content=content_delta)
+                else:
+                    delta.content = content_delta
             return delta
 
         except Exception as e:
