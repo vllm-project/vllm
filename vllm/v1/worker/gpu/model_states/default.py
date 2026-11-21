@@ -72,6 +72,7 @@ class DefaultModelState(ModelState):
             self.rope_state is not None
             and uses_multimodal_pruning(self.model_config, model)
         )
+        self.request_prefix_ranges: dict[str, list[tuple[int, int]]] = {}
 
         # Per-request bidirectional MM ranges. Not kept in the encoder cache:
         # only the first PP rank has one, but every rank builds attn metadata.
@@ -94,6 +95,13 @@ class DefaultModelState(ModelState):
                 or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
                 span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
             )[0]
+        prefix_ranges = getattr(self.model, "get_request_prefix_ranges", None)
+        if prefix_ranges is not None:
+            ranges = prefix_ranges(new_req_data)
+            if ranges:
+                self.request_prefix_ranges[new_req_data.req_id] = ranges
+            else:
+                self.request_prefix_ranges.pop(new_req_data.req_id, None)
         if self.rope_state is not None:
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.
@@ -123,6 +131,7 @@ class DefaultModelState(ModelState):
     def remove_request(self, req_id: str) -> None:
         if self.mm_prefix_ranges is not None:
             self.mm_prefix_ranges.pop(req_id, None)
+        self.request_prefix_ranges.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
 
@@ -209,6 +218,23 @@ class DefaultModelState(ModelState):
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}
 
+    def get_mm_prefix_ranges(
+        self, input_batch: InputBatch
+    ) -> dict[int, list[tuple[int, int]]] | None:
+        """PrefixLM bidirectional token ranges per request index of the batch."""
+        model_ranges = {
+            i: self.request_prefix_ranges[req_id]
+            for i, req_id in enumerate(input_batch.req_ids)
+            if req_id in self.request_prefix_ranges
+        }
+        if self.mm_prefix_ranges is None:
+            return model_ranges or None
+        ranges = {
+            i: self.mm_prefix_ranges.get(req_id, [])
+            for i, req_id in enumerate(input_batch.req_ids)
+        }
+        return {**ranges, **model_ranges} or None
+
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs or self.prompt_embeds_state is not None:
@@ -250,12 +276,6 @@ class DefaultModelState(ModelState):
             max_seq_len = self.max_model_len
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
-        req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
-        if self.mm_prefix_ranges is not None:
-            req_doc_ranges = {
-                i: self.mm_prefix_ranges.get(req_id, [])
-                for i, req_id in enumerate(input_batch.req_ids)
-            }
         dcp_local_seq_lens_cpu_upper_bound = None
         if input_batch.pcp is not None:
             dcp_local_seq_lens_cpu_upper_bound = (
@@ -278,7 +298,7 @@ class DefaultModelState(ModelState):
             dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             positions=input_batch.positions,
             is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
-            mm_req_doc_ranges=req_doc_ranges,
+            mm_req_doc_ranges=self.get_mm_prefix_ranges(input_batch),
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
             req_idx=input_batch.idx_mapping_np,

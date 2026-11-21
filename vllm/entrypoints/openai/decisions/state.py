@@ -45,7 +45,7 @@ def init_decisions_state(
         logger.warning("/v1/systemone and /v1/decisions are off: %s", e)
         return None
 
-    if strategy.task == "generate":
+    if strategy.supports_openai_decisions():
         state.openai_serving_decisions = OpenAIServingDecisions(
             state.openai_serving_models,
             strategy,
