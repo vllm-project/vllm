@@ -31,7 +31,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     async_request_openai_chat_completions,
     async_request_openai_completions,
 )
-from vllm.benchmarks.serve import _get_server_metrics_results
+from vllm.benchmarks.serve import _get_server_metrics_results, calculate_metrics
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -243,6 +243,120 @@ def _make_input(api_url: str, n_tokens: int, endpoint_id: str) -> RequestFuncInp
         model="test-model",
         multi_modal_content=multi_modal_content,
     )
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_diarized_audio_stream(monkeypatch: pytest.MonkeyPatch, complete: bool) -> None:
+    monkeypatch.setattr(request_func_module, "time", _FakeTime(_ScriptedClock()))
+    events: list[dict[str, Any]] = [
+        {"type": "transcript.text.delta", "delta": ""},
+        {"type": "transcript.text.delta", "delta": "Hello"},
+        {"type": "transcript.text.segment", "text": "Hello", "speaker": "A"},
+        {"type": "transcript.text.delta", "delta": " 你好"},
+        {"type": "transcript.text.segment", "text": "你好", "speaker": "B"},
+    ]
+    if complete:
+        events.append(
+            {
+                "type": "transcript.text.done",
+                "text": "Hello 你好",
+                "usage": {"type": "tokens", "input_tokens": 120, "output_tokens": 30},
+            }
+        )
+    chunks = [(0.0, _sse(event)) for event in events]
+    chunks.append((0.0, b"data: [DONE]\n\n"))
+    request = _make_input("http://test/v1/audio/transcriptions", 32, "audio")
+    request.extra_body = {"response_format": "diarized_json"}
+    output = asyncio.run(async_request_openai_audio(request, _FakeSession(chunks)))
+
+    if not complete:
+        assert not output.success
+        assert "transcript.text.done" in output.error
+        return
+    assert output.success, output.error
+    assert output.generated_text == "Hello 你好"
+    assert (output.prompt_len, output.output_tokens) == (120, 30)
+    assert (output.ttft, output.latency) == (2.0, 6.0)
+    assert output.itl == []  # Segment boundaries do not expose token times.
+    metrics, lengths = calculate_metrics(
+        input_requests=[],
+        outputs=[output],
+        dur_s=6.0,
+        tokenizer=None,
+        selected_percentiles=[99],
+        goodput_config_dict={"e2el": 7000},
+        token_timestamps_available=False,
+    )
+    assert lengths == [30] and metrics.output_throughput == 5.0
+    assert metrics.max_output_tokens_per_s is None
+    assert metrics.max_concurrent_requests == 1
+    assert metrics.request_goodput == pytest.approx(1 / 6)
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_fragmented_diarized_transcript(monkeypatch, newline):
+    text = "测试ab" * 512
+    events: list[dict[str, Any]] = [
+        {"type": "transcript.text.delta", "delta": text},
+        {"type": "transcript.text.segment", "text": text, "speaker": "A"},
+        {
+            "type": "transcript.text.done",
+            "text": text,
+            "usage": {"type": "tokens", "input_tokens": 7, "output_tokens": 9},
+        },
+    ]
+    separator = newline * 2
+    wire = (
+        b": keep-alive"
+        + separator
+        + separator.join(
+            b"event: "
+            + event["type"].encode()
+            + newline
+            + b"data:"
+            + json.dumps(event, ensure_ascii=False).encode()
+            for event in events
+        )
+        + separator
+        + b"data: [DONE]"
+        + separator
+    )
+    # Split UTF-8 characters, frame delimiters, and the repeated full transcript.
+    chunks = [(0.0, wire[i : i + 7]) for i in range(0, len(wire), 7)]
+    request = _make_input("http://test/v1/audio/transcriptions", 16, "audio")
+    request.extra_body = {"response_format": "diarized_json"}
+
+    # Bound the amount of JSON parsed independently of machine speed.
+    loads = json.loads
+    parsed_chars = 0
+
+    def count_input(payload):
+        nonlocal parsed_chars
+        parsed_chars += len(payload)
+        return loads(payload)
+
+    monkeypatch.setattr(request_func_module.json, "loads", count_input)
+    output = asyncio.run(async_request_openai_audio(request, _FakeSession(chunks)))
+    assert output.success, output.error
+    assert (output.generated_text, output.prompt_len, output.output_tokens) == (
+        text,
+        7,
+        9,
+    )
+    assert parsed_chars <= len(wire)
+
+
+@pytest.mark.parametrize("token_timestamps_available", [False, True])
+def test_peak_concurrency_counts_overlapping_requests(token_timestamps_available):
+    # Three requests touch the same second. One ends exactly as another begins.
+    outputs = [
+        RequestFuncOutput(success=True, start_time=start, latency=0.5, output_tokens=1)
+        for start in (10.0, 10.25, 10.5)
+    ]
+    metrics, _ = calculate_metrics(
+        [], outputs, 1.0, None, [99], {}, token_timestamps_available
+    )
+    assert metrics.max_concurrent_requests == 2
 
 
 def _run(
