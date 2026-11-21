@@ -912,11 +912,15 @@ class Scheduler(SchedulerInterface):
                     ):
                         break
 
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
+                    # The request cannot be scheduled. Only evict requests
+                    # that have not been scheduled in this step. This keeps
+                    # running decode requests from being rolled back.
                     if self.policy == SchedulingPolicy.PRIORITY:
+                        preemptable_reqs = self.running[req_index:]
+                        if not preemptable_reqs:
+                            break
                         preempted_req = max(
-                            self.running,
+                            preemptable_reqs,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                     else:
@@ -926,37 +930,7 @@ class Scheduler(SchedulerInterface):
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        victim_index = self.running.index(preempted_req)
-                        del self.running[victim_index]
-                        if victim_index < req_index:
-                            req_index -= 1
-
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            restored = num_scheduled_tokens.pop(preempted_req_id)
-                            token_budget += restored
-                            input_budget += restored + draft_slots
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
-                                if iteration_details is not None:
-                                    num_scheduled_encoder_inputs -= len(
-                                        preempted_encoder_inputs
-                                    )
-                    else:
-                        preempted_req = self.running.pop()
+                    self.running.remove(preempted_req)
 
                     self._preempt_request(
                         preempted_req,
@@ -969,16 +943,6 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
-                if (
-                    self.policy == SchedulingPolicy.PRIORITY
-                    and request.status == RequestStatus.PREEMPTED
-                ):
-                    # The request was the lowest-priority running request and
-                    # preempted itself. The requests after it have higher
-                    # priority and may still fit (it just freed its blocks);
-                    # it was removed from `self.running`, so `req_index`
-                    # already points at the next one.
-                    continue
                 # Cannot schedule this request.
                 break
 
