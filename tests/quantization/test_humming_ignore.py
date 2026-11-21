@@ -12,8 +12,15 @@ the real weight-load path (falls back to unquantized) and the dummy-load path
 """
 
 import pytest
+import torch
 
-from vllm.model_executor.layers.quantization.humming import HummingConfig
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.humming import (
+    HummingConfig,
+    HummingLayerQuantizationConfig,
+    HummingLinearMethod,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 # The real ignore list from Kimi-K2.6's compressed-tensors quantization_config.
 K26_IGNORE = [
@@ -54,3 +61,47 @@ def test_plain_substring_entries_still_work():
     cfg_dict = {"modules_to_not_convert": ["lm_head", "vision"]}
     assert cfg.is_layer_skipped(cfg_dict, "model.vision.encoder.fc") is True
     assert cfg.is_layer_skipped(cfg_dict, "model.layers.0.mlp.up_proj") is False
+
+
+def test_unquantized_weight_falls_back_to_working_linear(monkeypatch):
+    # A layer that the checkpoint left unquantized (e.g. AutoRound extra_config
+    # entries) reaches the Humming weight loader with a float weight. The
+    # method then turns itself into UnquantizedLinearMethod, which must be
+    # fully initialized so that process_weights_after_loading and apply work.
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    out_size, in_size = 8, 16
+    method = HummingLinearMethod(
+        HummingLayerQuantizationConfig(weight_schema=None, input_schema=object())
+    )
+    layer = torch.nn.Module()
+    layer.is_fallback = False
+    layer.param_dtype = torch.float32
+    layer.input_size_per_partition = in_size
+    layer.output_partition_sizes_sum = out_size
+    layer.extra_weight_attrs = {"weight_loader": default_weight_loader}
+    layer.tp_size, layer.tp_rank = 1, 0
+    placeholder = torch.nn.Parameter(torch.empty(0, device=device), requires_grad=False)
+    placeholder.param_name = "weight"
+    layer.weight = placeholder
+
+    weight = torch.randn(out_size, in_size, device=device)
+    method.prepare_weight_loader(layer, default_weight_loader)(placeholder, weight)
+
+    assert layer.is_fallback
+    assert isinstance(method, UnquantizedLinearMethod)
+    assert hasattr(method, "_gemm_impl")
+    torch.testing.assert_close(layer.weight.data, weight)
+
+    method.process_weights_after_loading(layer)
+    x = torch.randn(3, in_size, device=device)
+    torch.testing.assert_close(
+        method.apply(layer, x), torch.nn.functional.linear(x, weight)
+    )
