@@ -3,6 +3,7 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import json
 import time
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
@@ -237,6 +238,51 @@ class ChatCompletionNamedFunction(OpenAIBaseModel):
 class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     function: ChatCompletionNamedFunction
     type: Literal["function"] = "function"
+
+
+def _tool_call_signature(tool_calls: Any) -> tuple[tuple[str, str], ...] | None:
+    """Names and canonical arguments of one assistant turn's tool calls."""
+    if not tool_calls:
+        return None
+    signature = []
+    for tool_call in tool_calls:
+        function = tool_call.get("function") if isinstance(tool_call, dict) else None
+        if not isinstance(function, dict) or not function.get("name"):
+            return None
+        arguments = function.get("arguments") or ""
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments) if arguments.strip() else {}
+            except json.JSONDecodeError:
+                signature.append((function["name"], arguments))
+                continue
+        signature.append(
+            (function["name"], json.dumps(arguments, sort_keys=True, default=str))
+        )
+    return tuple(sorted(signature))
+
+
+def count_trailing_identical_tool_calls(messages: Any) -> int:
+    """Count how many assistant turns in a row, ending at the last assistant
+    turn, made exactly the same tool calls (names and arguments, in any
+    order). `tool` result messages between those turns are skipped; any other
+    message, or an assistant turn without tool calls, ends the run."""
+    run = 0
+    last: tuple[tuple[str, str], ...] | None = None
+    for message in reversed(messages or []):
+        if not isinstance(message, dict):
+            break
+        role = message.get("role")
+        if role == "tool":
+            continue
+        if role != "assistant":
+            break
+        signature = _tool_call_signature(message.get("tool_calls"))
+        if signature is None or (last is not None and signature != last):
+            break
+        last = signature
+        run += 1
+    return run
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
@@ -568,6 +614,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    max_repeated_tool_calls: Annotated[int, Field(ge=1)] | None = Field(
+        default=None,
+        description=(
+            "Opt-in guard against tool-call loops when `tool_choice` is "
+            '`"auto"`. If the last N assistant turns in `messages` each made '
+            "the same tool calls (same names and arguments), this request is "
+            'served as if `tool_choice` were `"none"`, so the model has to '
+            "answer instead of calling the tool again. Read from the request "
+            "history only; no state is kept between requests. Off by default."
+        ),
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     @model_validator(mode="before")
@@ -626,6 +684,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
+        return self
+
+    @model_validator(mode="after")
+    def _apply_max_repeated_tool_calls(self) -> "ChatCompletionRequest":
+        """Serve the request without tool calls once the history shows the
+        same tool calls repeated `max_repeated_tool_calls` times in a row."""
+        limit = self.max_repeated_tool_calls
+        if limit is None or self.tool_choice != "auto" or not self.tools:
+            return self
+        repeats = count_trailing_identical_tool_calls(self.messages)
+        if repeats >= limit:
+            logger.debug(
+                "Same tool calls repeated %d times; serving request without "
+                "tool calls (max_repeated_tool_calls=%d).",
+                repeats,
+                limit,
+            )
+            self.tool_choice = "none"
         return self
 
     _grammar_from_parser: bool = PrivateAttr(default=False)

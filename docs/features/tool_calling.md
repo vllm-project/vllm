@@ -160,6 +160,22 @@ When the option is unset, the tool parser's default level applies: `function` fo
 
 The floor never relaxes a constraint the request would already receive: tools the client marked `strict: true` keep their schemas at every level. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this option.
 
+### Stopping Repeated Tool Calls
+
+With `tool_choice="auto"`, a model can call the same tool with the same arguments again and again, even though each result comes back in a `tool` message. The `max_repeated_tool_calls` request parameter is an opt-in guard for this. When the last N assistant turns in `messages` all made the same tool calls (same names and arguments, in any order), vLLM serves that request as if `tool_choice` were `"none"`: no tool-call grammar is built and no tool calls are parsed, so the model has to answer. If the request also sets `response_format`, the answer follows that format.
+
+```python
+completion = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    tools=tools,
+    tool_choice="auto",
+    extra_body={"max_repeated_tool_calls": 3},
+)
+```
+
+The check reads only the request history, so the server keeps no state between requests. `tool` messages between the repeated turns are skipped; a user turn or an assistant turn without tool calls starts the count again. The parameter is ignored for `tool_choice="required"`, named tool choice and `"none"`, and it is off by default.
+
 ## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
