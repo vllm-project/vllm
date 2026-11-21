@@ -24,6 +24,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.tp_sequence_parallel import (  # noqa: E501
+    MoEPrepareAndFinalizeTPSequenceParallel,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
 )
@@ -141,7 +144,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         reduce_results: bool = True,
+        tp_sequence_parallel_experts: bool = False,
     ):
+        """`tp_sequence_parallel_experts`: the caller feeds each TP rank its
+        share of the tokens (`already_sequence_parallel=True`) and the
+        TP-sharded experts gather them. Only honoured when the shared expert
+        is fused into the experts or absent; see `experts_take_local_tokens`.
+        """
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -236,6 +245,15 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 prefix=f"{prefix}.shared_expert",
             )
 
+        self.tp_sequence_parallel_experts = (
+            tp_sequence_parallel_experts
+            and not self.is_sequence_parallel
+            and self.shared_expert is None
+            and not parallel_config.enable_expert_parallel
+            and parallel_config.data_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and self.tp_size > 1
+        )
         self.experts = FusedMoEFactory(
             shared_experts=(
                 None if self.replicate_shared_expert else self.shared_expert
@@ -250,7 +268,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel,
+            is_sequence_parallel=(
+                self.is_sequence_parallel or self.tp_sequence_parallel_experts
+            ),
             n_shared_experts=1 if self.shared_expert is None else None,
             reduce_results=reduce_results,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
@@ -258,6 +278,21 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             shared_expert_gate=self.shared_expert_gate
             if self.shared_expert is None
             else None,
+        )
+
+    @property
+    def experts_take_local_tokens(self) -> bool:
+        """Whether the experts gather the TP ranks' tokens themselves.
+
+        Resolved once the kernel is built after weight loading; backends
+        without the TP sequence-parallel prepare/finalize need the caller to
+        gather the tokens and reduce-scatter the un-reduced output.
+        """
+        if not self.tp_sequence_parallel_experts:
+            return False
+        kernel = getattr(self.experts.routed_experts.quant_method, "moe_kernel", None)
+        return kernel is not None and isinstance(
+            kernel.prepare_finalize, MoEPrepareAndFinalizeTPSequenceParallel
         )
 
     def forward(

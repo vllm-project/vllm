@@ -35,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two
 from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
     PassThroughPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.tp_sequence_parallel import (  # noqa: E501
+    MoEPrepareAndFinalizeTPSequenceParallel,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
@@ -228,6 +231,13 @@ def maybe_make_prepare_finalize(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=all2all_manager.world_size,
                 use_monolithic=use_monolithic,
+            )
+        elif (
+            moe.moe_parallel_config.use_tp_sequence_parallel_dispatch
+            and not use_monolithic
+        ):
+            return MoEPrepareAndFinalizeTPSequenceParallel(
+                tp_size=moe.moe_parallel_config.tp_size
             )
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
