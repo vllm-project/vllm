@@ -450,6 +450,22 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
     ),
+    "dots_ocr": VitCudagraphTestConfig(
+        model="rednote-hilab/dots.ocr",
+        modalities=["image"],
+        image_prompt=(
+            "<|user|><|img|><|imgpad|><|endofimg|>"
+            "What is in this image?<|endofuser|><|assistant|>"
+        ),
+        marks=[pytest.mark.core_model],
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [4096],
+            "encoder_cudagraph_max_vision_items_per_batch": 2,
+        },
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+        },
+    ),
     "deepseek_vl2": VitCudagraphTestConfig(
         model="deepseek-ai/deepseek-vl2-tiny",
         modalities=["image"],
@@ -567,12 +583,21 @@ def get_compilation_config(config: VitCudagraphTestConfig):
 # ---------------------------------------------------------------------------
 
 
+def _get_encoder_cudagraph_stats(worker):
+    manager = worker.model_runner.model_state.encoder_runner.cudagraph_manager
+    assert manager is not None and manager.is_captured()
+    return manager.get_cumulative_stats()
+
+
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
 )
-def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
+def test_vit_cudagraph_image(model_id, vllm_runner, image_assets, monkeypatch):
     config = MODEL_CONFIGS[model_id]
+
+    if model_id == "dots_ocr":
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     if config.skip:
         pytest.skip(f"{model_id} is marked to be skipped.")
@@ -591,6 +616,8 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         compilation_config=get_compilation_config(config),
         **config.vllm_runner_kwargs,
     ) as vllm_model:
+        if model_id == "dots_ocr":
+            initial_stats = vllm_model.llm.collective_rpc(_get_encoder_cudagraph_stats)
         if config.mistral_chat_prompt:
             assert config.image_prompt is not None
             tokenizer = vllm_model.llm.get_tokenizer()
@@ -624,6 +651,12 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         outputs = vllm_model.generate_greedy(
             image_prompts, config.max_tokens, images=images
         )
+
+        if model_id == "dots_ocr":
+            final_stats = vllm_model.llm.collective_rpc(_get_encoder_cudagraph_stats)
+            for initial, final in zip(initial_stats, final_stats, strict=True):
+                assert final["graph_hits"] - initial["graph_hits"] == len(images)
+                assert final["graph_misses"] == initial["graph_misses"]
 
         # Basic validation that we got a response
         assert len(outputs) == 2
