@@ -63,7 +63,7 @@ def configs(nvfp4: bool, tile_n: int) -> dict[str, tuple[int, int]]:
 
 # Token tile by batch size (tokens up to the first entry): tiles above the
 # mean rows per expert pay off once the routing is skewed.
-_TILES = ((8, 8), (128, 16), (384, 32), (768, 64), (4096, 128), (1 << 31, 256))
+_TILES = ((128, 16), (384, 32), (768, 64), (4096, 128), (1 << 31, 256))
 # Kernel of each (format, tile) for the gate/up and down projections.
 _KERNELS = {
     (True, 8): ("t128x8x512_s5_et128x8_m128x8x64_c1x1x1_rM_TN_transOut_schPd",) * 2,
