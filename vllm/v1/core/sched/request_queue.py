@@ -192,9 +192,13 @@ class PriorityRequestQueue(RequestQueue):
 
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
-        heap_copy = self._heap[:]
-        while heap_copy:
-            yield heapq.heappop(heap_copy)
+        # `sorted()` yields the same order as copying the heap and popping
+        # every element: Request.__lt__ is a strict total order (priority,
+        # then arrival_time, then request_id, then object identity as a
+        # final tiebreaker), so there are never ties for the two methods to
+        # disagree on. `sorted()` also avoids the extra `self._heap[:]` copy
+        # the previous implementation needed.
+        yield from sorted(self._heap)
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
