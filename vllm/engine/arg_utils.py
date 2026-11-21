@@ -662,7 +662,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_fp8_scale_save_margin
     )
     io_processor_plugin: str | None = None
-    renderer_num_workers: int = 1
+    renderer_num_workers: int | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method

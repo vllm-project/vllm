@@ -4937,6 +4937,22 @@ def test_renderer_num_workers_with_mm_cache():
     assert config.renderer_num_workers == 1
 
 
+def test_renderer_num_workers_default():
+    """Unset renderer_num_workers resolves to 4 for generate models (the async
+    renderer path) and to 1 for pooling runners, whose multimodal preprocessing
+    runs on the renderer workers and is incompatible with the cache when
+    multi-threaded."""
+    mm_model = "Qwen/Qwen2-VL-2B-Instruct"
+
+    assert ModelConfig(mm_model).renderer_num_workers == 4
+
+    # Pooling + default cache (cache_gb=4) must not trip the multi-worker check.
+    assert ModelConfig(mm_model, runner="pooling").renderer_num_workers == 1
+
+    # An explicit value is respected.
+    assert ModelConfig(mm_model, renderer_num_workers=8).renderer_num_workers == 8
+
+
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")

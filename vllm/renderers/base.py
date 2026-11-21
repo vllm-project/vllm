@@ -147,6 +147,8 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
+        # Always resolved by `ModelConfig.__post_init__` (None means "auto" there).
+        assert pool_workers is not None
         self._executor = _SwappableExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
 
@@ -226,9 +228,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # Pool last: multimodal processors may add tokens while they are
         # created, and the pooled copies only see tokens added before this.
         if isinstance(self.tokenizer, HfTokenizer):
-            maybe_make_thread_pool(
-                self.tokenizer, config.model_config.renderer_num_workers + 1
-            )
+            maybe_make_thread_pool(self.tokenizer, pool_workers + 1)
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         """Modify the renderer's copy of an HF tokenizer before it is pooled.
