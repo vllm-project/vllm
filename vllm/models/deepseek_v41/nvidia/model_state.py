@@ -840,15 +840,22 @@ class DeepseekV41ModelState(DefaultModelState):
         for groups, kv_cache_group in zip(attn_groups, kv_cache_config.kv_cache_groups):
             copies = []
             for group in groups:
-                if prefixes.isdisjoint(group.layer_names):
+                layer_names = [name for name in group.layer_names if name in prefixes]
+                if not layer_names:
                     continue
-                copy = replace(group, metadata_builders=[])
+                copy = replace(group, layer_names=layer_names, metadata_builders=[])
                 copy.create_metadata_builders(
                     self.vllm_config,
                     self.device,
                     group.kernel_block_size,
                     kv_cache_group=kv_cache_group,
                 )
+                # Replay only re-runs these layers on their window rows. Keep
+                # the builders' head-sharded path even when another layer of
+                # the model enables ShardQ.
+                for builder in copy.metadata_builders:
+                    if hasattr(builder, "use_shardq"):
+                        builder.use_shardq = False
                 copies.append(copy)
             own_groups.append(copies)
         return own_groups

@@ -263,6 +263,10 @@ class DeepseekSparseSWAMetadata:
     flashinfer_sparse_index_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict
     )
+    # ShardQ: this cache's exchange view, and the compact top-k layout start.
+    # -1 means the full-batch layout (after the decode rows).
+    shardq: object | None = None
+    topk_start: int = -1
 
     def get_prefill_chunk_plan(
         self,
