@@ -350,9 +350,16 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// macOS rejects POSIX shm names longer than 30 characters.
     fn unique_name() -> String {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("vllm-mm-shm-test-ring-{}-{id}", std::process::id())
+        format!("vllm-ring-{}-{id}", std::process::id())
+    }
+
+    /// POSIX shm objects are not files under `/dev/shm` on every platform, so
+    /// probe with `shm_open`.
+    fn shm_exists(name: &str) -> bool {
+        shm::open(format!("/{name}"), shm::OFlags::RDONLY, Mode::empty()).is_ok()
     }
 
     fn create_buffer(size: usize) -> SingleWriterShmRingBuffer {
@@ -370,7 +377,7 @@ mod tests {
         };
         assert!(error.to_string().contains("File exists"), "{error}");
         assert!(
-            std::path::Path::new(&format!("/dev/shm/{name}")).exists(),
+            shm_exists(&name),
             "a failed create must not unlink the existing segment"
         );
     }
@@ -382,17 +389,16 @@ mod tests {
         // segment was created.
         let result = SingleWriterShmRingBuffer::create(usize::MAX / 2, &name);
         assert!(result.is_err());
-        assert!(!std::path::Path::new(&format!("/dev/shm/{name}")).exists());
+        assert!(!shm_exists(&name));
     }
 
     #[test]
     fn drop_unlinks_the_segment() {
         let name = unique_name();
         let buffer = SingleWriterShmRingBuffer::create(1024, &name).unwrap();
-        let path = format!("/dev/shm/{name}");
-        assert!(std::path::Path::new(&path).exists());
+        assert!(shm_exists(&name));
         drop(buffer);
-        assert!(!std::path::Path::new(&path).exists());
+        assert!(!shm_exists(&name));
     }
 
     #[test]
