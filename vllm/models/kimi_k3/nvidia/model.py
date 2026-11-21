@@ -1736,32 +1736,22 @@ class KimiK3ForConditionalGeneration(
                     device=self.device, dtype=model_config.dtype
                 )
 
-            vision_attn = self.vision_tower.encoder.blocks[0].attn
-            if vision_attn.is_flash_attn_backend and vision_attn._fa_version == 4:
-                from vllm.models.kimi_k3.nvidia.ops.vision_fa4_warmup import (
-                    KimiK3VisionFA4WarmupConfig,
-                    register_kimi_k3_vision_fa4_warmup,
-                )
-
-                merge_height, merge_width = config.vision_config.merge_kernel_size
-                mm_config = model_config.get_multimodal_config()
-                assert mm_config is not None
-                register_kimi_k3_vision_fa4_warmup(
-                    KimiK3VisionFA4WarmupConfig(
-                        num_heads=vision_attn.num_heads,
-                        head_dim=vision_attn.head_size,
-                        dtype=vision_attn.dtype,
-                        max_batch_size=(
-                            vllm_config.scheduler_config.max_num_seqs
-                            * mm_config.get_limit_per_prompt("image")
-                        ),
-                        max_seqlen=(
-                            vllm_config.scheduler_config.max_num_encoder_input_tokens
-                            * merge_height
-                            * merge_width
-                        ),
-                    )
-                )
+            merge_height, merge_width = config.vision_config.merge_kernel_size
+            mm_config = model_config.get_multimodal_config()
+            assert mm_config is not None
+            max_vision_tokens = (
+                vllm_config.scheduler_config.max_num_encoder_input_tokens
+                * merge_height
+                * merge_width
+            )
+            self.vision_tower.encoder.blocks[0].attn.register_fa4_warmup(
+                max_seqlen=max_vision_tokens,
+                max_num_tokens=max_vision_tokens,
+                max_num_seqs=(
+                    vllm_config.scheduler_config.max_num_seqs
+                    * mm_config.get_limit_per_prompt("image")
+                ),
+            )
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
