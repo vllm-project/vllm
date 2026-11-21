@@ -8,6 +8,102 @@ from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
+def _write_kv_kernel(
+    K,
+    V,
+    KEY_CACHE,
+    VALUE_CACHE,
+    SLOT_MAPPING,
+    K_TOKEN_STRIDE,
+    K_HEAD_STRIDE,
+    V_TOKEN_STRIDE,
+    V_HEAD_STRIDE,
+    KC_BLOCK_STRIDE,
+    KC_PAGE_STRIDE,
+    KC_HEAD_STRIDE,
+    VC_BLOCK_STRIDE,
+    VC_PAGE_STRIDE,
+    VC_HEAD_STRIDE,
+    PAGE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_DIM: tl.constexpr,
+):
+    token = tl.program_id(0)
+    head = tl.program_id(1)
+    slot = tl.load(SLOT_MAPPING + token).to(tl.int64)
+    if slot < 0:
+        return
+
+    block = slot // PAGE
+    offset = slot % PAGE
+    dim = tl.arange(0, BLOCK_DIM)
+    mask = dim < HEAD_DIM
+
+    k_src = K + token * K_TOKEN_STRIDE + head * K_HEAD_STRIDE + dim
+    v_src = V + token * V_TOKEN_STRIDE + head * V_HEAD_STRIDE + dim
+    k_dst = (
+        KEY_CACHE
+        + block * KC_BLOCK_STRIDE
+        + offset * KC_PAGE_STRIDE
+        + head * KC_HEAD_STRIDE
+        + dim
+    )
+    v_dst = (
+        VALUE_CACHE
+        + block * VC_BLOCK_STRIDE
+        + offset * VC_PAGE_STRIDE
+        + head * VC_HEAD_STRIDE
+        + dim
+    )
+    tl.store(k_dst, tl.load(k_src, mask=mask), mask=mask)
+    tl.store(v_dst, tl.load(v_src, mask=mask), mask=mask)
+
+
+def write_kv_paged(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Scatter K/V into a FlashAttention paged cache, skipping padding slots.
+
+    The inputs use `(tokens, heads, head_dim)` and the caches use
+    `(blocks, page, heads, head_dim)`. One program handles one token/head pair.
+    """
+    num_tokens = slot_mapping.numel()
+    num_heads, head_dim = k.shape[1], k.shape[2]
+    if num_tokens == 0 or num_heads == 0:
+        return
+    assert k.shape == v.shape
+    assert k.stride(2) == v.stride(2) == 1
+    assert key_cache.stride(3) == value_cache.stride(3) == 1
+    assert key_cache.shape[1] == value_cache.shape[1]
+    assert key_cache.shape[2] == value_cache.shape[2] == num_heads
+
+    _write_kv_kernel[(num_tokens, num_heads)](
+        k,
+        v,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        PAGE=key_cache.shape[1],
+        HEAD_DIM=head_dim,
+        BLOCK_DIM=triton.next_power_of_2(head_dim),
+    )
+
+
+@triton.jit
 def _mix_rmsnorm_kernel(
     X,
     ALPHA,
