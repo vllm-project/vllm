@@ -347,6 +347,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
         rocm_segmented_attn_autotune_warmup(worker)
         _rocm_aiter_gemm_warmup(worker)
+        if "vllm.models.deepseek_v41.amd.akr_hooks" in sys.modules:
+            from vllm.models.deepseek_v41.amd.akr_warmup import prefill_warmup
+
+            prefill_warmup(worker)
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)

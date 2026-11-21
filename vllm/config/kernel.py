@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-AmdKernelsRoute = Literal[
+MiniMaxM3AmdKernelsRoute = Literal[
     "gemm",
     "moe",
     "qkv",
@@ -30,10 +30,40 @@ AmdKernelsRoute = Literal[
     "sp_prefill",
 ]
 
+DeepseekV41AmdKernelsRoute = Literal[
+    # attention input
+    "rope_insert",
+    "norm_dual",
+    "compressor",
+    "kv_score",
+    "dense_gemm",
+    # indexer, sparse attention, output projection
+    "indexer",
+    "sparse_mla",
+    "wo_a",
+    # MoE block
+    "router",
+    "shared_expert",
+    "fused_ep8",
+    # mHC
+    "mhc_seam",
+    "mhc_tail",
+    "mhc_wo_b",
+    "mhc_ffn",
+    # lm_head, DSpark draft and sampling
+    "lm_head",
+    "main_proj",
+    "draft_router",
+    "markov",
+]
+
+AmdKernelsRoute = Literal[MiniMaxM3AmdKernelsRoute, DeepseekV41AmdKernelsRoute]
+
 
 @config
 class AmdKernelsConfig:
-    """MiniMax-M3.1 layers on `amd_kernels` (ROCm gfx950, TP4)."""
+    """MiniMax-M3.1 (TP4) and DeepSeek-V4.1-Flash (DEP8) layers on `amd_kernels`
+    (ROCm gfx950). Each model reads only its own routes."""
 
     enabled: bool = True
     """Use `amd_kernels` where it is installed and the shapes fit."""
@@ -41,8 +71,21 @@ class AmdKernelsConfig:
     disabled_routes: list[AmdKernelsRoute] = Field(default_factory=list)
     """Routes that keep the stock kernels."""
 
+    indexer_max_ctx: int = 0
+    """DeepSeek-V4.1 `indexer` route: the longest row (compressed entries) the
+    kernel is sized for. 0 derives it from `max_model_len` and each layer's
+    compress ratio; a layer whose bound exceeds the kernel's limit stays on the
+    stock indexer."""
+
+    prefill_warmup: bool = True
+    """DeepSeek-V4.1: before CUDA graph capture, run every linear layer at each
+    AITER tuned-GEMM token bucket above the captured sizes plus a few
+    prefill-sized dummy steps, so that FlyDSL kernel variants only prefill steps
+    select are built at startup instead of stalling every DP rank while
+    serving."""
+
     def compile_factors(self) -> CompileFactors:
-        return get_compile_factors(self, set())
+        return get_compile_factors(self, {"prefill_warmup"})
 
 
 @config
@@ -346,7 +389,7 @@ class KernelConfig:
     deployment that cannot run it is refused at startup."""
 
     amd_kernels: AmdKernelsConfig = Field(default_factory=AmdKernelsConfig)
-    """MiniMax-M3.1 on `amd_kernels`; see `AmdKernelsConfig`."""
+    """MiniMax-M3.1 and DeepSeek-V4.1 on `amd_kernels`; see `AmdKernelsConfig`."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

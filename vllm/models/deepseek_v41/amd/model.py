@@ -69,6 +69,7 @@ from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
+from vllm.models.deepseek_v41.amd import akr_hooks, akr_mhc, akr_moe
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
@@ -336,6 +337,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.hc_attn_fn_packed: torch.Tensor | None = None
         self.hc_ffn_fn_packed: torch.Tensor | None = None
+        self.akr_mhc = akr_mhc.create(self, vllm_config)
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
@@ -404,15 +406,32 @@ class DeepseekV4DecoderLayer(nn.Module):
             # Fork only inside FULL graph capture, where the joins become graph
             # edges; HIP event waits at runtime are unreliable here.
             mhc_overlap = None
+        num_tokens = positions.shape[0]
+        akr = self.akr_mhc
+        if akr is not None and akr.seam_ok(num_tokens):
+            # The amd_kernels seam keeps one scratch per device: serial only.
+            mhc_overlap = None
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
             if mhc_overlap is not None
             else self.mhc_pre_delayed
         )
+        step = akr.begin_step() if akr is not None else None
+        carried = isinstance(x, akr_mhc.SeamCarry)
+        aux_inputs = None
+        if akr is not None and step is not None:
+            mhc_pre = partial(akr.pre, mhc_pre)
+            if step.want_aux and residual is not None and not carried:
+                aux_inputs = (x, residual, post_mix, res_mix)
+            akr.want_aux = aux_inputs is not None
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
-        if residual is None:
+        if carried:
+            # The previous layer's FFN epilogue chain ran this attention seam.
+            assert fuse_attn_norm and residual is not None
+            attn_pre, x = x.attn_pre, x.layer_input
+        elif residual is None:
             if x.dim() == 2:
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
@@ -508,14 +527,41 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
         if not fuse_attn_norm:
             x = self.attn_norm(x)
+        if akr is not None and aux_inputs is not None:
+            # DSpark auxiliary hidden state of the previous layer: the mean of
+            # the streams this seam's post-mix formed.
+            akr.aux_out = (
+                akr.last_aux
+                if akr.last_aux is not None
+                else self.mhc_post(*aux_inputs).mean(dim=1)
+            )
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
 
-        x = self.attn(positions, x, None)
+        # wo_b with the attention post-mix as its epilogue, then the FFN seam.
+        # forward_codes does nothing and returns None where wo_a does not serve.
+        wo_a_out = None
+        ffn_quant = None
+        if akr is not None and akr.wo_b_chain_ok(num_tokens):
+            wo_a_out = self.attn.forward_codes(positions, x, None)
+        if akr is not None and wo_a_out is not None:
+            residual, post_mix, res_mix, x, ffn_pre, ffn_quant = akr.wo_b_chain(
+                wo_a_out,
+                residual,
+                post_mix,
+                res_mix,
+                attn_pre,
+                quant=akr_moe.wants_x_quant(self.ffn, num_tokens),
+                dtype=x.dtype,
+            )
+        else:
+            x = self.attn(positions, x, None)
         if mhc_overlap is not None:
             mhc_overlap.join()
-        if self.use_sequence_parallel:
+        if wo_a_out is not None:
+            pass
+        elif self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         elif self.mono is not None and self.mono.ffn_only:
             out = self.mono.ffn(self, x, residual, post_mix, res_mix, attn_pre)
@@ -523,27 +569,55 @@ class DeepseekV4DecoderLayer(nn.Module):
                 return out
             x = tensor_model_parallel_all_reduce(x)
 
-        residual, post_mix, res_mix, x, ffn_pre = mhc_pre(
-            residual,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-            self.hc_eps,
-            self.hc_post_alpha,
-            self.hc_sinkhorn_iters,
-            pre_mix=attn_pre,
-            sublayer_out=x,
-            post_layer_mix=post_mix,
-            comb_res_mix=res_mix,
-            norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
-            norm_eps=self.ffn_norm.variance_epsilon,
-            fn_packed=self.hc_ffn_fn_packed,
-        )
-        if not self.fuse_seam_norm:
-            x = self.ffn_norm(x)
-        x = self.ffn(x, input_ids)
+        if wo_a_out is None:
+            if akr is not None:
+                akr.want_quant = akr_moe.wants_x_quant(self.ffn, num_tokens)
+            residual, post_mix, res_mix, x, ffn_pre = mhc_pre(
+                residual,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=attn_pre,
+                sublayer_out=x,
+                post_layer_mix=post_mix,
+                comb_res_mix=res_mix,
+                norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
+                norm_eps=self.ffn_norm.variance_epsilon,
+                fn_packed=self.hc_ffn_fn_packed,
+            )
+            if not self.fuse_seam_norm:
+                x = self.ffn_norm(x)
+            if akr is not None:
+                ffn_quant = akr.quant_output(x.dtype)
+        # Shared-expert down + routed add + FFN post-mix as one GEMM epilogue,
+        # then the next layer's attention seam. forward_parts does nothing and
+        # returns None where the shared-expert route does not serve; every rank
+        # still makes exactly one routed-experts call per layer.
+        if (
+            akr is not None
+            and step is not None
+            and akr.ffn_chain_ok(num_tokens, step.next_layer)
+        ):
+            parts = akr_moe.forward_parts(self.ffn, x, input_ids, ffn_quant)
+            if parts is not None:
+                routed, shared_act = parts
+                residual, post_mix, res_mix, carry = akr.ffn_chain(
+                    step.next_layer,
+                    shared_act,
+                    routed,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    ffn_pre,
+                    aux=step.chain_aux,
+                )
+                return carry, residual, post_mix, res_mix, ffn_pre
+        x = self.ffn(x, input_ids, x_quant=ffn_quant)
         if mhc_overlap is not None:
             mhc_overlap.join()
         return x, residual, post_mix, res_mix, ffn_pre
@@ -754,6 +828,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.mhc_post = MHCPostOp()
+        # amd_kernels mHC tail (set at load) and its per-step aux request
+        self.akr_tail_ready = False
+        self.akr_tail_aux = False
 
         spec_config = vllm_config.speculative_config
         if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
@@ -938,6 +1015,23 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             final_aux_recon = None
             collapsed = True
         mono_flush()
+        if (
+            ran_layers
+            and not collapsed
+            and get_pp_group().is_last_rank
+            and akr_mhc.tail_ok(self, hidden_states.shape[0])
+        ):
+            assert pre_mix is not None
+            return akr_mhc.model_tail(
+                self,
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                pre_mix,
+                aux_hidden_states,
+                final_aux_recon,
+            )
         if ran_layers and not collapsed:
             if (
                 self.end_layer in self.aux_hidden_state_layers
@@ -998,9 +1092,23 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None
         ran_layers = False
+        self.akr_tail_aux = False
+        akr_aux_layers: set[int] = set()
         for idx in layer_ids:
             ran_layers = True
-            hidden_states, residual, post_mix, res_mix, pre_mix = self.layers[idx](
+            layer = self.layers[idx]
+            if layer.akr_mhc is not None:
+                nxt = idx + 1
+                layer.akr_mhc.plan_step(
+                    want_aux=idx in akr_aux_layers,
+                    next_layer=(
+                        self.layers[nxt]
+                        if nxt in layer_ids and nxt < self.end_layer
+                        else None
+                    ),
+                    chain_aux=nxt in self.aux_hidden_state_layers,
+                )
+            hidden_states, residual, post_mix, res_mix, pre_mix = layer(
                 hidden_states,
                 positions,
                 input_ids,
@@ -1011,6 +1119,28 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 engram_hashes,
                 engram_mask,
             )
+            if idx in akr_aux_layers:
+                aux_hidden_states.append(layer.akr_mhc.aux_out)
+            if isinstance(hidden_states, akr_mhc.SeamCarry):
+                # residual is already the post-mixed stream
+                if idx + 1 in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(
+                        hidden_states.aux
+                        if hidden_states.aux is not None
+                        else residual.mean(dim=1)
+                    )
+                    final_aux_recon = None
+                continue
+            if idx + 1 in self.aux_hidden_state_layers and akr_mhc.defer_aux(
+                self, idx + 1, layer_ids, hidden_states.shape[0]
+            ):
+                # The next seam (or the model tail) emits the stream mean.
+                if idx + 1 == self.end_layer:
+                    self.akr_tail_aux = True
+                else:
+                    akr_aux_layers.add(idx + 1)
+                final_aux_recon = None
+                continue
             # The aux id of the first replay layer is the post of the last
             # full-batch layer. Capture it on the trimmed rows instead.
             if idx + 1 in self.aux_hidden_state_layers and not (
@@ -1577,6 +1707,7 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        akr_hooks.run_post_load(self)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

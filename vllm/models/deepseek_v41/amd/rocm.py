@@ -7,6 +7,7 @@ from typing import Any, ClassVar, cast
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import (
@@ -28,6 +29,7 @@ from vllm.models.deepseek_v4.amd.rocm import (
     _plain_fp8_sparse_mla,
     _register_plain_fp8_kv_scales,
 )
+from vllm.models.deepseek_v41.amd import akr_attn, akr_indexer, akr_mla
 from vllm.models.deepseek_v41.amd.ops.sparse_indexer import Gfx942SparseAttnIndexer
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
@@ -51,6 +53,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
+    AttentionMetadata,
     CommonAttentionMetadata,
     MultipleOf,
 )
@@ -468,6 +471,8 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
 
     mqa_cls = RocmSparseMQAIndexer
     attn_cls = RocmSparseAttnIndexer
+    # amd_kernels wq_b weights (akr_attn), set at load
+    akr: Any = None
 
     def _produce_k(
         self,
@@ -502,7 +507,10 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
         positions: torch.Tensor,
         rotary_emb: torch.nn.Module,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_head, self.head_dim)
+        q = akr_attn.indexer_wq_b(self, qr) if self.akr is not None else None
+        if q is None:
+            q = self._wq_b_proj(qr, qr_scale)
+        q = q.view(-1, self.n_head, self.head_dim)
         (q, q_scale), weights = rocm_mxfp4_indexer_q_quant(
             positions,
             q,
@@ -629,6 +637,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
+        self.akr = akr_attn.create(self)
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -694,6 +703,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         return out
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.akr is not None:
+            out = akr_attn.wqa_wkv(self, hidden_states)
+            if out is not None:
+                return out
         if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
             return self._bpre_attn_gemm(
                 self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
@@ -703,6 +716,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if self.akr is not None and akr_attn.kv_score_serves(self, hidden_states):
+            # One launch for kv_score and weights_proj; serial, because the
+            # kernel keeps one split-K scratch per device.
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            return (qr_kv, *akr_attn.kv_score_weights(self, hidden_states))
         if self.indexer is not None and self.compressor is None:
             # Serial: qr must sit on the default stream before the q-side
             # fork below can consume it (ROCm).
@@ -810,15 +828,33 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             weights, _ = indexer.weights_proj(hidden_states)
             return weights
 
-        (q, qr, qr_scale, kv), (latent, indexer_weights) = execute_in_parallel(
-            default_chain,
-            [compressor_chain, indexer_weights_chain],
-            self.ln_events[0],
-            self.ln_events[1:3],
-            aux_streams[:2],
-            enable=True,
-            default_first=True,
-        )
+        def akr_compressor_chain():
+            # kv_score and weights_proj in one amd_kernels launch
+            kv_score, weights = akr_attn.kv_score_weights(self, hidden_states)
+            latent = compressor(kv_score, positions)
+            compressor.insert_cache(latent, positions, self.rotary_emb)
+            return latent, weights
+
+        if self.akr is not None and akr_attn.kv_score_serves(self, hidden_states):
+            (q, qr, qr_scale, kv), ((latent, indexer_weights), _) = execute_in_parallel(
+                default_chain,
+                [akr_compressor_chain, None],
+                self.ln_events[0],
+                self.ln_events[1:3],
+                aux_streams[:2],
+                enable=True,
+                default_first=True,
+            )
+        else:
+            (q, qr, qr_scale, kv), (latent, indexer_weights) = execute_in_parallel(
+                default_chain,
+                [compressor_chain, indexer_weights_chain],
+                self.ln_events[0],
+                self.ln_events[1:3],
+                aux_streams[:2],
+                enable=True,
+                default_first=True,
+            )
 
         indexer._produce_k(latent, positions, self.indexer_rotary_emb)
         index_q, index_q_scale, index_weights_out = indexer.forward_q(
@@ -903,6 +939,51 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 return False
         return True
 
+    def _fused_qnorm_rope_kv_insert(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> torch.Tensor:
+        if self.akr is not None and isinstance(attn_metadata, dict):
+            q_fp8 = akr_attn.rope_insert(self, q, kv, positions, attn_metadata)
+            if q_fp8 is not None:
+                return q_fp8
+        return super()._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+
+    @eager_break_during_capture
+    def _sparse_indexer_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        index_q: torch.Tensor | None,
+        index_q_scale: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        if (
+            self.akr is not None
+            and index_q is not None
+            and not akr_indexer.dispatch(self, index_q, index_q_scale, index_weights)
+        ):
+            # amd_kernels did every row of this step's indexer
+            index_q = None
+        super()._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            index_weights,
+            q,
+            kv,
+            positions,
+            out,
+        )
+
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
@@ -917,6 +998,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         kernel RoPE/quantizes it itself. Falls back to the shared path
         when the aiter linear path is not active.
         """
+        if self.akr is not None:
+            # MXFP8 qr for both wq_b linears, bf16 kv
+            normed = akr_attn.norm_dual(self, qr_kv)
+            if normed is not None:
+                return normed[0], None, normed[1]
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         if not (
             qr.dim() == 2
@@ -961,9 +1047,37 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             quant_key=kMxfp8Dynamic,
         )
 
+    def forward_codes(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> QuantizedActivation | None:
+        """`forward` up to and including wo_a, for a caller that runs wo_b in
+        its own epilogue: wo_a's MXFP8 output, or None without any work done
+        where the amd_kernels wo_a route does not serve this row count."""
+        if self.akr is None or not akr_mla.wo_a_serves(self, hidden_states.shape[0]):
+            return None
+        self.akr.want_codes = True
+        try:
+            self.forward(positions, hidden_states, llama_4_scaling)
+        finally:
+            self.akr.want_codes = False
+        codes, self.akr.codes = self.akr.codes, None
+        assert codes is not None
+        return codes
+
     def _o_proj(
         self, attn_out: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
+        if isinstance(attn_out, QuantizedActivation) and self.akr is not None:
+            z_quant = akr_mla.wo_a(self, attn_out)
+            if z_quant is not None:
+                if self.akr.want_codes:
+                    self.akr.codes = z_quant
+                    return z_quant.data
+                return self._wo_b_proj(z_quant)
+            assert not self.akr.want_codes
         if isinstance(attn_out, QuantizedActivation):
             z = rocm_mxfp8_wo_a_bmm(
                 attn_out.data,
@@ -1161,8 +1275,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         source = self._static_forward_context[self._index_source_prefix]
         if source is self:
-            # Fresh indices as of this layer; drop what the last step cached.
-            source._topk_ragged_cache = {}
+            if self.akr is not None and self.akr.ragged_fresh:
+                # amd_kernels' indexer published this step's lists
+                self.akr.ragged_fresh = False
+            else:
+                # Fresh indices as of this layer; drop what the last step cached.
+                source._topk_ragged_cache = {}
         cached = source._topk_ragged_cache.get(self.compress_ratio)
         if cached is not None:
             return cached
@@ -1210,6 +1328,24 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         if self._use_aiter_sparse_mla:
             assert swa_metadata.decode_swa_ragged_indices is not None
             assert swa_metadata.decode_swa_ragged_indptr is not None
+            extra_cache = None if swa_only else kv_cache
+            if (
+                self.akr is not None
+                and output_mxfp8 is not None
+                and akr_mla.sparse_mla_decode(
+                    self,
+                    q,
+                    positions,
+                    self.swa_cache_layer.kv_cache,
+                    swa_metadata.decode_swa_ragged_indptr,
+                    swa_metadata.decode_swa_ragged_indices,
+                    extra_cache,
+                    topk_ragged_indptr if extra_cache is not None else None,
+                    topk_ragged_indices if extra_cache is not None else None,
+                    output_mxfp8,
+                )
+            ):
+                return q.shape[0]
             # The kernel's store rotates (and for MXFP8, quantizes) every row.
             self._aiter_sparse_mla(
                 q,

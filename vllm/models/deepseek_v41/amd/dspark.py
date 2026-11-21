@@ -44,6 +44,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
+from vllm.models.deepseek_v41.amd import akr_draft, akr_hooks, akr_sample
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -152,7 +153,10 @@ class DSparkDeepseekV4Model(nn.Module):
 
         `aux_hidden_states` is [T, hidden_size * len(target_layer_ids)].
         """
-        return self.main_norm(self.main_proj(aux_hidden_states))
+        projected = akr_draft.main_proj(self, aux_hidden_states)
+        if projected is None:
+            projected = self.main_proj(aux_hidden_states)
+        return self.main_norm(projected)
 
     @torch.inference_mode()
     def precompute_and_store_context_kv(
@@ -410,6 +414,31 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         return fused_markov.sample_sequential(speculator, num_reqs, head_hidden)
 
+    def sample_markov_chain(
+        self,
+        speculator: "DSparkSpeculator",
+        base_logits: torch.Tensor,
+        prev: torch.Tensor,
+        idx_map: torch.Tensor,
+        sample_pos: torch.Tensor,
+        out_tokens: torch.Tensor,
+        *,
+        prev_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        """All Markov steps of `DSparkSpeculator._sample_markov_chain` in one
+        amd_kernels launch, or None, having done nothing, for the speculator's
+        own loop."""
+        return akr_sample.markov_chain(
+            speculator,
+            self,
+            base_logits,
+            prev,
+            idx_map,
+            sample_pos,
+            out_tokens,
+            prev_indices,
+        )
+
     # --- Weight loading ----------------------------------------------------
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -522,6 +551,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def process_weights_after_loading(self) -> None:
         if self.use_mega_moe:
             finalize_mega_moe_weights(self)
+        akr_hooks.run_post_load(self)
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint `mtp.{i}.*` name to this model's parameter path.

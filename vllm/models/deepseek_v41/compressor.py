@@ -284,6 +284,9 @@ class DeepseekCompressor(nn.Module):
     indexer K kernels, which the attention layer can schedule concurrently.
     """
 
+    # ROCm DeepSeek-V4.1 amd_kernels compressor route (akr_attn), set at load
+    akr: Any = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -366,6 +369,11 @@ class DeepseekCompressor(nn.Module):
         """
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
+            return None
+        if self.akr is not None and self.akr.compress_insert(
+            self, kv_score, positions, attn_metadata
+        ):
+            # One launch saved the state and inserted the main and indexer keys.
             return None
 
         prev_rows = prev_row_indices = ring_write_slots = None

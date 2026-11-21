@@ -6,6 +6,7 @@ import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from itertools import islice
+from typing import Any
 
 import regex as re
 import torch
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -100,6 +102,9 @@ logger = init_logger(__name__)
 
 
 class DeepseekV4MLP(nn.Module):
+    # DeepSeek-V4.1 amd_kernels shared-expert route (akr_moe), set at load
+    akr: Any = None
+
     def __init__(
         self,
         hidden_size: int,
@@ -185,7 +190,11 @@ class DeepseekV4MLP(nn.Module):
         # this module), refilled in place on reloads for captured CUDA graphs.
         refill_derived(self, "_gateup_scale", ws.detach())
 
-    def forward(self, x):
+    def forward(self, x, x_quant: QuantizedActivation | None = None):
+        if self.akr is not None:
+            out = self.akr.forward(self, x, x_quant)
+            if out is not None:
+                return out
         if self._gateup_scale is not None and x.dim() == 2:
             # gate_up via fp8 group-quant (col-major) + B-preshuffle GEMM.
             x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
@@ -586,6 +595,9 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
 class DeepseekV4MoE(nn.Module):
     # None: use the padding vLLM added.
     experts_intermediate_pad: int | None = None
+    # DeepSeek-V4.1 amd_kernels MoE routes (akr_moe), set at load. While set,
+    # the shared expert runs after the routed experts on the same stream.
+    akr: Any = None
 
     def __init__(
         self,
@@ -789,7 +801,10 @@ class DeepseekV4MoE(nn.Module):
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        x_quant: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
@@ -798,7 +813,9 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         if self.use_mega_moe:
-            return self._forward_mega_moe(hidden_states, input_ids).view(org_shape)
+            return self._forward_mega_moe(hidden_states, input_ids, x_quant).view(
+                org_shape
+            )
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=hidden_states,
@@ -808,23 +825,29 @@ class DeepseekV4MoE(nn.Module):
         return final_hidden_states.view(org_shape)
 
     def _forward_mega_moe(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        x_quant: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         shared_experts = self.shared_experts
         if shared_experts is None:
-            return self._forward_mega_moe_routed(hidden_states, input_ids)
+            return self._forward_mega_moe_routed(hidden_states, input_ids, x_quant)
         events = self.shared_experts_events
         if (
             events is None
             or hidden_states.shape[0] > envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            or self.akr is not None
         ):
             return self._forward_mega_moe_routed(
-                hidden_states, input_ids
-            ) + shared_experts(hidden_states)
+                hidden_states, input_ids, x_quant
+            ) + shared_experts(hidden_states, x_quant)
         # The unfused shared expert overlaps router + MegaMoE in small steps.
         routed, shared = maybe_execute_in_parallel(
-            fn0=lambda: self._forward_mega_moe_routed(hidden_states, input_ids),
-            fn1=lambda: shared_experts(hidden_states),
+            fn0=lambda: self._forward_mega_moe_routed(
+                hidden_states, input_ids, x_quant
+            ),
+            fn1=lambda: shared_experts(hidden_states, x_quant),
             event0=events[0],
             event1=events[1],
             aux_stream=self.shared_experts_stream,
@@ -832,23 +855,29 @@ class DeepseekV4MoE(nn.Module):
         return routed + shared
 
     def _forward_mega_moe_routed(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        x_quant: QuantizedActivation | None = None,
     ) -> torch.Tensor:
-        router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            topk=self.n_activated_experts,
-            renormalize=self.renormalize,
-            input_tokens=input_ids,
-            hash_indices_table=self.gate.tid2eid,
-            routed_scaling_factor=self.routed_scaling_factor,
-            bias_vl=self.gate.bias_vl,
-            image_sentinel_lo=self.image_sentinel_lo,
-        )
-        return self.experts(hidden_states, topk_weights, topk_ids)
+        topk = self.akr.route(self, hidden_states) if self.akr is not None else None
+        if topk is None:
+            router_logits, _ = self.gate(hidden_states)
+            topk = fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                topk=self.n_activated_experts,
+                renormalize=self.renormalize,
+                input_tokens=input_ids,
+                hash_indices_table=self.gate.tid2eid,
+                routed_scaling_factor=self.routed_scaling_factor,
+                bias_vl=self.gate.bias_vl,
+                image_sentinel_lo=self.image_sentinel_lo,
+            )
+        topk_weights, topk_ids = topk
+        return self.experts(hidden_states, topk_weights, topk_ids, x_quant)
 
 
 # Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
