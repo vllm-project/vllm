@@ -391,9 +391,10 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
 @pytest.mark.parametrize(
     ("qk_nope_head_dim", "pad_heads"),
     # Kimi-K2 on the padded asm decode; Mistral Large 4 on the sparse Triton
-    # decode, which takes the query at the layer's own head count.
-    [(128, True), (64, False)],
-    ids=["kimi_k2", "mistral_large_4"],
+    # decode, which takes the query at the layer's own head count (its NoPE
+    # layers have qk_nope 128).
+    [(128, True), (64, False), (128, False)],
+    ids=["kimi_k2", "mistral_large_4", "mistral_large_4_nope"],
 )
 def test_aiter_fused_decode_query_matches_unfused_ops(
     num_tokens, q_scale, qk_nope_head_dim, pad_heads
