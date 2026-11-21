@@ -108,6 +108,8 @@ class ServerResponse(NamedTuple):
     first_chunk: str  # first chunk of the content
     content: str  # includes the first_chunk
     num_chunks: int
+    cached_tokens: int  # server-reported cached prompt tokens (from usage chunk)
+    prompt_tokens: int  # server-reported total prompt tokens (from usage chunk)
 
     def __str__(self) -> str:
         return f"ttft_ms {self.ttft_ms:.2f}, tpot_ms {self.tpot_ms:.2f}, latency_ms {self.latency_ms:.2f}"  # noqa: E501
@@ -124,6 +126,7 @@ class RequestStats(NamedTuple):
     output_num_chunks: int
     output_num_first_chunk_tokens: int
     approx_cached_percent: float
+    cache_hit_rate: float  # server-reported real cache hit rate (percent, 0.0-100.0)
     conversation_id: str
     client_id: int
 
@@ -131,7 +134,7 @@ class RequestStats(NamedTuple):
         return (
             f"ttft_ms {self.ttft_ms:.2f}, tpot_ms {self.tpot_ms:.2f}, latency_ms {self.latency_ms:.2f}, input_num_tokens {self.input_num_tokens}, "  # noqa: E501
             f"output_num_tokens {self.output_num_tokens} ({self.output_num_chunks} chunks, {self.output_num_first_chunk_tokens} tokens in first chunk), "  # noqa: E501
-            f"approx_cached_percent {self.approx_cached_percent:.2f}%"
+            f"approx_cached_percent {self.approx_cached_percent:.2f}%, cache_hit_rate {self.cache_hit_rate:.2f}%"  # noqa: E501
         )
 
 
@@ -256,7 +259,7 @@ async def send_request(
 
     if stream:
         payload["stream"] = True
-        payload["stream_options"] = {"include_usage": False}
+        payload["stream_options"] = {"include_usage": True}
 
     # if min_tokens is not None:
     #     payload["min_tokens"] = min_tokens
@@ -289,6 +292,8 @@ async def send_request(
     latency: float | None = None
     first_chunk = ""
     generated_text = ""
+    cached_tokens: int = 0
+    prompt_tokens: int = 0
 
     start_time: int = time.perf_counter_ns()
     most_recent_timestamp: int = start_time
@@ -312,11 +317,24 @@ async def send_request(
                     message = data["choices"][0]["message"]
                     assert message["role"] == "assistant"
                     generated_text += message["content"]
+                    if data.get("usage") is not None:
+                        prompt_tokens = data["usage"].get("prompt_tokens", 0)
+                        ptd = data["usage"].get("prompt_tokens_details")
+                        cached_tokens = (ptd.get("cached_tokens", 0) if ptd else 0)
                 else:
                     timestamp: int = time.perf_counter_ns()
                     data = json.loads(chunk)
 
+                    # Parse usage (vLLM sends it in the final chunk)
+                    if data.get("usage") is not None:
+                        prompt_tokens = data["usage"].get("prompt_tokens", 0)
+                        ptd = data["usage"].get("prompt_tokens_details")
+                        cached_tokens = (ptd.get("cached_tokens", 0) if ptd else 0)
+
                     # Delta is the new content/text/data
+                    if not data.get("choices"):
+                        most_recent_timestamp = timestamp
+                        continue
                     delta = data["choices"][0]["delta"]
                     if delta.get("content", None):
                         if ttft is None:
@@ -364,6 +382,8 @@ async def send_request(
         first_chunk=first_chunk,
         content=generated_text,
         num_chunks=num_chunks,
+        cached_tokens=cached_tokens,
+        prompt_tokens=prompt_tokens,
     )
     return sr
 
@@ -504,6 +524,12 @@ async def send_turn(
         # First chunk had only one token
         ttft_ms = response.ttft_ms
 
+    # Server-reported real cache hit rate
+    cache_hit_rate = (
+        100.0 * (response.cached_tokens / response.prompt_tokens)
+        if response.prompt_tokens > 0 else 0.0
+    )
+    
     rs = RequestStats(
         ttft_ms=ttft_ms,
         tpot_ms=tpot_ms,
@@ -515,6 +541,7 @@ async def send_turn(
         output_num_chunks=response.num_chunks,
         output_num_first_chunk_tokens=first_chunk_tokens,
         approx_cached_percent=approx_cached_percent,
+        cache_hit_rate=cache_hit_rate,
         conversation_id=conv_id,
         client_id=client_id,
     )
