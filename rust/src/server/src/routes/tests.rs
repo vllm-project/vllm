@@ -837,6 +837,8 @@ fn test_render_state(
         chat: ChatRequestProcessor::new(backend, None, None)
             .with_parser_selections(tool_call_parser, reasoning_parser),
         lora_modules: Vec::new(),
+        api_server_options: Default::default(),
+        system_fingerprint: None,
     }
 }
 
@@ -2950,6 +2952,8 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             chat: ChatRequestProcessor::new(backend.clone(), None, None)
                 .with_exclude_tools_when_tool_choice_none(exclude),
             lora_modules: Vec::new(),
+            api_server_options: Default::default(),
+            system_fingerprint: None,
         }));
         let (status, json) = post_json(
             &mut app,

@@ -25,7 +25,7 @@ use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus as HealthServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::server::health_reporter;
-use tower::service_fn;
+use tower::{ServiceExt as _, service_fn};
 use vllm_chat::multimodal::{MmLimitPerPrompt, MmLimitSpec, MmModality};
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatTextBackend,
@@ -3059,6 +3059,7 @@ async fn grpc_pause_withdraws_readiness_but_not_liveness() {
 // ========================================================================================
 
 const RENDER_EOS_TOKEN_ID: u32 = 0xF010;
+const RENDER_MULTI_CHAR_TOKEN_ID: u32 = 0xF003;
 
 /// Qwen3-like backend, so that `auto` parser selection resolves the reasoning
 /// and tool-call parsers, rendering each message as `role: text\n`.
@@ -3071,6 +3072,7 @@ impl TextBackend for FakeRenderBackend {
             TestTokenizer::new()
                 .with_regular_token("<think>", 0xF001)
                 .with_regular_token("</think>", 0xF002)
+                .with_regular_token("endgame", RENDER_MULTI_CHAR_TOKEN_ID)
                 .with_special_token("<|im_end|>", RENDER_EOS_TOKEN_ID),
         )
     }
@@ -3135,6 +3137,8 @@ fn render_state() -> RenderState {
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
+        api_server_options: Default::default(),
+        system_fingerprint: None,
     }
 }
 
@@ -3667,6 +3671,395 @@ async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
     assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
 }
 
+async fn render_raw<S: crate::render::RenderContext>(
+    service: &RenderServiceImpl<S>,
+    request: pb::RenderRequest,
+) -> Result<pb::RenderResponse, tonic::Status> {
+    service
+        .render(tonic::Request::new(request))
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+#[tokio::test]
+async fn render_raw_chat_returns_rendered_prompt_token_ids_and_reasoning_gate() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&render_service(), request).await.expect("render raw chat");
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+    assert_eq!(rendered.structured_output, None);
+    let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
+    assert_eq!(
+        gate.chat_template_kwargs,
+        json_to_proto_struct(&serde_json::json!({"enable_thinking": true}))
+    );
+}
+
+/// Exercise the actual HTTP route, including JSON validation and lowering.
+#[tokio::test]
+async fn render_raw_chat_parity_with_http_render_route() {
+    for response_format in [
+        None,
+        Some(serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}}
+        })),
+    ] {
+        let state = Arc::new(render_state());
+        let service = RenderServiceImpl::new(state.clone());
+        let mut body = serde_json::json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "chat_template_kwargs": {"enable_thinking": true}
+        });
+        if let Some(format) = response_format {
+            body["response_format"] = format;
+        }
+        let body = serde_json::to_vec(&body).unwrap();
+        let raw = render_raw(
+            &service,
+            pb::RenderRequest {
+                api: pb::Api::Chat as i32,
+                body: body.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("gRPC render");
+        let response = crate::routes::render::build_router(state)
+            .oneshot(
+                axum::http::Request::post("/v1/chat/completions/render")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let http: crate::routes::inference::generate::GenerateRequest =
+            serde_json::from_slice(&bytes).expect("HTTP render response");
+        assert_eq!(raw.prompt_token_ids, http.token_ids);
+        assert_eq!(
+            raw.structured_output,
+            http.sampling_params
+                .inner
+                .structured_outputs
+                .as_ref()
+                .map(super::convert::structured_output_to_proto)
+        );
+        let gate = raw.engine_reasoning_gate.expect("reasoning gate");
+        assert_eq!(gate.reasoning_ended, http.reasoning_ended);
+        let kwargs = http.reasoning_parser_kwargs.expect("HTTP reasoning parser kwargs");
+        assert_eq!(
+            gate.chat_template_kwargs,
+            json_to_proto_struct(&serde_json::json!(kwargs.chat_template_kwargs))
+        );
+        assert!(raw.media.is_empty());
+        assert!(http.features.is_none());
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_malformed_json() {
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: b"{ invalid json ".to_vec(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("malformed json should fail");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("failed to parse chat completion request"));
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unsupported_api() {
+    let service = render_service();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Hi"}]
+    }))
+    .unwrap();
+
+    let test_cases = [
+        (pb::Api::Unspecified as i32, "api is required"),
+        (
+            pb::Api::Completions as i32,
+            "api `API_COMPLETIONS` is not supported",
+        ),
+        (
+            pb::Api::AnthropicMessages as i32,
+            "api `API_ANTHROPIC_MESSAGES` is not supported",
+        ),
+        (
+            pb::Api::Responses as i32,
+            "api `API_RESPONSES` is not supported",
+        ),
+        (999, "unknown api value 999"),
+    ];
+
+    for (api, expected_msg) in test_cases {
+        let request = pb::RenderRequest {
+            api,
+            body: body.clone(),
+            ..Default::default()
+        };
+        let status = render_raw(&service, request)
+            .await
+            .expect_err(&format!("api {api} should fail"));
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "case: {api}");
+        assert!(
+            status.message().contains(expected_msg),
+            "case: {api}, got: {}",
+            status.message()
+        );
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unknown_model() {
+    let body = serde_json::json!({
+        "model": "non-existent-model",
+        "messages": [{"role": "user", "content": "Hi"}]
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("unknown model should fail");
+
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    assert!(status.message().contains("The model `non-existent-model` does not exist."));
+}
+
+#[tokio::test]
+async fn render_raw_chat_enforces_validation_parity() {
+    let body = serde_json::json!({
+        "model": "model",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "stream": false,
+        "stream_options": {"include_usage": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("stream_options without stream should fail validation");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("stream_options"));
+}
+
+#[tokio::test]
+async fn render_raw_chat_accepts_lora_adapter_model() {
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        ..render_state()
+    }));
+    let body = serde_json::json!({
+        "model": "adapter-a",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&service, request).await.expect("render raw chat lora");
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+}
+
+#[tokio::test]
+async fn render_raw_chat_returns_parser_grammar_for_required_tool_choice() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }
+        }],
+        "tool_choice": "required",
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&render_service(), request).await.expect("render raw chat tools");
+
+    let Some(pb::StructuredOutput {
+        kind: Some(pb::structured_output::Kind::StructuralTag(structural_tag)),
+    }) = rendered.structured_output
+    else {
+        panic!(
+            "expected a structural tag: {:?}",
+            rendered.structured_output
+        );
+    };
+    assert!(structural_tag.contains("get_weather"), "{structural_tag}");
+}
+
+/// Only the proto field selects the gRPC payload mode, even when the JSON
+/// body asks for the opposite HTTP mode.
+#[tokio::test]
+async fn render_raw_chat_uses_proto_mm_payload_only() {
+    let service = multimodal_render_service();
+    let mut reference = None;
+    for (mode, json_mode, return_mm_kwargs, includes_kwargs) in [
+        (pb::MmPayload::Unspecified, "none", false, true),
+        (pb::MmPayload::Tensors, "none", false, true),
+        (pb::MmPayload::None, "tensors", true, false),
+    ] {
+        let body = serde_json::json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}},
+                {"type": "text", "text": "Describe"}
+            ]}],
+            "mm_payload": json_mode,
+            "return_mm_kwargs": return_mm_kwargs
+        });
+        let rendered = render_raw(
+            &service,
+            pb::RenderRequest {
+                api: pb::Api::Chat as i32,
+                body: serde_json::to_vec(&body).unwrap(),
+                mm_payload: mode as i32,
+            },
+        )
+        .await
+        .expect("multimodal render");
+        let [item] = rendered.media.as_slice() else {
+            panic!("expected one image")
+        };
+        let Some(pb::media_item::Source::Features(features)) = &item.source else {
+            panic!("expected preprocessed features");
+        };
+        assert_eq!(features.kwargs.is_some(), includes_kwargs, "{mode:?}");
+        assert!(features.mm_hash.is_some());
+        let identity = (
+            rendered.prompt_token_ids.clone(),
+            features.mm_hash.clone(),
+            features.offset,
+            features.length,
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(&identity, expected);
+        } else {
+            reference = Some(identity);
+        }
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unknown_mm_payload() {
+    for mm_payload in [3, 999] {
+        let status = render_raw(
+            &render_service(),
+            pb::RenderRequest {
+                api: pb::Api::Chat as i32,
+                body: br#"{"messages":[{"role":"user","content":"Hi"}]}"#.to_vec(),
+                mm_payload,
+            },
+        )
+        .await
+        .expect_err("unsupported payload mode");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("mm_payload"));
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_enforces_output_token_limit() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_completion_tokens": 1025,
+    });
+    let status = render_raw(
+        &render_service(),
+        pb::RenderRequest {
+            api: pb::Api::Chat as i32,
+            body: serde_json::to_vec(&body).unwrap(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("max_completion_tokens over the limit");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status}");
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unknown_model_with_engine_backed_state() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake.clone(),
+        EngineId::from_engine_index(0),
+        default_ready_response(),
+        |_, _| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(
+        EngineCoreLlm::new(client),
+        Arc::new(FakeRenderBackend) as Arc<dyn ChatTextBackend>,
+    )
+    .with_served_model_name("test-model");
+    let service = RenderServiceImpl::new(Arc::new(AppState::new(vec!["test-model".into()], chat)));
+    let status = render_raw(
+        &service,
+        pb::RenderRequest {
+            api: pb::Api::Chat as i32,
+            body: br#"{"model":"unknown-model","messages":[{"role":"user","content":"Hi"}]}"#
+                .to_vec(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("unknown model");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    engine_task.await.expect("mock engine shutdown");
+}
+
 /// Shutdown ends open health watches, including one on the overall server
 /// status, so the render gRPC server's drain finishes.
 #[tokio::test]
@@ -3705,4 +4098,828 @@ async fn render_grpc_server_shutdown_ends_health_watches() {
         .expect("server task")
         .expect("server result");
     drop(client);
+}
+
+// ========================================================================================
+// DerenderStream
+// ========================================================================================
+
+fn derender_body(extra: serde_json::Value) -> Vec<u8> {
+    let mut body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Hi"}],
+    });
+    body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    serde_json::to_vec(&body).unwrap()
+}
+
+async fn derender_start_request(body: Vec<u8>) -> pb::DerenderStreamRequest {
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body,
+        ..Default::default()
+    };
+    let prompt_token_ids = render_raw(&render_service(), request.clone())
+        .await
+        .expect("render")
+        .prompt_token_ids;
+    pb::DerenderStreamRequest {
+        request: Some(pb::derender_stream_request::Request::Start(Box::new(
+            pb::DerenderStart {
+                context: Some(pb::derender_start::Context::Request(request)),
+                prompt_token_ids,
+            },
+        ))),
+    }
+}
+
+fn derender_output_request(
+    text: &str,
+    finish_info: Option<pb::FinishInfo>,
+) -> pb::DerenderStreamRequest {
+    derender_output_frame(derender_sequence_output(text, finish_info))
+}
+
+fn derender_sequence_output(text: &str, finish_info: Option<pb::FinishInfo>) -> pb::SequenceOutput {
+    let mut token_ids = render_token_ids(text);
+    // The worker's terminal output ends with the EOS token it stopped on.
+    if let Some(pb::finish_info::StopReason::EosTokenId(id)) =
+        finish_info.as_ref().and_then(|info| info.stop_reason.as_ref())
+    {
+        token_ids.push(*id);
+    }
+    pb::SequenceOutput {
+        token_ids,
+        finish_info,
+        ..Default::default()
+    }
+}
+
+fn derender_output_frame(output: pb::SequenceOutput) -> pb::DerenderStreamRequest {
+    pb::DerenderStreamRequest {
+        request: Some(pb::derender_stream_request::Request::Output(Box::new(
+            pb::GenerateResponse {
+                outputs: Some(output),
+                ..Default::default()
+            },
+        ))),
+    }
+}
+
+/// `output` with a logprob of -0.5 and rank 1 for every token, each its own
+/// only candidate.
+fn with_derender_logprobs(mut output: pb::SequenceOutput) -> pb::SequenceOutput {
+    let len = output.token_ids.len();
+    output.logprobs = vec![-0.5; len];
+    output.ranks = vec![1; len];
+    output.candidate_tokens = output
+        .token_ids
+        .iter()
+        .map(|&id| pb::CandidateTokenInfo {
+            tokens: vec![pb::candidate_token_info::TokenInfo {
+                id,
+                logprob: -0.5,
+                rank: 1,
+            }],
+        })
+        .collect();
+    output
+}
+
+fn derender_eos() -> pb::FinishInfo {
+    pb::FinishInfo {
+        finish_reason: pb::finish_info::FinishReason::Stop as i32,
+        stop_reason: Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID)),
+        num_cached_tokens: Some(3),
+        kv_transfer_params: json_to_proto_struct(&serde_json::json!({"remote_host": "decode-0"})),
+        ..Default::default()
+    }
+}
+
+fn derender_stop_string(stop: &str) -> pb::FinishInfo {
+    pb::FinishInfo {
+        finish_reason: pb::finish_info::FinishReason::Stop as i32,
+        stop_reason: Some(pb::finish_info::StopReason::StopString(stop.to_string())),
+        ..Default::default()
+    }
+}
+
+/// Send `requests`, close the request stream, and return every response.
+async fn derender_stream_responses(
+    requests: Vec<pb::DerenderStreamRequest>,
+) -> Result<Vec<pb::DerenderStreamResponse>, tonic::Status> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        TonicServer::builder()
+            .add_service(super::RenderGrpcService::new(render_service()))
+            .serve_with_incoming(MaybeTlsListener::plain(Listener::Tcp(listener)))
+            .await
+            .expect("grpc server");
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    let mut client = pb::render_client::RenderClient::new(channel);
+    let mut responses = client.derender_stream(futures::stream::iter(requests)).await?.into_inner();
+    let mut collected = Vec::new();
+    while let Some(response) = tokio::time::timeout(Duration::from_secs(5), responses.message())
+        .await
+        .expect("timed out waiting for a DerenderStream response")?
+    {
+        collected.push(response);
+    }
+    server.abort();
+    Ok(collected)
+}
+
+/// The SSE `data:` payloads of `responses`, and the sequences they finished.
+fn sse_payloads(
+    responses: &[pb::DerenderStreamResponse],
+) -> (Vec<String>, Vec<pb::SequenceFinish>) {
+    let mut events = Vec::new();
+    let mut finished = Vec::new();
+    for response in responses {
+        match &response.output {
+            Some(pb::derender_stream_response::Output::Events(bytes)) => {
+                events.extend_from_slice(bytes);
+            }
+            other => panic!("expected events, got {other:?}"),
+        }
+        finished.extend(response.finished.clone());
+    }
+    let events = String::from_utf8(events).expect("utf-8 events");
+    let payloads = events
+        .split_terminator("\n\n")
+        .map(|event| event.strip_prefix("data: ").expect("data event").to_string())
+        .collect();
+    (payloads, finished)
+}
+
+/// The text content of the chunks among `payloads`.
+fn streamed_content(payloads: &[String]) -> String {
+    payloads
+        .iter()
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| {
+            let chunk: serde_json::Value = serde_json::from_str(payload).expect("chunk json");
+            chunk["choices"][0]["delta"]["content"].as_str().map(str::to_string)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn derender_stream_emits_sse_events_and_the_finished_sequence() {
+    let responses = derender_stream_responses(vec![
+        derender_start_request(derender_body(serde_json::json!({"stream": true}))).await,
+        derender_output_request("one", None),
+        derender_output_request(" two", Some(derender_eos())),
+    ])
+    .await
+    .expect("derender");
+
+    let (payloads, finished) = sse_payloads(&responses);
+    assert_eq!(streamed_content(&payloads), "one two");
+    assert_eq!(payloads.last().map(String::as_str), Some("[DONE]"));
+    let last: serde_json::Value = serde_json::from_str(&payloads[payloads.len() - 2]).unwrap();
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    expect_test::expect![[r#"
+        [
+            SequenceFinish {
+                index: 0,
+                finish_info: Some(
+                    FinishInfo {
+                        num_output_tokens: 8,
+                        finish_reason: Stop,
+                        kv_transfer_params: Some(
+                            Struct {
+                                fields: {
+                                    "remote_host": Value {
+                                        kind: Some(
+                                            StringValue(
+                                                "decode-0",
+                                            ),
+                                        ),
+                                    },
+                                },
+                            },
+                        ),
+                        ec_transfer_params: None,
+                        num_cached_tokens: Some(
+                            3,
+                        ),
+                        stop_reason: Some(
+                            EosTokenId(
+                                61456,
+                            ),
+                        ),
+                    },
+                ),
+            },
+        ]"#]]
+    .assert_eq(&format!("{finished:#?}"));
+}
+
+#[tokio::test]
+async fn derender_stream_returns_the_json_body_for_a_non_streaming_request() {
+    let responses = derender_stream_responses(vec![
+        derender_start_request(derender_body(serde_json::json!({}))).await,
+        derender_output_request("one", None),
+        derender_output_request(" two", Some(derender_eos())),
+    ])
+    .await
+    .expect("derender");
+
+    assert_eq!(responses.len(), 1);
+    let Some(pb::derender_stream_response::Output::Body(body)) = &responses[0].output else {
+        panic!("expected a body, got {:?}", responses[0].output);
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("body json");
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "one two");
+    assert_eq!(body["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        body["usage"]["prompt_tokens_details"],
+        serde_json::Value::Null
+    );
+    assert_eq!(responses[0].finished.len(), 1);
+}
+
+#[tokio::test]
+async fn derender_stream_cuts_at_the_stop_string_the_worker_reports() {
+    let body = derender_body(serde_json::json!({"stream": true, "stop": ["END"]}));
+    let responses = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("Hello E", None),
+        derender_output_request("ND!", Some(derender_stop_string("END"))),
+    ])
+    .await
+    .expect("derender");
+
+    let (payloads, finished) = sse_payloads(&responses);
+    assert_eq!(streamed_content(&payloads), "Hello ");
+    let finish_info = finished[0].finish_info.as_ref().unwrap();
+    assert_eq!(
+        finish_info.stop_reason,
+        Some(pb::finish_info::StopReason::StopString("END".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_finds_the_stop_string_the_worker_did_not_report() {
+    let body = derender_body(serde_json::json!({"stream": true, "stop": ["END"]}));
+    let responses = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("Hello E", None),
+        derender_output_request("ND! more", None),
+        derender_output_request(" ignored", None),
+    ])
+    .await
+    .expect("derender");
+
+    let (payloads, finished) = sse_payloads(&responses);
+    assert_eq!(streamed_content(&payloads), "Hello ");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(
+        finished[0].finish_info.as_ref().unwrap().stop_reason,
+        Some(pb::finish_info::StopReason::StopString("END".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_rejects_a_reported_stop_string_outside_the_request() {
+    let body = derender_body(serde_json::json!({"stream": true, "stop": ["END"]}));
+    let status = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("Hello", Some(derender_stop_string("STOP"))),
+    ])
+    .await
+    .expect_err("unknown stop string");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+#[tokio::test]
+async fn derender_stream_rejects_protocol_violations() {
+    let start = derender_start_request(derender_body(serde_json::json!({"stream": true}))).await;
+    let cases = [
+        ("output first", vec![derender_output_request("Hi", None)]),
+        (
+            "closed before finish",
+            vec![start.clone(), derender_output_request("Hi", None)],
+        ),
+        (
+            "second start",
+            vec![
+                start.clone(),
+                derender_output_request("Hi", None),
+                start.clone(),
+            ],
+        ),
+    ];
+    for (name, requests) in cases {
+        let status = derender_stream_responses(requests).await.expect_err(name);
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{name}: {status:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn derender_stream_rejects_unsupported_requests() {
+    for (name, api, extra) in [
+        (
+            "completions",
+            pb::Api::Completions as i32,
+            serde_json::json!({}),
+        ),
+        (
+            "multiple choices",
+            pb::Api::Chat as i32,
+            serde_json::json!({"n": 2}),
+        ),
+    ] {
+        let mut start = derender_start_request(derender_body(serde_json::json!({}))).await;
+        let Some(pb::derender_stream_request::Request::Start(inner)) = &mut start.request else {
+            unreachable!()
+        };
+        inner.context = Some(pb::derender_start::Context::Request(pb::RenderRequest {
+            api,
+            body: derender_body(extra),
+            ..Default::default()
+        }));
+        let status = derender_stream_responses(vec![start]).await.expect_err(name);
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{name}: {status:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn derender_stream_rejects_a_reported_stop_string_the_output_does_not_contain() {
+    let body = derender_body(serde_json::json!({"stream": true, "stop": ["END"]}));
+    let status = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("Hello", Some(derender_stop_string("END"))),
+    ])
+    .await
+    .expect_err("stop string not in the output");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+#[tokio::test]
+async fn derender_stream_keeps_the_stop_string_when_requested() {
+    let body = derender_body(serde_json::json!({
+        "stream": true,
+        "stop": ["END"],
+        "include_stop_str_in_output": true,
+    }));
+    let responses = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("Hello E", None),
+        derender_output_request("ND!", Some(derender_stop_string("END"))),
+    ])
+    .await
+    .expect("derender");
+
+    let (payloads, finished) = sse_payloads(&responses);
+    assert_eq!(streamed_content(&payloads), "Hello END");
+    assert_eq!(
+        finished[0].finish_info.as_ref().unwrap().stop_reason,
+        Some(pb::finish_info::StopReason::StopString("END".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_ends_on_an_aborted_output() {
+    let aborted = pb::FinishInfo {
+        finish_reason: pb::finish_info::FinishReason::Aborted as i32,
+        ..Default::default()
+    };
+    let responses = derender_stream_responses(vec![
+        derender_start_request(derender_body(serde_json::json!({"stream": true}))).await,
+        derender_output_request("one", None),
+        derender_output_request(" two", Some(aborted)),
+    ])
+    .await
+    .expect("derender");
+
+    let (payloads, finished) = sse_payloads(&responses);
+    assert_eq!(streamed_content(&payloads), "one two");
+    let last: serde_json::Value = serde_json::from_str(&payloads[payloads.len() - 2]).unwrap();
+    assert_eq!(last["choices"][0]["finish_reason"], "abort");
+    assert_eq!(
+        finished[0].finish_info.as_ref().unwrap().finish_reason,
+        pb::finish_info::FinishReason::Aborted as i32
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_returns_output_logprobs() {
+    let body = derender_body(serde_json::json!({"logprobs": true, "top_logprobs": 1}));
+    let responses = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_frame(with_derender_logprobs(derender_sequence_output(
+            "one", None,
+        ))),
+        derender_output_frame(with_derender_logprobs(derender_sequence_output(
+            " two",
+            Some(derender_eos()),
+        ))),
+    ])
+    .await
+    .expect("derender");
+
+    let Some(pb::derender_stream_response::Output::Body(body)) = &responses[0].output else {
+        panic!("expected a body, got {:?}", responses[0].output);
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("body json");
+    let content = body["choices"][0]["logprobs"]["content"].as_array().expect("logprobs");
+    let tokens: String = content.iter().map(|entry| entry["token"].as_str().unwrap()).collect();
+    // The EOS token is hidden from the text, not from the logprobs.
+    assert_eq!(tokens, "one two<|im_end|>");
+    assert!(content.iter().all(|entry| entry["logprob"] == -0.5));
+    assert!(content.iter().all(|entry| entry["top_logprobs"].as_array().unwrap().len() == 1));
+}
+
+#[tokio::test]
+async fn derender_stream_rejects_misaligned_logprobs() {
+    let mut output = with_derender_logprobs(derender_sequence_output("one", None));
+    output.ranks.pop();
+    let status = derender_stream_responses(vec![
+        derender_start_request(derender_body(serde_json::json!({"logprobs": true}))).await,
+        derender_output_frame(output),
+    ])
+    .await
+    .expect_err("misaligned logprobs");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+/// Both sides run the same stop matcher, so a different match means they
+/// decoded different text.
+#[tokio::test]
+async fn derender_stream_rejects_a_reported_stop_string_the_decoder_did_not_match_first() {
+    let body = derender_body(serde_json::json!({"stream": true, "stop": ["END", "STOP"]}));
+    let status = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("Hello END STOP", Some(derender_stop_string("STOP"))),
+    ])
+    .await
+    .expect_err("stop string mismatch");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert!(
+        status.message().contains("stops on \"END\" first"),
+        "{status:?}"
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_cuts_a_stop_string_inside_one_token() {
+    let body = derender_body(serde_json::json!({"stream": true, "stop": ["dg"]}));
+    let output = derender_sequence_output("the endgame", Some(derender_stop_string("dg")));
+    assert_eq!(output.token_ids.last(), Some(&RENDER_MULTI_CHAR_TOKEN_ID));
+    let responses = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_frame(output),
+    ])
+    .await
+    .expect("derender");
+
+    let (payloads, finished) = sse_payloads(&responses);
+    assert_eq!(streamed_content(&payloads), "the en");
+    assert_eq!(
+        finished[0].finish_info.as_ref().unwrap().stop_reason,
+        Some(pb::finish_info::StopReason::StopString("dg".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_ignores_stop_strings_before_min_tokens() {
+    let body = derender_body(serde_json::json!({
+        "stream": true,
+        "stop": ["E"],
+        "min_tokens": 3,
+    }));
+    let responses = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("Eab", None),
+        derender_output_request("Ecd", Some(derender_stop_string("E"))),
+    ])
+    .await
+    .expect("derender");
+
+    let (payloads, finished) = sse_payloads(&responses);
+    assert_eq!(streamed_content(&payloads), "Eab");
+    assert_eq!(
+        finished[0].finish_info.as_ref().unwrap().stop_reason,
+        Some(pb::finish_info::StopReason::StopString("E".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_hides_the_stop_token_the_worker_reports() {
+    let stop_token_id = render_token_ids("!")[0];
+    let body = derender_body(serde_json::json!({"stop_token_ids": [stop_token_id]}));
+    let responses = derender_stream_responses(vec![
+        derender_start_request(body).await,
+        derender_output_request("one", None),
+        derender_output_request(
+            " two!",
+            Some(pb::FinishInfo {
+                finish_reason: pb::finish_info::FinishReason::Stop as i32,
+                stop_reason: Some(pb::finish_info::StopReason::StopTokenId(stop_token_id)),
+                ..Default::default()
+            }),
+        ),
+    ])
+    .await
+    .expect("derender");
+
+    let Some(pb::derender_stream_response::Output::Body(body)) = &responses[0].output else {
+        panic!("expected a body, got {:?}", responses[0].output);
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("body json");
+    assert_eq!(body["choices"][0]["message"]["content"], "one two");
+    assert_eq!(body["choices"][0]["finish_reason"], "stop");
+    assert_eq!(body["choices"][0]["stop_reason"], stop_token_id);
+    assert_eq!(
+        responses[0].finished[0].finish_info.as_ref().unwrap().stop_reason,
+        Some(pb::finish_info::StopReason::StopTokenId(stop_token_id))
+    );
+}
+
+fn derender_parity_outputs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (render_token_ids("Hello"), None),
+        (render_token_ids(" world"), None),
+        (
+            vec![RENDER_EOS_TOKEN_ID],
+            Some(EngineCoreFinishReason::Stop),
+        ),
+    ]
+}
+
+/// Run `body` through HTTP `/v1/chat/completions`, and through `Render`,
+/// `Inference.GenerateStream` and `DerenderStream`, on one server whose mock
+/// engine answers both requests with `output_specs`. Returns the HTTP body and
+/// the DerenderStream responses.
+async fn chat_over_http_and_derender(
+    engine_id: impl Into<EngineId>,
+    body: serde_json::Value,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+) -> (Vec<u8>, Vec<pb::DerenderStreamResponse>) {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id.into(),
+        default_ready_response(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                for _ in 0..2 {
+                    let request = decode_add_request(&recv_engine_message(dealer).await);
+                    let outputs =
+                        engine_outputs_for_request(&request.request_id, output_specs.clone());
+                    send_outputs(push, outputs).await;
+                }
+            })
+        },
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(
+        EngineCoreLlm::new(client),
+        Arc::new(FakeRenderBackend) as Arc<dyn ChatTextBackend>,
+    )
+    .with_served_model_name("test-model");
+    let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
+    let body = serde_json::to_vec(&body).unwrap();
+
+    let response = crate::routes::build_router(state.clone())
+        .oneshot(
+            axum::http::Request::post("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let http = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn({
+        let state = state.clone();
+        async move {
+            TonicServer::builder()
+                .add_service(InferenceServer::new(InferenceServiceImpl::new(
+                    state.clone(),
+                )))
+                .add_service(super::RenderGrpcService::new(RenderServiceImpl::new(state)))
+                .serve_with_incoming(MaybeTlsListener::plain(Listener::Tcp(listener)))
+                .await
+                .expect("grpc server");
+        }
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    let mut render_client = pb::render_client::RenderClient::new(channel.clone());
+
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body,
+        ..Default::default()
+    };
+    let prompt_token_ids = render_client
+        .render(request.clone())
+        .await
+        .expect("render")
+        .into_inner()
+        .prompt_token_ids;
+    let frames: Vec<pb::GenerateResponse> = InferenceClient::new(channel)
+        .generate_stream(pb::GenerateRequest {
+            request_id: "derender-parity-worker".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: prompt_token_ids.clone(),
+            })),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 16,
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                output_token_ids: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("generate stream")
+        .into_inner()
+        .map(|frame| frame.expect("generate frame"))
+        .collect()
+        .await;
+
+    let start = pb::DerenderStreamRequest {
+        request: Some(pb::derender_stream_request::Request::Start(Box::new(
+            pb::DerenderStart {
+                context: Some(pb::derender_start::Context::Request(request)),
+                prompt_token_ids,
+            },
+        ))),
+    };
+    let requests: Vec<_> = std::iter::once(start)
+        .chain(frames.into_iter().map(|frame| pb::DerenderStreamRequest {
+            request: Some(pb::derender_stream_request::Request::Output(Box::new(
+                frame,
+            ))),
+        }))
+        .collect();
+    let responses = render_client
+        .derender_stream(futures::stream::iter(requests))
+        .await
+        .expect("derender")
+        .into_inner()
+        .map(|response| response.expect("derender response"))
+        .collect()
+        .await;
+
+    server.abort();
+    engine_task.await.expect("mock engine task");
+    (http, responses)
+}
+
+/// `bytes` as text with every `"created"` timestamp set to 0.
+fn zero_created(bytes: &[u8]) -> String {
+    const KEY: &str = "\"created\":";
+    let text = std::str::from_utf8(bytes).expect("utf-8");
+    let mut normalized = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        let (head, tail) = rest.split_at(at + KEY.len());
+        normalized.push_str(head);
+        normalized.push('0');
+        rest = tail.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    normalized.push_str(rest);
+    normalized
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn derender_stream_sse_matches_http_chat_completions() {
+    let (http, responses) = chat_over_http_and_derender(
+        b"engine-derender-parity-sse",
+        serde_json::json!({
+            "model": "test-model",
+            "request_id": "derender-parity",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+            "stream_options": {"include_usage": true, "continuous_usage_stats": true},
+        }),
+        derender_parity_outputs(),
+    )
+    .await;
+
+    let mut events = Vec::new();
+    for response in &responses {
+        match &response.output {
+            Some(pb::derender_stream_response::Output::Events(bytes)) => {
+                events.extend_from_slice(bytes);
+            }
+            other => panic!("expected events, got {other:?}"),
+        }
+    }
+    assert_eq!(zero_created(&events), zero_created(&http));
+    assert!(
+        zero_created(&http).contains("\"content\":\" world\""),
+        "{}",
+        zero_created(&http)
+    );
+    assert_eq!(responses.last().unwrap().finished.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn derender_stream_body_matches_http_chat_completions() {
+    let (http, responses) = chat_over_http_and_derender(
+        b"engine-derender-parity-body",
+        serde_json::json!({
+            "model": "test-model",
+            "request_id": "derender-parity",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }),
+        derender_parity_outputs(),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1);
+    let Some(pb::derender_stream_response::Output::Body(body)) = &responses[0].output else {
+        panic!("expected a body, got {:?}", responses[0].output);
+    };
+    assert_eq!(zero_created(body), zero_created(&http));
+    assert!(
+        zero_created(&http).contains("\"content\":\"Hello world\""),
+        "{}",
+        zero_created(&http)
+    );
+}
+
+/// The reasoning parser starts from `prompt_token_ids`, which only Derender
+/// gets from the caller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn derender_stream_reasoning_matches_http_chat_completions() {
+    let (http, responses) = chat_over_http_and_derender(
+        b"engine-derender-parity-reasoning",
+        serde_json::json!({
+            "model": "test-model",
+            "request_id": "derender-parity",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "chat_template_kwargs": {"enable_thinking": true},
+            "stream": true,
+        }),
+        vec![
+            (render_token_ids("<think>plan"), None),
+            (render_token_ids("</think>Answer"), None),
+            (
+                vec![RENDER_EOS_TOKEN_ID],
+                Some(EngineCoreFinishReason::Stop),
+            ),
+        ],
+    )
+    .await;
+
+    let events: Vec<u8> = responses
+        .iter()
+        .flat_map(|response| match &response.output {
+            Some(pb::derender_stream_response::Output::Events(bytes)) => bytes.to_vec(),
+            other => panic!("expected events, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(zero_created(&events), zero_created(&http));
+    let http = zero_created(&http);
+    assert!(http.contains("\"reasoning\":\"plan\""), "{http}");
+    assert!(http.contains("\"content\":\"Answer\""), "{http}");
 }

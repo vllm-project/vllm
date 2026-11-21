@@ -27,7 +27,7 @@ use crate::utils::{
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct PreparedRequest {
+pub(crate) struct PreparedRequest {
     /// Stable OpenAI-style request ID, reused as the external chat request ID.
     pub request_id: String,
     /// Public model ID echoed back to the client.
@@ -41,7 +41,7 @@ pub(super) struct PreparedRequest {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(super) struct ResponseOptions {
+pub(crate) struct ResponseOptions {
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
     /// Whether every streamed chunk should carry cumulative usage.
@@ -72,7 +72,7 @@ pub(super) struct ResponseOptions {
 ///
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
-pub(super) fn prepare_chat_request(
+pub(crate) fn prepare_chat_request(
     request: ChatCompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,

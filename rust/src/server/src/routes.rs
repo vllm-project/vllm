@@ -7,7 +7,7 @@ mod checkpoint;
 mod collective_rpc;
 mod generative_scoring;
 mod health;
-mod inference;
+pub(crate) mod inference;
 mod kv_event_sources;
 mod load;
 mod lora;

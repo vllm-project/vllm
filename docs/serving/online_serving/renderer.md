@@ -26,6 +26,94 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## Rust raw-JSON gRPC rendering
+
+The experimental Rust frontend can render a raw OpenAI Chat Completions JSON
+request without running inference. Start the Rust render server with
+`vllm-rs render <model> --grpc-port 50051` to enable the `vllm.Render` gRPC
+service alongside its HTTP render endpoints. The gRPC service is disabled
+unless `--grpc-port` is set.
+
+Call `Render.Render` with `api = API_CHAT` and the UTF-8 JSON request in the
+`body` bytes field. Only Chat Completions are supported by this raw RPC;
+Completions, Anthropic Messages, Responses, and an unspecified API are rejected.
+For example, this protobuf text-format request supplies the raw body:
+
+```protobuf
+api: API_CHAT
+body: "{\"model\":\"<model>\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
+mm_payload: MM_PAYLOAD_TENSORS
+```
+
+Choose returned multimodal data with the **proto `mm_payload` field**:
+
+| Value | Returned media |
+| --- | --- |
+| `MM_PAYLOAD_UNSPECIFIED` (default) | Same as `MM_PAYLOAD_TENSORS`. |
+| `MM_PAYLOAD_TENSORS` | Preprocessed inline tensors, hashes, and placeholder ranges. |
+| `MM_PAYLOAD_NONE` | Hashes and placeholder ranges, without inline tensors. |
+
+The JSON body's `mm_payload` and `return_mm_kwargs` fields do not select the
+gRPC output mode. `MM_PAYLOAD_NONE` is useful for routing on the prompt layout;
+its media cannot be forwarded directly to `Inference.Generate` without tensor
+data. Metadata-only mode is not implemented yet
+([#65018](https://github.com/vllm-project/vllm/issues/65018)); unknown enum
+values are rejected. The existing typed `Render.RenderChat` RPC keeps its
+`omit_media_kwargs` boolean unchanged.
+
+The response returns prompt token IDs, an effective structured-output
+constraint, a reasoning gate, and preprocessed media. **It does not yet return
+lowered sampling or stopping parameters**, including temperature, max_tokens,
+stop, bad_words, or n. To preserve the request's generation behavior, supply
+equivalent generation parameters separately when constructing the
+`Inference.Generate` request. Copying only the render response is insufficient;
+for example, a temperature and multiple samples requested in JSON would not be
+preserved by those fields alone. This remaining contract work is tracked in
+[#65503](https://github.com/vllm-project/vllm/issues/65503).
+
+### Turning generated tokens into the client response
+
+`Render.DerenderStream` is the reverse step for a request rendered with
+`Render.Render`: it turns the `Inference.GenerateStream` output into what the
+client expects, with the server-side reasoning and tool-call parsers applied.
+For `api = API_CHAT` with `n = 1` it returns serialized SSE events for a
+`stream: true` body, or the final JSON body for a `stream: false` one, matching
+`/v1/chat/completions` apart from `id` and `created`.
+
+1. Send `start` first, with the same `RenderRequest` passed to `Render` and the
+   `prompt_token_ids` it returned. `mm_payload` is ignored.
+2. Send each `GenerateStream` response unchanged, up to and including the one
+   with `finish_info`. To end early, send an output with
+   `finish_info.finish_reason = ABORTED`.
+3. Read the `events` (or the single `body`) from the responses. The server ends
+   the stream with the response that carries the finished sequence in
+   `finished` and reads no further messages, so stop sending then.
+
+If the stream ends without `finished`, cancel `GenerateStream`. That happens on
+a gRPC error status, and for a streaming client on an in-band error event
+(`data: {"error": ...}` followed by `data: [DONE]`), which the gateway can
+forward to the client as is.
+
+Set `response.output_token_ids = true` on the `GenerateRequest`:
+`DerenderStream` decodes `token_ids` and does not read `text`. The `stop`
+strings of the `GenerateRequest` must match the body's `stop`, because the
+stream applies the same stop matching as the worker. It rejects a stop string
+the body does not list, and one that differs from where its own decoding
+stops, since that means the two sides decoded different text.
+
+If the worker does not match stop strings (`response.output_text = false`),
+`DerenderStream` matches them itself, ends the output at the match, and reports
+the `stop_string` in `finished`. The worker never sent it, so cancel
+`GenerateStream` when you see it.
+
+Not supported yet: `n > 1`, prompt logprobs, and APIs other than `API_CHAT`.
+`DerenderStream` reports no per-request metrics.
+
+The render server uses default response options, so the output can differ from
+a `vllm serve` started with `--enable-prompt-tokens-details` or
+`--enable-force-include-usage`: `usage.prompt_tokens_details` is not returned,
+and usage is only streamed when the body asks for it.
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model
