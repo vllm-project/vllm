@@ -32,6 +32,18 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+### Decode states at prefix-match boundaries
+
+In multi-turn and agentic workloads, the next turn's prompt is the previous prompt plus the model's output plus new input. A finished request's Mamba state is otherwise cached only at the last Mamba block boundary its decode crossed, so the next turn recomputes up to one block of tokens. With `--prefix-match-unit` smaller than the Mamba block size, vLLM also keeps the state at the last prefix-match boundary its decode crossed and caches it when the request finishes, so the next turn resumes less than one `--prefix-match-unit` before the previous end.
+
+```bash
+vllm serve <hybrid-model> --enable-prefix-caching --prefix-match-unit 32
+```
+
+Each decoding request holds one extra state block per Mamba group for this (two with async scheduling or speculative decoding). `--prefix-cache-decode-retention-interval` controls it: `0` (the default) turns it on whenever `--prefix-match-unit` is set, and `None` turns it off. Positive values are not supported yet.
+
+It needs `--prefix-match-unit` larger than `2 * (num_speculative_tokens + 1)`, and it is off with pipeline parallelism, on non-CUDA platforms, with KV connectors, and with ReplaySSM. The startup log names the reason when it is off.
+
 ### FlashInfer ReplaySSM
 
 FlashInfer ReplaySSM caches recent inputs to reduce full-state writes during Mamba2 decoding. It is disabled by default. Both Model Runners V1 and V2 support prefix caching with ReplaySSM, including MTP speculative decoding.

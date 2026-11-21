@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup, MambaSpec
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -620,3 +621,42 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_decode_hold_blocks_applied_once_per_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hold rows set in a step are uploaded by one apply, the last write to a
+    row wins (a reused slot's clear, then its new holds), and nothing is
+    uploaded before `apply_decode_hold_writes`."""
+    state = object.__new__(MambaHybridModelState)
+    holds = StagedWriteTensor((4, 2), dtype=torch.int32, device=torch.device("cuda"))
+    holds.gpu.fill_(-1)
+    state._decode_hold_ids = holds
+    state._pending_decode_holds = {}
+    applies = 0
+    apply_write = holds.apply_write
+
+    def counted_apply() -> None:
+        nonlocal applies
+        applies += 1
+        apply_write()
+
+    monkeypatch.setattr(holds, "apply_write", counted_apply)
+    state.set_decode_hold_blocks({1: [10, 11], 3: [30, 31]})
+    assert holds.gpu.tolist() == [[-1, -1]] * 4
+    state.apply_decode_hold_writes()
+    assert holds.gpu.tolist() == [[-1, -1], [10, 11], [-1, -1], [30, 31]]
+    assert applies == 1
+
+    # Slot 3 is reused by a new request that also ends prefill this step.
+    state._pending_decode_holds[3] = [-1, -1]  # what add_request sets
+    state.set_decode_hold_blocks({3: [40, 41]})
+    state.apply_decode_hold_writes()
+    assert holds.gpu.tolist() == [[-1, -1], [10, 11], [-1, -1], [40, 41]]
+    assert applies == 2
+
+    # A step with nothing set uploads nothing.
+    state.apply_decode_hold_writes()
+    assert applies == 2

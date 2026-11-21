@@ -246,6 +246,16 @@ class SingleTypeKVCacheManager(ABC):
         # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
         # by ``KVCacheManager``; only a prefix-caching Mamba group ever gets it.
         self.shared_prefix_checkpoint = False
+        # `CacheConfig.prefix_cache_decode_retention_interval` == 0 with a
+        # prefix match unit finer than the block: the unit, set by
+        # `KVCacheManager` on full-attention and Mamba "align" groups. 0 = off.
+        self.decode_match_unit = 0
+        # Holds per decoding request (Mamba groups): 2 when an in-flight step or
+        # trimmed drafts may write past the last boundary the scheduler saw.
+        self.num_decode_holds = 0
+        # Draft tokens per step, which the scheduler may trim past a stop after
+        # the worker wrote their states (Mamba groups, with decode holds).
+        self.num_decode_spec_tokens = 0
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -736,8 +746,17 @@ class SingleTypeKVCacheManager(ABC):
         # Free blocks in reverse order so that the tail blocks are freed first.
         self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
 
-    def cache_blocks_on_free(self, request: Request) -> None:
-        """Cache blocks that are only retained once the request is freed."""
+    def cache_blocks_on_free(self, request: Request) -> int | None:
+        """Cache blocks that are only retained once the request is freed.
+
+        Returns the decode boundary whose recurrent state was cached inside a
+        block, if any, so the other groups can key the same boundary.
+        """
+        return None
+
+    def cache_decode_boundary_on_free(self, request: Request, num_tokens: int) -> None:
+        """Key this group's block at a decode boundary another group cached
+        a recurrent state at (see `cache_blocks_on_free`)."""
         return None
 
     @classmethod
@@ -1011,6 +1030,25 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
+        )
+
+    def cache_decode_boundary_on_free(self, request: Request, num_tokens: int) -> None:
+        # Attention KV is append-only, so the block holding `num_tokens` also
+        # serves that shorter prefix: key it there, metadata only.
+        if self.decode_match_unit == 0:
+            return
+        blocks = self.req_to_blocks.get(request.request_id, [])
+        block_idx = num_tokens // self.block_size
+        if num_tokens % self.block_size == 0 or block_idx >= len(blocks):
+            # A full block already carries this key.
+            return
+        self.block_pool.cache_partial_block(
+            request=request,
+            block=blocks[block_idx],
+            num_tokens=num_tokens,
+            kv_cache_group_id=self.kv_cache_group_id,
+            block_size=self.block_size,
+            keep_existing_hashes=True,
         )
 
 
@@ -1847,6 +1885,23 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         return num_skipped_tokens
 
 
+def _max_decode_holds(vllm_config: "VllmConfig") -> int:
+    """Upper bound of `decode_match_holds()[1]` from the config alone (no KV
+    cache config yet), for sizing."""
+    cache_config = vllm_config.cache_config
+    if (
+        cache_config.prefix_cache_decode_retention_interval is None
+        or cache_config.prefix_match_unit is None
+        or not cache_config.enable_prefix_caching
+    ):
+        return 0
+    unseen_writes = (
+        vllm_config.scheduler_config.async_scheduling
+        or vllm_config.speculative_config is not None
+    )
+    return 2 if unseen_writes else 1
+
+
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
     zeroes_new_blocks: ClassVar[bool] = False
@@ -1889,7 +1944,10 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(params, MambaManager.Params)
         if params.enable_prefix_caching:
             return (
-                2 + params.num_speculative_blocks + params.num_prefill_checkpoint_blocks
+                2
+                + params.num_speculative_blocks
+                + params.num_prefill_checkpoint_blocks
+                + _max_decode_holds(vllm_config)
             )
         return 1 + params.num_speculative_blocks
 
@@ -1959,6 +2017,13 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # Per decoding request: blocks outside the block table into which
+            # the worker copies the state at each prefix-match boundary a step
+            # crosses (`decode_match_unit`), and the last token count not
+            # covered (earlier boundaries are not in them).
+            self._decode_holds: dict[str, tuple[list[KVCacheBlock], int]] = {}
+            # Holds handed out this step, for the worker.
+            self._new_decode_holds: dict[str, list[int]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -2453,6 +2518,8 @@ class MambaManager(SingleTypeKVCacheManager):
             self._req_chunk_ranges.pop(request_id, None)
             self._mid_block_states.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._new_decode_holds.pop(request_id, None)
+            hold = self._decode_holds.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
@@ -2463,7 +2530,55 @@ class MambaManager(SingleTypeKVCacheManager):
                 for entry in self._pending_boundary_state_offloads
                 if entry[0] != request_id
             ]
+            if hold is not None:
+                # The cached hold first, so it is freed after the rest of this
+                # group (the uncached one goes straight back to the pool).
+                holds = sorted(hold[0], key=lambda b: b.block_hash is None)
+                return [*holds, *super().pop_blocks_for_free(request_id)]
         return super().pop_blocks_for_free(request_id)
+
+    def num_decode_holds_needed(self, request: Request, num_tokens: int) -> int:
+        """Blocks to reserve for `allocate_decode_holds` in a step that ends
+        at `num_tokens` computed tokens."""
+        # From the step that ends prefill (including a resumed request
+        # replaying its output) on: the worker writes a hold where a step ends
+        # on a boundary, and prefill may end on one.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if (
+            self.decode_match_unit == 0
+            or num_tokens < prefill_end
+            or request.request_id in self._decode_holds
+        ):
+            return 0
+        return self.num_decode_holds
+
+    def allocate_decode_holds(self, request: Request, num_tokens: int) -> None:
+        """Hand a request its decode-state hold blocks. The worker writes the
+        state at every prefix-match boundary a step crosses from now on in
+        place, into hold `boundary // unit % num_decode_holds`."""
+        if not self.num_decode_holds_needed(request, num_tokens):
+            return
+        holds = self.block_pool.get_new_blocks(self.num_decode_holds)
+        if self._record_new_block_ids:
+            # A shifted conv copy writes only part of the block.
+            self.new_block_ids.extend(b.block_id for b in holds)
+        # Boundaries from the prefill end on are in the holds; earlier ones,
+        # which a prefill chunk may run past, are not.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        first = max(request.num_computed_tokens, prefill_end - 1)
+        self._decode_holds[request.request_id] = (holds, first)
+        self._new_decode_holds[request.request_id] = [b.block_id for b in holds]
+
+    def release_decode_holds(self, request_id: str) -> list[KVCacheBlock]:
+        """Take a request's holds back without caching them, e.g. before a
+        streaming session's next input chunk, which prefill may run past."""
+        self._new_decode_holds.pop(request_id, None)
+        hold = self._decode_holds.pop(request_id, None)
+        return [] if hold is None else hold[0]
+
+    def take_new_decode_holds(self) -> dict[str, list[int]]:
+        holds, self._new_decode_holds = self._new_decode_holds, {}
+        return holds
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only
@@ -2542,11 +2657,60 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         return idx
 
-    def cache_blocks_on_free(self, request: Request) -> None:
+    def cache_blocks_on_free(self, request: Request) -> int | None:
         """Cache the held latest decode-crossed boundary state, so a follow-up
         turn resumes there."""
+        boundary = self._cache_decode_hold(request)
+        block_boundary = self._cache_decode_block_boundary_state(request)
+        if boundary is None and self.decode_match_unit:
+            # An attention group with a larger block has no key at this Mamba
+            # block boundary either: report it too.
+            boundary = block_boundary
+        return boundary
+
+    def _cache_decode_hold(self, request: Request) -> int | None:
+        """Cache the hold that holds the state at the last prefix-match
+        boundary before the output end, if no later write can have reached it.
+        """
+        unit = self.decode_match_unit
+        hold = self._decode_holds.get(request.request_id) if unit else None
+        if hold is None:
+            return None
+        holds, first = hold
+        processed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        boundary = processed // unit * unit
+        if (
+            boundary <= first
+            or boundary % self.block_size == 0
+            or boundary > len(request.block_hashes) * unit
+        ):
+            # Not written into a hold, or a block boundary, which the block
+            # state below covers.
+            return None
+        # The worker also writes boundaries reached by an in-flight step or by
+        # draft tokens accepted past a stop and trimmed here. One that maps to
+        # the same hold would overwrite it.
+        unseen = request.num_in_flight_tokens + self.num_decode_spec_tokens
+        num_holds = len(holds)
+        later = boundary + num_holds * unit
+        while later <= processed + unseen:
+            if later % self.block_size:
+                return None
+            later += num_holds * unit
+        self.block_pool.cache_partial_block(
+            request=request,
+            block=holds[boundary // unit % num_holds],
+            num_tokens=boundary,
+            kv_cache_group_id=self.kv_cache_group_id,
+            block_size=self.block_size,
+        )
+        return boundary
+
+    def _cache_decode_block_boundary_state(self, request: Request) -> int | None:
+        """Cache the held decode-crossed block boundary state; return that
+        boundary if its state is cached."""
         if not self.keep_decode_resume_state:
-            return
+            return None
         blocks = self.req_to_blocks.get(request.request_id, [])
         idx = self._decode_resume_block_idx(
             request.request_id,
@@ -2557,10 +2721,11 @@ class MambaManager(SingleTypeKVCacheManager):
         if (
             idx is None
             or idx >= len(blocks)
-            or blocks[idx].block_hash is not None
             or num_hashed_tokens < (idx + 1) * self.block_size
         ):
-            return
+            return None
+        if blocks[idx].block_hash is not None:
+            return (idx + 1) * self.block_size
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=blocks,
@@ -2569,6 +2734,7 @@ class MambaManager(SingleTypeKVCacheManager):
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
         )
+        return (idx + 1) * self.block_size
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()

@@ -134,6 +134,17 @@ class ModelState(ABC):
     def remove_request(self, req_id: str) -> None:
         return None
 
+    def set_decode_hold_blocks(self, holds: dict[int, list[int]]) -> None:
+        """Record decode-state hold blocks per request slot; see
+        `SchedulerOutput.mamba_decode_hold_block_ids`. The scheduler sends
+        them only when `decode_match_holds` is on, which needs Mamba."""
+        raise NotImplementedError
+
+    def apply_decode_hold_writes(self) -> None:
+        """Upload the hold rows set this step; called once per step after
+        `update_requests`."""
+        return None
+
     def apply_staged_writes(self) -> None:
         return None
 
