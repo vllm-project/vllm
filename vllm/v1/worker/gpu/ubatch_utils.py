@@ -36,6 +36,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.ubatching import (
     dbo_comm_stream_priority,
+    enable_dma_all_reduce,
     make_ubatch_contexts,
 )
 from vllm.v1.worker.utils import AttentionGroup
@@ -350,8 +351,8 @@ class UBatchRunner:
             else None
             for _ in range(self.num_ubatches)
         ]
-        self.comm_stream = torch.cuda.Stream(
-            device=device, priority=dbo_comm_stream_priority()
+        self.comm_stream = current_platform.create_ubatch_comm_stream(
+            device, dbo_comm_stream_priority()
         )
         # Threads and graph capture must use the same compute stream.
         self.capture_stream = torch.cuda.Stream(device=device)
@@ -359,12 +360,15 @@ class UBatchRunner:
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         if self.parallel_config.dbo_schedule == "all-reduce-overlap":
             # The TP all-reduces run on the comm stream. Collective: every rank
-            # binds in the same order.
-            pynccl_comm = getattr(
-                get_tp_group().device_communicator, "pynccl_comm", None
-            )
-            if pynccl_comm is not None:
-                pynccl_comm.bind_stream(self.comm_stream)
+            # takes the same branch, in the same order.
+            tp = get_tp_group()
+            # The SDMA path carries the microbatch all-reduces. Giving the comm
+            # stream its own RCCL communicator as well cost the whole DBO gain on
+            # MI355X (TP2), so leave PyNccl unbound then.
+            if not enable_dma_all_reduce(tp, vllm_config):
+                pynccl_comm = getattr(tp.device_communicator, "pynccl_comm", None)
+                if pynccl_comm is not None:
+                    pynccl_comm.bind_stream(self.comm_stream)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
         current_platform.prepare_ubatch_streams(

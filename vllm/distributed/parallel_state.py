@@ -760,13 +760,14 @@ class GroupCoordinator:
         # custom op, so compiled graphs reach it too; no-ops outside a microbatch.
         from vllm.v1.worker.ubatching import (
             dbo_switch_to_comm_sync,
+            dbo_tp_all_reduce,
             dbo_yield_and_switch_from_comm_to_compute,
         )
 
         # Launch before yielding: the comm stream then waits on a compute event
         # recorded after every read of whichever freed block the output reuses.
         dbo_switch_to_comm_sync("all-reduce-overlap")
-        out = self.device_communicator.all_reduce(input_)
+        out = dbo_tp_all_reduce(self.device_communicator, input_)
         dbo_yield_and_switch_from_comm_to_compute("all-reduce-overlap")
         return out
 
