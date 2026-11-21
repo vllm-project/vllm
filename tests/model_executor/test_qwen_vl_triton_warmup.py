@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,21 @@ import torch
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
     _warm_mrope,
     _warm_vision,
+    qwen_vl_triton_warmup,
 )
+
+
+def test_qwen_vl_warmup_skips_vision_import_for_text_model(monkeypatch) -> None:
+    module_name = "vllm.model_executor.models.qwen3_vl"
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    runner = SimpleNamespace(
+        get_model=lambda: torch.nn.Linear(1, 1),
+        device=torch.device("cpu"),
+    )
+    qwen_vl_triton_warmup(runner)
+
+    assert module_name not in sys.modules
 
 
 def test_vision_warmup_calls_only_position_and_rotary_paths() -> None:
