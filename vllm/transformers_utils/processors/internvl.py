@@ -203,6 +203,8 @@ def video_to_pixel_values_internvl(
     max_num: int,
     use_thumbnail: bool,
 ) -> torch.Tensor:
+    if isinstance(video, torch.Tensor):
+        video = video.cpu().numpy()
     target_ratios = get_internvl_target_ratios(min_num, max_num)
 
     transform = build_transform(input_size=input_size)
