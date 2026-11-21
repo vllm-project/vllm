@@ -324,6 +324,10 @@ class RocmRdnaAttentionBackend(TritonAttentionBackend):
 class RocmRdnaAttentionImpl(TritonAttentionImpl):
     """Runs the RDNA3.5 kernels when they support the call, else Triton."""
 
+    # The sliding window covers max_model_len: without the window's builds,
+    # full attention's serve it.
+    _window_covers_seqs = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._variant: KernelVariant | None = None
@@ -339,6 +343,13 @@ class RocmRdnaAttentionImpl(TritonAttentionImpl):
         )
         # Sequences the batched scratch holds.
         self._cap = 0
+        # A causal window no shorter than the longest sequence is full attention.
+        model_config = getattr(vllm_config, "model_config", None)
+        self._window_covers_seqs = (
+            model_config is not None
+            and self.sliding_window[1] == 0
+            and self.sliding_window[0] + 1 >= model_config.max_model_len
+        )
 
     def _reject(self, reason: str) -> None:
         """Log why this call falls back to Triton."""
@@ -438,17 +449,17 @@ class RocmRdnaAttentionImpl(TritonAttentionImpl):
 
         # Logical KV cache order is (num_blocks, num_kv_heads, block_size, 2*hs).
         q = kwargs["q"]
-        variant = variant_for(
+        shape = (
             self.num_heads,
             self.num_kv_heads,
             self.head_size,
             max_query_len,
             kv_cache.shape[2],
             0 if kv_cache.stride(1) < kv_cache.stride(2) else 1,
-            win,
-            q.dtype,
-            nseq > 1,
         )
+        variant = variant_for(*shape, win, q.dtype, nseq > 1)
+        if variant is None and win and self._window_covers_seqs:
+            variant = variant_for(*shape, 0, q.dtype, nseq > 1)
         if variant is None:
             self._reject("no build in _rocm_C for this shape and layout")
             return None
@@ -619,6 +630,16 @@ class RocmRdnaAttentionImpl(TritonAttentionImpl):
             self._reject("prefill: KV cache is not the packed HND layout")
             return None
         q, out = kwargs["q"], kwargs["out"]
+        hq, hkv, d = self.num_heads, self.num_kv_heads, self.head_size
+        if (
+            win
+            and self._window_covers_seqs
+            and prefill_variant_for(
+                hq, hkv, d, block_size, 1, win, q.dtype, PREFILL_MIN_M
+            )
+            is None
+        ):
+            win = 0
         m = q.shape[0]
         nseq = kwargs["seqused_k"].shape[0]
         # A batch, or fewer tokens than the first build serves: a plan.
@@ -637,7 +658,6 @@ class RocmRdnaAttentionImpl(TritonAttentionImpl):
             ):
                 self._reject("prefill batch without the host's query starts")
                 return None
-        hq, hkv, d = self.num_heads, self.num_kv_heads, self.head_size
         if planned:
             variant, plan, head_group, starts = self._plan(
                 cast(RocmRdnaMetadata, md), block_size, win, first, q
