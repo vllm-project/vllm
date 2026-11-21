@@ -52,7 +52,12 @@ def claim_triton_cache_dir() -> None:
     # Not under the per-model compile cache: these kernels are not
     # model-specific, and the AOT artifact already carries Inductor's.
     triton_cache = os.path.join(envs.VLLM_CACHE_ROOT, "triton_cache")
-    os.makedirs(triton_cache, exist_ok=True)
+    try:
+        os.makedirs(triton_cache, exist_ok=True)
+    except OSError as e:
+        # Keep Triton's default rather than fail startup on a read-only root.
+        logger.warning("Cannot create Triton cache dir %s: %s", triton_cache, e)
+        return
     os.environ["TRITON_CACHE_DIR"] = triton_cache
     logger.debug("Using Triton cache directory: %s", triton_cache)
 

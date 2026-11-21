@@ -121,6 +121,17 @@ def test_claim_triton_cache_dir_honours_caller(monkeypatch, tmp_path):
     assert os.environ["TRITON_CACHE_DIR"] == str(tmp_path / "mine")
 
 
+def test_claim_triton_cache_dir_tolerates_unwritable_root(monkeypatch, tmp_path):
+    (tmp_path / "file").touch()
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "file" / "vllm"))
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    envs.disable_envs_cache()
+
+    claim_triton_cache_dir()
+
+    assert "TRITON_CACHE_DIR" not in os.environ
+
+
 def test_forked_child_can_use_openmp_after_parent_did():
     """A forked child deadlocks in libgomp if its parent already ran a parallel
     region, unless get_mp_context() releases the parent's OpenMP workers."""
