@@ -3,49 +3,20 @@
 """DeepSeek V4 model — hardware-isolated entry point.
 
 The actual implementation lives under `nvidia/` and `amd/`; this module
-picks the right one for the current platform and re-exports the public
-classes used by the model registry and quantization config lookup.
+picks the right one for the current platform on first attribute access, so
+that importing `quant_config` does not pull in the model code.
 """
 
-from vllm.platforms import current_platform
+import importlib
+from typing import TYPE_CHECKING, Any
 
 from .quant_config import DeepseekV4FP8Config
 
-# Pick the per-platform implementation. The NVIDIA branch is the static
-# default that mypy sees; the ROCm/XPU branches override at runtime and are
-# kept type-compatible via ``# type: ignore[assignment]``.
-if current_platform.is_rocm():
-    from .amd.dspark import (  # type: ignore[assignment]
-        DSparkDeepseekV4ForCausalLM,
-    )
-    from .amd.model import DeepseekV4ForCausalLM
-    from .amd.mtp import DeepSeekV4MTP
-    from .common.vl_model import (  # type: ignore[assignment]
-        DeepseekV4ForConditionalGeneration,
-    )
-elif current_platform.is_xpu():
-    from .vl_stub import (  # type: ignore[assignment]
-        DeepseekV4ForConditionalGeneration,
-    )
-    from .xpu.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
-    from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
-    from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
-elif current_platform.is_cpu():
-    from .cpu.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
-    from .cpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
-    from .cpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
-    from .vl_stub import (  # type: ignore[assignment]
-        DeepseekV4ForConditionalGeneration,
-    )
-else:
-    from .common.vl_model import (  # type: ignore[assignment]
-        DeepseekV4ForConditionalGeneration,
-    )
-    from .nvidia.dspark import (  # type: ignore[assignment]
-        DSparkDeepseekV4ForCausalLM,
-    )
-    from .nvidia.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
-    from .nvidia.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+if TYPE_CHECKING:
+    from .common.vl_model import DeepseekV4ForConditionalGeneration
+    from .nvidia.dspark import DSparkDeepseekV4ForCausalLM
+    from .nvidia.model import DeepseekV4ForCausalLM
+    from .nvidia.mtp import DeepSeekV4MTP
 
 __all__ = [
     "DSparkDeepseekV4ForCausalLM",
@@ -54,3 +25,25 @@ __all__ = [
     "DeepseekV4ForCausalLM",
     "DeepseekV4ForConditionalGeneration",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        impl, vl = "amd", "common.vl_model"
+    elif current_platform.is_xpu():
+        impl, vl = "xpu", "vl_stub"
+    elif current_platform.is_cpu():
+        impl, vl = "cpu", "vl_stub"
+    else:
+        impl, vl = "nvidia", "common.vl_model"
+    module = {
+        "DSparkDeepseekV4ForCausalLM": f".{impl}.dspark",
+        "DeepSeekV4MTP": f".{impl}.mtp",
+        "DeepseekV4ForCausalLM": f".{impl}.model",
+        "DeepseekV4ForConditionalGeneration": f".{vl}",
+    }[name]
+    return getattr(importlib.import_module(module, __name__), name)
