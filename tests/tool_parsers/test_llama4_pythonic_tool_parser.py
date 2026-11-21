@@ -64,11 +64,22 @@ PYTHON_TAG_FUNCTION_OUTPUT = (
 
 
 @pytest.mark.parametrize("streaming", [True, False])
-def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        "How can I help you today?",
+        "[1] See the docs.",
+        "[Note] hello",
+        "[x](https://example.com) is a link",
+        "[]",
+    ],
+)
+def test_no_tool_call(
+    streaming: bool, model_output: str, default_tokenizer: TokenizerLike
+):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
         default_tokenizer
     )
-    model_output = "How can I help you today?"
 
     content, tool_calls = run_tool_extraction(
         tool_parser, model_output, streaming=streaming
