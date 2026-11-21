@@ -13,17 +13,16 @@ from vllm.v1.attention.backends.mla.prefill.flash_attn import (
 _FA_MODULE = "vllm.v1.attention.backends.mla.prefill.flash_attn"
 
 
-def test_upstream_flash_attn_head_major_output_is_made_token_major():
-    """Upstream flash_attn on ROCm may return a head-major output, while
-    merge_attn_states derives each partial's token stride from its head
-    stride. The backend must hand back a token-major partial."""
+def test_upstream_flash_attn_head_major_output_is_preserved():
+    """Avoid copying a head-major output that merge_attn_states can consume."""
     num_tokens, num_heads, head_size = 5, 3, 8
     expected = torch.randn(num_tokens, num_heads, head_size)
+    head_major = expected.transpose(0, 1).contiguous().transpose(0, 1)
     lse = torch.randn(num_heads, num_tokens)
 
     def head_major_kernel(**kwargs):
         assert kwargs["return_attn_probs"]
-        return expected.transpose(0, 1).contiguous().transpose(0, 1), lse
+        return head_major, lse
 
     backend = object.__new__(FlashAttnPrefillBackend)
     backend.requires_v_padding = False
@@ -35,6 +34,7 @@ def test_upstream_flash_attn_head_major_output_is_made_token_major():
             q=q, k=q, v=q, return_softmax_lse=True
         )
 
-    assert attn_out.is_contiguous()
+    assert attn_out is head_major
+    assert not attn_out.is_contiguous()
     torch.testing.assert_close(attn_out, expected)
     assert attn_lse is lse

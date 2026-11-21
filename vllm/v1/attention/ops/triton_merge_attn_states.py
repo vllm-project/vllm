@@ -25,10 +25,11 @@ def merge_attn_states(
     num_query_heads = output.shape[1]
     head_size = output.shape[2]
     padded_head_size = triton.next_power_of_2(head_size)
-    # We assume the output stride on num_head is not always as same as the
-    # `suffix_output` and `prefix_output`, as them might be padded by the
-    # attention backend.
+    prefix_token_stride = prefix_output.stride(0)
     prefix_head_stride = prefix_output.stride(1)
+    suffix_token_stride = suffix_output.stride(0)
+    suffix_head_stride = suffix_output.stride(1)
+    output_token_stride = output.stride(0)
     output_head_stride = output.stride(1)
     # lse tensors are [NUM_HEADS, NUM_TOKENS] but may be non-contiguous views
     # (e.g. a transpose of a backend's [NUM_TOKENS, NUM_HEADS] output), so index
@@ -52,8 +53,12 @@ def merge_attn_states(
         prefix_lse,
         suffix_output,
         suffix_lse,
-        prefix_head_stride,
+        output_token_stride,
         output_head_stride,
+        prefix_token_stride,
+        prefix_head_stride,
+        suffix_token_stride,
+        suffix_head_stride,
         prefix_lse_head_stride,
         prefix_lse_token_stride,
         suffix_lse_head_stride,
@@ -77,8 +82,12 @@ def merge_attn_states_kernel(
     prefix_lse,  # [NUM_HEADS, NUM_TOKENS]
     suffix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
-    prefix_head_stride,
+    output_token_stride,
     output_head_stride,
+    prefix_token_stride,
+    prefix_head_stride,
+    suffix_token_stride,
+    suffix_head_stride,
     prefix_lse_head_stride,
     prefix_lse_token_stride,
     suffix_lse_head_stride,
@@ -94,9 +103,8 @@ def merge_attn_states_kernel(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    token_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
-    num_heads = tl.num_programs(1)
+    token_idx = tl.program_id(0).to(tl.int64)
+    head_idx = tl.program_id(1).to(tl.int64)
 
     prefix_mask = token_idx < prefill_tokens_with_context
 
@@ -121,8 +129,8 @@ def merge_attn_states_kernel(
 
         s_out = tl.load(
             suffix_output
-            + token_idx * num_heads * prefix_head_stride
-            + head_idx * prefix_head_stride
+            + token_idx * suffix_token_stride
+            + head_idx * suffix_head_stride
             + head_arange,
             mask=head_mask,
         )
@@ -134,7 +142,7 @@ def merge_attn_states_kernel(
 
         tl.store(
             output
-            + token_idx * num_heads * output_head_stride
+            + token_idx * output_token_stride
             + head_idx * output_head_stride
             + head_arange,
             s_out,
@@ -185,15 +193,15 @@ def merge_attn_states_kernel(
 
     p_out = tl.load(
         prefix_output
-        + token_idx * num_heads * prefix_head_stride
+        + token_idx * prefix_token_stride
         + head_idx * prefix_head_stride
         + head_arange,
         mask=head_mask,
     )
     s_out = tl.load(
         suffix_output
-        + token_idx * num_heads * prefix_head_stride
-        + head_idx * prefix_head_stride
+        + token_idx * suffix_token_stride
+        + head_idx * suffix_head_stride
         + head_arange,
         mask=head_mask,
     )
@@ -215,7 +223,7 @@ def merge_attn_states_kernel(
 
     tl.store(
         output
-        + token_idx * num_heads * output_head_stride
+        + token_idx * output_token_stride
         + head_idx * output_head_stride
         + head_arange,
         out,
