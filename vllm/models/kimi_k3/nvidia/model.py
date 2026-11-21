@@ -456,7 +456,9 @@ class KimiMoE(nn.Module):
                 intermediate_size=shared_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                # MegaMoE adds the shared output locally, so without sequence
+                # parallelism (PP > 1) the TP-sharded partials must be reduced.
+                reduce_results=self.use_mega_moe and not use_sequence_parallel,
                 use_sequence_parallel=use_sequence_parallel,
                 # MegaMoE calls the shared expert directly. DeepEP v2 hands it
                 # to MoERunner, but preserves the local SP output layout needed
