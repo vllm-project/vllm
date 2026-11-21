@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -156,6 +157,7 @@ class FunctionGemmaToolParser(ToolParser):
         self.current_tool_id: int = -1
         self.streamed_args_for_tool: list[str] = []
         self.buffered_delta_text = ""
+        self._stream_regex_timed_out = False
 
     def _parse_arguments(self, args_str: str, partial: bool = False) -> dict:
         """Parse a FunctionGemma argument string into a dictionary.
@@ -204,7 +206,9 @@ class FunctionGemmaToolParser(ToolParser):
             )
 
         try:
-            matches = self.tool_call_regex.findall(model_output)
+            matches = self.tool_call_regex.findall(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
 
             if not matches:
                 return ExtractedToolCallInformation(
@@ -248,6 +252,15 @@ class FunctionGemmaToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            logger.debug(
+                "Regex timeout occurred when matching user input: %s",
+                model_output,
+            )
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
         except Exception:
             logger.exception("Error extracting tool calls from FunctionGemma response")
             return ExtractedToolCallInformation(
@@ -284,7 +297,9 @@ class FunctionGemmaToolParser(ToolParser):
         """Stream what is left of the current call, including its closing brace."""
         if not 0 <= self.current_tool_id < len(self.prev_tool_call_arr):
             return None
-        all_calls = self.tool_call_regex.findall(current_text)
+        all_calls = self.tool_call_regex.findall(
+            current_text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+        )
         args = {}
         if self.current_tool_id < len(all_calls):
             match = all_calls[self.current_tool_id]
@@ -326,6 +341,9 @@ class FunctionGemmaToolParser(ToolParser):
     ) -> DeltaMessage | None:
         delta_text = self._buffer_delta_text(delta_text)
         current_text = previous_text + delta_text
+
+        if self._stream_regex_timed_out:
+            return None
 
         if self.tool_call_start_token not in current_text:
             if delta_text:
@@ -407,6 +425,10 @@ class FunctionGemmaToolParser(ToolParser):
                 return DeltaMessage(content=delta_text)
             return None
 
+        except TimeoutError:
+            self._stream_regex_timed_out = True
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            return None
         except Exception:
             logger.exception("Error in streaming tool call extraction")
             return None
