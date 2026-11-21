@@ -314,6 +314,179 @@ def _tq_decode_stage1(
 
 
 # ---------------------------------------------------------------------------
+# Stage 1 (grouped): GQA head grouping + tl.dot tensor-core scoring
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _tq_grouped_decode_stage1(
+    Q_rot_ptr,
+    KV_cache_ptr,
+    Block_table_ptr,
+    Seq_lens_ptr,
+    Mid_o_ptr,
+    stride_qb,
+    stride_qh,
+    stride_cache_block,
+    stride_cache_pos,
+    stride_cache_head,
+    stride_bt_b,
+    stride_mid_b,
+    stride_mid_h,
+    stride_mid_s,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_KV_SPLITS: tl.constexpr,
+    KV_GROUP_SIZE: tl.constexpr,
+    Q_HEAD_NUM: tl.constexpr,
+    KPS: tl.constexpr,
+    VQB: tl.constexpr,
+    VAL_DATA_BYTES: tl.constexpr,
+    ATTN_SCALE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    DOT_DTYPE: tl.constexpr,
+    FP8_E4B15: tl.constexpr = 0,
+):
+    """GQA-grouped TQ decode stage1 for the FP8 key path (k8v4).
+
+    Each CTA processes up to BLOCK_H Q heads that share one KV head,
+    loading K/V once and computing scores via `tl.dot`.
+    """
+    bid = tl.program_id(0)
+    head_group_id = tl.program_id(1)
+    sid = tl.program_id(2)
+
+    # Each KV head owns `heads_per_kv_head` consecutive CTAs, so a CTA never
+    # spans two KV heads even when KV_GROUP_SIZE is not a multiple of BLOCK_H.
+    heads_per_kv_head: tl.constexpr = tl.cdiv(KV_GROUP_SIZE, BLOCK_H)
+    kv_head = head_group_id // heads_per_kv_head
+    group_idx = head_group_id % heads_per_kv_head
+    cur_head = kv_head * KV_GROUP_SIZE + group_idx * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask_h = (cur_head < (kv_head + 1) * KV_GROUP_SIZE) & (cur_head < Q_HEAD_NUM)
+
+    seq_len = tl.load(Seq_lens_ptr + bid)
+    split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
+    split_start = split_len * sid
+    split_end = tl.minimum(split_start + split_len, seq_len)
+
+    if split_start >= split_end:
+        out_base = bid * stride_mid_b + cur_head * stride_mid_h + sid * stride_mid_s
+        tl.store(Mid_o_ptr + out_base + HEAD_DIM, float("-inf"), mask=mask_h)
+        return
+
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < HEAD_DIM
+    kv_range = tl.arange(0, BLOCK_KV)
+
+    q_base = bid * stride_qb + cur_head[:, None] * stride_qh + d_offs[None, :]
+    q_rot = tl.load(
+        Q_rot_ptr + q_base,
+        mask=mask_h[:, None] & d_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+
+    m_prev = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
+    l_prev = tl.zeros([BLOCK_H], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_H, BLOCK_D], dtype=tl.float32)
+
+    bt_base = bid * stride_bt_b
+
+    for start_n in range(split_start, split_end, BLOCK_KV):
+        kv_offs = start_n + kv_range
+        kv_mask = kv_offs < split_end
+
+        page_idx = kv_offs // BLOCK_SIZE
+        page_off = kv_offs % BLOCK_SIZE
+        block_nums = tl.load(
+            Block_table_ptr + bt_base + page_idx, mask=kv_mask, other=0
+        ).to(tl.int64)
+
+        slot_bases = (
+            block_nums * stride_cache_block
+            + page_off.to(tl.int64) * stride_cache_pos
+            + tl.cast(kv_head, tl.int64) * stride_cache_head
+        )
+
+        # K dequant: [BLOCK_KV, BLOCK_D]
+        k_addrs = slot_bases[:, None] + d_offs[None, :]
+        k_raw = tl.load(
+            KV_cache_ptr + k_addrs,
+            mask=kv_mask[:, None] & d_mask[None, :],
+            other=0,
+        )
+        if FP8_E4B15:
+            k_float = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+        else:
+            k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+
+        # [BLOCK_H, BLOCK_KV]
+        scores = tl.dot(q_rot.to(DOT_DTYPE), tl.trans(k_float.to(DOT_DTYPE)))
+        scores = (scores * ATTN_SCALE).to(tl.float32)
+        scores = tl.where(mask_h[:, None] & kv_mask[None, :], scores, -float("inf"))
+
+        n_e_max = tl.maximum(tl.max(scores, 1), m_prev)
+        re_scale = tl.exp(m_prev - n_e_max)
+        p = tl.exp(scores - n_e_max[:, None])
+
+        # V dequant: [BLOCK_KV, BLOCK_D]
+        tl.static_assert(VQB == 4, "grouped kernel only supports 4-bit values")
+        val_bases = slot_bases + KPS
+
+        vb_idx = d_offs // 2
+        vb_shift = (d_offs % 2) * 4
+        val_addrs = val_bases[:, None] + vb_idx[None, :]
+        val_raw = tl.load(
+            KV_cache_ptr + val_addrs,
+            mask=kv_mask[:, None] & d_mask[None, :],
+            other=0,
+        ).to(tl.int32)
+        v_idx = ((val_raw >> vb_shift[None, :]) & 0xF).to(tl.float32)
+
+        sc_bases = val_bases + VAL_DATA_BYTES
+        sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(tl.uint16)
+        sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
+            tl.uint16
+        )
+        v_scales = (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+        zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
+            tl.uint16
+        )
+        zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
+            tl.uint16
+        )
+        v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+        values = v_idx * v_scales[:, None] + v_zeros[:, None]
+
+        acc = acc * re_scale[:, None] + tl.dot(
+            p.to(DOT_DTYPE), values.to(DOT_DTYPE)
+        ).to(tl.float32)
+        l_prev = l_prev * re_scale + tl.sum(p, 1)
+        m_prev = n_e_max
+
+    safe_l = tl.where(l_prev > 0.0, l_prev, 1.0)
+    out_base = (
+        bid * stride_mid_b + cur_head[:, None] * stride_mid_h + sid * stride_mid_s
+    )
+    tl.store(
+        Mid_o_ptr + out_base + d_offs[None, :],
+        acc / safe_l[:, None],
+        mask=mask_h[:, None] & d_mask[None, :],
+    )
+    lse = m_prev + tl.log(safe_l)
+    tl.store(
+        Mid_o_ptr
+        + bid * stride_mid_b
+        + cur_head * stride_mid_h
+        + sid * stride_mid_s
+        + HEAD_DIM,
+        lse,
+        mask=mask_h,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pre-dequant kernel: Bulk dequant K (MSE+norms) and V to fp16
 # ---------------------------------------------------------------------------
 
@@ -549,43 +722,81 @@ def triton_turboquant_decode_attention(
 
     # Stage 1: split-KV tiled attention scoring + value accumulation
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
-    BLOCK_KV = 4
-    grid = (B, Hq, NUM_KV_SPLITS)
-    _tq_decode_stage1[grid](
-        q_rot,
-        kv_cache,
-        block_table,
-        seq_lens,
-        centroids,
-        mid_o,
-        q_rot.stride(0),
-        q_rot.stride(1),
-        kv_cache.stride(0),
-        kv_cache.stride(1),
-        kv_cache.stride(2),
-        block_table.stride(0),
-        mid_o.stride(0),
-        mid_o.stride(1),
-        mid_o.stride(2),
-        NUM_KV_HEADS=Hk,
-        HEAD_DIM=D,
-        BLOCK_SIZE=block_size,
-        NUM_KV_SPLITS=NUM_KV_SPLITS,
-        KV_GROUP_SIZE=kv_group_size,
-        MSE_BITS=mse_bits,
-        MSE_BYTES=cfg["mse_bytes"],
-        KPS=key_packed_size,
-        VQB=value_quant_bits,
-        VAL_DATA_BYTES=cfg["val_data_bytes"],
-        ATTN_SCALE=scale,
-        BLOCK_D=cfg["BLOCK_D"],
-        BLOCK_KV=BLOCK_KV,
-        KEY_FP8=1 if key_fp8 else 0,
-        NORM_CORRECTION=1 if norm_correction else 0,
-        FP8_E4B15=fp8_e4b15,
-        num_warps=1,
-        num_stages=1,
-    )
+    if kv_group_size > 1 and key_fp8:
+        BLOCK_H = 16
+        grid = (B, Hk * triton.cdiv(kv_group_size, BLOCK_H), NUM_KV_SPLITS)
+        _tq_grouped_decode_stage1[grid](
+            q_rot,
+            kv_cache,
+            block_table,
+            seq_lens,
+            mid_o,
+            q_rot.stride(0),
+            q_rot.stride(1),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group_size,
+            Q_HEAD_NUM=Hq,
+            KPS=key_packed_size,
+            VQB=value_quant_bits,
+            VAL_DATA_BYTES=cfg["val_data_bytes"],
+            ATTN_SCALE=scale,
+            BLOCK_D=cfg["BLOCK_D"],
+            BLOCK_KV=16,
+            BLOCK_H=BLOCK_H,
+            # bf16 models keep the bf16 range; fp16 would overflow at 65504.
+            DOT_DTYPE=tl.bfloat16 if query.dtype == torch.bfloat16 else tl.float16,
+            FP8_E4B15=fp8_e4b15,
+            num_warps=4,
+            num_stages=2,
+        )
+    else:
+        # MHA and MSE-key presets: one query head per CTA.
+        BLOCK_KV = 4
+        grid = (B, Hq, NUM_KV_SPLITS)
+        _tq_decode_stage1[grid](
+            q_rot,
+            kv_cache,
+            block_table,
+            seq_lens,
+            centroids,
+            mid_o,
+            q_rot.stride(0),
+            q_rot.stride(1),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            NUM_KV_HEADS=Hk,
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group_size,
+            MSE_BITS=mse_bits,
+            MSE_BYTES=cfg["mse_bytes"],
+            KPS=key_packed_size,
+            VQB=value_quant_bits,
+            VAL_DATA_BYTES=cfg["val_data_bytes"],
+            ATTN_SCALE=scale,
+            BLOCK_D=cfg["BLOCK_D"],
+            BLOCK_KV=BLOCK_KV,
+            KEY_FP8=1 if key_fp8 else 0,
+            NORM_CORRECTION=1 if norm_correction else 0,
+            FP8_E4B15=fp8_e4b15,
+            num_warps=1,
+            num_stages=1,
+        )
 
     # Stage 2: Reduce across KV splits
     # Output in query dtype — eliminates float16_copy kernel after stage2
