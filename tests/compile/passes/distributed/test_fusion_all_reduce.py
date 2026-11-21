@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 from importlib.util import find_spec
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -121,6 +123,41 @@ def test_fused_ar_workspace_hidden_dim_spec_without_draft():
         speculative_config=SimpleNamespace(draft_model_config=None),
     )
     assert _fused_ar_workspace_hidden_dim(config) == 2048
+
+
+def test_allreduce_fusion_pass_does_not_own_global_workspace(monkeypatch):
+    # Regression test for #67629: the FlashInfer all-reduce workspace is
+    # process-global, shared by compiled callables, CUDA graphs, and
+    # communicators. Its lifetime is owned by the communicator / process
+    # shutdown (`destroy_fi_ar_workspace` is atexit-registered and called
+    # on communicator shutdown), so garbage-collecting an individual pass
+    # instance must not destroy it.
+    import vllm.compilation.passes.fusion.allreduce_rms_fusion as fusion_mod
+
+    destroy_mock = Mock()
+    # The pre-fix `__del__` reached the destroy function through the name
+    # imported into the fusion module; intercept it there and at its
+    # definition site so a call is recorded either way.
+    monkeypatch.setattr(
+        fusion_mod, "destroy_fi_ar_workspace", destroy_mock, raising=False
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.flashinfer_all_reduce."
+        "destroy_fi_ar_workspace",
+        destroy_mock,
+    )
+
+    assert "__del__" not in AllReduceFusionPass.__dict__
+
+    # Bypass `__init__` (it needs a full VllmConfig and a process group);
+    # the pre-fix `__del__` only consulted `disabled`, so mark the
+    # instance as a live pass before dropping it.
+    pass_instance = AllReduceFusionPass.__new__(AllReduceFusionPass)
+    pass_instance.disabled = False
+    del pass_instance
+    gc.collect()
+
+    destroy_mock.assert_not_called()
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
