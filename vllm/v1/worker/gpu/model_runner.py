@@ -1720,6 +1720,52 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _hd512_cascade_set_step_v2(self, input_batch: InputBatch) -> None:
+        """gfx942 hd512 cascade (VLLM_GEMMA4_HD512_CASCADE): detect this
+        step's sibling groups from the CPU block-table shadow and stage
+        the descriptors into each hd512 group's metadata builder; build()
+        commits them to the persistent device buffers."""
+        ctx = getattr(self, "_hd512_cascade_ctx", None)
+        if ctx is None:
+            ctx = self._resolve_hd512_cascade_ctx()
+            self._hd512_cascade_ctx = ctx
+        if not ctx:
+            return
+        n = input_batch.num_reqs
+        idx = input_batch.idx_mapping_np[:n]
+        qsl = input_batch.query_start_loc_np
+        sq = (input_batch.num_computed_tokens_np[:n] + qsl[1 : n + 1] - qsl[:n]).astype(
+            "int32", copy=False
+        )
+        for gid, builder in ctx:
+            builder.hd512_cascade_set_step_np(
+                self.block_tables.cascade_shadow_np[gid][idx],
+                self.block_tables.num_blocks.np[gid][idx],
+                n,
+                sq,
+            )
+
+    def _resolve_hd512_cascade_ctx(self):
+        """hd512 (head_size 512, GQA 2 kv heads) groups whose metadata
+        builder allocated cascade buffers, and their builders; also
+        creates each group's CPU block-table shadow."""
+        ctx = []
+        for gid in range(len(self.kv_cache_config.kv_cache_groups)):
+            spec = self.kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+            if getattr(spec, "head_size", None) != 512:
+                continue
+            if getattr(spec, "num_kv_heads", None) != 2:
+                continue
+            builder = self.attn_groups[gid][0].get_metadata_builder(0)
+            if getattr(builder, "hd512_cascade_bufs", None) is None:
+                continue
+            ctx.append((gid, builder))
+            self.block_tables.cascade_shadow_np[gid] = np.zeros(
+                self.block_tables.block_tables[gid].gpu.shape,
+                dtype=np.int32,
+            )
+        return ctx
+
     def prepare_dummy_attn(
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
@@ -1963,6 +2009,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
+            # gfx942 hd512 cascade (VLLM_GEMMA4_HD512_CASCADE): refresh the
+            # per-step sibling-group descriptors from the CPU block-table
+            # shadow. FULL-CG decode replay never rebuilds attention
+            # metadata, so without this every replayed step runs the
+            # cascade kernels on the previous step's (or empty) groups.
+            if envs.VLLM_GEMMA4_HD512_CASCADE:
+                self._hd512_cascade_set_step_v2(input_batch)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba prefix-cache pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
