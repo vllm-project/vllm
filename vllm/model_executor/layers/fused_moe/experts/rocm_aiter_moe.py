@@ -798,6 +798,9 @@ class AiterInt4Experts(AiterExperts):
     in the layout of `int_wna16._process_weights_aiter`."""
 
     _AITER_QUANT_TYPE = AiterQuantType.BLOCK_1X32
+    # The a16wi4 stage 1 ignores doweight_stage1, and stage 2 then scales by
+    # an uninitialized weight buffer.
+    _SUPPORTS_ROUTER_WEIGHT_ON_INPUT = False
 
     @staticmethod
     def _supports_current_device() -> bool:

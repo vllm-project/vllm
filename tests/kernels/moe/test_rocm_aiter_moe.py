@@ -1131,6 +1131,56 @@ def test_aiter_int4_experts_situ_fails_closed(
     assert supports(MoEActivation.SITU) is supported
 
 
+def test_aiter_int4_experts_reject_router_weight_on_input():
+    """The a16wi4 kernels drop doweight_stage1 and scale the output by an
+    uninitialized buffer, so the experts raise before calling AITER."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        int4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    num_experts, hidden_dim, intermediate_dim, num_tokens = 4, 256, 128, 8
+    experts = rocm_aiter_moe.AiterInt4Experts(
+        make_dummy_moe_config(
+            num_experts=num_experts,
+            hidden_dim=hidden_dim,
+            intermediate_size=intermediate_dim,
+        ),
+        int4_w4a16_moe_quant_config(
+            w1_scale=torch.empty(0),
+            w2_scale=torch.empty(0),
+            block_shape=[0, 32],
+        ),
+    )
+    hidden_states = torch.zeros(num_tokens, hidden_dim, dtype=torch.bfloat16)
+    workspace = torch.empty(0)
+    with (
+        mock.patch.object(rocm_aiter_ops, "fused_moe") as fused_moe,
+        pytest.raises(AssertionError, match="apply_router_weight_on_input"),
+    ):
+        experts.apply(
+            output=torch.empty_like(hidden_states),
+            hidden_states=hidden_states,
+            w1=torch.empty(0),
+            w2=torch.empty(0),
+            topk_weights=torch.ones(num_tokens, 1),
+            topk_ids=torch.zeros(num_tokens, 1, dtype=torch.int32),
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=workspace,
+            workspace2=workspace,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=True,
+        )
+    fused_moe.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("backend", "arch", "activation"),
     [
