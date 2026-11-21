@@ -298,3 +298,147 @@ def test_long_string_argument_streams_before_close():
     ]
     assert len(arg_chunks) > len(body) // 64
     assert json.loads("".join(arg_chunks)) == {"text": body}
+
+
+# ── #62051: invoke-less block, name truncated mid-name, unspaced V4 wrapper ──
+
+INVOKE_LESS_BLOCK = "\n\n<｜DSML｜ calls>\n<url>https://x.com</url>\n</｜DSML｜ calls>"
+
+NAME_TRUNCATED_CALLS = '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="WebF'
+
+# V4's unspaced ``tool_calls`` wrapper spelling emitted by some V4.1
+# deployments (#62051).
+UNSPACED_V4_NAMED_CALLS = CALLS.replace(
+    "<｜DSML｜ calls>", "<｜DSML｜tool_calls>"
+).replace("</｜DSML｜ calls>", "</｜DSML｜tool_calls>")
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("special_calls", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
+@pytest.mark.parametrize(
+    "block",
+    [INVOKE_LESS_BLOCK]
+    + ["<｜DSML｜ calls>abc" + tail for tail in ("<", "</", "</｜DSML｜ calls")],
+)
+def test_invoke_less_block_falls_back_to_content(
+    thinking, special_calls, chunk_size, block
+):
+    """A tool block with no invoke is not a tool call: the block falls back
+    to content verbatim instead of being dropped silently (#62051)."""
+    text = ("Plan.</think>" if thinking else "") + "Checking." + block
+    tokenizer, tokens = tokenizer_for(text, special_calls)
+    output = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": thinking}),
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50 if thinking else 51],
+        )
+    )
+    reasoning, content, calls = parser_for(tokenizer, {"thinking": thinking}).parse(
+        text,
+        _test_request(tools=DUMMY_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    assert output.reasoning == (reasoning or "") == ("Plan." if thinking else "")
+    assert output.content == (content or "") == "Checking." + block
+    assert output.tool_calls == []
+    assert not calls
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("special_calls", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
+def test_name_truncated_call_yields_no_call(thinking, special_calls, chunk_size):
+    """A call cut off inside its tool name never became a call: no ghost
+    call with empty arguments reaches the client on either path (#62051)."""
+    text = ("Plan.</think>" if thinking else "") + "Checking." + NAME_TRUNCATED_CALLS
+    tokenizer, tokens = tokenizer_for(text, special_calls)
+    output = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": thinking}),
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50 if thinking else 51],
+        )
+    )
+    reasoning, content, calls = parser_for(tokenizer, {"thinking": thinking}).parse(
+        text,
+        _test_request(tools=DUMMY_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    assert output.reasoning == (reasoning or "") == ("Plan." if thinking else "")
+    assert output.tool_calls == []
+    assert not calls
+    assert output.content.strip() == (content or "").strip() == "Checking."
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
+def test_unspaced_v4_wrapper_name_opens_tool_block(thinking, chunk_size):
+    """V4's unspaced ``tool_calls`` wrapper spelling emitted by some V4.1
+    deployments opens (and closes) a tool block (#62051)."""
+    text = ("Plan.</think>" if thinking else "") + "Checking." + UNSPACED_V4_NAMED_CALLS
+    tokenizer, tokens = tokenizer_for(text, False)
+    output = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": thinking}),
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50 if thinking else 51],
+        )
+    )
+    reasoning, content, calls = parser_for(tokenizer, {"thinking": thinking}).parse(
+        text,
+        _test_request(tools=DUMMY_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    assert output.reasoning == (reasoning or "") == ("Plan." if thinking else "")
+    assert output.content.strip() == (content or "").strip() == "Checking."
+    assert [call["name"] for call in output.tool_calls] == ["get_weather", "add"]
+    assert [call.name for call in calls] == ["get_weather", "add"]
+    assert (
+        [json.loads(call["arguments"]) for call in output.tool_calls]
+        == [json.loads(call.arguments) for call in calls]
+        == [{"city": "杭州", "count": 42}, {"x": 1.5, "y": 2.25}]
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
+def test_invoke_less_block_after_call_stays_dropped(chunk_size):
+    """An invoke-less block after a completed call is post-call output:
+    both paths keep the turn-end drop contract instead of falling it back
+    to content."""
+    text = CALLS + "Mid turn." + INVOKE_LESS_BLOCK + "Tail."
+    tokenizer, tokens = tokenizer_for(text, False)
+    output = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": False}),
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[51],
+        )
+    )
+    reasoning, content, calls = parser_for(tokenizer, {"thinking": False}).parse(
+        text,
+        _test_request(tools=DUMMY_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    assert [t["name"] for t in output.tool_calls] == ["get_weather", "add"]
+    assert output.content == (content or "") == ""
+    assert calls
+    assert [c.name for c in calls] == ["get_weather", "add"]
+    assert [t["arguments"] for t in output.tool_calls] == [c.arguments for c in calls]
