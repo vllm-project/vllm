@@ -124,6 +124,8 @@ class HarmonyParser(DelegatingParser):
 
         # For error recovery
         self._current_message_tokens: list[int] = []
+        self._current_header_tokens: list[int] = []
+        self._active_header: tuple[str | None, str | None] | None = None
 
     @property
     def _harmony_parser(self) -> StreamableParser:
@@ -137,8 +139,16 @@ class HarmonyParser(DelegatingParser):
         if len(messages) <= self._num_processed_messages:
             return None
         msg = messages[self._num_processed_messages]
-        msg.recipient = self._normalize_recipient(msg.recipient)
+        if self._active_header is not None:
+            msg.channel, msg.recipient = self._active_header
+        else:
+            msg.channel, msg.recipient = self._normalize_header(
+                msg.channel,
+                msg.recipient,
+            )
         self._num_processed_messages += 1
+        self._active_header = None
+        self._current_header_tokens.clear()
         return msg
 
     def flush(self) -> list[Segment]:
@@ -170,6 +180,8 @@ class HarmonyParser(DelegatingParser):
         self._parser = None
         self._num_processed_messages = 0
         self._current_message_tokens.clear()
+        self._current_header_tokens.clear()
+        self._active_header = None
 
         if msg is None:
             return segments
@@ -251,8 +263,9 @@ class HarmonyParser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        prev_recipient = self._normalize_recipient(
-            self._harmony_parser.current_recipient
+        _, prev_recipient = self._normalize_header(
+            self._harmony_parser.current_channel,
+            self._harmony_parser.current_recipient,
         )
         result = self.process_chunk(delta_token_ids)
         if finished:
@@ -343,25 +356,44 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_index, token_id in enumerate(token_ids):
+            previous_state = self._harmony_parser.state_data["state"]
             try:
                 self._harmony_parser.process(token_id)
             except HarmonyError:
                 continue
-            channel = self._harmony_parser.current_channel
-            recipient = self._normalize_recipient(
-                self._harmony_parser.current_recipient
-            )
+            current_state = self._harmony_parser.state_data["state"]
+            # Capture raw header tokens, including the token that starts the header.
+            if current_state == "Header":
+                if previous_state != "Header":
+                    self._current_header_tokens.clear()
+                    self._active_header = None
+                self._current_header_tokens.append(token_id)
+            # Resolve the header when the parser enters message content.
+            elif previous_state == "Header" and current_state == "Content":
+                self._active_header = self._resolve_header(
+                    self._current_header_tokens,
+                    self._harmony_parser.current_channel,
+                    self._harmony_parser.current_recipient,
+                )
+            if self._active_header is not None:
+                channel, recipient = self._active_header
+            else:
+                channel, recipient = self._normalize_header(
+                    self._harmony_parser.current_channel,
+                    self._harmony_parser.current_recipient,
+                )
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
-
             if completed_message is not None:
+                channel, recipient = (
+                    completed_message.channel,
+                    completed_message.recipient,
+                )
                 self._current_message_tokens.clear()
             else:
                 self._current_message_tokens.append(token_id)
-
             if self._is_reasoning_token(token_id, channel, recipient):
                 reasoning_token_count += 1
-
             segments.append(
                 Segment(
                     channel=channel,
@@ -371,8 +403,6 @@ class HarmonyParser(DelegatingParser):
                     token_index=token_index,
                 )
             )
-
-            # TODO: Optionally merge and suppress empty Segments
 
         self._num_counted_tokens += len(token_ids)
         self._num_reasoning_tokens += reasoning_token_count
@@ -386,14 +416,35 @@ class HarmonyParser(DelegatingParser):
             return self._num_reasoning_tokens
 
         parser = get_streamable_parser_for_assistant()
+        header_tokens: list[int] = []
+        active_header: tuple[str | None, str | None] | None = None
         count = 0
         for token_id in token_ids:
+            previous_state = parser.state_data["state"]
             try:
                 parser.process(token_id)
             except HarmonyError:
                 continue
-            recipient = self._normalize_recipient(parser.current_recipient)
-            if self._is_reasoning_token(token_id, parser.current_channel, recipient):
+            current_state = parser.state_data["state"]
+            if current_state == "Header":
+                if previous_state != "Header":
+                    header_tokens.clear()
+                active_header = None
+                header_tokens.append(token_id)
+            elif previous_state == "Header" and current_state == "Content":
+                active_header = self._resolve_header(
+                    header_tokens,
+                    parser.current_channel,
+                    parser.current_recipient,
+                )
+            if active_header is not None:
+                channel, recipient = active_header
+            else:
+                channel, recipient = self._normalize_header(
+                    parser.current_channel,
+                    parser.current_recipient,
+                )
+            if self._is_reasoning_token(token_id, channel, recipient):
                 count += 1
         return count
 
@@ -413,15 +464,54 @@ class HarmonyParser(DelegatingParser):
         return super().adjust_request(request)
 
     @staticmethod
-    def _normalize_recipient(recipient: str | None) -> str | None:
-        """Remove constrained formats misparsed into recipients by older Harmony."""
-        if recipient is None:
-            return None
+    def _normalize_header(
+        channel: str | None, recipient: str | None
+    ) -> tuple[str | None, str | None]:
+        """Repair header tokens that Harmony misparses into the recipient.
 
-        constrain_index = recipient.find("<|constrain|>")
-        if constrain_index == -1:
-            return recipient
-        return recipient[:constrain_index].rstrip() or None
+        Older Harmony leaks `<|constrain|>` into the recipient. gpt-oss can
+        also restart a header, e.g. `<|channel|>commentary to=assistant
+        <|channel|>analysis`, in which case the last channel applies.
+        """
+        if recipient is None:
+            return channel, None
+
+        recipient = recipient.split("<|constrain|>", 1)[0]
+        recipient, restarted, restarted_channel = recipient.partition("<|channel|>")
+        recipient = recipient.strip()
+        if restarted:
+            channel = restarted_channel.strip() or channel
+            # A restarted header addressed to the assistant itself is stray.
+            if recipient == "assistant":
+                recipient = ""
+        return channel, recipient or None
+
+    @classmethod
+    def _resolve_header(
+        cls,
+        header_tokens: Sequence[int],
+        channel: str | None,
+        recipient: str | None,
+    ) -> tuple[str | None, str | None]:
+        channel, recipient = cls._normalize_header(channel, recipient)
+        if not header_tokens:
+            return channel, recipient
+        raw_header = get_encoding().decode(list(header_tokens))
+        # A restarted channel header is indicated by multiple channel markers.
+        if raw_header.count("<|channel|>") <= 1:
+            return channel, recipient
+        # The last channel declaration takes precedence.
+        restarted_channel = raw_header.rsplit("<|channel|>", 1)[1]
+        restarted_channel = restarted_channel.split(maxsplit=1)[0]
+        restarted_channel = restarted_channel.split("<|", 1)[0].strip()
+        if not restarted_channel:
+            return channel, recipient
+        channel = restarted_channel
+        # "assistant" is not a tool recipient. In this malformed/restarted
+        # header it represents the stray recipient from the earlier declaration.
+        if recipient == "assistant":
+            recipient = None
+        return channel, recipient
 
 
 _JSON_CONSTRAINS = [" json", " <|constrain|>json"]
