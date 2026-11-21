@@ -435,6 +435,24 @@ class MuseSparkMoE(nn.Module):
             )
         return norm(hidden_states)
 
+    def _gather_routes(
+        self, hidden_states: torch.Tensor, shard: TokenShard
+    ) -> torch.Tensor:
+        """Route the shard's own rows and gather their top-k weights and ids (2 x
+        top_k words per token) instead of the router logits (one FP32 per expert).
+        The router returns the gathered routes on its next call; returns the
+        stand-in router logits to pass it."""
+        logits = self._router_logits(hidden_states)
+        weights, ids = self.moe_router._compute_routing(
+            hidden_states, logits, torch.int32
+        )
+        k = weights.shape[1]
+        packed = usp.gather_bytes(torch.cat([weights.view(torch.int32), ids], 1), shard)
+        self.moe_router.set_precomputed_routes(
+            packed[:, :k].contiguous().view(torch.float32), packed[:, k:].contiguous()
+        )
+        return logits.new_empty(()).expand(shard.num_tokens, logits.shape[1])
+
     def _gather_mxfp4(self, pooled: torch.Tensor, shard: UlyssesShard) -> torch.Tensor:
         """Pre-expert norm and MXFP4 quantization on the token shard, then gather the
         FP4 rows and E8M0 scales. Returns a placeholder `[T, hidden]` input that
@@ -466,10 +484,11 @@ class MuseSparkMoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        router_logits = self._router_logits(hidden_states)
-        hidden_states = self._pool(hidden_states, shard)
         if shard is not None:
-            router_logits = shard.gather(router_logits)
+            router_logits = self._gather_routes(hidden_states, shard)
+        else:
+            router_logits = self._router_logits(hidden_states)
+        hidden_states = self._pool(hidden_states, shard)
 
         if shard is not None and not self.defer_reduce:
             with token_sharded_moe_output():
@@ -489,6 +508,8 @@ class MuseSparkMoE(nn.Module):
                 experts_out = tensor_model_parallel_all_reduce(experts_out)
         if isinstance(shard, UlyssesShard) and usp.take_prequant(hidden_states):
             raise RuntimeError("The MoE experts did not take the MXFP4 input.")
+        if self.moe_router.take_precomputed_routes() is not None:
+            raise RuntimeError("The MoE router did not take the gathered routes.")
 
         if self.unpooler is not None:
             experts_out, _ = self.unpooler(experts_out)
