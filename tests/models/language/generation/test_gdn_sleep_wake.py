@@ -50,7 +50,6 @@ def test_gdn_sleep_wake_no_stale_state():
         enforce_eager=True,
         max_model_len=1024,
         gpu_memory_utilization=0.4,
-        trust_remote_code=True,
     )
 
     # Warm generation before sleeping.
