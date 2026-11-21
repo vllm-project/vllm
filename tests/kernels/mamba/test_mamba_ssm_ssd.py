@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from tests.kernels.mamba.utils import selective_state_update_ref
 from vllm.model_executor.layers.mamba.ops import (
     ssd_bmm,
     ssd_chunk_scan,
@@ -18,6 +19,9 @@ from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
 )
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
+)
+from vllm.model_executor.layers.mamba.ops.ssd_flashinfer import (
+    mamba_chunk_scan_flashinfer,
 )
 from vllm.model_executor.layers.mamba.ops.triton_helpers import _autotuned_configs
 from vllm.platforms import current_platform
@@ -1013,3 +1017,82 @@ def test_chunk_scan_fwd_every_config_matches(monkeypatch):
                 rtol=2e-2,
                 msg=lambda m, config=config: f"{config}: {m}",
             )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FlashInfer SSD needs SM10x",
+)
+@pytest.mark.parametrize("has_initial_state", [False, True])
+def test_flashinfer_ssd_exports_a_checkpoint_mid_prefill(has_initial_state):
+    """FlashInfer's scan writes the state at a checkpoint token inside a prefill
+    (off its 128-token grid), alongside each sequence's final state, so prefix
+    caching can store checkpoints from FlashInfer prefills."""
+    set_random_seed(0)
+    lengths, checkpoint_offset = (224, 3), 96
+    heads, groups, dim, dstate = 8, 2, 64, 128
+    tokens = sum(lengths)
+    x = torch.randn(tokens, heads, dim, device=DEVICE, dtype=torch.bfloat16)
+    dt = torch.randn(tokens, heads, device=DEVICE, dtype=torch.bfloat16) - 4
+    B = torch.randn(tokens, groups, dstate, device=DEVICE, dtype=torch.bfloat16)
+    C = torch.randn_like(B)
+    A = -torch.exp(torch.rand(heads, device=DEVICE))
+    D = torch.randn(heads, device=DEVICE, dtype=torch.bfloat16)
+    dt_bias = torch.randn_like(D)
+    ssm_state = torch.randn(5, heads, dim, dstate, device=DEVICE)
+    slots = torch.tensor([3, 1], dtype=torch.int32, device=DEVICE)
+    initial = ssm_state[slots].clone()
+    if not has_initial_state:
+        initial.zero_()
+    cu_seqlens = torch.tensor([0, lengths[0], tokens], dtype=torch.int32, device=DEVICE)
+    out = torch.empty_like(x)
+    checkpoint_states = torch.empty(2, heads, dim, dstate, device=DEVICE)
+
+    mamba_chunk_scan_flashinfer(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D,
+        dt_bias,
+        cu_seqlens,
+        out,
+        ssm_state,
+        slots,
+        initial,
+        checkpoint_token_indices=torch.tensor(
+            [checkpoint_offset, -1], dtype=torch.int32, device=DEVICE
+        ),
+        checkpoint_state_slots=torch.arange(2, dtype=torch.int32, device=DEVICE),
+        checkpoint_states=checkpoint_states,
+    )
+
+    # FP64 recurrence, token by token.
+    state = initial.double()
+    A_ref = A.double()[:, None, None].expand(-1, dim, dstate)
+    D_ref = D.double()[:, None].expand(-1, dim)
+    bias_ref = dt_bias.double()[:, None].expand(-1, dim)
+    expected_out = torch.empty_like(x, dtype=torch.float64)
+    expected_checkpoint = None
+    for row, (start, end) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        for token in range(start, end):
+            if row == 0 and token == checkpoint_offset:
+                expected_checkpoint = state[0].clone()
+            expected_out[token] = selective_state_update_ref(
+                state[row : row + 1],
+                x[token : token + 1].double(),
+                dt[token : token + 1].double().unsqueeze(-1).expand(-1, -1, dim),
+                A_ref,
+                B[token : token + 1].double(),
+                C[token : token + 1].double(),
+                D=D_ref,
+                dt_bias=bias_ref,
+                dt_softplus=True,
+            )[0]
+
+    torch.testing.assert_close(out.double(), expected_out, atol=0.1, rtol=0.06)
+    torch.testing.assert_close(ssm_state[slots].double(), state, atol=0.05, rtol=0.05)
+    torch.testing.assert_close(
+        checkpoint_states[0].double(), expected_checkpoint, atol=0.05, rtol=0.05
+    )
