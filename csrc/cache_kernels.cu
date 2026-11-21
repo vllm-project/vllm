@@ -991,7 +991,8 @@ void reshape_and_cache_flash(
   // Only models with v_head_size != head_size take the kernel below; everything
   // else keeps using the kernel above, so its codegen is untouched.
   if (v_head_size == head_size) {
-    dim3 block(std::min(num_heads * head_size, 512));
+    // At least one full warp, so the per-head walk always advances.
+    dim3 block(std::clamp(num_heads * head_size, 32, 512));
     DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
                                CALL_RESHAPE_AND_CACHE_FLASH);
   } else {
