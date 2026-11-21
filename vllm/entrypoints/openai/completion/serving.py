@@ -12,6 +12,7 @@ from typing import cast
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.aux_outputs import hidden_states_response_fields
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     RequestResponseMetadata,
@@ -509,6 +510,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         model=model_name,
                         choices=[
                             CompletionResponseStreamChoice(
+                                **hidden_states_response_fields(output),
                                 index=i,
                                 text=delta_text,
                                 logprobs=logprobs,
@@ -523,6 +525,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 weight_versions=(
                                     output.weight_versions
                                     if request.return_weight_versions
+                                    or output.hidden_states is not None
                                     else None
                                 ),
                             )
@@ -714,9 +717,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    **hidden_states_response_fields(output),
                     weight_versions=(
                         output.weight_versions
                         if request.return_weight_versions
+                        or output.hidden_states is not None
                         else None
                     ),
                 )

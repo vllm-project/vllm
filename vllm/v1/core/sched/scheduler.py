@@ -473,7 +473,10 @@ class Scheduler(SchedulerInterface):
         self.aux_output_connector = (
             AuxOutputSchedulerConnector(
                 self.kv_cache_manager,
-                retained_objects(vllm_config, self.kv_cache_manager.kv_cache_config)[0],
+                retained_objects(vllm_config, self.kv_cache_manager.kv_cache_config)[0]
+                if vllm_config.aux_output_config.enable_return_routed_experts
+                else 0,
+                enable_routed_experts=vllm_config.aux_output_config.enable_return_routed_experts,
             )
             if vllm_config.aux_output_config.enabled
             else None
@@ -2544,13 +2547,17 @@ class Scheduler(SchedulerInterface):
                 request.resumable = False
                 stopped = True
 
-            routed_experts = None
+            routed_experts = hidden_states = prompt_hidden_states = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
-            if self.aux_output_connector is not None and should_emit_output:
-                routed_experts = self.aux_output_connector.take_output(
-                    request, model_runner_output.aux_output_connector_output
+            if self.aux_output_connector is not None:
+                routed_experts, hidden_states, prompt_hidden_states = (
+                    self.aux_output_connector.take_output(
+                        request,
+                        model_runner_output.aux_output_connector_output,
+                        should_emit_output=should_emit_output,
+                    )
                 )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
@@ -2617,8 +2624,8 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
-            if should_emit_output:
-                # Add EngineCoreOutput for this Request.
+            if should_emit_output or prompt_hidden_states is not None:
+                # Add sampled output or an explicit prompt-scoring chunk.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
@@ -2630,7 +2637,7 @@ class Scheduler(SchedulerInterface):
                         prompt_token_id_logprobs=prompt_token_id_logprobs,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
-                        events=request.take_events(),
+                        events=request.take_events() if should_emit_output else None,
                         prefill_stats=prefill_stats,
                         spec_decode_metrics=(
                             request.spec_decode_metrics
@@ -2641,12 +2648,15 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        hidden_states=hidden_states,
+                        prompt_hidden_states=prompt_hidden_states,
                         num_nans_in_logits=request.num_nans_in_logits,
                         watermarking=watermarking,
                     )
                 )
             else:
-                # Invariant: EngineCore returns no partial prefill outputs.
+                # Only explicit prompt hidden rows are emitted during partial prefill.
+                # Prompt logprobs still accompany normal sampled or terminal output.
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
 

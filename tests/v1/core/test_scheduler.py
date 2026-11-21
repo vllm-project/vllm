@@ -361,6 +361,51 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     assert output.routed_experts.shape == (0, 1, 1)
 
 
+def test_routed_experts_chunked_recompute_after_preemption():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=32, max_model_len=256, enable_prefix_caching=True
+    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=96, max_tokens=2, ignore_eos=True
+    )
+    scheduler.add_request(request)
+    partial_chunks = 0
+    while not request.is_finished():
+        computed = request.num_computed_tokens
+        scheduled = scheduler.schedule()
+        end = computed + scheduled.num_scheduled_tokens[request.request_id]
+        sampled = end >= request.num_tokens
+        rows = np.arange(end, dtype=np.uint8).reshape(-1, 1, 1)
+        outputs = scheduler.update_from_output(
+            scheduled,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                sampled_token_ids=[[0]] if sampled else [[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output=(
+                    {request.request_id: AuxRequestOutput(0, rows)} if sampled else None
+                ),
+            ),
+        )
+        if not sampled:
+            assert all(not batch.outputs for batch in outputs.values())
+            if request.num_preemptions:
+                assert request.num_output_tokens == 1
+                partial_chunks += 1
+        else:
+            output = outputs[request.client_index].outputs[0]
+            np.testing.assert_array_equal(output.routed_experts, rows)
+            if request.num_output_tokens == 1:
+                assert scheduler.reset_prefix_cache(reset_running_requests=True)
+                assert request.status == RequestStatus.PREEMPTED
+    assert request.num_preemptions == 1
+    assert partial_chunks == 3
+    assert request.num_output_tokens == 2
+
+
 def test_routed_experts_hashes_follow_scheduled_tokens():
     scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)

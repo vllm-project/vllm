@@ -18,6 +18,10 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     retained_objects,
 )
+from vllm.distributed.aux_output_connector.hidden_states import (
+    HiddenStateCapturer,
+    PendingHiddenOutput,
+)
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -62,7 +66,8 @@ class PendingAuxOutput:
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     # GPU snapshot taken on the main stream.
-    routed_experts_gpu: torch.Tensor
+    routed_experts_gpu: torch.Tensor | None
+    hidden: PendingHiddenOutput | None = None
     # Filled by enqueue_cpu_copy on the output copy stream.
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
@@ -74,12 +79,28 @@ class PendingAuxOutput:
         """Enqueue asynchronous D2H copies; call on the output copy stream."""
         self.num_sampled = num_sampled
         self.num_rejected = num_rejected
-        self.routed_experts = self.routed_experts_gpu.to(
-            "cpu", non_blocking=True
-        ).numpy()
+        if self.routed_experts_gpu is not None:
+            self.routed_experts = self.routed_experts_gpu.to(
+                "cpu", non_blocking=True
+            ).numpy()
+        if self.hidden is not None:
+            self.hidden.enqueue_cpu_copy(num_sampled, num_rejected)
 
     def process_output(self) -> dict[str, AuxRequestOutput]:
-        return self.connector.process_output(self)
+        outputs = (
+            self.connector.process_output(self)
+            if self.routed_experts_gpu is not None
+            else {}
+        )
+        if self.hidden is not None:
+            for request_id, (start, rows) in self.hidden.process_output().items():
+                output = outputs.setdefault(request_id, AuxRequestOutput())
+                output.hidden_start, output.hidden_states = start, rows
+            for request_id, chunk in self.hidden.process_prompt_output().items():
+                outputs.setdefault(
+                    request_id, AuxRequestOutput()
+                ).prompt_hidden_states = chunk
+        return outputs
 
 
 class AuxOutputWorkerConnector:
@@ -92,10 +113,17 @@ class AuxOutputWorkerConnector:
         model: torch.nn.Module,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
+        capturer = None
+        if vllm_config.aux_output_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer(
+                max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
+            )
+            bind_routed_experts_capturer(model, capturer)
+        self._hidden = (
+            HiddenStateCapturer(model, vllm_config)
+            if vllm_config.aux_output_config.enable_return_hidden_states
+            else None
         )
-        bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
         self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
@@ -114,7 +142,7 @@ class AuxOutputWorkerConnector:
         """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
-        if not get_tp_group().is_first_rank:
+        if self._capturer is None or not get_tp_group().is_first_rank:
             return
 
         vllm_config = self._vllm_config
@@ -136,10 +164,30 @@ class AuxOutputWorkerConnector:
             vllm_config.max_concurrent_batches,
         )
 
+    def prepare_hidden_output(
+        self,
+        input_batch: InputBatch,
+        sample_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> None:
+        if self._hidden is not None and get_tp_group().is_first_rank:
+            self._hidden.prepare(input_batch, sample_hidden_states, hidden_states)
+
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
+        hidden = None if self._hidden is None else self._hidden.take_pending()
         if self._buffer is None or self._step_metadata is None:
-            return None
+            if hidden is None:
+                return None
+            return PendingAuxOutput(
+                self,
+                list(input_batch.req_ids),
+                input_batch.num_computed_tokens_np,
+                input_batch.query_start_loc_np,
+                None,
+                hidden,
+            )
+        assert self._capturer is not None
 
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
@@ -150,6 +198,7 @@ class AuxOutputWorkerConnector:
             token_starts=input_batch.num_computed_tokens_np,
             query_start_loc=query_start_loc,
             routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
+            hidden=hidden,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -338,6 +387,10 @@ class AuxOutputWorkerConnector:
                 buffer.release_block(rows)
             buffer.discard(request_id)
 
+    @property
+    def hidden_states_metadata(self) -> dict[str, Any] | None:
+        return self._hidden.metadata if self._hidden is not None else None
+
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates.
 
@@ -345,6 +398,8 @@ class AuxOutputWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
+        if self._hidden is not None:
+            self._hidden.plans = {} if metadata is None else metadata.hidden_plans
         if self._buffer is None or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (

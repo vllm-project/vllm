@@ -1338,6 +1338,14 @@ class Worker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def get_hidden_states_metadata(self) -> dict[str, Any] | None:
+        """Return model-level metadata without transferring captured rows."""
+        if not self.vllm_config.aux_output_config.enable_return_hidden_states:
+            return None
+        connector = self.model_runner.aux_output_connector
+        assert connector is not None
+        return connector.hidden_states_metadata
+
     def get_draft_model(self) -> nn.Module | None:
         return self.model_runner.get_draft_model()
 

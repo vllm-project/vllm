@@ -146,6 +146,7 @@ class LLM(
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
+        enable_return_hidden_states: Allow requests to return lm_head inputs.
         enable_return_routed_experts: Whether to return routed experts.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
@@ -209,6 +210,7 @@ class LLM(
         offload_prefetch_step: int = 1,
         offload_params: set[str] | None = None,
         enforce_eager: bool = False,
+        enable_return_hidden_states: bool = False,
         enable_return_routed_experts: bool = False,
         return_sampling_mask: bool = False,
         disable_custom_all_reduce: bool = False,
@@ -327,6 +329,7 @@ class LLM(
             offload_prefetch_step=offload_prefetch_step,
             offload_params=offload_params or set(),
             enforce_eager=enforce_eager,
+            enable_return_hidden_states=enable_return_hidden_states,
             enable_return_routed_experts=enable_return_routed_experts,
             return_sampling_mask=return_sampling_mask,
             disable_custom_all_reduce=disable_custom_all_reduce,

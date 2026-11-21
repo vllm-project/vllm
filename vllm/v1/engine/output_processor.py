@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.exceptions import GenerationError
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -33,6 +34,7 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.hidden_states import HiddenStatesAccumulator
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -45,6 +47,7 @@ from vllm.v1.metrics.stats import (
 from vllm.v1.outputs import SamplingMaskLists
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.v1.engine.admission_control import SharedAdmissionStats
 
 # shared empty CPU tensor used as a placeholder pooling output
@@ -240,6 +243,7 @@ class RequestState:
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
+        self.hidden_states: HiddenStatesAccumulator | None = None
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
@@ -352,6 +356,9 @@ class RequestState:
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
             state.stats.is_watermark_skipped = sampling_params._watermarking_skipped
+        state.hidden_states = HiddenStatesAccumulator.for_request(
+            sampling_params, state.prompt_len
+        )
         return state
 
     def make_request_output(
@@ -409,6 +416,9 @@ class RequestState:
         if self.parent_req is None:
             outputs = [output]
         else:
+            if final_only:
+                self.parent_req.error = self.parent_req.error or error
+                error = self.parent_req.error
             outputs, finished = self.parent_req.get_outputs(self.request_id, output)
             if not outputs:
                 return None
@@ -420,6 +430,7 @@ class RequestState:
             finished,
             kv_transfer_params,
             ec_transfer_params,
+            error=error,
         )
 
     def _new_request_output(
@@ -473,6 +484,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            error=error,
         )
 
     def _new_completion_output(
@@ -517,7 +529,7 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
-        return CompletionOutput(
+        output = CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
@@ -530,6 +542,11 @@ class RequestState:
             spec_decode_metrics=self.spec_decode_metrics if finished else None,
             weight_versions=self._weight_version_spans() if finished else None,
         )
+        if finish_reason is not None and self.hidden_states is not None:
+            self.hidden_states.finalize(
+                output, self.detokenizer.num_output_tokens(), finish_reason
+            )
+        return output
 
     def track_weight_version(self, weight_version: str) -> None:
         """Start a span when the weight version changes."""
@@ -562,6 +579,7 @@ class OutputProcessor:
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
+        hidden_states_config: "ModelConfig | None" = None,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -572,6 +590,14 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
+        self.hidden_states_empty = (
+            torch.empty(
+                (0, hidden_states_config.get_hidden_size()),
+                dtype=hidden_states_config.dtype,
+            )
+            if hidden_states_config is not None
+            else None
+        )
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -688,6 +714,8 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
+        if req_state.hidden_states is not None:
+            req_state.hidden_states.empty = self.hidden_states_empty
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
@@ -774,6 +802,16 @@ class OutputProcessor:
                     reqs_to_abort.append(req_id)
                 continue
 
+            if engine_core_output.prompt_hidden_states is not None:
+                start, rows = engine_core_output.prompt_hidden_states
+                assert req_state.hidden_states is not None
+                req_state.hidden_states.add_prompt(start, rows, weight_version)
+                if (
+                    not engine_core_output.new_token_ids
+                    and not engine_core_output.finished
+                ):
+                    continue
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -785,6 +823,9 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
+            if engine_core_output.hidden_states is not None:
+                assert req_state.hidden_states is not None
+                req_state.hidden_states.add_generated(engine_core_output.hidden_states)
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
@@ -849,15 +890,38 @@ class OutputProcessor:
             )
 
             # 4) Create and handle RequestOutput objects.
-            if request_output := req_state.make_request_output(
-                new_token_ids,
-                pooling_output,
-                finish_reason,
-                stop_reason,
-                kv_transfer_params,
-                ec_transfer_params,
-                error=request_error,
-            ):
+            try:
+                request_output = req_state.make_request_output(
+                    new_token_ids,
+                    pooling_output,
+                    finish_reason,
+                    stop_reason,
+                    kv_transfer_params,
+                    ec_transfer_params,
+                    error=request_error,
+                )
+            except GenerationError as exc:
+                reqs_to_abort.append(req_id)
+                if req_state.queue is not None:
+                    self._finish_request(req_state)
+                    req_state.queue.put(exc)
+                    continue
+                request_output = req_state.make_request_output(
+                    new_token_ids,
+                    pooling_output,
+                    FinishReason.ERROR,
+                    stop_reason,
+                    kv_transfer_params,
+                    ec_transfer_params,
+                    error=RequestError(
+                        code="hidden_states_unavailable", message=str(exc)
+                    ),
+                )
+                self._finish_request(req_state)
+                if request_output is not None:
+                    request_outputs.append(request_output)
+                continue
+            if request_output:
                 if streaming_chunk_boundary:
                     request_output.finished = False
 
@@ -914,6 +978,8 @@ class OutputProcessor:
             output.new_sampling_mask = output.new_sampling_mask.slice_request(
                 0, num_kept
             )
+        if req_state.hidden_states is not None:
+            req_state.hidden_states.trim(req_state.detokenizer.num_output_tokens())
         if output.routed_experts is not None:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
 

@@ -108,6 +108,11 @@ class LLMEngine:
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            hidden_states_config=(
+                vllm_config.model_config
+                if vllm_config.aux_output_config.enable_return_hidden_states
+                else None
+            ),
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
@@ -263,6 +268,7 @@ class LLMEngine:
                     "latter will be used, and the former will be ignored."
                 )
             request_params = request.params
+            self.input_processor.validate_engine_core_request(request)
             if isinstance(request_params, SamplingParams):
                 # This request object is owned by the engine from here on.
                 self.input_processor.apply_watermarking(

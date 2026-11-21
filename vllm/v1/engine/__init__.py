@@ -323,6 +323,12 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # Append auxiliary fields to preserve array_like wire positions.
+    hidden_states: torch.Tensor | None = None
+
+    # Absolute start and CPU rows for a prompt-scoring prefill chunk.
+    prompt_hidden_states: tuple[int, torch.Tensor] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

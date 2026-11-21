@@ -48,7 +48,7 @@ class SamplingMask:
 
 @dataclass
 class WeightVersionSpan:
-    """Output tokens `[start, end)` were sampled by weights labelled `version`."""
+    """A version span over output tokens, or over rows of a prompt tensor."""
 
     version: str
     start: int
@@ -96,6 +96,11 @@ class CompletionOutput:
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
+    hidden_states: torch.Tensor | None = None
+    hidden_states_start: int | None = None
+    prompt_hidden_states: torch.Tensor | None = None
+    prompt_hidden_states_start: int | None = None
+    prompt_hidden_states_weight_versions: list[WeightVersionSpan] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -163,6 +168,7 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+        error: Structured request-level error information, if generation failed.
 
     """
 
@@ -184,6 +190,7 @@ class RequestOutput:
         prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        error: RequestError | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -207,10 +214,13 @@ class RequestOutput:
         self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        self.error = error
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
         self.finished |= next_output.finished
+        if next_output.error is not None:
+            self.error = next_output.error
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
 
@@ -245,6 +255,21 @@ class RequestOutput:
                             completion.routed_experts = next_completion.routed_experts
                         # Like finish_reason, spans come only with the terminal output.
                         completion.weight_versions = next_completion.weight_versions
+                        if next_completion.prompt_hidden_states is not None:
+                            completion.prompt_hidden_states = (
+                                next_completion.prompt_hidden_states
+                            )
+                            completion.prompt_hidden_states_start = (
+                                next_completion.prompt_hidden_states_start
+                            )
+                            completion.prompt_hidden_states_weight_versions = (
+                                next_completion.prompt_hidden_states_weight_versions
+                            )
+                        if next_completion.hidden_states is not None:
+                            completion.hidden_states = next_completion.hidden_states
+                            completion.hidden_states_start = (
+                                next_completion.hidden_states_start
+                            )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:

@@ -10,6 +10,10 @@ from pydantic import Field, model_validator
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.aux_outputs import (
+    HiddenStatesRequest,
+    HiddenStatesResponse,
+)
 from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MAX,
     PRIORITY_MIN,
@@ -48,7 +52,7 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
-class CompletionRequest(OpenAIBaseModel):
+class CompletionRequest(HiddenStatesRequest, OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
@@ -437,6 +441,9 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            aux_outputs=self.aux_outputs,
+            hidden_states_start=self.hidden_states_start,
+            hidden_states_end=self.hidden_states_end,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 
@@ -677,7 +684,7 @@ class CompletionLogProbs(OpenAIBaseModel):
     top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
 
 
-class CompletionResponseChoice(OpenAIBaseModel):
+class CompletionResponseChoice(HiddenStatesResponse, OpenAIBaseModel):
     index: int
     text: str
     logprobs: CompletionLogProbs | None = None
@@ -727,7 +734,7 @@ class CompletionResponse(OpenAIBaseModel):
     metrics: PerRequestMetrics | None = None
 
 
-class CompletionResponseStreamChoice(OpenAIBaseModel):
+class CompletionResponseStreamChoice(HiddenStatesResponse, OpenAIBaseModel):
     index: int
     text: str
     logprobs: CompletionLogProbs | None = None

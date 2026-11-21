@@ -6,12 +6,14 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
+from vllm.distributed.aux_output_connector.hidden_states import HiddenStatePlan
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     get_routed_experts_bytes_per_token,
 )
@@ -71,12 +73,16 @@ class AuxOutputConnectorMetadata:
     finished_requests: tuple[str, ...]
     retained_block_hashes: PackedBlockHashes | None = None
     released_block_hashes: PackedBlockHashes | None = None
+    hidden_plans: dict[str, HiddenStatePlan] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class AuxRequestOutput:
-    token_start: int
-    rows: np.ndarray
+    token_start: int = 0
+    rows: np.ndarray | None = None
+    hidden_start: int = 0
+    hidden_states: torch.Tensor | None = None
+    prompt_hidden_states: tuple[int, torch.Tensor] | None = None
 
 
 class AuxOutputSchedulerConnector:
@@ -86,7 +92,10 @@ class AuxOutputSchedulerConnector:
         self,
         kv_cache_manager: KVCacheManager,
         num_objects: int,
+        *,
+        enable_routed_experts: bool = True,
     ) -> None:
+        self._routing = enable_routed_experts
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
@@ -117,6 +126,13 @@ class AuxOutputSchedulerConnector:
         requests: dict[str, Request],
     ) -> AuxOutputConnectorMetadata:
         """Build one step's incremental worker metadata."""
+        hidden_plans = {}
+        for request_id in scheduler_output.num_scheduled_tokens:
+            plan = HiddenStatePlan.for_request(requests[request_id])
+            if plan is not None:
+                hidden_plans[request_id] = plan
+        if not self._routing:
+            return AuxOutputConnectorMetadata(0, {}, {}, (), hidden_plans=hidden_plans)
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
@@ -155,6 +171,7 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             self._pack_hashes(self._retained_hashes),
             self._pack_hashes(self._released_hashes),
+            hidden_plans=hidden_plans,
         )
         self._retained_hashes, self._released_hashes = [], []
         return metadata
@@ -170,7 +187,9 @@ class AuxOutputSchedulerConnector:
             request.num_prompt_tokens,
         )
 
-    def max_cache_hit(self, request: Request) -> int:
+    def max_cache_hit(self, request: Request) -> int | None:
+        if not self._routing:
+            return None
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -185,6 +204,8 @@ class AuxOutputSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
+        if not self._routing:
+            return num_external
         num_hit = num_local + num_external
         if num_hit <= self._emit_start(request):
             for block, keys in islice(
@@ -194,11 +215,16 @@ class AuxOutputSchedulerConnector:
             ):
                 if block not in self._kv_cached:
                     self._rowless[block] = keys[-1]
-        elif num_hit % self._block_size or num_hit > self.max_cache_hit(request):
-            return 0
+        else:
+            limit = self.max_cache_hit(request)
+            assert limit is not None
+            if num_hit % self._block_size or num_hit > limit:
+                return 0
         return num_external
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
+        if not self._routing:
+            return
         blocks = islice(
             self._kv_blocks(request.block_hashes), cdiv(num_tokens, self._block_size)
         )
@@ -238,9 +264,20 @@ class AuxOutputSchedulerConnector:
         self,
         request: Request,
         output: dict[str, AuxRequestOutput] | None,
-    ) -> np.ndarray | None:
+        *,
+        should_emit_output: bool,
+    ) -> tuple[np.ndarray | None, torch.Tensor | None, tuple[int, torch.Tensor] | None]:
         """Return the accepted R3 rows for one scheduled request."""
         request_id = request.request_id
+        request_output = (output or {}).get(request_id)
+        hidden = prompt = None
+        if request_output is not None:
+            prompt = request_output.prompt_hidden_states
+            if request_output.hidden_states is not None:
+                end = max(0, request.num_tokens - 1 - request_output.hidden_start)
+                hidden = request_output.hidden_states[:end]
+        if not self._routing or not should_emit_output:
+            return None, hidden, prompt
         # The block this request started mid-block has no rows here. Its hash
         # exists only once its last token is known; record the block before
         # the scheduler can cache it.
@@ -258,6 +295,7 @@ class AuxOutputSchedulerConnector:
             f"auxiliary output worker output is missing {request_id}"
         )
         request_output = output[request_id]
+        assert request_output.rows is not None
         token_end = request.num_tokens - 1
         local_end = token_end - request_output.token_start
         if local_end < 0:
@@ -268,17 +306,19 @@ class AuxOutputSchedulerConnector:
                 "output_end="
                 f"{request_output.token_start + len(request_output.rows)}"
             )
-            return None
+            return None, hidden, prompt
         assert local_end <= len(request_output.rows), (
             "auxiliary output worker output has an invalid token range: "
             f"request={request_id}, token_end={token_end}, "
             f"output_start={request_output.token_start}, "
             f"output_end={request_output.token_start + len(request_output.rows)}"
         )
-        return request_output.rows[:local_end]
+        return request_output.rows[:local_end], hidden, prompt
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
+        if not self._routing:
+            return
         request_id = request.request_id
         self._loading.pop(request_id, None)
         if request_id in self._sent_hash_counts:

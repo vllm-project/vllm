@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import msgspec
 import numpy as np
@@ -443,6 +443,15 @@ class SamplingParams(
     and terminate early, saving time and tokens."""
 
     # Debugging / RL-specific parameters. Not intended for production serving.
+    aux_outputs: tuple[Literal["hidden_states", "prompt_hidden_states"], ...] | None = (
+        None
+    )
+    """Requested generated-position or prompt-scoring auxiliary outputs."""
+    hidden_states_start: int = 0
+    """Inclusive absolute input position; generated positions begin at P - 1."""
+    hidden_states_end: int | None = None
+    """Exclusive absolute position, or None to capture through generation end."""
+
     routed_experts_prompt_start: int = 0
     """When enable_return_routed_experts is active, skip the first
     routed_experts_prompt_start prompt tokens from the returned routing
@@ -491,6 +500,10 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        aux_outputs: tuple[Literal["hidden_states", "prompt_hidden_states"], ...]
+        | None = None,
+        hidden_states_start: int = 0,
+        hidden_states_end: int | None = None,
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
@@ -559,6 +572,9 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            aux_outputs=aux_outputs,
+            hidden_states_start=hidden_states_start,
+            hidden_states_end=hidden_states_end,
             routed_experts_prompt_start=routed_experts_prompt_start,
             trace_decode_token_ids=trace_decode_token_ids,
         )
@@ -636,6 +652,7 @@ class SamplingParams(
             self.skip_reading_prefix_cache = (
                 self.prompt_logprobs is not None
                 or self.prompt_logprob_token_ids is not None
+                or bool(self.aux_outputs and "prompt_hidden_states" in self.aux_outputs)
             )
 
     def _verify_args(self) -> None:

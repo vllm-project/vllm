@@ -4,6 +4,11 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## Training Data Capture
+
+See [hidden-state outputs](../training/hidden_states.md)
+for generated and prompt-position training features returned through the Python and HTTP APIs.
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

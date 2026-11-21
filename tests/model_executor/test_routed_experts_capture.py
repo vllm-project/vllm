@@ -7,7 +7,13 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, DeviceConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    AuxOutputConfig,
+    CUDAGraphMode,
+    DeviceConfig,
+    ModelConfig,
+    VllmConfig,
+)
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
@@ -780,7 +786,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     )
 
     config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
+        aux_output_config=AuxOutputConfig(enable_return_routed_experts=True),
         kv_transfer_config=None,
         max_concurrent_batches=2,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
@@ -828,7 +834,9 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", buffer_constructor)
 
     config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(max_bytes=None),
+        aux_output_config=AuxOutputConfig(
+            enable_return_routed_experts=True, max_bytes=None
+        ),
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),
         scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
@@ -859,7 +867,7 @@ def test_model_runner_accepts_routed_experts(monkeypatch):
             logits_processors=None,
             enable_prompt_embeds=False,
         ),
-        aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
+        aux_output_config=AuxOutputConfig(enable_return_routed_experts=True),
         speculative_config=None,
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1,
