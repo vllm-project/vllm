@@ -619,6 +619,20 @@ def _detect_developer_role_support(chat_template: str) -> bool:
     return '"developer"' in chat_template or "'developer'" in chat_template
 
 
+@lru_cache(maxsize=32)
+def _detect_tool_reference_support(chat_template: str) -> bool:
+    return "tool_reference" in chat_template
+
+
+def _has_tool_reference(conversation: list[ConversationMessage]) -> bool:
+    return any(
+        isinstance(part, dict) and part.get("type") == "tool_reference"
+        for msg in conversation
+        if isinstance(content := msg.get("content"), list)
+        for part in content
+    )
+
+
 def _convert_developer_to_system(
     conversation: list[ConversationMessage],
 ) -> list[ConversationMessage]:
@@ -913,6 +927,22 @@ def safe_apply_chat_template(
         logger.info_once(
             "Chat template does not support the 'developer' message role. "
             "Converting developer messages to 'system' role.",
+        )
+    # Templates such as GLM-5.3's render tool_reference parts from `tools`.
+    # Others drop them (an empty tool search result) or fail on them, so
+    # reject the request; Claude Code then retries without tool search.
+    if not _detect_tool_reference_support(chat_template) and _has_tool_reference(
+        conversation
+    ):
+        logger.warning_once(
+            "Rejected a request with tool_reference content (tool search "
+            "results): the chat template does not render it. Pass a chat "
+            "template that does with --chat-template to support tool search."
+        )
+        raise VLLMValidationError(
+            "This model's chat template does not support tool search results "
+            "(tool_reference content). Disable tool search in the client; for "
+            "Claude Code, set ENABLE_TOOL_SEARCH=false."
         )
     resolved_kwargs = resolve_chat_template_kwargs(
         tokenizer=tokenizer,
