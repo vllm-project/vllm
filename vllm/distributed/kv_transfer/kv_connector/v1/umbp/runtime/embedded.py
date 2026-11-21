@@ -32,7 +32,12 @@ from ..data import (
     TransferJobState,
     TransferJobStatus,
 )
-from .base import IUMBPRuntime, UMBPSchedulerHandle, UMBPWorkerHandle
+from .base import (
+    IUMBPRuntime,
+    UMBPSchedulerHandle,
+    UMBPWorkerHandle,
+    mori_unavailable_error,
+)
 from .factory import UMBPRuntimeConfig
 
 logger = init_logger(__name__)
@@ -352,7 +357,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         try:
             from mori.cpp import MemoryLocationType
         except ImportError as exc:
-            raise RuntimeError("MORI UMBP Python bindings are unavailable") from exc
+            raise mori_unavailable_error() from exc
 
         for cache in kv_caches.values():
             storage = cache.untyped_storage()
@@ -863,9 +868,7 @@ class EmbeddedRuntime(IUMBPRuntime):
         try:
             from mori.cpp import UMBPClient, UMBPConfig
         except ImportError as exc:
-            raise RuntimeError(
-                "Embedded UMBP requires MORI built with BUILD_UMBP=ON"
-            ) from exc
+            raise mori_unavailable_error() from exc
 
         client_config = UMBPConfig()
         _configure_dram(client_config, self.options)

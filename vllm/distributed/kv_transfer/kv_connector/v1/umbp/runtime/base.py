@@ -9,12 +9,34 @@ from typing import Protocol
 
 import torch
 
+from vllm.platforms import current_platform
+
 from ..data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
     RankTopology,
     TransferJobState,
 )
+
+
+def mori_unavailable_error() -> RuntimeError:
+    """Build a platform-aware error for a missing MORI installation.
+
+    MORI (https://github.com/ROCm/mori) is an AMD ROCm/HIP library; embedded
+    and standalone UMBP runtimes are not available on other platforms.
+    """
+    if current_platform.is_rocm():
+        detail = (
+            "MORI was not importable. Build MORI with BUILD_UMBP=ON and make "
+            "sure `mori` is on PYTHONPATH."
+        )
+    else:
+        detail = (
+            "MORI (https://github.com/ROCm/mori) is an AMD ROCm/HIP library; "
+            f"UMBP's embedded and standalone runtimes do not support "
+            f"'{current_platform.device_name}'."
+        )
+    return RuntimeError(f"UMBP runtime unavailable: {detail}")
 
 
 class UMBPSchedulerHandle(Protocol):
