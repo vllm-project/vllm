@@ -298,6 +298,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
             &test_input,
             config.ready_check_timeout_sec,
             5,
+            None,
         )
         .await?;
         if !test_output.success {
