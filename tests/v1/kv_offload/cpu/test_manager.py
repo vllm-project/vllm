@@ -2039,11 +2039,14 @@ def test_unfinished_prefix_survives_pressure_across_store_batches(
         assert all(manager.lookup(key, ctx) is LookupResult.HIT for key in group[:-1])
 
 
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
 @pytest.mark.parametrize("reuse_method", ["load", "store"])
-def test_unfinished_lru_reused_prefix_outlives_new_tail(reuse_method):
-    manager = make_cpu_manager(num_chunks=4)
+def test_unfinished_reused_prefix_outlives_new_tail(reuse_method, cache_policy):
+    manager = make_cpu_manager(num_chunks=4, cache_policy=cache_policy)
     head, middle, tail = to_keys([1, 2, 3])
     seed = make_req_context("seed")
+    seed.set_offload_key_position(head, 16)
+    seed.set_offload_key_position(middle, 32)
     assert (
         manager.prepare_store([head, middle], seed, trigger=StoreTrigger.ON_COMPUTE)
         is not None
