@@ -46,6 +46,40 @@ def _validate_nccl_checkpoint(worker, suspended):
         )
 
 
+_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES = 100
+_MCL_CURRENT, _MCL_FUTURE, _MCL_ONFAULT = 1, 2, 4
+
+
+def _uses_host_page_tables() -> bool:
+    import ctypes
+
+    import torch
+
+    cuda = ctypes.CDLL("libcuda.so.1")
+    device, value = ctypes.c_int(), ctypes.c_int()
+    return (
+        cuda.cuDeviceGet(ctypes.byref(device), torch.accelerator.current_device_index())
+        == 0
+        and cuda.cuDeviceGetAttribute(
+            ctypes.byref(value), _PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES, device
+        )
+        == 0
+        and value.value == 1
+    )
+
+
+def _lock_process_memory(worker) -> bool:
+    import ctypes
+    import resource
+
+    if not _uses_host_page_tables():
+        return True
+    if resource.getrlimit(resource.RLIMIT_MEMLOCK)[0] != resource.RLIM_INFINITY:
+        return False
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.mlockall(_MCL_CURRENT | _MCL_FUTURE | _MCL_ONFAULT) == 0
+
+
 class CUDACheckpointExecutor(MultiprocExecutor):
     """Use dedicated workers even at TP=1 so failed restoration is terminable."""
 
@@ -142,6 +176,16 @@ class CUDACheckpointExecutor(MultiprocExecutor):
                     f"all-reduce and NCCL checkpoint configuration: {required}"
                 )
         super().__init__(vllm_config, monitor_workers)
+        self._lock_worker_memory()
+
+    def _lock_worker_memory(self):
+        if not all(self.collective_rpc(_lock_process_memory, timeout=30)):
+            logger.warning_once(
+                "Could not lock worker memory; under host memory pressure "
+                "the first restore after a checkpoint may be slow. Run "
+                "with an unlimited memlock limit, e.g. "
+                "`docker run --ulimit memlock=-1`."
+            )
 
     def _record(self, **event):
         event["monotonic_s"] = time.monotonic()
