@@ -1302,6 +1302,7 @@ class DiffusionSampler:
             ),
             max_per_req_token_ids=max_token_ids,
             logits_mode=self.logits_mode,
+            drop_sampled_from_topk=False,
         )
 
     def _stash_tile_logprobs(
@@ -1404,6 +1405,7 @@ class DiffusionSampler:
                 ),
                 max_per_req_token_ids=max_token_ids,
                 logits_mode=self.logits_mode,
+                drop_sampled_from_topk=False,
             )
 
     def _emitted_logprobs(

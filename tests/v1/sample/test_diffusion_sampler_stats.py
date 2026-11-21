@@ -189,6 +189,7 @@ def test_stashed_logprobs_match_compute_topk_scores(
         ),
         max_per_req_token_ids=max_ids,
         logits_mode=logits_mode,
+        drop_sampled_from_topk=False,
     )
 
     stash_w = 1 + max(num_logprobs, max_ids) + 2
