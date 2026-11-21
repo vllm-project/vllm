@@ -131,6 +131,8 @@ def freeze_gc_heap() -> None:
     gc.collect(0)
     # Freeze all GC tracked objects
     gc.freeze()
+    if envs.VLLM_GC_THRESHOLDS:
+        gc.set_threshold(*map(int, envs.VLLM_GC_THRESHOLDS.split(",")))
 
 
 _T = TypeVar("_T")
