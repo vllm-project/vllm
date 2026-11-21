@@ -1647,10 +1647,16 @@ def test_chunked_prompt_logprobs_match_unchunked(
     logits = logits.float() / vocab_size
     prompt_token_ids = torch.randint(vocab_size, (num_tokens,), device=device)
 
+    def _identity_logits(
+        hidden_states: torch.Tensor, row_start: int = 0
+    ) -> torch.Tensor:
+        del row_start
+        return hidden_states
+
     token_ids, logprobs, ranks = compute_prompt_logprobs_with_chunking(
         prompt_token_ids,
         logits,
-        lambda hidden_states: hidden_states,
+        _identity_logits,
         num_prompt_logprobs,
     )
 
