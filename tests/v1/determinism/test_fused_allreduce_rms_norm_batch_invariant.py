@@ -25,10 +25,10 @@ def _worker_batch_invariant_ar_norm(rank, world_size, port, gemma):
     norm_cls = GemmaRMSNorm if gemma else RMSNorm
     fused = fused_allreduce_gemma_rms_norm if gemma else fused_allreduce_rms_norm
     norm = norm_cls(6144).cuda().to(torch.bfloat16)
-    torch.manual_seed(42)
-    residual = torch.randn(1, 6144, device="cuda", dtype=torch.bfloat16)
-    torch.manual_seed(100 + rank)
-    partial = torch.randn_like(residual)
+    gen = torch.Generator(device="cuda").manual_seed(42)
+    residual = torch.randn(1, 6144, device="cuda", dtype=torch.bfloat16, generator=gen)
+    gen.manual_seed(100 + rank)
+    partial = torch.randn(1, 6144, device="cuda", dtype=torch.bfloat16, generator=gen)
 
     reduced = tensor_model_parallel_all_reduce(partial.clone())
     reference = norm(reduced, residual.clone())
