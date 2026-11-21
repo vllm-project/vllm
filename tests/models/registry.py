@@ -1268,7 +1268,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B"
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
@@ -1860,7 +1860,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Nemotron3_5TranscribeMTPModel": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
         speculative_model="nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
-        is_available_online=False,
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
