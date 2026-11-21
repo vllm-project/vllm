@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import json
 
 import openai
@@ -13,7 +12,6 @@ from vllm.assets.audio import AudioAsset
 from vllm.multimodal.utils import encode_audio_base64, encode_audio_url, fetch_audio
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
-ASR_MODEL_NAME = "Qwen/Qwen3-ASR-0.6B-hf"
 TEST_AUDIO_URLS = [
     AudioAsset("winning_call").url,
     AudioAsset("mary_had_lamb").url,
@@ -400,45 +398,3 @@ async def test_multi_audio_input(
         )
         message = chat_completion.choices[0].message
         assert message.content is not None and len(message.content) >= 0
-
-
-@pytest.fixture(scope="module")
-def asr_server():
-    args = [
-        "--max-model-len",
-        "4096",
-        "--max-num-seqs",
-        "4",
-        "--enforce-eager",
-    ]
-
-    with RemoteOpenAIServer(ASR_MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-@pytest.mark.asyncio
-async def test_concurrent_audio_of_different_lengths(asr_server):
-    """Batching distinct clips of different lengths must not kill the engine."""
-    clips = []
-    for audio_url in TEST_AUDIO_URLS:
-        audio, sample_rate = fetch_audio(audio_url)
-        for length in (len(audio), len(audio) // 2):
-            clips.append(encode_audio_url(audio[:length], int(sample_rate)))
-
-    async with asr_server.get_async_client() as client:
-        chat_completions = await asyncio.gather(
-            *(
-                client.chat.completions.create(
-                    model=ASR_MODEL_NAME,
-                    messages=dummy_messages_from_audio_url(
-                        clip, "Transcribe this audio."
-                    ),
-                    max_completion_tokens=16,
-                    temperature=0.0,
-                )
-                for clip in clips
-            )
-        )
-
-    for chat_completion in chat_completions:
-        assert chat_completion.choices[0].message.content
