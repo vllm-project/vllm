@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
@@ -17,6 +18,16 @@ class DSpineSpeculator(DFlash2Speculator):
         draft_config = vllm_config.speculative_config.draft_model_config.hf_config
         _maybe_override_dspine_config(draft_config)
         super().__init__(vllm_config, device)
+
+    def load_draft_model(
+        self, target_model: nn.Module, target_attn_layer_names: set[str]
+    ) -> nn.Module:
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        spec = self.vllm_config.speculative_config
+        assert spec is not None
+        if spec.draft_lm_head_quantization == "fp8" and not self.context_kv_only:
+            model.prepare_coarse_lm_head()
+        return model
 
     def _prepare_candidates(self, model_output, num_reqs):
         hidden_states, final_pre_injection = model_output
