@@ -24,6 +24,8 @@
 # limitations under the License.
 import torch
 
+from vllm.forward_context import get_forward_context, is_forward_context_available
+
 from .base import RotaryEmbedding
 
 
@@ -71,3 +73,113 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
         return cache
+
+
+class DynamicNTKScalingRotaryEmbeddingForEncoder(RotaryEmbedding):
+    """Dynamic NTK scaling for packed, complete encoder sequences.
+
+    Each sequence starts at position zero. Unlike autoregressive decoding,
+    the final length is known, and no rotated keys are cached across forwards.
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        max_trained_positions: int,
+        base: float,
+        is_neox_style: bool,
+        scaling_factor: float,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            dtype,
+        )
+        self.max_trained_positions = max_trained_positions
+        # Cache only inverse frequencies by length, not a quadratic table of
+        # (length, position) pairs. Short sequences retain the original base.
+        lengths = torch.arange(max_position_embeddings + 1, dtype=torch.float64)
+        lengths = lengths.clamp_min(max_trained_positions)
+        bases = base * (
+            scaling_factor * lengths / max_trained_positions - (scaling_factor - 1)
+        ) ** (rotary_dim / (rotary_dim - 2))
+        powers = torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim
+        inv_freq = 1.0 / (bases.float()[:, None] ** powers)
+        self.register_buffer("inv_freq_by_length", inv_freq, persistent=False)
+
+    def _cos_sin_for_positions(
+        self, positions: torch.Tensor, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        positions = positions.flatten()
+        if is_forward_context_available():
+            is_padding = get_forward_context().is_padding
+            if is_padding is not None:
+                positions = positions.masked_fill(is_padding, 0)
+        indices = torch.arange(positions.numel(), device=positions.device)
+        # A zero next position marks the end of a document. Padding positions
+        # are also zero, so they cannot extend the final real document.
+        next_positions = torch.cat((positions, positions.new_zeros(1)))[1:]
+        ends = torch.where(next_positions == 0, indices + 1, positions.numel())
+        ends = ends.flip(0).cummin(0).values.flip(0)
+        lengths = ends - indices + positions
+        inv_freq = self.inv_freq_by_length[lengths]
+        freqs = positions.float()[:, None] * inv_freq
+        cos_sin = torch.cat((freqs.cos(), freqs.sin()), dim=-1).to(dtype)
+        # Keep short-input rounding identical to the original RoPE cache,
+        # including when this forward is compiled with low-precision Q/K.
+        cos_sin = torch.where(
+            (lengths <= self.max_trained_positions)[:, None],
+            self.cos_sin_cache[positions].to(dtype),
+            cos_sin,
+        )
+        return indices, cos_sin
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        indices, cos_sin = self._cos_sin_for_positions(positions, query.dtype)
+        return self.forward_static(
+            indices,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            cos_sin,
+            self.is_neox_style,
+        )
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from vllm import _custom_ops as ops
+
+        indices, cos_sin = self._cos_sin_for_positions(positions, query.dtype)
+        ops.rotary_embedding(
+            indices, query, key, self.head_size, cos_sin, self.is_neox_style
+        )
+        return query, key
+
+    forward_cpu = forward_cuda
+    forward_hip = forward_cuda
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if key is None:
+            return self.forward_native(positions, query, key)
+        return self.forward_cuda(positions, query, key)
