@@ -32,7 +32,7 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     parse_questions,
 )
 from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
-from vllm.entrypoints.openai.decisions.protocol import DecisionRequest
+from vllm.entrypoints.openai.decisions.protocol import ChoiceAnswer, DecisionRequest
 from vllm.entrypoints.openai.decisions.question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -927,6 +927,34 @@ async def test_d3_takes_more_options_than_letters(d3):
     assert "\nZ: option 25\nAA: option 26\n" in text
     assert "\nAN: option 39\n\n" in text
     assert len(response.answers["many"]["probabilities"]) == 40
+
+
+@pytest.mark.asyncio
+async def test_decisions_serving_unlabeled_choices_exceed_label_limit(d3):
+    """Exercise the serving layer directly with an unlabeled read strategy.
+
+    D3's classify task is not exposed at `/v1/decisions` by HTTP initialization.
+    This fixture bypasses that initialization to test the serving option limit.
+    """
+    serving, engine, tokenizer = d3
+    create = OpenAIServingDecisions(serving.models, serving.strategy).create_decisions
+    choices = [{"value": f"option {i}"} for i in range(40)]
+    response = await create(
+        DecisionRequest(
+            model=D3_REQUEST["model"],
+            input="",
+            questions=[{"type": "choice", "instructions": "x", "choices": choices}],
+        )
+    )
+    assert not isinstance(response, ErrorResponse), response
+    text = tokenizer.decode(engine.encode.call_args.args[0]["prompt_token_ids"])
+    # The decisions adapter names each option by its value's JSON text.
+    assert '\nZ: "option 25": \nAA: "option 26": \n' in text
+    assert '\nAN: "option 39": \n\n' in text
+    (answer,) = response.answers
+    assert isinstance(answer, ChoiceAnswer)
+    assert len(answer.probabilities) == 40
+    assert math.fsum(p.probability for p in answer.probabilities) == pytest.approx(1)
 
 
 @pytest.mark.asyncio
