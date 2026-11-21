@@ -3,8 +3,13 @@
 """Normalized configuration consumed by native offloading backends."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.layer_layout import (
+        LayerObjectLayout,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,5 +98,12 @@ class OffloadingConfig:
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.
     canonical_layout: bool = False
+    # Canonical layout: the layout of a chunk row of each offloaded group, by
+    # group ID. A row holds the canonical pages of the group's layers on every
+    # pipeline stage, back to back in model order, so the layout does not
+    # depend on the parallel config; a stage fills the slots of its own layers.
+    canonical_row_layouts: Mapping[int, "LayerObjectLayout"] = field(
+        default_factory=dict
+    )
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None

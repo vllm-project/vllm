@@ -505,9 +505,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ):
                 logger.warning(
                     "Secondary-tier KV is only valid for engines with the same "
-                    "parallel configuration; sharing it across TP sizes needs "
+                    "parallel configuration; sharing it across TP and PP sizes needs "
                     "canonical_layout=true in kv_connector_extra_config, "
-                    "parallelism-agnostic KV cache layers, and no PP, DCP or PCP."
+                    "parallelism-agnostic KV cache layers, and no DCP or PCP."
                 )
 
         return self._manager
@@ -555,6 +555,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
             tiers.append((tier_config, tier_cls))
         return tiers
+
+    @override
+    def _uses_canonical_layout(self) -> bool:
+        return self.config.canonical_layout
 
     @override
     def _uses_shared_region(self) -> bool:
@@ -607,9 +611,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if any(ref.mapping is None for ref in all_refs):
             raise RuntimeError(
                 "canonical_layout was requested but the KV cache layout "
-                "could not be certified for canonical offload (offload "
-                "workers must be exactly the TP group, and packed / "
-                "cross-layer KV layouts are not supported). Remove "
+                "could not be certified for canonical offload (the offload "
+                "workers must be the TP x PCP group of every pipeline stage, "
+                "and packed / cross-layer KV layouts are not supported). Remove "
                 "canonical_layout from kv_connector_extra_config."
             )
         self.all_layers_portable = all(

@@ -4,6 +4,12 @@
 
 from typing import TYPE_CHECKING
 
+from vllm.distributed.kv_transfer.kv_connector.v1.layer_layout import (
+    LayerObjectLayout,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    canonical_row_layouts,
+)
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import (
@@ -143,11 +149,20 @@ def build_offloading_config(
                 f"'blocks_per_chunk' to express the chunk size in blocks."
             )
 
+    canonical_layout = bool(extra_config.get("canonical_layout", False))
+
     groups = tuple(
         OffloadingGroupConfig(
             group_id=group_id,
             tokens_per_block=tokens_per_block,
-            layer_names=tuple(group.layer_names),
+            # A canonical row holds the group's layers on every pipeline stage,
+            # so name them all: the storage namespace then does not depend on
+            # the pipeline stage or size.
+            layer_names=tuple(
+                kv_cache_config.pipeline_layer_specs(group_id)
+                if canonical_layout
+                else group.layer_names
+            ),
             sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
                 group, tokens_per_block * blocks_per_chunk
             ),
@@ -193,14 +208,18 @@ def build_offloading_config(
         and parallel_config.nnodes_within_dp == 1
     )
 
-    canonical_layout = bool(extra_config.get("canonical_layout", False))
-
     # Only canonical pages can be parallelism-invariant: they are
     # topology-free, so every config whose mappings derive portable, group by
     # group, qualifies; certification happens per layer at registration and
     # create_worker fails closed on this flag.
     is_parallelism_agnostic = False
+    row_layouts: dict[int, LayerObjectLayout] = {}
     if canonical_layout:
+        # Every stage must lay out the chunk row of all stages identically.
+        assert (
+            parallel_config.pipeline_parallel_size == 1
+            or kv_cache_config.pipeline_stages
+        ), "canonical_layout with PP needs the KV cache layers of every stage"
         tp_size = parallel_config.tensor_parallel_size
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
 
@@ -228,18 +247,27 @@ def build_offloading_config(
                 total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
             ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
 
-        # Certify per layer, as the mapping derivation does.
+        # Certify per layer, as the mapping derivation does, on every pipeline
+        # stage: the namespace is shared by all of them.
         layer_specs = [
             (group, spec)
-            for group in kv_cache_config.kv_cache_groups
-            for spec in group.kv_cache_specs.values()
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            for spec in kv_cache_config.pipeline_layer_specs(group_id).values()
         ]
         is_parallelism_agnostic = (
             len(layer_specs) > 0
             and all(spec_certifiable(group, spec) for group, spec in layer_specs)
             and parallel_config.decode_context_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.world_size == tp_size
+            and parallel_config.world_size
+            == tp_size * parallel_config.pipeline_parallel_size
+        )
+
+        row_layouts = canonical_row_layouts(
+            vllm_config,
+            kv_cache_config,
+            (group_id for group_id, _ in selected_groups),
+            blocks_per_chunk,
         )
 
     if canonical_layout:
@@ -250,6 +278,8 @@ def build_offloading_config(
                 for _, group in selected_groups
                 for spec in group.kv_cache_specs.values()
             )
+            # Pipeline stages hold different layers, so their bytes differ.
+            and parallel_config.pipeline_parallel_size == 1
             and parallel_config.nnodes_within_dp == 1
             and (
                 parallel_config.world_size == 1
@@ -297,4 +327,5 @@ def build_offloading_config(
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        canonical_row_layouts=row_layouts,
     )

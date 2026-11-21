@@ -312,7 +312,6 @@ class SharedOffloadRegion:
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
-        self._canonical_offset = 0
         self.is_pinned: bool = False
         self.pinned_addresses: list[int] = []
 
@@ -454,48 +453,32 @@ class SharedOffloadRegion:
         self._views.append(worker_layer_view)
         return worker_layer_view
 
-    def create_next_canonical_view(self, tensor_page_size: int) -> torch.Tensor:
-        """Allocate a strided int8 view shared by all workers for one
-        canonical tensor (canonical layout).
+    def create_canonical_view(self) -> torch.Tensor:
+        """Return an int8 view of the whole chunk rows, shared by all workers
+        (canonical layout).
 
-        Must be called once per canonical tensor, instead of
-        create_next_worker_view. The full mmap layout is:
+        Called instead of create_next_worker_view. The full mmap layout is:
 
-            |<-------- canonical area ------->|<-------- unused ------->|
-            |  all workers share this area    |                         |
-            |                                 |                         |
-            | [ canonical_t0 | canonical_t1 ] |                         |
-            | [ canonical_t0 | canonical_t1 ] |                         |
-            | [ canonical_t0 | canonical_t1 ] |                         |
-            ^                ^
-            _canonical_offset=0, then advances by each tensor's size
+            |<---------------------- row_stride ---------------------->|
+            | [ layer_0 | layer_1 | ... | layer_{L-1} ] |    unused     |
+            | [ layer_0 | layer_1 | ... | layer_{L-1} ] |    unused     |
+            ...
 
-        Each canonical_t{i} cell is that tensor's canonical page for the
-        chunk. Canonical areas are carved consecutively from the start of
-        each chunk row; consecutive rows are separated by row_stride. Every
-        worker gets the identical byte ranges and writes only its disjoint
+        A row holds the chunk's canonical pages of one KV cache group's
+        layers, on every pipeline stage, at offsets fixed by the model's
+        layers. Every worker gets the identical rows and writes only its own
         bytes within them, as described by its canonical mappings — unlike
         create_next_worker_view, which gives each worker a private
         cpu_page_size slot per row.
 
         The trailing unused bytes exist only when the canonical pages sum to
-        less than row_stride: page-alignment padding of the row, or
-        deduplication of KV replicated across workers (e.g. the MLA latent),
-        where one canonical copy replaces world_size worker copies.
+        less than row_stride: page-alignment padding of the row, or the rows
+        of a KV cache group with fewer layers than the largest group.
 
-        Args:
-            tensor_page_size: Canonical bytes per chunk for this tensor.
-
+        Returns an int8 tensor of shape (num_chunks, row_stride) with stride
+        (row_stride, 1).
         """
-        new_offset = self._canonical_offset + tensor_page_size
-        assert new_offset <= self._row_stride
-        view = torch.as_strided(
-            self._base,
-            size=(self.num_chunks, tensor_page_size),
-            stride=(self._row_stride, 1),
-            storage_offset=self._canonical_offset,
-        )
-        self._canonical_offset = new_offset
+        view = self.base_tensor.view(self.num_chunks, self._row_stride)
         self._views.append(view)
         return view
 

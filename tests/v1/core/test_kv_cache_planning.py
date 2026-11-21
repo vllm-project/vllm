@@ -41,6 +41,7 @@ from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
     get_kv_cache_groups,
+    get_pipeline_stages,
     kv_cache_groups_tp_replicas,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -791,6 +792,76 @@ def test_project_kv_cache_groups_to_worker():
         "layer1": layer_a.spec,
         "layer3": layer_a.spec,
     }
+
+
+def test_pipeline_stages_describe_every_stage():
+    """Every worker learns each PP stage's group projections and block size in
+    bytes, draft layers on the last stage included; the groups stay fixed when
+    a worker later edits its own."""
+    layer = new_kv_cache_layer()
+    stage0 = {"layer0": layer, "layer1": layer}
+    stage1 = {
+        "layer2": layer,
+        "layer3": layer,
+        "draft.layer0": replace(layer, is_draft=True),
+    }
+    # Two TP ranks per stage.
+    layer_configs = [stage0, stage0, stage1, stage1]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**30] * 4)
+
+    stages = get_pipeline_stages(vllm_config, kv_cache_configs)
+
+    assert [[g.layer_names for g in stage.kv_cache_groups] for stage in stages] == [
+        [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
+        for worker in (0, 2)
+    ]
+    page = kv_cache_planning._get_layer_block_stride(layer.spec)
+    assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
+    draft_stage_layers = ["layer2", "layer3", "draft.layer0"]
+    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
+    kv_cache_configs[2].kv_cache_groups[0].kv_cache_specs["shared"] = layer.spec
+    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
+    # An engine core that plans only its own worker cannot describe the stages.
+    assert get_pipeline_stages(vllm_config, kv_cache_configs[:1]) == ()
+
+
+def _pipeline_layer_specs(partition: list[int]) -> list[list[str]]:
+    """Each group's layers on every stage of a hybrid model that `partition`
+    splits across pipeline stages, as one worker's config lists them."""
+    full = new_kv_cache_layer()
+    swa = new_sliding_window_layer(sliding_window=32)
+    # Two sliding-window layers per full attention layer
+    layers = {f"layer{i}": full if i % 3 == 2 else swa for i in range(6)}
+    names = list(layers)
+    bounds = [sum(partition[:i]) for i in range(len(partition) + 1)]
+    layer_configs = [
+        {name: layers[name] for name in names[start:end]}
+        for start, end in zip(bounds, bounds[1:])
+    ]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = len(partition)
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config, layer_configs, [2**30] * len(layer_configs)
+    )
+    kv_cache_config = kv_cache_configs[-1]
+    kv_cache_config.pipeline_stages = get_pipeline_stages(vllm_config, kv_cache_configs)
+    return [
+        list(kv_cache_config.pipeline_layer_specs(group_id))
+        for group_id in range(len(kv_cache_config.kv_cache_groups))
+    ]
+
+
+@pytest.mark.parametrize("partition", [[2, 4], [4, 2], [3, 3], [1, 2, 3]])
+def test_pipeline_layer_specs_do_not_depend_on_pipeline_partition(partition):
+    """Joined across the pipeline stages, every group lists the same layers in
+    the same order under any PP size and layer partition."""
+    single_stage = _pipeline_layer_specs([6])
+    assert len(single_stage) > 1
+    assert _pipeline_layer_specs(partition) == single_stage
 
 
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])

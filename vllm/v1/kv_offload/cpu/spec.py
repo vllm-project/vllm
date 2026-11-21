@@ -130,6 +130,13 @@ class CPUOffloadingSpec(OffloadingSpec):
             num_copies = 1 if self.replicated_layout else world_size
             kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
             kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
+            if self._uses_canonical_layout() and config.canonical_row_layouts:
+                # All workers share one canonical chunk row, which holds the
+                # layers of every pipeline stage. Rows of different groups
+                # overlay: a chunk belongs to one group.
+                kv_bytes_per_chunk = max(
+                    layout.size for layout in config.canonical_row_layouts.values()
+                )
 
             # calculate cpu_page_size_per_worker
             self.cpu_page_size_per_worker = kv_bytes_per_chunk // num_copies
@@ -207,6 +214,11 @@ class CPUOffloadingSpec(OffloadingSpec):
                 info=self.cpu_info,
             )
         return self._manager
+
+    def _uses_canonical_layout(self) -> bool:
+        """Whether the worker CPU buffer holds canonical chunk rows rather
+        than per-worker pages; sizes a chunk by the canonical row."""
+        return False
 
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private

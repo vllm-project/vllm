@@ -868,8 +868,8 @@ def test_single_chunk_segments_preserve_shared_canonical_views(
                 2 * huge_page,
                 huge_page + PAGE_SIZE,
             ]
-        a = regions[0].create_next_canonical_view(pool_bytes)
-        b = regions[1].create_next_canonical_view(pool_bytes)
+        (a,) = regions[0].create_canonical_view()
+        (b,) = regions[1].create_canonical_view()
         a.fill_(17)
         assert (b == 17).all()
         b[2 * huge_page - 1 : 2 * huge_page + 1] = 29

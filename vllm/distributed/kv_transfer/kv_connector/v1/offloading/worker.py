@@ -82,6 +82,24 @@ class OffloadingConnectorWorker:
         mappings = derive_canonical_mappings(
             self.vllm_config, kv_cache_config, kv_caches
         )
+        # Canonical layout: each layer's offset in a chunk row of its group
+        canonical_offsets: dict[str, int] = {}
+        blocks_per_chunk = self.spec.config.cache.blocks_per_chunk
+        for group_id, kv_cache_group in zip(selected_group_ids, selected_groups):
+            row_layout = self.spec.config.canonical_row_layouts.get(group_id)
+            if row_layout is None:
+                continue
+            for layer_name in kv_cache_group.layer_names:
+                slot = row_layout.slots.get(layer_name)
+                mapping = mappings.get(layer_name)
+                if slot is None:
+                    assert mapping is None, f"layer {layer_name} has no row slot"
+                    continue
+                assert (
+                    mapping is None
+                    or mapping.canonical_page_size_bytes * blocks_per_chunk == slot.size
+                ), f"canonical pages of layer {layer_name} do not fill its slot"
+                canonical_offsets[layer_name] = slot.offset
 
         # layer_name -> (num_blocks, page_size_bytes) tensor
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
@@ -208,6 +226,7 @@ class OffloadingConnectorWorker:
                             tensor_idx=curr_tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
                             mapping=mapping,
+                            canonical_offset=canonical_offsets.get(layer_name, 0),
                         )
                     )
 

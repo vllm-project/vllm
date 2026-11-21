@@ -10,6 +10,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group,
     make_kv_cache_group_from_specs,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.layer_layout import LayerObjectLayout
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     TransferJob,
@@ -93,6 +94,7 @@ def _single_rank_vllm_config(total_kv_heads: int):
     parallel_config.decode_context_parallel_size = 1
     parallel_config.prefill_context_parallel_size = 1
     parallel_config.cp_kv_cache_interleave_size = 1
+    parallel_config.pipeline_parallel_size = 1
     parallel_config.world_size = 1
     parallel_config.rank = 0
     vllm_config.model_config.get_total_num_kv_heads.return_value = total_kv_heads
@@ -104,6 +106,7 @@ def _make_worker(
     replicated_layout: bool = False,
     rank: int = 0,
     canonical_layout: bool = False,
+    canonical_row_layouts: dict[int, LayerObjectLayout] | None = None,
 ):
     """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
@@ -115,6 +118,8 @@ def _make_worker(
     spec.async_init = False
     spec.config = MagicMock()
     spec.config.canonical_layout = canonical_layout
+    spec.config.canonical_row_layouts = canonical_row_layouts or {}
+    spec.config.cache.blocks_per_chunk = 1
     spec.config.parallel.rank = rank
     spec.get_worker.return_value = MagicMock()
 
@@ -666,6 +671,54 @@ def test_register_packed_kv_caches_skips_scratch_group():
     assert len(canonical.tensors) == 1
     assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, 2 * page)
     assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
+
+
+_ATTN_SPEC = AttentionSpec(
+    block_size=BLOCK_SIZE,
+    num_kv_heads=NUM_KV_HEADS,
+    head_size=HEAD_SIZE,
+    dtype=DTYPE,
+)
+
+
+def _two_layer_kv_cache_config(layers: list[str]) -> KVCacheConfig:
+    page = _ATTN_SPEC.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=len(layers) * page * NUM_BLOCKS,
+                layers=layers,
+                layer_stride=page * NUM_BLOCKS,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[make_kv_cache_group(layers, _ATTN_SPEC)],
+    )
+
+
+def test_register_kv_caches_places_layers_in_their_row_slots():
+    """A pipeline stage holding layers 2 and 3 of the model writes their
+    canonical pages at the slots the row layout of all stages gives them."""
+    layers = ["layer2", "layer3"]
+    kv_cache_config = _two_layer_kv_cache_config(layers)
+    page = _ATTN_SPEC.page_size_bytes
+    kv_caches = _allocate_kv_caches(
+        kv_cache_config, [], device=torch.device(f"{DEVICE_TYPE}:0")
+    )
+    worker, spec = _make_worker(
+        kv_cache_config,
+        canonical_layout=True,
+        canonical_row_layouts={
+            0: LayerObjectLayout.pack([(f"layer{i}", page) for i in range(4)])
+        },
+    )
+    worker.register_kv_caches(kv_caches)
+
+    canonical = spec.get_worker.call_args[0][0]
+    (refs,) = canonical.group_data_refs
+    assert [ref.canonical_offset for ref in refs] == [2 * page, 3 * page]
+    assert all(ref.mapping is not None for ref in refs)
 
 
 def test_register_split_padded_pages_raises():

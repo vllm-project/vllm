@@ -6,17 +6,22 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
+from vllm.distributed.kv_transfer.kv_connector.v1.layer_layout import LayerSlot
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     _layer_mapping,
     _opaque_fallback_mapping,
     _RankContext,
     _verify_tiling,
+    canonical_page_size,
+    canonical_row_layouts,
     derive_canonical_mappings,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheConfig,
     KVCacheSpec,
+    KVCacheStage,
     KVQuantMode,
     MLAAttentionSpec,
 )
@@ -478,6 +483,7 @@ def _vllm_config(tp=1, dcp=1, pcp=1, pp=1, interleave=1, total_kv_heads=2):
     config.parallel_config.decode_context_parallel_size = dcp
     config.parallel_config.prefill_context_parallel_size = pcp
     config.parallel_config.cp_kv_cache_interleave_size = interleave
+    config.parallel_config.pipeline_parallel_size = pp
     config.parallel_config.world_size = pp * tp * pcp
     config.parallel_config.rank = 0
     config.model_config.get_total_num_kv_heads.return_value = total_kv_heads
@@ -523,12 +529,136 @@ def test_derive_mixed_model_with_dcp():
 
 
 def test_derive_refuses_foreign_worker_groups():
+    # The workers are not the TP x PCP grid of every pipeline stage
     attn_spec = _full_spec()
     kv_cache_config = _kv_cache_config([make_kv_cache_group(["attn"], attn_spec)])
     kv_caches = {"attn": _split_nhd_cache(attn_spec)}
-    assert (
-        derive_canonical_mappings(
-            _vllm_config(tp=2, pp=2, total_kv_heads=4), kv_cache_config, kv_caches
+    vllm_config = _vllm_config(tp=2, pp=2, total_kv_heads=4)
+    vllm_config.parallel_config.world_size = 8
+    assert derive_canonical_mappings(vllm_config, kv_cache_config, kv_caches) == {}
+
+
+def test_derive_pipeline_stage_rank_maps_like_its_tp_rank():
+    # Workers are ordered by PP rank, then TP rank: worker 3 of TP2 x PP2 is
+    # TP rank 1 of the second stage.
+    attn_spec = _full_spec()
+    kv_cache_config = _kv_cache_config([make_kv_cache_group(["attn"], attn_spec)])
+    kv_caches = {"attn": _split_nhd_cache(attn_spec)}
+    pp_config = _vllm_config(tp=2, pp=2, total_kv_heads=4)
+    pp_config.parallel_config.rank = 3
+    tp_config = _vllm_config(tp=2, total_kv_heads=4)
+    tp_config.parallel_config.rank = 1
+
+    mappings = derive_canonical_mappings(pp_config, kv_cache_config, kv_caches)
+    assert mappings == derive_canonical_mappings(tp_config, kv_cache_config, kv_caches)
+    tp_config.parallel_config.rank = 0
+    rank0 = derive_canonical_mappings(tp_config, kv_cache_config, kv_caches)
+    assert mappings["attn"].runs != rank0["attn"].runs
+
+
+# ---------------------------------------------------------------------------
+# Canonical chunk rows
+# ---------------------------------------------------------------------------
+
+
+def _stage_kv_cache_config(partition: list[int], stage: int) -> KVCacheConfig:
+    """The KV cache config of one pipeline stage of a model with an attention
+    group and an MLA group, whose layers `partition` splits across stages."""
+    bounds = [sum(partition[:i]) for i in range(len(partition) + 1)]
+    stages = tuple(
+        KVCacheStage(
+            kv_cache_groups=(
+                make_kv_cache_group(
+                    [f"attn.{i}" for i in range(start, end)], _full_spec()
+                ),
+                make_kv_cache_group(
+                    [f"mla.{i}" for i in range(start, end)], _mla_spec()
+                ),
+            ),
+            # No KV cache tensors are placed.
+            bytes_per_block=0,
         )
-        == {}
+        for start, end in zip(bounds, bounds[1:])
     )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[],
+        kv_cache_groups=list(stages[stage].kv_cache_groups),
+    )
+    kv_cache_config.pipeline_stages = stages
+    return kv_cache_config
+
+
+@pytest.mark.parametrize("partition", [[4], [2, 2], [3, 1], [1, 1, 1, 1]])
+def test_row_layouts_do_not_depend_on_pipeline_partition(partition):
+    """Every stage lays out a chunk row from the layers of all stages, in
+    model order, so the slots match those of a single-stage engine."""
+    single_stage = canonical_row_layouts(
+        _vllm_config(tp=2, total_kv_heads=4),
+        _stage_kv_cache_config([4], 0),
+        (0, 1),
+        blocks_per_chunk=2,
+    )
+    vllm_config = _vllm_config(tp=2, pp=len(partition), total_kv_heads=4)
+    for stage in range(len(partition)):
+        layouts = canonical_row_layouts(
+            vllm_config,
+            _stage_kv_cache_config(partition, stage),
+            (0, 1),
+            blocks_per_chunk=2,
+        )
+        assert layouts == single_stage
+
+    # The two TP head shards of an attention page, one replicated MLA page
+    attn_page = canonical_page_size(vllm_config, _full_spec())
+    assert attn_page == 2 * _full_spec().real_page_size_bytes
+    mla_page = canonical_page_size(vllm_config, _mla_spec())
+    assert mla_page == _mla_spec().real_page_size_bytes
+    assert single_stage[0].slots["attn.3"] == LayerSlot(6 * attn_page, 2 * attn_page)
+    assert single_stage[0].size == 8 * attn_page
+    # A row holds one group's layers, so every group's slots start at 0
+    assert single_stage[1].slots["mla.0"] == LayerSlot(0, 2 * mla_page)
+    assert single_stage[1].size == 8 * mla_page
+
+
+def test_uncertifiable_layer_gets_its_opaque_page_slot():
+    spec = _full_spec(kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
+    vllm_config = _vllm_config(tp=4, total_kv_heads=8)
+    assert canonical_page_size(vllm_config, spec) == 4 * spec.unpadded_page_size_bytes
+
+
+def test_unrecognized_layout_of_certified_layer_fills_its_canonical_page():
+    """Kernel blocks split the page, so its byte layout is not recognized,
+    but the spec's KV head shards are: every rank's page goes whole to its
+    head shard's position, and the page keeps the size of its row slot."""
+    spec = _full_spec(num_kv_heads=1)
+    kv_cache_config = _kv_cache_config([make_kv_cache_group(["attn"], spec)])
+    kernel_blocks = torch.zeros(
+        2 * NUM_BLOCKS, 2, spec.block_size // 2, 1, 64, dtype=torch.int8
+    )
+    vllm_config = _vllm_config(tp=4, total_kv_heads=2)
+    per_rank = []
+    for rank in range(4):
+        vllm_config.parallel_config.rank = rank
+        mappings = derive_canonical_mappings(
+            vllm_config, kv_cache_config, {"attn": kernel_blocks}
+        )
+        per_rank.append(mappings["attn"])
+
+    page = spec.real_page_size_bytes
+    assert canonical_page_size(vllm_config, spec) == 2 * page
+    assert all(m.canonical_page_size_bytes == 2 * page for m in per_rank)
+    assert [_triples(m.runs) for m in per_rank] == [
+        [(0, 0, page)],
+        [(0, 0, page)],
+        [(0, page, page)],
+        [(0, page, page)],
+    ]
+    # The two ranks holding a head take turns writing it
+    assert [(m.num_writers, m.writer_index) for m in per_rank] == [
+        (2, 0),
+        (2, 1),
+        (2, 0),
+        (2, 1),
+    ]
+    assert not any(m.parallelism_agnostic for m in per_rank)
