@@ -40,6 +40,11 @@ _THINKING_END_TAG = "<channel|>"
 
 # Sentinel tokens that may appear in decoded output.
 _TURN_END_TAG = "<turn|>"
+_EOS_TAG = "<eos>"
+_TRAILING_SENTINELS = (_TURN_END_TAG, _EOS_TAG)
+
+_THOUGHT_LABEL = "thought"
+_THOUGHT_PREFIX = f"{_THOUGHT_LABEL}\n"
 
 
 def parse_thinking_output(text: str) -> dict[str, str | None]:
@@ -77,24 +82,43 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
         >>> print(result["answer"])    # final answer
 
     """
-    if _THINKING_END_TAG in text:
-        parts = text.split(_THINKING_END_TAG, 1)
-        thinking_block = parts[0]
-        answer = _clean_answer(parts[1])
+    thinking_parts: list[str] = []
+    answer_parts: list[str] = []
+    remaining = text
+    found_thinking = False
 
-        # Extract thinking content: strip the start tag if present
+    while _THINKING_END_TAG in remaining:
+        found_thinking = True
+        thinking_block, remaining = remaining.split(_THINKING_END_TAG, 1)
         if _THINKING_START_TAG in thinking_block:
-            thinking = thinking_block.split(_THINKING_START_TAG, 1)[1]
+            before, thinking = thinking_block.split(_THINKING_START_TAG, 1)
+            if before:
+                answer_parts.append(before)
         else:
             thinking = thinking_block
 
-        # Strip the "thought\n" channel role label the model emits inside
-        # <|channel>thought\n...<channel|> (analogous to "user\n" in
-        # <|turn>user\n...<turn|>).
-        thinking = _strip_thought_label(thinking.strip())
-        thinking = thinking.strip()
+        cleaned = _clean_thinking(thinking)
+        if cleaned:
+            thinking_parts.append(cleaned)
 
-        return {"thinking": thinking, "answer": answer}
+    unclosed = _find_unfinished_thought(remaining)
+    if unclosed is not None:
+        found_thinking = True
+        before_start, partial_thinking = unclosed
+        if before_start:
+            answer_parts.append(before_start)
+        cleaned = _clean_answer(partial_thinking)
+        if cleaned:
+            thinking_parts.append(cleaned)
+        remaining = ""
+
+    if found_thinking:
+        if remaining:
+            answer_parts.append(remaining)
+        return {
+            "thinking": "\n".join(thinking_parts),
+            "answer": _clean_answer("".join(answer_parts)),
+        }
 
     # No thinking delimiters found.
     # Strip spurious "thought\n" role label that some Gemma4 models sometimes
@@ -104,14 +128,62 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
     return {"thinking": None, "answer": answer}
 
 
+def _find_unfinished_thought(text: str) -> tuple[str, str] | None:
+    """Find the first unclosed Gemma4 `thought` channel block, if any.
+
+    Matches either `<|channel>thought\n...` or a truncated `<|channel>` /
+    `<|channel>thought` header at the end of the text (ignoring trailing
+    whitespace and sentinel tokens), so plain-text mentions like
+    `"answer mentions <|channel> literally"` are not split falsely.
+    """
+    search_from = 0
+    while True:
+        idx = text.find(_THINKING_START_TAG, search_from)
+        if idx == -1:
+            return None
+        after = text[idx + len(_THINKING_START_TAG) :]
+        if after.startswith(_THOUGHT_PREFIX):
+            return text[:idx], after[len(_THOUGHT_PREFIX) :]
+        if _THOUGHT_LABEL.startswith(_strip_trailing_sentinels(after)):
+            return text[:idx], ""
+        search_from = idx + len(_THINKING_START_TAG)
+
+
+def _clean_thinking(text: str) -> str:
+    """Strip the `thought\\n` channel role label and surrounding whitespace."""
+    # Gemma4 emits `thought\n` inside `<|channel>thought\n...<channel|>`
+    # (analogous to `user\n` in `<|turn>user\n...<turn|>`). Only strip leading
+    # whitespace before checking the label so `<|channel>thought\n` keeps its
+    # trailing newline intact when stripping `_THOUGHT_PREFIX`.
+    stripped = text.lstrip()
+    if stripped.startswith(_THOUGHT_PREFIX):
+        return stripped[len(_THOUGHT_PREFIX) :].strip()
+    if stripped.rstrip() == _THOUGHT_LABEL:
+        return ""
+    return stripped.strip()
+
+
 def _strip_thought_label(text: str) -> str:
     """Strip the spurious `thought\\n` label from the start of text.
 
     Only strips when `thought` appears as the very first word followed by
     a newline — preserving the word `thought` in any other context.
     """
-    if text.startswith("thought\n"):
-        return text[len("thought\n") :]
+    if text.startswith(_THOUGHT_PREFIX):
+        return text[len(_THOUGHT_PREFIX) :]
+    return text
+
+
+def _strip_trailing_sentinels(text: str) -> str:
+    """Strip trailing sentinel tokens (`<turn|>`, `<eos>`) and whitespace."""
+    text = text.rstrip()
+    while True:
+        for sentinel in _TRAILING_SENTINELS:
+            if text.endswith(sentinel):
+                text = text[: -len(sentinel)].rstrip()
+                break
+        else:
+            break
     return text
 
 
@@ -121,11 +193,4 @@ def _clean_answer(text: str) -> str:
     Strips `<turn|>`, `<eos>`, and surrounding whitespace that the
     model appends at the end of its response.
     """
-    text = text.strip()
-    # Strip trailing <turn|> (Gemma4 turn-end marker)
-    if text.endswith(_TURN_END_TAG):
-        text = text[: -len(_TURN_END_TAG)].rstrip()
-    # Strip trailing <eos> if present
-    if text.endswith("<eos>"):
-        text = text[:-5].rstrip()
-    return text
+    return _strip_trailing_sentinels(text.lstrip())
