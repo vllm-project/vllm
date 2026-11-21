@@ -76,8 +76,10 @@ from .dev import (
     bf_hi,
     bf_lo,
     butterfly,
+    e4m3_dword,
     fresh,
     hw_rsq,
+    inv_kv_scale,
     ld_f32,
     ld_i32,
     ld_vec,
@@ -160,6 +162,7 @@ class Build:
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
     # this layer's verify attention fused at the HA head ("swa" / "full")
     attn: str = ""
+    kv_fp8: bool = False  # e4m3 KV cache (HB insert, HA fused attention); else bf16
 
     @property
     def bnd(self):
@@ -296,7 +299,7 @@ def build(key: Build):
         from . import attn_frag
 
         assert key.attn in ("swa", "full"), key
-        FA = attn_frag.make(S // 8, key.attn == "swa")
+        FA = attn_frag.make(S // 8, key.attn == "swa", kv_fp8=key.kv_fp8)
         FaLds = FA.Lds
         # the fragment's source hash: the disk cache does not follow FA.run
         _KEYSTR = _KEYSTR + FA.key
@@ -1835,6 +1838,8 @@ def build(key: Build):
         slots,
         cos_sin,
         pos,
+        k_scale,
+        v_scale,
         tag,
         health,
         tid,
@@ -1849,7 +1854,8 @@ def build(key: Build):
         element (slot >> 4) * bstride + (kv * 16 + (slot & 15)) * 128 + 64 isv + 2p, bstride = v_cache (a
         value); each half wave stores with its own wave-uniform 64-bit block base (readlane of its slot);
         slot < 0 and tt >= nrows skipped. Rows tt >= nrows are not real rows (their q is written, their KV
-        is not)."""
+        is not). kv_fp8: e4m3 bytes (element = byte) scaled by 1 / *k_scale or *v_scale, one dword a lane
+        pair (e4m3_dword)."""
         row0 = (hh * HD) // 2 + p
         got = mb_poll(
             tag,
@@ -1880,20 +1886,23 @@ def build(key: Build):
         else:
             kv = hh - HQ - isv.select(fx.Int32(HKV), fx.Int32(0))
             slot = ld_i32(slots, fx.min(tt, nrows - 1) * 2)
+            if const_expr(key.kv_fp8):
+                w8 = e4m3_dword(o0, o1, inv_kv_scale(isv.select(v_scale, k_scale)))
             for half in range_constexpr(2):
                 sl = readlane(slot, 32 * half)
                 tl_ = readlane(tt, 32 * half)
                 mine = ((tid % 64) >= 32) if half == 1 else ((tid % 64) < 32)
                 if (sl >= 0) & (tl_ < nrows):
-                    base = k_cache + (
-                        fx.Int64(sl >> 4) * v_cache
-                        + fx.Int64(
-                            (kv * 16 + (sl & 15)) * 128
-                            + isv.select(fx.Int32(HD), fx.Int32(0))
+                    eoff = fx.Int64(sl >> 4) * v_cache + fx.Int64(
+                        (kv * 16 + (sl & 15)) * 128
+                        + isv.select(fx.Int32(HD), fx.Int32(0))
+                    )
+                    if const_expr(key.kv_fp8):
+                        st_if(mine & (p % 2 == 0), w8, k_cache + eoff, p // 2)
+                    elif mine:
+                        bo.buffer_store(
+                            bf16_pair(o0, o1), rsrc(k_cache + eoff * fx.Int64(2)), p
                         )
-                    ) * fx.Int64(2)
-                    if mine:
-                        bo.buffer_store(bf16_pair(o0, o1), rsrc(base), p)
 
     @traced
     def head_finish(
@@ -1904,6 +1913,8 @@ def build(key: Build):
         slots,
         cos_sin,
         pos,
+        k_scale,
+        v_scale,
         tag,
         health,
         tid,
@@ -1925,6 +1936,8 @@ def build(key: Build):
                     slots,
                     cos_sin,
                     pos,
+                    k_scale,
+                    v_scale,
                     tag,
                     health,
                     tid,
@@ -2116,6 +2129,8 @@ def build(key: Build):
         slots: Int64,
         cos_sin: Int64,
         pos: Int64,
+        k_scale: Int64,
+        v_scale: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -2221,6 +2236,8 @@ def build(key: Build):
             slots,
             cos_sin,
             pos,
+            k_scale,
+            v_scale,
             tag,
             health,
             tid,
@@ -2319,6 +2336,8 @@ def build(key: Build):
         slots: Int64,
         cos_sin: Int64,
         pos: Int64,
+        k_scale: Int64,
+        v_scale: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -2357,6 +2376,8 @@ def build(key: Build):
             slots,
             cos_sin,
             pos,
+            k_scale,
+            v_scale,
             scratch,
             epoch,
             health,
@@ -2381,9 +2402,9 @@ def build(key: Build):
     return _BUILDS[key]
 
 
-def build_vllm(S=32, W=8, next_rope=True, attn=""):
+def build_vllm(S=32, W=8, next_rope=True, attn="", kv_fp8=False):
     """The HA / HB build vLLM launches for S rows (32 / 64 / 96 / 128) of a TP = EP = 8 group;
     next_rope: the next layer has RoPE (HB); attn = "swa" / "full": this layer's verify attention
-    fused at the HA head."""
+    fused at the HA head; kv_fp8: e4m3 KV cache."""
     assert W == 8 and S in (32, 64, 96, 128), (S, W)
-    return Build(S=S, next_rope=bool(next_rope), attn=attn)
+    return Build(S=S, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))
