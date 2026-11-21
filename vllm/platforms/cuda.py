@@ -798,12 +798,7 @@ class CudaPlatformBase(Platform):
     @classmethod
     @cache
     def is_arch_support_pdl(cls) -> bool:
-        try:
-            device = torch.cuda.current_device()
-            major, _ = torch.cuda.get_device_capability(device)
-        except Exception:
-            return False
-        return major >= 9
+        return cls.has_device_capability(90)
 
 
 # NVML utils
