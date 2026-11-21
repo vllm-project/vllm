@@ -9,12 +9,12 @@
  *
  * The lane layout, 128-bit register-direct state access, padded q/k shared
  * layout and packed f32x2 math are adapted from FlashInfer's cake_gdn
- * BF16-state MTP decode kernel
- * (gdn_decode_pretranspose_mtp_t4_bf16state_wide128 under
- * flashinfer/data/csrc/gdn/cake/ in FlashInfer 0.7.3,
- * https://github.com/flashinfer-ai/flashinfer, Apache-2.0, Copyright (c) 2026
- * by FlashInfer team). The reduction is our own: it keeps the summation order
- * of fused_gdn_decode_kernel.cu, so results stay bit-identical to it.
+ * BF16-state MTP decode kernel, cake_gdn_decode_pretranspose_mtp_t4_
+ * bf16state_wide128 in csrc/gdn/cake/ (FlashInfer v0.7.3), added in
+ * https://github.com/flashinfer-ai/flashinfer/pull/4581.
+ * Copyright (c) 2026 by FlashInfer team, licensed under Apache-2.0.
+ * The reduction is our own: it keeps the summation order of
+ * fused_gdn_decode_kernel.cu, so results stay bit-identical to it.
  */
 
 #include <cstdint>
