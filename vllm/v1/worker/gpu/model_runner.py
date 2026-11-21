@@ -54,9 +54,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    initialize_mamba_ssu_backend,
-)
 from vllm.model_executor.layers.quantization.online.lm_head import (
     refresh_quantized_lm_heads,
 )
@@ -800,11 +797,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if self.speculator is not None:
             self.speculator.pcp_manager = self.pcp_manager
-        initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config,
-            self.kv_cache_config,
-            use_replayssm=self.cache_config.use_replayssm,
-        )
         piecewise_capture_available = bool(
             is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
             or has_compiled_submodule(self.model)

@@ -21,7 +21,9 @@ from tests.v1.attention.utils import (
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.model_executor.layers.linear_attention.mamba.decode.selector import (
+    select_mamba_ssu_kernel,
+)
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -35,19 +37,10 @@ class ReplaySSMBuildCase:
     is_prefilling: list[bool]
 
 
-def _make_mamba_spec(
-    buffer_len: int,
-    mamba_backend: MambaBackendEnum,
-    num_speculative_tokens: int = 0,
-) -> MambaSpec:
-    shapes = MambaStateShapeCalculator.append_replayssm_ring(
-        ((1, 1), (1, 1, 1)),
-        n_groups=1,
-        tp_world_size=1,
-        logical_window=buffer_len,
-        backend=mamba_backend,
-        num_speculative_tokens=num_speculative_tokens,
-    )
+def _make_mamba_spec(vllm_config) -> MambaSpec:
+    base_shapes = ((1, 1), (1, 1, 1))
+    kernel = select_mamba_ssu_kernel(vllm_config, None)
+    shapes = (*base_shapes, *kernel.extra_state_shapes(vllm_config, base_shapes, 1))
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=shapes,
@@ -78,7 +71,7 @@ def _create_replayssm_builder(
             num_speculative_tokens=num_speculative_tokens,
         )
     return MockMambaBuilder(
-        _make_mamba_spec(buffer_len, mamba_backend, num_speculative_tokens),
+        _make_mamba_spec(vllm_config),
         ["layer0"],
         vllm_config,
         DEVICE,
