@@ -168,35 +168,34 @@ def fused_topk_bias(
         # regular routing path. image_sentinel_lo == 0 disables this.
         assert input_tokens is not None, "bias_vl routing requires input_tokens"
 
+    output_indices_dtype = torch.int32 if indices_type is None else indices_type
+    if (
+        scoring_func == "sqrtsoftplus"
+        and hash_indices_table is None
+        and can_use_dsv4_topk(
+            gating_output,
+            e_score_correction_bias,
+            topk,
+            renormalize,
+            output_indices_dtype,
+        )
+    ):
+        assert e_score_correction_bias is not None
+        return dsv4_topk(
+            gating_output,
+            e_score_correction_bias,
+            output_indices_dtype,
+            routed_scaling_factor,
+            is_padding=get_moe_padding_mask(gating_output.shape[0]),
+            input_ids=input_tokens,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
+        )
+
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
         )
-
-        output_indices_dtype = torch.int32 if indices_type is None else indices_type
-        padding_mask = get_moe_padding_mask(gating_output.shape[0])
-        if (
-            scoring_func == "sqrtsoftplus"
-            and hash_indices_table is None
-            and can_use_dsv4_topk(
-                gating_output,
-                e_score_correction_bias,
-                topk,
-                renormalize,
-                output_indices_dtype,
-            )
-        ):
-            assert e_score_correction_bias is not None
-            return dsv4_topk(
-                gating_output,
-                e_score_correction_bias,
-                output_indices_dtype,
-                routed_scaling_factor,
-                is_padding=padding_mask,
-                input_ids=input_tokens,
-                bias_vl=bias_vl,
-                image_sentinel_lo=image_sentinel_lo,
-            )
 
         M, _ = hidden_states.size()
 
