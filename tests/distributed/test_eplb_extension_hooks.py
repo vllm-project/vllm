@@ -23,9 +23,8 @@ from vllm.distributed.eplb.eplb_state import (
     EplbStats,
     compute_logical_maps,
 )
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
-from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
+from vllm.distributed.eplb.rebalance_execute import transfer_layer
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform, PlatformEnum
@@ -201,7 +200,6 @@ class _ModelState(EplbModelState):
 
     def _commit_eplb_maps_for_layer(self, target, layer):
         super()._commit_eplb_maps_for_layer(target, layer)
-        assert not self.pending_result.consumed_event._recorded.is_set()
         if self.fail_commit:
             raise RuntimeError("device commit failed")
         self.committed_layers.append(layer)
@@ -242,7 +240,6 @@ def model_state(cpu_group):
         model_name="expert-test",
         model=model,
         expert_buffer=[torch.empty_like(model.weight)],
-        rebalanced=False,
         eplb_stats=None,
         device_index=None,
         communicator=TorchDistGlooStagedEplbCommunicator(cpu_group),
@@ -273,7 +270,9 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
     state = _State(Policy())
     if use_async:
         model_state.eplb_stats = published_stats
-        result = run_rebalance_experts(model_state, state, current, None)
+        result = run_rebalance_experts(
+            state.policy, model_state.eplb_stats, current, None
+        )
     else:
         result = state.policy.rebalance_experts(published_stats, current)
     default_state = EplbState(ParallelConfig(), torch.device("cpu"))
@@ -283,9 +282,7 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
 
 
 @pytest.mark.parametrize("fail_commit", [False, True])
-def test_async_commit_updates_maps_before_buffer_acknowledgement(
-    model_state, fail_commit
-):
+def test_async_layer_apply_installs_weights_and_maps(model_state, fail_commit):
     model_state.fail_commit = fail_commit
     target = torch.tensor([[1, 0, 3, 2]])
     original = model_state.model.weight.detach().clone()
@@ -299,25 +296,20 @@ def test_async_commit_updates_maps_before_buffer_acknowledgement(
         stream=None,
         is_profile=False,
     )
-    result = AsyncEplbLayerResult(0, target[0], metadata, CpuGpuEvent())
-    model_state.pending_result = result
-    model_state.rebalanced = True
     if fail_commit:
         with pytest.raises(RuntimeError, match="commit failed"):
-            model_state._move_to_workspace(0)
+            model_state._move_to_workspace(0, target[0], metadata)
     else:
-        model_state._move_to_workspace(0)
+        model_state._move_to_workspace(0, target[0], metadata)
     torch.testing.assert_close(model_state.model.weight, original[[1, 0, 3, 2]])
     torch.testing.assert_close(model_state.physical_to_logical_map, target)
     if fail_commit:
         assert model_state.committed_layers == []
-        assert model_state.pending_result is result
-        assert not result.consumed_event._recorded.is_set()
+        assert model_state.num_committed_layers == 0
     else:
         assert model_state.committed_layers == [0]
         torch.testing.assert_close(model_state.committed_maps[0], target)
-        assert model_state.pending_result is None
-        assert result.consumed_event._recorded.is_set()
+        assert model_state.num_committed_layers == 1
 
 
 def test_sync_commit_updates_maps_before_device_work(model_state):

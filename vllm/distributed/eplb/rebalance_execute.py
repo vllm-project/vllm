@@ -7,13 +7,14 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent, device_stream
+from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.distributed.eplb.migration_scheduler import (
     MigrationFlow,
     schedule_migration_batches,
@@ -22,6 +23,9 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
+
+if TYPE_CHECKING:
+    from .async_worker import AsyncEplbPlan
 
 logger = init_logger(__name__)
 
@@ -57,13 +61,8 @@ class AsyncEplbLayerResult:
     """
     transfer_metadata: TransferMetadata
     """Metadata describing what was received during transfer_layer."""
-    consumed_event: CpuGpuEvent
-    """
-    Event used to synchronize access to the intermediate buffer. The async worker calls
-    wait() after it finishes transferring weights to the intermediate buffer. The main
-    thread calls record() after it finishes transferring weights out of the intermediate
-    buffer in _move_to_workspace()
-    """
+    plan: "AsyncEplbPlan"
+    """The placement plan of this cycle, passed on to the next layer's job."""
 
 
 def get_ep_ranks_with_experts_batch(

@@ -16,6 +16,7 @@ steps:
   - tests/distributed/test_eplb_extension_hooks.py
   - vllm/config/parallel.py
   - vllm/platforms/interface.py
+  - vllm/v1/worker/sentinel/eplb_redistribute.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_migration_scheduler.py
@@ -37,6 +38,7 @@ steps:
       - tests/distributed/test_eplb_extension_hooks.py
       - vllm/config/parallel.py
       - vllm/platforms/interface.py
+      - vllm/v1/worker/sentinel/eplb_redistribute.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) [Nightly] EPLB Execution"
