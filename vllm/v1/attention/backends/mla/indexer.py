@@ -428,6 +428,11 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     num_reqs: int
     skip_kv_gather: bool = False
     local_cu_seq_lens: torch.Tensor | None = None
+    # The same row bounds in the global key space: column j of a row is token
+    # j of the request, not token j of this rank's shard. Only filled when the
+    # backend asks for them (build_prefill_chunk_metadata global_row_bounds).
+    global_cu_seqlen_ks: torch.Tensor | None = None
+    global_cu_seqlen_ke: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
 
@@ -978,6 +983,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # so this is None; its own split uses self.decode_threshold.
     reorder_batch_threshold: int | None = None
     requires_block_table_width = True
+    # Set by builders whose indexer layout keeps exactly one key per token, so
+    # a rank can score its share of a prefill chunk's query rows against every
+    # rank's keys and share the selections. Layouts that compress keys or
+    # preselect candidates keep scoring every row.
+    _dcp_prefill_rowshard_supported: bool = False
 
     @classmethod
     def get_cudagraph_support(
@@ -1034,6 +1044,22 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             and self.vllm_config.speculative_config.enable_adaptive_verification
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
+        # The ROCm DCP indexer can score a prefill row against every rank's
+        # keys at once, which needs the row's bounds in the global key space
+        # beside the local ones the kernel writes into cu_seqlen_ks/ke.
+        self._needs_global_row_bounds = (
+            current_platform.is_rocm()
+            and self.dcp_world_size > 1
+            and not self.use_pcp
+            and envs.VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL
+        )
+        self._rowshard_dcp_prefill = (
+            self._needs_global_row_bounds
+            and envs.VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL
+            and self._dcp_prefill_rowshard_supported
+            and self.compress_ratio == 1
+            and not self.indexer_uses_fp4
+        )
         # Plan prefill chunks for the fused MQA+top-k kernel (not bounded by
         # the logits budget). PCP + DCP has its own planner. v4.1 candidate
         # selection is not excluded: its pre-candidate indexers take
@@ -1620,6 +1646,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            if self._rowshard_dcp_prefill:
+                # Each rank scores only its query rows. The scorer still tiles
+                # within the original per-rank workspace budget.
+                max_logits_bytes *= self.dcp_world_size
             # Upper bound is exact for prefill rows (the `[num_decodes:]`
             # slice below).
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
@@ -1688,6 +1718,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     dcp_world_size=self.dcp_world_size,
                     cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
                     pcp_plan=pcp_plan,
+                    global_row_bounds=self._needs_global_row_bounds,
                     positions=positions,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
@@ -1977,6 +2008,7 @@ def build_prefill_chunk_metadata(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     pcp_plan: PCPGlobalChunkPlan | None = None,
+    global_row_bounds: bool = False,
     positions: torch.Tensor | None = None,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     if pcp_plan is not None:
@@ -2071,6 +2103,30 @@ def build_prefill_chunk_metadata(
         positions=positions,
     )
 
+    # Run the same kernel once more with a single rank, so the bounds address
+    # the request's whole key range rather than this rank's shard of it.
+    global_ks: torch.Tensor | None = None
+    global_ke: torch.Tensor | None = None
+    if global_row_bounds and dcp_world_size > 1 and pcp_plan is None:
+        global_ks = torch.empty_like(cu_seq_len_ks)
+        global_ke = torch.empty_like(cu_seq_len_ke)
+        _BUILD_PREFILL_CHUNK_METADATA_KERNEL(
+            query_start_loc,
+            uncompressed_seq_lens[start_idx:end_idx],
+            cu_seq_lens,
+            cu_seq_lens,
+            token_to_seq,
+            global_ks,
+            global_ke,
+            qs_start,
+            qs_stop,
+            0,
+            1,
+            cp_kv_cache_interleave_size,
+            num_reqs=num_reqs,
+            COMPRESS_RATIO=compress_ratio,
+        )
+
     pcp_deinterleave_idx = pcp_plan.deinterleave_idx if pcp_plan is not None else None
 
     token_start = query_start_loc_cpu[start_idx].item()
@@ -2095,6 +2151,8 @@ def build_prefill_chunk_metadata(
         num_reqs=num_reqs,
         skip_kv_gather=skip_kv_gather,
         local_cu_seq_lens=local_cu_seq_lens,
+        global_cu_seqlen_ks=global_ks,
+        global_cu_seqlen_ke=global_ke,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
     )
