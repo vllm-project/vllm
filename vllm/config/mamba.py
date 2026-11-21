@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from enum import Enum, EnumMeta
+from enum import EnumMeta, StrEnum
 from typing import Any, Literal, get_args
 
 from pydantic import field_validator
@@ -18,12 +18,12 @@ class _MambaBackendEnumMeta(EnumMeta):
         except KeyError:
             valid = ", ".join(cls.__members__.keys())
             raise ValueError(
-                f"Unknown Mamba SSU backend: '{name}'. Valid options are: {valid}"
+                f"Unknown Mamba backend: '{name}'. Valid options are: {valid}"
             ) from None
 
 
-class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
-    """Enumeration of supported Mamba SSU (selective state update) backends."""
+class MambaBackendEnum(StrEnum, metaclass=_MambaBackendEnumMeta):
+    """Enumeration of supported Mamba backends."""
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
@@ -37,29 +37,33 @@ MambaSSUAlgorithm = Literal["auto", "simple", "vertical", "horizontal"]
 class MambaConfig:
     """Configuration for Mamba SSM backends."""
 
-    backend: MambaBackendEnum = MambaBackendEnum.TRITON
-    """Mamba SSU backend to use."""
+    backend: MambaBackendEnum | None = None
+    """Kernel backend for Mamba decode (SSU, and ReplaySSM's provider). A
+    backend that can't run fails at startup. None selects automatically:
+    Triton on GPUs and "cpu" on CPU, or FlashInfer where only it can run what
+    is asked."""
 
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.
     Uses random bits to unbias the rounding error, which can improve
-    numerical stability for long sequences. The Triton backend requires
-    compute capability 10.0 on CUDA or gfx950 on ROCm."""
+    numerical stability for long sequences. Needs a float16 SSM cache
+    (`--mamba-ssm-cache-dtype float16`) and a decode kernel that supports it:
+    Triton on compute capability 10.x (CUDA) or gfx950 (ROCm), or FlashInfer."""
     stochastic_rounding_philox_rounds: int = 0
     """Number of Philox PRNG rounds for stochastic rounding random number
     generation. 0 uses the Triton default. Higher values improve randomness
     quality at the cost of compute."""
 
     ssu_algorithm: MambaSSUAlgorithm | None = None
-    """Selective state update algorithm to use with the FlashInfer backend.
-    None defaults to FlashInfer's "auto" algorithm. Forced algorithms must
-    be supported by FlashInfer for the active GPU, state dtype, and decoding
-    mode."""
+    """Selective state update algorithm for FlashInfer's decode kernel, the
+    only one that takes one. None defaults to FlashInfer's "auto" algorithm.
+    Forced algorithms must be supported by FlashInfer for the active GPU,
+    state dtype, and decoding mode."""
 
-    prefill_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    prefill_backend: MambaBackendEnum | None = None
     """Kernel backend for the SSD scan of Mamba2 prefills. "flashinfer" runs
-    FlashInfer's fused SSD scan (SM100/SM103 only); prefills that store Mamba
-    checkpoints always use "triton"."""
+    FlashInfer's fused SSD scan (SM10x). A backend that can't run fails at
+    startup. None selects automatically: Triton on GPUs, "cpu" on CPU."""
 
     @field_validator("backend", "prefill_backend", mode="before")
     @classmethod
@@ -79,56 +83,6 @@ class MambaConfig:
                 f"Unknown Mamba SSU algorithm: '{self.ssu_algorithm}'. "
                 f"Valid options are: {valid}"
             )
-        if self.backend != MambaBackendEnum.FLASHINFER:
-            raise ValueError(
-                "Mamba SSU algorithm selection is only supported with the "
-                "FlashInfer backend. Please set `--mamba-backend flashinfer`, "
-                "or omit `--mamba-ssu-algorithm`."
-            )
-
-    def validate_prefill_backend(self) -> None:
-        if self.prefill_backend == MambaBackendEnum.CPU:
-            raise ValueError(
-                "Unknown Mamba prefill backend: 'cpu'. "
-                "Valid options are: triton, flashinfer"
-            )
-        if self.prefill_backend == MambaBackendEnum.FLASHINFER:
-            from vllm.platforms import current_platform
-
-            if not current_platform.is_device_capability_family(100):
-                raise ValueError(
-                    "--mamba-prefill-backend flashinfer requires SM100/SM103."
-                )
 
     def __post_init__(self):
         self.validate_ssu_algorithm()
-        self.validate_prefill_backend()
-        if self.enable_stochastic_rounding:
-            from vllm.platforms import current_platform
-
-            if current_platform.is_rocm():
-                from vllm.platforms.rocm import on_gfx950
-
-                if not on_gfx950():
-                    raise ValueError(
-                        "Stochastic rounding for Mamba cache on ROCm requires "
-                        "gfx950 (MI350/MI355). Please do not specify "
-                        "`--enable-mamba-cache-stochastic-rounding`."
-                    )
-            elif not current_platform.is_cuda():
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache is only supported "
-                    "on NVIDIA CUDA and AMD gfx950 platforms. Please do not specify "
-                    "`--enable-mamba-cache-stochastic-rounding`."
-                )
-            elif (
-                self.backend == MambaBackendEnum.TRITON
-                and not current_platform.is_device_capability_family(100)
-            ):
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache with triton backend requires "
-                    "compute capability 10.0 (data center Blackwell). The `cvt.rs` "
-                    "PTX instruction is not supported on your GPU. Please do not "
-                    "specify `--enable-mamba-cache-stochastic-rounding`, "
-                    "or set `--mamba-backend flashinfer`."
-                )

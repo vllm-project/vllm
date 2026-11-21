@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.v1.attention.test_gdn_metadata_builder import (
+    BLOCK_SIZE,
     DEVICE,
     _common_attn_metadata,
     _create_gdn_builder,
@@ -17,6 +18,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_vllm_config,
 )
+from tests.v1.worker.test_utils import _TestReplaySSMMixer
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms import current_platform
@@ -262,16 +264,21 @@ def test_replayssm_uses_built_mamba_decode_split(
     gdn_builder = _create_gdn_builder(num_speculative_tokens=3, full_cuda_graph=True)
     config = gdn_builder.vllm_config
     config.model_config.hf_text_config.mamba_chunk_size = 256
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64), (4, 8, 16)),
+        dtypes=(torch.float16, torch.float32),
+    )
     mamba_builder = Mamba2AttentionMetadataBuilder(
-        gdn_builder.kv_cache_spec, ["mamba"], config, DEVICE
+        mamba_spec, ["mamba"], config, DEVICE
     )
     # Classification uses the provider-independent Mamba builder on CPU.
     state_config = create_vllm_config(max_num_seqs=4, max_num_batched_tokens=16)
     state_config.speculative_config = config.speculative_config
     state_config.cache_config.use_replayssm = True
     state_config.cache_config.enable_prefix_caching = False
-    state_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    state = MambaHybridModelState(state_config, torch.nn.Module(), None, DEVICE)
+    model = torch.nn.Sequential(_TestReplaySSMMixer(MambaBackendEnum.FLASHINFER))
+    state = MambaHybridModelState(state_config, model, None, DEVICE)
     # The groups use these backend types without instantiating them.
     groups = [
         AttentionGroup(

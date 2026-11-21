@@ -239,6 +239,7 @@ steps:
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/layers/linear_attention/mamba/decode/
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/warmup/kernel_warmup.py
     - vllm/model_executor/warmup/replayssm_warmup.py
@@ -289,6 +290,7 @@ steps:
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/layers/linear_attention/mamba/decode/
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/warmup/kernel_warmup.py
     - vllm/model_executor/warmup/replayssm_warmup.py
@@ -339,6 +341,7 @@ steps:
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/layers/linear_attention/mamba/decode/
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/warmup/kernel_warmup.py
     - vllm/model_executor/warmup/replayssm_warmup.py
