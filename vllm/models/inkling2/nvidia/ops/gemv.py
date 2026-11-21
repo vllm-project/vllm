@@ -40,7 +40,6 @@ def _low_m_bmm_kernel(
     K_PER_SPLIT: tl.constexpr,
     SPLIT: tl.constexpr,
     MP: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
 ):
     """Program `(n, b, s)` computes column tile `n` of batch `b` over K range
     `s`. With `SPLIT > 1` it writes fp32 partials to `P` `[SPLIT, B, MP, N]`;
@@ -84,7 +83,7 @@ def _low_m_bmm_kernel(
                 )
             tl.atomic_xchg(C + tile, 0, sem="relaxed", scope="gpu")
     if is_last:
-        if HAS_BIAS:
+        if Bias is not None:
             acc += tl.load(Bias + cols, cols < N, other=0).to(tl.float32)[None, :]
         tl.store(
             Y + (b * SYB + rows[:, None] * SYM + cols[None, :]),
@@ -255,7 +254,6 @@ def low_m_bmm(
         K_PER_SPLIT=cfg.k_per_split,
         SPLIT=cfg.split,
         MP=_MP,
-        HAS_BIAS=bias is not None,
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
         launch_pdl=True,
