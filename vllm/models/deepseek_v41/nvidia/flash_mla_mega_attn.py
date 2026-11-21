@@ -203,7 +203,12 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         config = getattr(config, "text_config", config)
         n_heads = getattr(config, "num_attention_heads", 0) or 0
         n_groups = getattr(config, "o_groups", 0) or 0
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # A replicated mixer keeps every head on every rank.
+        tp_size = (
+            1
+            if envs.VLLM_DSV41_REPLICATE_MIXER
+            else vllm_config.parallel_config.tensor_parallel_size
+        )
         if n_heads % tp_size or n_groups % tp_size:
             return False
         n_local_heads, n_local_groups = n_heads // tp_size, n_groups // tp_size
