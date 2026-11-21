@@ -93,3 +93,13 @@ def test_processor_reuses_tokenizer_snapshot():
     get_tokenizer(model)
     get_processor(model)
     assert _snapshot_non_weight_files.cache_info().misses == 1
+
+
+def test_processor_keeps_caller_tokenizer_name():
+    """The renderer shares its tokenizer with the processor and resolves the
+    chat template from the tokenizer's name, so `--tokenizer` must win."""
+    tokenizer = get_tokenizer("Qwen/Qwen2-VL-7B-Instruct")
+    processor = get_processor("Qwen/Qwen2-VL-2B-Instruct", tokenizer=tokenizer)
+
+    assert processor.tokenizer is tokenizer
+    assert tokenizer.name_or_path == "Qwen/Qwen2-VL-7B-Instruct"
