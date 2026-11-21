@@ -2482,7 +2482,9 @@ def test_prefill_hybrid_model_hash_lookahead():
         assert hit == expected
         assert all(len(group) == expected // block_size for group in blocks.blocks)
     # Losing a full-attention block still limits every group's shared hit.
-    (evicted,) = manager.block_pool.get_cached_block(prime.block_hashes[4], [0])
+    cached = manager.block_pool.get_cached_block(prime.block_hashes[4], [0])
+    assert cached is not None
+    (evicted,) = cached
     manager.block_pool.evict_blocks({evicted.block_id})
     _, hit, _ = manager.get_computed_blocks(prime)
     assert hit == 64

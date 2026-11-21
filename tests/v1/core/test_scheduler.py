@@ -489,6 +489,8 @@ def test_kv_loaded_without_auxiliary_outputs_is_hit_before_emit_start(
     )
     scheduler.aux_output_connector = _aux_output_connector(scheduler)
     first, second = create_requests(num_requests=2, num_tokens=80, same_prompt=True)
+    assert second.sampling_params is not None
+    assert first.sampling_params is not None
     second.sampling_params = second.sampling_params.clone()
     first.sampling_params.routed_experts_prompt_start = 80
     second.sampling_params.routed_experts_prompt_start = prompt_start
@@ -502,7 +504,8 @@ def test_kv_loaded_without_auxiliary_outputs_is_hit_before_emit_start(
     )
     assert scheduler.schedule().num_scheduled_tokens == {first.request_id: 1}
     scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
-    scheduler.connector.get_num_new_matched_tokens = Mock(
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = Mock(  # type: ignore[method-assign]
         return_value=(external_tokens, False)
     )
     scheduler.add_request(second)
@@ -510,6 +513,7 @@ def test_kv_loaded_without_auxiliary_outputs_is_hit_before_emit_start(
     output = scheduler.schedule()
 
     assert output.num_scheduled_tokens == {second.request_id: expected_tokens}
+    assert output.aux_output_connector_metadata is not None
     assert output.aux_output_connector_metadata.retained_block_hashes is None
 
 
@@ -5324,7 +5328,7 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     scheduler = create_scheduler()
     manager = scheduler.structured_output_manager
     manager.backends["xgrammar"] = Mock()
-    manager.backends["xgrammar"].compile_grammar.side_effect = RuntimeError(
+    manager.backends["xgrammar"].compile_grammar.side_effect = RuntimeError(  # type: ignore[attr-defined]
         "forced FSM compilation error"
     )
     manager._use_async_grammar_compilation = async_grammar
@@ -5957,7 +5961,8 @@ def test_ec_connector_cache_miss_fails_metadata_only_item(use_kv_connector):
     resolver = PlaceholderMetadataResolver(scheduler.vllm_config.model_config)
     resolver._cache["image"] = {"image_grid_thw"}
     scheduler._ec_metadata_resolver = resolver
-    scheduler.ec_connector.has_cache_item = Mock(return_value=False)
+    assert scheduler.ec_connector is not None
+    scheduler.ec_connector.has_cache_item = Mock(return_value=False)  # type: ignore[method-assign]
 
     scheduler.add_request(request)
     output = scheduler.schedule()

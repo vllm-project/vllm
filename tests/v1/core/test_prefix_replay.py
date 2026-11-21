@@ -174,6 +174,7 @@ def test_throttle_defers_prefix_replay(via_connector):
     )
     _prefill(scheduler, first)
     if via_connector:
+        assert isinstance(scheduler.connector, MockKVConnector)
         scheduler.connector.config = dataclasses.replace(
             scheduler.connector.config, matched_tokens=HIT_TOKENS
         )

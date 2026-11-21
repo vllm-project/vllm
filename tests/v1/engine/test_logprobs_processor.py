@@ -263,8 +263,17 @@ def test_byte_fallback_context_spans_rows_and_batches(prompt, flat_logprobs, spl
             )
         start += size
 
-    stored = processor.prompt_logprobs[1:] if prompt else processor.logprobs
-    decoded = [[lp.decoded_token for lp in position.values()] for position in stored]
+    if prompt:
+        assert processor.prompt_logprobs is not None
+        stored = processor.prompt_logprobs[1:]
+    else:
+        assert processor.logprobs is not None
+        stored = processor.logprobs
+    decoded = [
+        [lp.decoded_token for lp in position.values()]
+        for position in stored
+        if position is not None
+    ]
     # 12 completes "é" only right after a sampled 11 (a row's own sampled
     # token is not its context); row 4 samples 12, also a candidate.
     assert decoded == [
