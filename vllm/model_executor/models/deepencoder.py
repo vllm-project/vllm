@@ -18,12 +18,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionConfig
 
+from vllm import envs
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
-from vllm.triton_utils import LOG2E, tl, triton
+from vllm.triton_utils import HAS_TRITON, LOG2E, tl, triton
 
 from .clip import CLIPEncoder, CLIPVisionEmbeddings
 from .utils import AutoWeightsLoader
@@ -228,6 +230,94 @@ class LayerNorm2d(nn.Module):
         return x
 
 
+@triton.jit
+def _pack_conv2d_windows_kernel(
+    x_ptr,
+    rows_ptr,
+    stride_b,
+    stride_c,
+    stride_h,
+    stride_w,
+    INPUT_H: tl.constexpr,
+    INPUT_W: tl.constexpr,
+    OUTPUT_H: tl.constexpr,
+    OUTPUT_W: tl.constexpr,
+    KERNEL_H: tl.constexpr,
+    KERNEL_W: tl.constexpr,
+    STRIDE_H: tl.constexpr,
+    STRIDE_W: tl.constexpr,
+    PAD_H: tl.constexpr,
+    PAD_W: tl.constexpr,
+    ROW_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Pack zero-padded windows into contiguous rows for a SAM convolution."""
+    batch = tl.program_id(1).to(tl.int64)
+    offset = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    image_size: tl.constexpr = OUTPUT_H * OUTPUT_W * ROW_SIZE
+    position = offset // ROW_SIZE
+    element = offset % ROW_SIZE
+    channel = element // (KERNEL_H * KERNEL_W)
+    h = position // OUTPUT_W * STRIDE_H + element // KERNEL_W % KERNEL_H - PAD_H
+    w = position % OUTPUT_W * STRIDE_W + element % KERNEL_W - PAD_W
+    valid = offset < image_size
+    value = tl.load(
+        x_ptr + batch * stride_b + channel * stride_c + h * stride_h + w * stride_w,
+        mask=valid & (h >= 0) & (h < INPUT_H) & (w >= 0) & (w < INPUT_W),
+        other=0,
+    )
+    tl.store(rows_ptr + batch * image_size + offset, value, mask=valid)
+
+
+class _DeepEncoderConv2d(Conv2dLayer):
+    """Implement an ungrouped, undilated SAM convolution with GEMM."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pad_h, pad_w = self.padding
+        kernel_h, kernel_w = self.kernel_size
+        stride_h, stride_w = self.stride
+        batch, _, input_h, input_w = x.shape
+        height = (input_h + 2 * pad_h - kernel_h) // stride_h + 1
+        width = (input_w + 2 * pad_w - kernel_w) // stride_w + 1
+
+        if self.kernel_size == self.stride == (1, 1) and self.padding == (0, 0):
+            rows = x.permute(0, 2, 3, 1).reshape(-1, self.input_size).contiguous()
+        elif HAS_TRITON and x.device.type in ("cuda", "xpu"):
+            rows = x.new_empty((batch * height * width, self.input_size))
+            block_size = 512
+            grid = (triton.cdiv(height * width * self.input_size, block_size), batch)
+            _pack_conv2d_windows_kernel[grid](
+                x,
+                rows,
+                *x.stride(),
+                input_h,
+                input_w,
+                height,
+                width,
+                kernel_h,
+                kernel_w,
+                stride_h,
+                stride_w,
+                pad_h,
+                pad_w,
+                self.input_size,
+                block_size,
+                num_warps=4,
+            )
+        else:
+            padded = F.pad(x, (pad_w, pad_w, pad_h, pad_h))
+            patches = padded.unfold(2, kernel_h, stride_h).unfold(3, kernel_w, stride_w)
+            rows = patches.permute(0, 2, 3, 1, 4, 5).reshape(-1, self.input_size)
+
+        linear = linear_batch_invariant if envs.VLLM_BATCH_INVARIANT else F.linear
+        output = linear(rows, self.weight.flatten(1), self.bias)
+        return (
+            output.view(batch, height, width, self.out_channels)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
+
+
 # This class and its supporting functions below lightly adapted from the ViTDet backbone available at: https://github.com/facebookresearch/detectron2/blob/main/detectron2/modeling/backbone/vit.py # noqa
 class ImageEncoderViT(nn.Module):
     def __init__(
@@ -304,14 +394,14 @@ class ImageEncoderViT(nn.Module):
             self.blocks.append(block)
 
         self.neck = nn.Sequential(
-            Conv2dLayer(
+            _DeepEncoderConv2d(
                 embed_dim,
                 out_chans,
                 kernel_size=1,
                 bias=False,
             ),
             LayerNorm2d(out_chans),
-            Conv2dLayer(
+            _DeepEncoderConv2d(
                 out_chans,
                 out_chans,
                 kernel_size=3,
@@ -321,10 +411,10 @@ class ImageEncoderViT(nn.Module):
             LayerNorm2d(out_chans),
         )
 
-        self.net_2 = Conv2dLayer(
+        self.net_2 = _DeepEncoderConv2d(
             256, 512, kernel_size=3, stride=2, padding=1, bias=False
         )
-        self.net_3 = Conv2dLayer(
+        self.net_3 = _DeepEncoderConv2d(
             512, last_conv_output, kernel_size=3, stride=2, padding=1, bias=False
         )
 
@@ -357,10 +447,7 @@ class ImageEncoderViT(nn.Module):
             x = blk(x)
 
         neck_output = self.neck(x.permute(0, 3, 1, 2))
-        conv2_output = self.net_2(neck_output)
-        conv3_output = self.net_3(conv2_output)
-
-        return conv3_output
+        return self.net_3(self.net_2(neck_output))
 
 
 class Block(nn.Module):
@@ -697,7 +784,7 @@ class PatchEmbed(nn.Module):
         """
         super().__init__()
 
-        self.proj = Conv2dLayer(
+        self.proj = _DeepEncoderConv2d(
             in_chans, embed_dim, kernel_size=kernel_size, stride=stride, padding=padding
         )
 
