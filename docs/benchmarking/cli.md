@@ -111,6 +111,11 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
+When the server exposes prefix cache counters and reports new queries during the
+benchmark, `vllm bench serve` prints `Prefix cache hit rate (%)`. The rate is
+the percentage of queried tokens that hit the device-local prefix cache during
+the run. It excludes external cache hits from KV connectors.
+
 #### Results Visualization
 
 The `--plot-timeline` and `--plot-dataset-stats` can be used to generate respectively the requests completion timeline and dataset prompt and output tokens statistics, which can be useful for debugging purpose or for deeper analysis.
