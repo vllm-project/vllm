@@ -72,11 +72,12 @@ def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
     column_scales, monkeypatch, enable_aiter_mqa
 ) -> None:
     """The vLLM AITER dispatch honors ragged intervals and per-token scales."""
+    import aiter.mqa_logits as aiter_mqa_logits
+
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     assert rocm_aiter_ops.is_enabled(), "AITER is required on gfx950"
-    assert mod.mqa_logits_module() is not None, "AITER MQA logits are required"
     torch.manual_seed(42)
     device = torch.device("cuda")
     dtype = current_platform.fp8_dtype()
@@ -91,8 +92,9 @@ def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
         [1, 129, 259, 5, 259, 259, 259], device=device, dtype=torch.int32
     )
 
-    module = mod.mqa_logits_module()
-    implementation = module.fp8_mqa_logits
+    # gfx950 goes through AITER's shape dispatch, which picks Triton or FlyDSL
+    # (on 256 CUs this 32-head shape takes the smallest tuned FlyDSL row).
+    implementation = aiter_mqa_logits.mqa_logits
     calls = 0
 
     def traced_implementation(*args, **kwargs):
@@ -100,7 +102,7 @@ def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
         calls += 1
         return implementation(*args, **kwargs)
 
-    monkeypatch.setattr(module, "fp8_mqa_logits", traced_implementation)
+    monkeypatch.setattr(aiter_mqa_logits, "mqa_logits", traced_implementation)
     actual = mod.rocm_fp8_mqa_logits(q, (k, scales), weights, starts, ends)
     assert calls == 1
     score = torch.einsum("mhd,nd->mhn", q.float(), k.float()) * scales.reshape(-1)
