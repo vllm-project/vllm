@@ -114,6 +114,7 @@ async def init_generate_state(
             tool_parser=args.tool_call_parser,
             tool_strict_level=args.tool_strict_level,
             tool_server=state.tool_server,
+            enable_tool_json_retry=args.enable_tool_json_retry,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,

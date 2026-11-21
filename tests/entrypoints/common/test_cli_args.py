@@ -267,6 +267,15 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     validate_parsed_serve_args(args)
 
 
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [([], False), (["--enable-tool-json-retry"], True)],
+)
+def test_enable_tool_json_retry(serve_parser, cli_args, expected):
+    args = serve_parser.parse_args(args=cli_args)
+    assert args.enable_tool_json_retry is expected
+
+
 def test_auto_tool_choice_with_reasoning_parser_passes(serve_parser):
     """Auto tool choice combined with a reasoning parser is supported.
 

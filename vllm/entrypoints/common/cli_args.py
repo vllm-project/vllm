@@ -150,6 +150,12 @@ class BaseFrontendArgs:
     The `demo` Python tool executes model-generated code in Docker without
     network isolation by default. See the security guide for more
     information."""
+    enable_tool_json_retry: bool = False
+    """Responses API only. If set to True, when the model calls a built-in
+    tool (browser or container, see `--tool-server`) with arguments that are
+    not valid JSON, return the parse error to the model so it can retry the
+    call. If set to False, the request fails instead. Replaces the deprecated
+    `VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY` environment variable."""
     max_log_len: int | None = None
     """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""

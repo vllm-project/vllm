@@ -373,6 +373,16 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub tool_server: Option<Unsupported>,
 
+    /// Responses API only. If set to True, return built-in tool argument JSON
+    /// parse errors to the model so it can retry the call.
+    #[arg(
+        long,
+        visible_alias = "no-enable-tool-json-retry",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_tool_json_retry: Option<Unsupported>,
+
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,

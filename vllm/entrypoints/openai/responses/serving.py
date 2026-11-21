@@ -21,7 +21,7 @@ from openai.types.responses.response_output_text import Logprob, LogprobTopLogpr
 from pydantic import TypeAdapter
 
 from vllm import envs
-from vllm.config.utils import replace
+from vllm.config.utils import get_from_deprecated_env_if_set, replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -118,6 +118,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         tool_parser: str | None = None,
         tool_strict_level: str | None = None,
         tool_server: ToolServer | None = None,
+        enable_tool_json_retry: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_per_request_metrics: bool = False,
@@ -151,6 +152,17 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.enable_per_request_metrics = enable_per_request_metrics
+
+        # The env var is deprecated; it still enables retry when set.
+        if get_from_deprecated_env_if_set(
+            "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY",
+            removal_version="v0.36.0",
+            field_name="--enable-tool-json-retry",
+        ):
+            enable_tool_json_retry = (
+                enable_tool_json_retry or envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY
+            )
+        self.enable_tool_json_retry = enable_tool_json_retry
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -463,6 +475,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     function_tool_names,
                     response_parser=response_parser,
                     request=request,
+                    enable_tool_json_retry=self.enable_tool_json_retry,
                 )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
@@ -478,6 +491,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
+                        enable_tool_json_retry=self.enable_tool_json_retry,
                     )
                 else:
                     context = SimpleContext(

@@ -2156,9 +2156,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # temperature=0). Set to an ISO date string, e.g. "2023-09-12",
     # for reproducible inference or testing.
     "VLLM_SYSTEM_START_DATE": lambda: os.getenv("VLLM_SYSTEM_START_DATE", None),
-    # Enable automatic retry when tool call JSON parsing fails
-    # If enabled, returns an error message to the model to retry
-    # If disabled (default), raises an exception and fails the request
+    # Deprecated: use --enable-tool-json-retry instead.
+    # This environment variable will be removed in v0.36.0.
     "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
         int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
     ),
