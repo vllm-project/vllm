@@ -99,6 +99,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.kimi_k3.common.dsa_cache import packed_dsa_block_size
+from vllm.models.kimi_k3.nvidia.dense_draft import aux_reads_attn_res
 from vllm.models.kimi_k3.nvidia.dsa import KimiK3DSAAttention
 from vllm.models.kimi_k3.nvidia.gqa_draft import GQADraftKVCacheGrouping
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
@@ -986,6 +987,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.config = config
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
+        self._aux_attn_res_stream = aux_reads_attn_res(vllm_config)
         parallel_config = vllm_config.parallel_config
         use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         self.use_sequence_parallel = (
@@ -1134,20 +1136,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if not pp.is_last_rank and self.end_layer in self.aux_hidden_state_layers:
                 raise ValueError(
                     f"Auxiliary layer {self.end_layer} cannot end a non-final PP "
-                    "stage when VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=1"
+                    "stage when the draft reads the AttnRes stream"
                 )
         if self.use_attn_res:
             logger.info_once(
-                "Kimi-K3 aux hidden capture: layers=%s mode=%s "
-                "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
+                "Kimi-K3 aux hidden capture: layers=%s mode=%s",
                 self.aux_hidden_state_layers,
                 "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
-                int(self._aux_attn_res_stream),
             )
-
-    @property
-    def _aux_attn_res_stream(self) -> bool:
-        return envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM
 
     def _capture_aux_hidden_stream(
         self,

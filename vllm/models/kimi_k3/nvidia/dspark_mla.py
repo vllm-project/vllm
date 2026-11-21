@@ -144,100 +144,16 @@ class K3DSparkDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class K3DSparkModel(nn.Module):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        start_layer_id: int,
-        prefix: str,
-    ) -> None:
-        super().__init__()
-        assert vllm_config.speculative_config is not None
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self.quant_config = get_draft_quant_config(vllm_config)
+class K3DraftContextKV(nn.Module):
+    """Fused write of the target-derived context K/V of every MLA draft layer.
 
-        # The frozen target embedding is aliased after the draft checkpoint loads.
-        self.embed_tokens: nn.Module | None = None
+    Subclasses set `layers` (each with a K3 MLA `self_attn`), `context_kv_proj`
+    (every layer's KV rows of the fused A projection) and
+    `_max_num_context_tokens`."""
 
-        self.context_proj = ReplicatedLinear(
-            self.config.target_hidden_size * self.config.num_target_layers,
-            self.config.hidden_size,
-            bias=False,
-            return_bias=False,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "context_proj"),
-        )
-        self.context_norm = RMSNorm(
-            self.config.hidden_size, eps=self.config.rms_norm_eps
-        )
-
-        self.layers = nn.ModuleList(
-            [
-                K3DSparkDecoderLayer(
-                    vllm_config=vllm_config,
-                    config=self.config,
-                    layer_idx=layer_idx,
-                    start_layer_id=start_layer_id,
-                    prefix=prefix,
-                )
-                for layer_idx in range(self.config.num_hidden_layers)
-            ]
-        )
-        kv_width = self.config.kv_lora_rank + self.config.qk_rope_head_dim
-        self.context_kv_proj = MergedColumnParallelLinear(
-            self.config.hidden_size,
-            [kv_width] * self.config.num_hidden_layers,
-            bias=False,
-            return_bias=False,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(
-                prefix,
-                f"layers.{start_layer_id}.self_attn.fused_qkv_a_proj",
-            ),
-            disable_tp=True,
-        )
-        self.final_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.markov_head = DSparkMarkovHead(
-            self.config.vocab_size,
-            self.config.draft_vocab_size,
-            self.config.markov_rank,
-            prefix=maybe_prefix(prefix, "markov_head"),
-        )
-        self.confidence_head: DSparkConfidenceHead | None = None
-        if getattr(self.config, "enable_confidence_head", False):
-            with_markov = getattr(self.config, "confidence_head_with_markov", False)
-            input_dim = self.config.hidden_size + (
-                self.config.markov_rank if with_markov else 0
-            )
-            self.confidence_head = DSparkConfidenceHead(
-                input_dim,
-                prefix=maybe_prefix(prefix, "confidence_head"),
-                bias=True,
-                with_markov=with_markov,
-            )
-        self._max_num_context_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        assert self.embed_tokens is not None
-        return self.embed_tokens(input_ids)
-
-    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.context_norm(self.context_proj(hidden_states))
-
-    @torch.inference_mode()
-    def precompute_and_store_context_kv(
-        self,
-        context_states: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
-    ) -> None:
-        """Project target-derived context into each draft layer's latent cache."""
-        self._precompute_fused_context_kv(
-            context_states, context_positions, context_slot_mapping
-        )
+    layers: nn.ModuleList
+    context_kv_proj: MergedColumnParallelLinear
+    _max_num_context_tokens: int
 
     def _build_fused_context_kv_metadata(self) -> None:
         """Build cross-layer metadata after checkpoint loading."""
@@ -417,6 +333,102 @@ class K3DSparkModel(nn.Module):
             )
             self._context_cache_ptrs = cache_ptrs
         return self._context_cache_ptrs
+
+
+class K3DSparkModel(K3DraftContextKV):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        start_layer_id: int,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        assert vllm_config.speculative_config is not None
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.quant_config = get_draft_quant_config(vllm_config)
+
+        # The frozen target embedding is aliased after the draft checkpoint loads.
+        self.embed_tokens: nn.Module | None = None
+
+        self.context_proj = ReplicatedLinear(
+            self.config.target_hidden_size * self.config.num_target_layers,
+            self.config.hidden_size,
+            bias=False,
+            return_bias=False,
+            quant_config=self.quant_config,
+            prefix=maybe_prefix(prefix, "context_proj"),
+        )
+        self.context_norm = RMSNorm(
+            self.config.hidden_size, eps=self.config.rms_norm_eps
+        )
+
+        self.layers = nn.ModuleList(
+            [
+                K3DSparkDecoderLayer(
+                    vllm_config=vllm_config,
+                    config=self.config,
+                    layer_idx=layer_idx,
+                    start_layer_id=start_layer_id,
+                    prefix=prefix,
+                )
+                for layer_idx in range(self.config.num_hidden_layers)
+            ]
+        )
+        kv_width = self.config.kv_lora_rank + self.config.qk_rope_head_dim
+        self.context_kv_proj = MergedColumnParallelLinear(
+            self.config.hidden_size,
+            [kv_width] * self.config.num_hidden_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=self.quant_config,
+            prefix=maybe_prefix(
+                prefix,
+                f"layers.{start_layer_id}.self_attn.fused_qkv_a_proj",
+            ),
+            disable_tp=True,
+        )
+        self.final_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        self.markov_head = DSparkMarkovHead(
+            self.config.vocab_size,
+            self.config.draft_vocab_size,
+            self.config.markov_rank,
+            prefix=maybe_prefix(prefix, "markov_head"),
+        )
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(self.config, "enable_confidence_head", False):
+            with_markov = getattr(self.config, "confidence_head_with_markov", False)
+            input_dim = self.config.hidden_size + (
+                self.config.markov_rank if with_markov else 0
+            )
+            self.confidence_head = DSparkConfidenceHead(
+                input_dim,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=True,
+                with_markov=with_markov,
+            )
+        self._max_num_context_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None
+        return self.embed_tokens(input_ids)
+
+    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.context_norm(self.context_proj(hidden_states))
+
+    @torch.inference_mode()
+    def precompute_and_store_context_kv(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
+    ) -> None:
+        """Project target-derived context into each draft layer's latent cache."""
+        self._precompute_fused_context_kv(
+            context_states, context_positions, context_slot_mapping
+        )
 
     def forward(
         self,
