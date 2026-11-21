@@ -7,6 +7,7 @@ from fractions import Fraction
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -37,7 +38,8 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
     """- Weights: MXFP4 with E8M0 scales per block of 32
     - Activations: FP8 E4M3 (static per-tensor quantization)
 
-    Uses the AITER Triton kernel and falls back to emulation if AITER not available.
+    Uses FlyDSL on RDNA4 when available, AITER on supported MX hardware,
+    and otherwise preserves the emulation path.
     """
 
     supported_activation_quant_keys = [kFp8StaticTensorSym]
@@ -57,11 +59,32 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         self.fp8_min, self.fp8_max = get_fp8_min_max()
         self.fp8_dtype = current_platform.fp8_dtype()
 
+        from vllm.model_executor.kernels.linear import (
+            Rdna4Mxfp4LinearKernel,
+            _get_linear_backend,
+            init_mxfp4_linear_kernel,
+        )
+
+        backend = _get_linear_backend(quantization="mxfp4")
+        self.kernel = None
+        self.use_aiter_kernel = False
+        if backend == "flydsl" or (
+            backend == "auto"
+            and Rdna4Mxfp4LinearKernel.__name__ not in envs.VLLM_DISABLED_KERNELS
+            and Rdna4Mxfp4LinearKernel.is_supported()[0]
+        ):
+            self.kernel = init_mxfp4_linear_kernel(activation_quant_key)
+            return
+
         kernel_supported_gpu = False
         if current_platform.is_rocm():
             kernel_supported_gpu = current_platform.supports_mx()
 
-        self.use_aiter_kernel = is_aiter_found_and_supported() and kernel_supported_gpu
+        self.use_aiter_kernel = (
+            backend != "emulation"
+            and is_aiter_found_and_supported()
+            and kernel_supported_gpu
+        )
 
         if not self.use_aiter_kernel:
             logger.warning_once(
@@ -139,6 +162,8 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         replace_parameter(
             layer, "input_scale", torch.tensor(input_scale, dtype=torch.float32)
         )
+        if self.kernel is not None:
+            self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -146,6 +171,8 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.kernel is not None:
+            return self.kernel.apply_weights(layer, x, bias)
         if self.use_aiter_kernel:
             return self._apply_aiter_kernel(layer, x, bias)
         else:

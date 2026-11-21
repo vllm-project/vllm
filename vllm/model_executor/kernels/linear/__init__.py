@@ -85,6 +85,9 @@ from vllm.model_executor.kernels.linear.mxfp4.emulation import (
 from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
     FlashInferMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.flydsl import (
+    Rdna4Mxfp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.humming import (
     HummingMxFp4LinearKernel,
 )
@@ -263,10 +266,12 @@ from vllm.model_executor.layers.quantization.utils.humming import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     check_activation_quant_fallback,
+    kFp8DynamicTokenSym,
     kInt8DynamicTokenAsym,
     kInt8DynamicTokenSym,
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -398,6 +403,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     },
     "exllama": {
         ExllamaLinearKernel,
+    },
+    "flydsl": {
+        Rdna4Mxfp4LinearKernel,
     },
     "emulation": {
         EmulationMxfp8LinearKernel,
@@ -662,6 +670,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
         EmulationMxfp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        Rdna4Mxfp4LinearKernel,
         Rdna3W4A8MxFp4LinearKernel,
         AiterMxfp4LinearKernel,
         EmulationMxfp4LinearKernel,
@@ -1188,9 +1197,6 @@ def init_mxfp4_linear_kernel(
         return FakeMxFp4LinearKernel()
 
     activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
-    config = MxFp4LinearLayerConfig(
-        activation_quant_key=activation_quant_key,
-    )
 
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
@@ -1205,13 +1211,34 @@ def init_mxfp4_linear_kernel(
         quantization="mxfp4",
     )
 
-    kernel_cls, failure_reasons = _first_usable_kernel(
-        possible,
-        config,
-        activation_quant_key,
-        _quant_scheme_check(kMxfp4Static, activation_quant_key),
-    )
-    if kernel_cls is not None:
+    failure_reasons = []
+    for candidate in possible:
+        candidate_activation = activation_quant_key
+        if (
+            candidate is Rdna4Mxfp4LinearKernel
+            and activation_quant_key in (None, kMxfp4Dynamic)
+            and not _user_linear_activation_override_is_set()
+        ):
+            candidate_activation = kFp8DynamicTokenSym
+
+        config = MxFp4LinearLayerConfig(activation_quant_key=candidate_activation)
+        kernel_cls, reasons = _first_usable_kernel(
+            [candidate],
+            config,
+            candidate_activation,
+            _quant_scheme_check(kMxfp4Static, candidate_activation),
+        )
+        failure_reasons.extend(reasons)
+        if kernel_cls is None:
+            continue
+
+        if candidate_activation != activation_quant_key:
+            if reason := check_activation_quant_fallback(
+                kernel_cls.__name__, activation_quant_key, candidate_activation
+            ):
+                failure_reasons.append(reason)
+                continue
+            logger.info_once("Using per-token FP8 activations for RDNA4 MXFP4")
         logger.debug_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
