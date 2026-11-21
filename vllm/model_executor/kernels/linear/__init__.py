@@ -129,6 +129,9 @@ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutlassMxfp8LinearKernel,
     FlashInferTrtllmMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.hipbmm import (
+    RocmHipbmmMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.humming import (
     HummingMxfp8LinearKernel,
 )
@@ -603,6 +606,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         TorchMxFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        RocmHipbmmMxfp8LinearKernel,
         # AITER's FlyDSL GEMM; can_implement() claims only the (N, K) shapes
         # AITER has tuned, the rest fall through to the next kernel. Kept out
         # of the "aiter" --linear-backend set, which would leave those shapes

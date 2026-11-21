@@ -1288,6 +1288,7 @@ steps:
   - csrc/rocm/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/kernels/linear/
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - vllm/_aiter_ops.py
   - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
