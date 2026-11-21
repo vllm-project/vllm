@@ -1,10 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+import torch
 
-from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
+from vllm.lora.layers import LoRAMappingType
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+    PlaceholderRange,
+)
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.mm.lora import activate_mm_loras
 
 
 class _FakeModel:
@@ -36,52 +50,70 @@ class _FakeLoRAManager:
 
 def _mm_feature(
     modality: str,
+    identifier: str,
     num_embeds: int,
-    identifier: str | None = None,
     data: object | None = "kwargs",
 ):
     return SimpleNamespace(
         modality=modality,
-        identifier=identifier or f"{modality}-{num_embeds}",
+        identifier=identifier,
         data=data,
         mm_position=SimpleNamespace(get_num_embeds=lambda: num_embeds),
     )
 
 
-def _run(features, encoder_outputs=None):
-    """Runs set_active_mm_loras for one request (LoRA id 7) scheduling every
-    feature in `features`, and returns (model, lora_manager)."""
+class _FakeEncoderRunner:
+    """Exposes the batch callback so tests can drive encoder batches directly."""
+
+    def __init__(self, encoder_cache):
+        self.encoder_cache = encoder_cache
+        self.callback: Callable[[list[str]], None] | None = None
+
+    @contextmanager
+    def mm_lora_batch_callback(self, callback: Callable[[list[str]], None] | None):
+        self.callback = callback
+        try:
+            yield
+        finally:
+            self.callback = None
+
+
+def test_activate_mm_loras_skips_prompt_embeds_passthrough():
+    """`prompt_embeds` is a passthrough modality: the tensor is already in
+    the model's embedding space, no encoder runs, and there is nothing to
+    apply tower/connector LoRA to. activate_mm_loras must skip it instead
+    of forwarding it to the model's get_mm_lora_token_counts (which doesn't
+    know about it and would raise "Unsupported modality")."""
     req_id = "req-0"
     model = _FakeModel()
     lora_manager = _FakeLoRAManager()
-    encoder_cache = SimpleNamespace(
-        mm_features={req_id: features},
-        encoder_outputs=encoder_outputs or {},
+    runner = _FakeEncoderRunner(
+        SimpleNamespace(
+            mm_features={
+                req_id: [
+                    _mm_feature("prompt_embeds", "h_embeds", num_embeds=32),
+                    _mm_feature("image", "h_img", num_embeds=4),
+                ]
+            },
+            encoder_outputs={},
+        )
     )
     lora_state = SimpleNamespace(
         lora_ids=np.array([7], dtype=np.int32),
         lora_requests={req_id: object()},
     )
-    set_active_mm_loras(
+
+    with activate_mm_loras(
         model=model,
         lora_manager=lora_manager,
-        encoder_cache=encoder_cache,
+        encoder_runner=runner,
         req_id_to_index={req_id: 0},
         lora_state=lora_state,
-        scheduled_encoder_inputs={req_id: list(range(len(features)))},
-    )
-    return model, lora_manager
-
-
-def test_set_active_mm_loras_skips_prompt_embeds_passthrough():
-    """`prompt_embeds` is a passthrough modality: the tensor is already in
-    the model's embedding space, no encoder runs, and there is nothing to
-    apply tower/connector LoRA to. set_active_mm_loras must skip it instead
-    of forwarding it to the model's get_mm_lora_token_counts (which doesn't
-    know about it and would raise "Unsupported modality")."""
-    model, lora_manager = _run(
-        [_mm_feature("prompt_embeds", num_embeds=32), _mm_feature("image", 4)]
-    )
+        scheduled_encoder_inputs={req_id: [0, 1]},
+    ):
+        # prepare_mm_inputs never sends prompt_embeds to the encoder.
+        assert runner.callback is not None
+        runner.callback(["h_img"])
 
     # Only the real "image" item should ever reach the model.
     assert model.calls == ["image"]
@@ -90,16 +122,76 @@ def test_set_active_mm_loras_skips_prompt_embeds_passthrough():
     assert mapping.index_mapping == (7, 7, 7, 7)
 
 
-def test_set_active_mm_loras_skips_items_already_encoded():
+def test_activate_mm_loras_rejects_unmatched_encoder_batch():
+    """A batch with no mapping must fail loudly instead of reusing the
+    previous batch's adapters."""
+    req_id = "req-0"
+    lora_manager = _FakeLoRAManager()
+    runner = _FakeEncoderRunner(
+        SimpleNamespace(
+            mm_features={req_id: [_mm_feature("image", "h_img", 4)]},
+            encoder_outputs={},
+        )
+    )
+    lora_state = SimpleNamespace(
+        lora_ids=np.array([7], dtype=np.int32),
+        lora_requests={req_id: object()},
+    )
+
+    with activate_mm_loras(
+        model=_FakeModel(),
+        lora_manager=lora_manager,
+        encoder_runner=runner,
+        req_id_to_index={req_id: 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={req_id: [0]},
+    ):
+        assert runner.callback is not None
+        with pytest.raises(AssertionError, match="h_unknown"):
+            runner.callback(["h_unknown"])
+    assert lora_manager.set_active_adapters_calls == []
+
+
+def _collect_with_one_batch(features, encoder_outputs, batch_mm_hashes):
+    """Runs activate_mm_loras for one request (LoRA id 7) scheduling every
+    feature in `features`, encodes `batch_mm_hashes` as a single batch, and
+    returns (model, lora_manager)."""
+    req_id = "req-0"
+    model = _FakeModel()
+    lora_manager = _FakeLoRAManager()
+    runner = _FakeEncoderRunner(
+        SimpleNamespace(mm_features={req_id: features}, encoder_outputs=encoder_outputs)
+    )
+    lora_state = SimpleNamespace(
+        lora_ids=np.array([7], dtype=np.int32),
+        lora_requests={req_id: object()},
+    )
+    with activate_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_runner=runner,
+        req_id_to_index={req_id: 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={req_id: list(range(len(features)))},
+    ):
+        if batch_mm_hashes:
+            assert runner.callback is not None
+            runner.callback(batch_mm_hashes)
+    return model, lora_manager
+
+
+def test_activate_mm_loras_skips_items_already_encoded():
     """The scheduler can evict an encoder-cache entry and re-allocate it in
     the same step, keeping the worker-side tensor: the item is scheduled but
-    EncoderRunner.prepare_mm_inputs doesn't re-encode it. Mapping it anyway
-    makes the tower mapping longer than the encoder's output, and the LoRA
-    kernels then read and write past their buffers."""
-    cached = _mm_feature("image", num_embeds=8, identifier="cached-image")
-    fresh = _mm_feature("image", num_embeds=4, identifier="fresh-image")
-    model, lora_manager = _run(
-        [cached, fresh], encoder_outputs={"cached-image": object()}
+    EncoderRunner.prepare_mm_inputs doesn't re-encode it, so it must not be
+    mapped, and an encoder batch never asks for it."""
+    model, lora_manager = _collect_with_one_batch(
+        [
+            _mm_feature("image", "cached-image", num_embeds=8),
+            _mm_feature("image", "fresh-image", num_embeds=4),
+        ],
+        encoder_outputs={"cached-image": object()},
+        batch_mm_hashes=["fresh-image"],
     )
 
     assert model.calls == ["image"]
@@ -108,11 +200,16 @@ def test_set_active_mm_loras_skips_items_already_encoded():
     assert mapping.index_mapping == (7, 7, 7, 7)
 
 
-def test_set_active_mm_loras_skips_items_without_data():
+def test_activate_mm_loras_skips_items_without_data():
     """prepare_mm_inputs doesn't encode an item whose data is None, so it must
     not be mapped either."""
-    model, lora_manager = _run(
-        [_mm_feature("image", num_embeds=8, data=None), _mm_feature("image", 4)]
+    model, lora_manager = _collect_with_one_batch(
+        [
+            _mm_feature("image", "no-data", num_embeds=8, data=None),
+            _mm_feature("image", "h_img", num_embeds=4),
+        ],
+        encoder_outputs={},
+        batch_mm_hashes=["h_img"],
     )
 
     assert model.calls == ["image"]
@@ -120,10 +217,118 @@ def test_set_active_mm_loras_skips_items_without_data():
     assert mapping.index_mapping == (7, 7, 7, 7)
 
 
-def test_set_active_mm_loras_noop_when_every_item_is_cached():
+def test_activate_mm_loras_noop_when_every_item_is_cached():
     """When nothing will be encoded this step, no tower mapping is set."""
-    item = _mm_feature("image", num_embeds=4, identifier="cached-image")
-    model, lora_manager = _run([item], encoder_outputs={"cached-image": object()})
+    model, lora_manager = _collect_with_one_batch(
+        [_mm_feature("image", "cached-image", num_embeds=4)],
+        encoder_outputs={"cached-image": object()},
+        batch_mm_hashes=[],
+    )
 
     assert model.calls == []
     assert lora_manager.set_active_adapters_calls == []
+
+
+class _BatchRecordingModel:
+    def __init__(self, lora_manager: _FakeLoRAManager):
+        self._lora_manager = lora_manager
+        self.recorded_batches: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+
+    def get_mm_lora_token_counts(self, *, modality, mm_kwargs, num_mm_embeds):
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds
+
+    def get_mm_mapping(self):
+        return SimpleNamespace(connector=["visual.merger"])
+
+    def embed_multimodal(self, **mm_kwargs_batch):
+        tower = next(
+            m
+            for _, m in reversed(self._lora_manager.set_active_adapters_calls)
+            if m.type == LoRAMappingType.TOWER
+        )
+        connector = next(
+            m
+            for _, m in reversed(self._lora_manager.set_active_adapters_calls)
+            if m.type == LoRAMappingType.CONNECTOR
+        )
+        self.recorded_batches.append((tower.index_mapping, connector.index_mapping))
+        batch_len = mm_kwargs_batch["pixel_values"].shape[0]
+        return [torch.zeros(1, 4) for _ in range(batch_len)]
+
+
+def _real_mm_feature(
+    modality: str, identifier: str, num_embeds: int, field_name: str, shared_val: int
+) -> MultiModalFeatureSpec:
+    item = MultiModalKwargsItem(
+        {
+            "pixel_values": MultiModalFieldElem(
+                data=torch.zeros(1, 2),
+                field=MultiModalSharedField(batch_size=1),
+            ),
+            field_name: MultiModalFieldElem(
+                data=torch.tensor([shared_val]),
+                field=MultiModalSharedField(batch_size=1),
+            ),
+        }
+    )
+    return MultiModalFeatureSpec(
+        data=item,
+        modality=modality,
+        identifier=identifier,
+        mm_position=PlaceholderRange(offset=0, length=num_embeds),
+    )
+
+
+def test_activate_mm_loras_scopes_mapping_per_encoder_batch():
+    """Each embed_multimodal batch receives only its own items' LoRA mapping,
+    both across modalities and when one modality splits across batches."""
+    encoder_cache = EncoderCache()
+    # Trigger 3 batches:
+    # 1) "image" item (shared field mismatch splits batch_a -> 2 batches)
+    # 2) "image" item
+    # 3) "video" item (first in scheduled_encoder_inputs, sorted after image)
+    feat_vid = _real_mm_feature("video", "h_vid", 5, "tag", shared_val=1)
+    feat_img1 = _real_mm_feature("image", "h_img1", 2, "tag", shared_val=1)
+    feat_img2 = _real_mm_feature("image", "h_img2", 3, "tag", shared_val=2)
+
+    encoder_cache.mm_features["req-vid"] = [feat_vid]
+    encoder_cache.mm_features["req-img1"] = [feat_img1]
+    encoder_cache.mm_features["req-img2"] = [feat_img2]
+
+    lora_manager = _FakeLoRAManager()
+    model = _BatchRecordingModel(lora_manager)
+    runner = EncoderRunner(
+        model=model,
+        max_num_tokens=16,
+        hidden_size=4,
+        encoder_cache=encoder_cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    req_v, req_1, req_2 = object(), object(), object()
+    lora_state = SimpleNamespace(
+        lora_ids=np.array([2, 1, 3], dtype=np.int32),
+        lora_requests={"req-vid": req_v, "req-img1": req_1, "req-img2": req_2},
+    )
+    scheduled = {"req-vid": [0], "req-img1": [0], "req-img2": [0]}
+
+    with activate_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_runner=runner,
+        req_id_to_index={"req-vid": 0, "req-img1": 1, "req-img2": 2},
+        lora_state=lora_state,
+        scheduled_encoder_inputs=scheduled,
+    ):
+        mm_hashes, mm_kwargs = runner.prepare_mm_inputs(scheduled)
+        outputs = runner.execute_mm_encoder(mm_kwargs, mm_hashes)
+
+    assert len(outputs) == 3
+    assert model.recorded_batches == [
+        ((1, 1), (1, 1)),
+        ((3, 3, 3), (3, 3, 3)),
+        ((2, 2, 2, 2, 2), (2, 2, 2, 2, 2)),
+    ]
+    # Callback should be cleared once the context exits.
+    assert runner._mm_lora_batch_callback is None
