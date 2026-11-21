@@ -59,8 +59,8 @@ from .ops.attention import (
     rel_decode_attention,
 )
 from .ops.attention_sm90 import MODE_OUT_LSE, rel_attention
-from .ops.gemv import qkv_bmm, use_qkv_bmm
 from .ops.linear import linear
+from .ops.ll_gemm_sm120 import qkv_bmm, use_qkv_bmm
 from .ops.sconv import attention_prologue, shift_rel_proj
 from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
 

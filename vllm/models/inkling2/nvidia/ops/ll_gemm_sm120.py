@@ -19,7 +19,7 @@ _MAX_TILES = 4096
 
 
 @triton.jit
-def _low_m_bmm_kernel(
+def _ll_gemm_kernel(
     X,
     W,
     Bias,
@@ -195,33 +195,14 @@ def _counter(stream: int) -> torch.Tensor:
     return torch.zeros(_MAX_TILES, dtype=torch.int32, device="cuda")
 
 
-def use_low_m_bmm(x: torch.Tensor, w: torch.Tensor) -> bool:
-    """Whether `low_m_bmm` serves bf16 `x` `[..., M, K]` and `w` `[..., N, K]`."""
-    return (
-        x.is_cuda
-        and x.dtype == w.dtype == torch.bfloat16
-        and 0 < x.shape[-2] <= MAX_M
-        and x.stride(-1) == w.stride(-1) == 1
-        and current_platform.is_device_capability_family(120)
-    )
-
-
-def low_m_bmm(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    out_dtype: torch.dtype | None = None,
-    bias: torch.Tensor | None = None,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """`x` `[B, M, K]` @ `w` `[B, N, K]`.T (+ `bias` `[N]`) -> `[B, M, N]` for
-    M <= 16, with fp32 accumulation, into `out` if given."""
+def _ll_gemm(
+    x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None, out: torch.Tensor
+) -> None:
     nb, m, k = x.shape
     n = w.shape[1]
     assert 0 < m <= MAX_M and w.shape == (nb, n, k)
     assert x.stride(2) == w.stride(2) == 1
     assert bias is None or (bias.shape == (n,) and bias.stride(0) == 1)
-    if out is None:
-        out = torch.empty((nb, m, n), dtype=out_dtype or x.dtype, device=x.device)
     assert out.shape == (nb, m, n) and out.stride(2) == 1
     assert max(nb * w.stride(0), nb * x.stride(0), nb * out.stride(0)) < 2**31
     cfg = _config(nb, n, k)
@@ -233,7 +214,7 @@ def low_m_bmm(
             (cfg.split, nb, _MP, n), dtype=torch.float32, device=x.device
         )
         counter = _counter(current_stream().cuda_stream)
-    _low_m_bmm_kernel[(n_tiles, nb, cfg.split)](
+    _ll_gemm_kernel[(n_tiles, nb, cfg.split)](
         x,
         w,
         bias,
@@ -258,7 +239,6 @@ def low_m_bmm(
         num_stages=cfg.num_stages,
         launch_pdl=True,
     )
-    return out
 
 
 def use_qkv_bmm(
@@ -326,38 +306,50 @@ def qkv_bmm(
     return out
 
 
-def sm12x_bf16_gemv(
+def sm12x_bf16_ll_gemm(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """`x` `[..., K]` @ `weight` `[N, K]`.T (+ `bias`) for at most `MAX_M` rows."""
+    """Low-latency `x @ weight.T` (+ `bias` `[N]`) for at most `MAX_M` rows,
+    with fp32 accumulation, into `out` if given. `weight` `[N, K]` takes `x`
+    `[..., K]` -> `[..., N]`; `weight` `[B, N, K]` takes `x` `[B, M, K]` ->
+    `[B, M, N]`."""
+    n = weight.shape[-2]
+    if weight.ndim == 3:
+        if out is None:
+            out = x.new_empty((*x.shape[:2], n), dtype=out_dtype or x.dtype)
+        _ll_gemm(x, weight, bias, out)
+        return out
     lead = x.shape[:-1]
     x2 = x.reshape(-1, x.shape[-1])
-    m = x2.shape[0]
-    n = weight.shape[0]
-    assert m <= MAX_M
     if out is None:
-        out = torch.empty((m, n), device=x.device, dtype=out_dtype or x.dtype)
-    if m:
-        low_m_bmm(x2[None], weight[None], bias=bias, out=out[None])
+        out = x.new_empty((x2.shape[0], n), dtype=out_dtype or x.dtype)
+    if x2.shape[0]:
+        _ll_gemm(x2[None], weight[None], bias, out[None])
     return out.view(*lead, n)
 
 
-def use_sm12x_bf16_gemv(
+def use_sm12x_bf16_ll_gemm(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> bool:
+    """Whether `sm12x_bf16_ll_gemm` serves these operands."""
+    if weight.ndim == 2:
+        shapes_ok = x.ndim >= 2
+        m = x.numel() // max(x.shape[-1], 1)
+    else:
+        shapes_ok = weight.ndim == 3 and x.ndim == 3 and x.shape[0] == weight.shape[0]
+        m = x.shape[-2] if x.ndim >= 2 else 0
     return (
-        x.is_cuda
+        shapes_ok
+        and x.is_cuda
         and weight.device == x.device
         and x.dtype == weight.dtype == torch.bfloat16
-        and x.ndim >= 2
-        and weight.ndim == 2
-        and x.shape[-1] == weight.shape[1]
+        and x.shape[-1] == weight.shape[-1]
         and x.stride(-1) == weight.stride(-1) == 1
-        and 0 < x.numel() // x.shape[-1] <= MAX_M
+        and 0 < m <= MAX_M
         and (
             bias is None
             or (

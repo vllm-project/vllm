@@ -27,8 +27,8 @@ from .model import (
     Inkling2Model,
 )
 from .ops.attn_res import attn_res
-from .ops.gemv import low_m_bmm, use_low_m_bmm
 from .ops.linear import linear_k_groups
+from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.loop import blend_rms_norm, pair_rms_norm
 from .sconv import conv_metadata
 
@@ -124,8 +124,9 @@ class Inkling2LoopDecoderLayer(Inkling2DecoderLayer):
         pair = pair_rms_norm(dest, message)
         down = self.controller_down[streams]
         up = self.controller_gain_forget[streams]
-        if use_low_m_bmm(pair, down):
-            gain_forget = low_m_bmm(low_m_bmm(pair, down), up, torch.float32)
+        if use_sm12x_bf16_ll_gemm(pair, down):
+            hidden = sm12x_bf16_ll_gemm(pair, down)
+            gain_forget = sm12x_bf16_ll_gemm(hidden, up, out_dtype=torch.float32)
         else:
             hidden = torch.bmm(pair, down.transpose(1, 2))
             gain_forget = torch.bmm(hidden, up.transpose(1, 2), out_dtype=torch.float32)
