@@ -246,6 +246,15 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
+        if (
+            cache_config.kv_offloading_size is not None
+            and cache_config.kv_offloading_backend == "native"
+        ):
+            raise NotImplementedError(
+                "--kv-offloading-size with the native backend is not supported "
+                "on CPU. It requires CUDA, ROCm or XPU."
+            )
+
         is_deepseek_v4 = (
             model_config is not None
             and getattr(model_config.hf_config, "model_type", None) == "deepseek_v4"
