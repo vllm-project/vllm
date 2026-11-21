@@ -312,15 +312,21 @@ FP8Weight = tuple[torch.Tensor, torch.Tensor]
 class UlyssesWeights:
     """One attention layer's full projection weights (all ranks' heads, rank-major)
     as per-output-channel FP8 with `[1, N]` scales. `qkv` and `gate` are None when
-    only the output side runs Ulysses."""
+    only the output side runs Ulysses, or when `qkv_gate` holds both as the
+    rank-major concatenation of the fused `[q|k|v|o-gate]` shards."""
 
     qkv: FP8Weight | None
     gate: FP8Weight | None
     o: FP8Weight
+    qkv_gate: FP8Weight | None = None
+
+    @property
+    def output_only(self) -> bool:
+        return self.qkv is None and self.qkv_gate is None
 
     @property
     def tensors(self) -> tuple[torch.Tensor, ...]:
-        parts = (self.qkv, self.gate, self.o)
+        parts = (self.qkv, self.gate, self.qkv_gate, self.o)
         return tuple(t for part in parts if part is not None for t in part)
 
     @property
@@ -363,27 +369,32 @@ def build_weights(
     q: int,
     kv: int,
     output_only: bool = False,
+    alias: bool = False,
 ) -> UlyssesWeights:
     """The full FP8 weights of the TP-sharded fused `[q|k|v|o-gate]` (`q`, `kv`:
-    this rank's sizes) and O projections; only O with `output_only`."""
+    this rank's sizes) and O projections; only O with `output_only`.
+
+    An FP8 `qkv_proj` gives the fused copy (`qkv_gate`), and with `alias` its own
+    weight becomes the view of its rows in that copy, so they are stored once."""
     if output_only:
         o = torch.cat(_all_gather_weight(o_proj), dim=1)
         torch.accelerator.empty_cache()
         return UlyssesWeights(None, None, _quant_weight(o))
-    qkv_rows, gate_rows = slice(0, q + 2 * kv), slice(q + 2 * kv, 2 * q + 2 * kv)
     if fp8_dense.is_fp8(qkv_proj):
         # Rows are quantized independently, so the gathered FP8 rows and scales
         # equal quantizing the gathered BF16 weight.
         weights, scales = fp8_dense.full_weight_parts(
             qkv_proj, _group(), get_tensor_model_parallel_world_size()
         )
+        fused = torch.cat(weights), torch.cat(scales).view(1, -1)
+        del weights, scales
+        if alias:
+            rank = get_tp_group().rank_in_group
+            fp8_dense.alias_weight_rows(qkv_proj, fused[0], rank)
         o = torch.cat(_all_gather_weight(o_proj), dim=1)
         torch.accelerator.empty_cache()
-        qkv, gate = (
-            (_rows(weights, rows), _rows(scales, rows).view(1, -1))
-            for rows in (qkv_rows, gate_rows)
-        )
-        return UlyssesWeights(qkv, gate, _quant_weight(o))
+        return UlyssesWeights(None, None, _quant_weight(o), qkv_gate=fused)
+    qkv_rows, gate_rows = slice(0, q + 2 * kv), slice(q + 2 * kv, 2 * q + 2 * kv)
     parts = _all_gather_weight(qkv_proj)
     qkv, gate = _rows(parts, qkv_rows), _rows(parts, gate_rows)
     del parts

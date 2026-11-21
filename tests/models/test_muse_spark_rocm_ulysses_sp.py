@@ -262,11 +262,16 @@ PROMPT = [t % 497 + 3 for t in range(2561)]
 
 
 def _tiny_llm(
-    tmp_path, monkeypatch, additional_config: dict, max_num_batched_tokens: int = 4096
+    tmp_path,
+    monkeypatch,
+    additional_config: dict,
+    max_num_batched_tokens: int = 4096,
+    init=_random_weights,
+    **kwargs,
 ):
-    """A two-layer Muse Spark at TEP2 with O(1) random weights (`_random_weights`);
-    `built` holds each rank's count of layers with Ulysses copies. Skips unless
-    gfx950."""
+    """A two-layer Muse Spark at TEP2 with O(1) random weights (`init`, by default
+    `_random_weights`); `kwargs` go to `LLM`. `built` holds each rank's count of
+    layers with Ulysses copies. Skips unless gfx950."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     # `apply_model` and `collective_rpc` send functions to the TP workers.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -296,8 +301,9 @@ def _tiny_llm(
         enable_prefix_caching=False,
         enforce_eager=True,
         additional_config=additional_config,
+        **kwargs,
     )
-    llm.built = llm.apply_model(_random_weights)
+    llm.built = llm.apply_model(init)
     return llm
 
 
@@ -385,16 +391,30 @@ def _bits(t: torch.Tensor) -> torch.Tensor:
 def _parts(w: "usp.UlyssesWeights") -> dict[str, list[torch.Tensor]]:
     return {
         part: [_bits(t) for t in getattr(w, part)]
-        for part in ("qkv", "gate", "o")
+        for part in ("qkv", "gate", "qkv_gate", "o")
         if getattr(w, part) is not None
     }
 
 
-def _copies(options: dict) -> list[str]:
-    """The Ulysses copies a layer holds with `options`."""
+def _copies(options: dict, fp8: bool = False) -> list[str]:
+    """The Ulysses copies a layer holds with `options` (`fp8`: FP8 `qkv_proj`)."""
     if options["ulysses_prefill"] == "output_only":
         return ["o"]
-    return ["gate", "o", "qkv"]
+    return ["o", "qkv_gate"] if fp8 else ["gate", "o", "qkv"]
+
+
+def _aliased(m: torch.nn.Module) -> bool:
+    """Whether the layer's FP8 `qkv_proj` weight is the view of this rank's rows in
+    its fused Ulysses copy."""
+    from vllm.distributed import get_tensor_model_parallel_rank
+
+    fused = m.ulysses_weights.qkv_gate
+    if fused is None:
+        return False
+    w = m.qkv_proj.weight
+    rows = w.shape[0] if w.is_contiguous() else w.shape[1]
+    own = fused[0][get_tensor_model_parallel_rank() * rows]
+    return w.data_ptr() == own.data_ptr()
 
 
 def _held_copies(model: torch.nn.Module) -> list[list[str]]:
@@ -412,10 +432,12 @@ def _same(a: list[torch.Tensor], b: list[torch.Tensor]) -> bool:
 def _reload_attention(worker, exponent: int, output_only: bool) -> dict:
     """Reload every attention QKV and O weight (kernel format) with its columns
     scaled by 2**exponent and 2**-exponent alternately, which is exact in BF16 and
-    changes the per-row FP8 payload, not only its scales. Returns the
-    addresses of the Ulysses copies, the copies (qkv, gate, o) that differ from
-    ones freshly built from the reloaded weights in the `output_only` mode, and
-    those the reload left unchanged."""
+    changes the per-row FP8 payload, not only its scales; an FP8 weight instead has
+    the sign of every other column flipped when `exponent` is nonzero (exact, and
+    undone by the next flip). Returns the addresses of the Ulysses copies, the
+    copies that differ from ones freshly built from the reloaded weights in the
+    `output_only` mode, those the reload left unchanged, and the layers whose FP8
+    `qkv_proj` weight views its rows in the fused copy."""
     model = worker.get_model()
     layers = [m for m in model.modules() if getattr(m, "ulysses_weights", None)]
     before = [
@@ -424,10 +446,17 @@ def _reload_attention(worker, exponent: int, output_only: bool) -> dict:
     ]
     weights = []
     for name, param in model.named_parameters():
-        if name.endswith(("qkv_proj.weight", "o_proj.weight")):
-            cols = torch.arange(param.shape[1], device=param.device)
-            scale = torch.exp2(exponent * (1 - 2 * (cols % 2)).float())
-            weights.append((name, param * scale.to(param.dtype)))
+        if not name.endswith(("qkv_proj.weight", "o_proj.weight")):
+            continue
+        if param.element_size() == 1:
+            bits = param.data.view(torch.uint8).clone()
+            if exponent:
+                bits[:, 1::2] ^= 0x80
+            weights.append((name, bits.view(param.dtype)))
+            continue
+        cols = torch.arange(param.shape[1], device=param.device)
+        scale = torch.exp2(exponent * (1 - 2 * (cols % 2)).float())
+        weights.append((name, param * scale.to(param.dtype)))
     worker.reload_weights(weights_iterator=iter(weights), is_checkpoint_format=False)
     stale, unchanged = [], []
     for i, (m, old) in enumerate(zip(layers, before, strict=True)):
@@ -450,7 +479,33 @@ def _reload_attention(worker, exponent: int, output_only: bool) -> dict:
         "ptrs": [t.data_ptr() for m in layers for t in m.ulysses_weights.tensors],
         "stale": stale,
         "unchanged": unchanged,
+        "aliased": [i for i, m in enumerate(layers) if _aliased(m)],
     }
+
+
+def _check_reloads(llm, options: dict, fp8: bool = False) -> None:
+    """Reload the attention weights perturbed, then restored (`_reload_attention`):
+    the copies stay in place and equal fresh ones, an FP8 `qkv_proj` stays aliased
+    into its fused copy, and the logprobs move and come back."""
+    output_only = options["ulysses_prefill"] == "output_only"
+    aliased = list(range(LAYERS)) if fp8 and not output_only else []
+
+    def reload(exponent: int) -> list[int]:
+        result = llm.collective_rpc(_reload_attention, args=(exponent, output_only))
+        assert [r["stale"] for r in result] == [[], []]
+        assert [r["aliased"] for r in result] == [aliased] * 2
+        if exponent:
+            assert [r["unchanged"] for r in result] == [[], []]
+        return [r["ptrs"] for r in result]
+
+    ptrs = reload(0)
+    original = _prompt_logprobs(llm)
+    assert reload(1) == ptrs
+    perturbed = _prompt_logprobs(llm)
+    assert reload(-1) == ptrs
+    restored = _prompt_logprobs(llm)
+    assert (perturbed - original).abs().mean() > 0.1
+    torch.testing.assert_close(restored, original, rtol=0, atol=1e-3)
 
 
 @pytest.mark.skipif(
@@ -464,19 +519,4 @@ def test_ulysses_prefill_follows_weight_reloads(tmp_path, monkeypatch) -> None:
     original ones."""
     llm = _tiny_llm(tmp_path, monkeypatch, ON)
     assert llm.built == [LAYERS] * 2
-
-    def reload(exponent: int) -> list[int]:
-        result = llm.collective_rpc(_reload_attention, args=(exponent, False))
-        assert [r["stale"] for r in result] == [[], []]
-        if exponent:
-            assert [r["unchanged"] for r in result] == [[], []]
-        return [r["ptrs"] for r in result]
-
-    ptrs = reload(0)
-    original = _prompt_logprobs(llm)
-    assert reload(1) == ptrs
-    perturbed = _prompt_logprobs(llm)
-    assert reload(-1) == ptrs
-    restored = _prompt_logprobs(llm)
-    assert (perturbed - original).abs().mean() > 0.1
-    torch.testing.assert_close(restored, original, rtol=0, atol=1e-3)
+    _check_reloads(llm, ON)

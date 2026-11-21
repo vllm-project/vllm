@@ -918,18 +918,29 @@ class MuseSparkAttention(nn.Module):
         return self.back(attn_output, og, shard)
 
     def build_ulysses_weights(self, output_only: bool = False) -> int:
-        """Build the full FP8 weights `forward_ulysses` uses; returns their bytes.
-        A weight reload refills the held copies in place."""
+        """Build the full FP8 weights `forward_ulysses` uses; returns the bytes they
+        add (the aliased `qkv_proj` rows excluded). A weight reload refills the held
+        copies in place."""
         assert self.fuse_o_norm_gate, "Ulysses attention needs the fused O-norm gate"
-        if self.ulysses_weights is not None:
-            output_only = self.ulysses_weights.qkv is None
+        held = self.ulysses_weights
+        first = held is None
+        if held is not None:
+            output_only = held.output_only
+        # A reload refills the held copy, which the aliased weight already views.
         built = usp.build_weights(
-            self.qkv_proj, self.o_proj, self.q_size, self.kv_size, output_only
+            self.qkv_proj,
+            self.o_proj,
+            self.q_size,
+            self.kv_size,
+            output_only,
+            alias=first,
         )
         if self.ulysses_weights is None:
             self.ulysses_weights = built
         else:
             self.ulysses_weights.refill(built)
+        if built.qkv_gate is not None:
+            return built.nbytes - self.qkv_proj.weight.nbytes
         return built.nbytes
 
     def forward_ulysses(
@@ -946,20 +957,27 @@ class MuseSparkAttention(nn.Module):
             "Muse Spark Ulysses prefill active (TP world size %d, FP8 %s weights, "
             "FP8 all-to-all payloads).",
             shard.world,
-            "O" if w.qkv is None else "QKV/O",
+            "O" if w.output_only else "QKV/O",
             scope="process",
         )
         dtype = self.o_proj.weight.dtype
-        if w.qkv is None:
+        if w.output_only:
             return self.forward_ulysses_output(positions, x, shard)
-        assert w.gate is not None
         xq = x if isinstance(x, tuple) else usp.quant_rows(x)
-        qkv = usp.a2a_tokens_to_heads(
-            usp.gemm(xq, w.qkv, dtype),
-            self.q_size + 2 * self.kv_size,
-            shard,
-            self.head_dim,
-        )
+        n = self.q_size + 2 * self.kv_size
+        og = None
+        if w.qkv_gate is not None:
+            # One GEMM over the fused rank-major copy: per rank `[q|k|v]`, then
+            # the O-gate columns.
+            y = usp.gemm(xq, w.qkv_gate, dtype)
+            y = y.view(y.shape[0], shard.world, n + self.q_size)
+            ys = y[:, :, :n].reshape(y.shape[0], -1)
+            og = y[:, :, n:].reshape(y.shape[0], -1)
+            del y
+        else:
+            assert w.qkv is not None
+            ys = usp.gemm(xq, w.qkv, dtype)
+        qkv = usp.a2a_tokens_to_heads(ys, n, shard, self.head_dim)
         q, k, v, _ = self._qk_norm_rope_kv_insert(qkv, positions)
         if self.fused_qk_norm_rope_kv_insert:
             attn_output = self.attn(q, None, None)
@@ -968,7 +986,9 @@ class MuseSparkAttention(nn.Module):
         heads = usp.a2a_heads_to_tokens(
             attn_output.reshape(-1, self.q_size), shard, self.head_dim
         )
-        og = usp.gemm(xq, w.gate, dtype)
+        if og is None:
+            assert w.gate is not None
+            og = usp.gemm(xq, w.gate, dtype)
         num_heads = heads.shape[1] // self.head_dim
         gated = rms_norm_gated(
             heads.view(-1, num_heads, self.head_dim),
