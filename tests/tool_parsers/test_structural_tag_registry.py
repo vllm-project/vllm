@@ -1894,6 +1894,9 @@ def test_glm47_strict_only_matches_xgrammar_builtin(tool_choice: str, reasoning:
         tools=dumped,
         tool_choice=builtin_choice,
         reasoning=reasoning,
+        # the registry applies the whitespace cap to the finished tag, so the
+        # byte-identity comparison must build the builtin with the same cap
+        max_whitespace_cnt=envs.VLLM_TOOL_CALL_MAX_WHITESPACE,
     )
 
     assert isinstance(ours, StructuralTag)
@@ -1925,6 +1928,9 @@ def test_glm47_parameter_level_pins_schemas_like_the_builtin(
         ],
         tool_choice="required",
         reasoning=False,
+        # the registry applies the whitespace cap to the finished tag, so the
+        # byte-identity comparison must build the builtin with the same cap
+        max_whitespace_cnt=envs.VLLM_TOOL_CALL_MAX_WHITESPACE,
     )
 
     assert isinstance(ours, StructuralTag)
