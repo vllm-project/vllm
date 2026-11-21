@@ -164,11 +164,17 @@ def _compare_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", hf_overrides])
 
-    ep_env = {
-        "VLLM_TEST_ENABLE_EP": "1",
-    }
-
     ep_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        distributed_backend,
+        "--enable-expert-parallel",
+    ]
+
+    # compare without expert parallelism
+    tp_args = [
         *common_args,
         "--tensor-parallel-size",
         str(tp_size),
@@ -176,31 +182,13 @@ def _compare_tp(
         distributed_backend,
     ]
 
-    # compare without expert parallelism
-    tp_env = {
-        "VLLM_TEST_ENABLE_EP": "0",
-    }
-
-    tp_args = [
-        *common_args,
-        "--tensor-parallel-size",
-        str(tp_size),
-        "--distributed-executor-backend",
-        "mp",
-    ]
-
-    try:
-        compare_two_settings(
-            model_name,
-            ep_args,
-            tp_args,
-            ep_env,
-            tp_env,
-            method=method,
-            max_wait_seconds=360,
-        )
-    except Exception:
-        raise
+    compare_two_settings(
+        model_name,
+        ep_args,
+        tp_args,
+        method=method,
+        max_wait_seconds=360,
+    )
 
 
 @pytest.mark.parametrize(
