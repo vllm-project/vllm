@@ -214,7 +214,8 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
             torch.testing.assert_close(actual, expected, atol=0.06, rtol=0.06)
         assert torch.isfinite(actual).all()
 
-    actual = run()
+    # MoRI's output is a view of its combine buffer, which the next combine rewrites.
+    actual = run().clone()
     check(actual)
     if graph:
         saved = actual.clone()
