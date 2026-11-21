@@ -67,6 +67,7 @@ class KVQuantMode(IntEnum):
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
     CUSTOM = 12
+    MXFP4_DS_MLA = 15
 
     @property
     def is_per_token_head(self) -> bool:
@@ -125,6 +126,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         # Page size is keyed on cache_dtype_str in the MLA specs, not
         # nvfp4_kv_cache_full_dim.
         return KVQuantMode.NVFP4_DS_MLA
+    if kv_cache_dtype == "mxfp4_ds_mla":
+        return KVQuantMode.MXFP4_DS_MLA
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
