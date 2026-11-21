@@ -649,11 +649,9 @@ def test_deepgemm_fp4_vs_triton(
 
 
 @pytest.mark.skipif(not _fp4_supported(), reason="Requires DeepGEMM FP4 kernels")
-def test_compressed_tensors_mxfp4_uses_deepgemm_weight_format():
+def test_compressed_tensors_mxfp4_uses_deepgemm_weight_format(default_vllm_config):
     """Compressed-tensors MXFP4 weights reach DeepGEMM without Marlin repacking."""
-    from types import SimpleNamespace
-
-    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
     from vllm.model_executor.layers.fused_moe.expert_map_manager import (
         ExpertMapManager,
     )
@@ -670,6 +668,9 @@ def test_compressed_tensors_mxfp4_uses_deepgemm_weight_format():
     )
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
         CompressedTensorsW4A4Mxfp4MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
     )
 
     weights = {
@@ -700,6 +701,15 @@ def test_compressed_tensors_mxfp4_uses_deepgemm_weight_format():
             },
         }
     )
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            targets={
+                "model.layers.0.ffn.experts": QuantSpec(
+                    activation="fp8_per_block_dynamic"
+                )
+            }
+        )
+    )
     moe_config = make_dummy_moe_config(
         num_experts=2,
         hidden_dim=128,
@@ -717,9 +727,7 @@ def test_compressed_tensors_mxfp4_uses_deepgemm_weight_format():
         enable_eplb=False,
     )
 
-    vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(quantization_config=None)
-    with torch.device("cuda"), set_current_vllm_config(vllm_config):
+    with torch.device("cuda"):
         layer = RoutedExperts(
             "model.layers.0.ffn.experts",
             torch.bfloat16,
