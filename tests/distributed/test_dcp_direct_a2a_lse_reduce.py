@@ -352,7 +352,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
-    direct_a2a = MagicMock()
+    direct_a2a = MagicMock(max_num_tokens=16)
     direct_query = MagicMock()
     direct_kv = MagicMock()
     monkeypatch.setattr(
@@ -384,7 +384,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     workspace = torch.empty(96, 8)
 
     assert manager.v_up_proj_combine is None
-    assert manager.query_gather == direct_query.gather
+    assert isinstance(manager.query_gather, functools.partial)
+    assert manager.query_gather.func == manager._direct_workspace_query_gather
+    assert manager.query_gather.args == (direct_query,)
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
@@ -399,11 +401,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
         query_start_loc=query_start_loc,
     )
     direct_a2a.lse_reduce.assert_called_once_with(
-        output,
-        lse,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-        is_lse_base_on_e=False,
+        output, lse, False, seq_lens, query_start_loc
     )
 
 
@@ -484,7 +482,9 @@ def test_dcp_workspace_covers_decode_width(with_spec_config):
     config.scheduler_config.max_num_batched_tokens = 128
     config.num_speculative_tokens = 3
     if with_spec_config:
-        config.speculative_config = MagicMock(num_speculative_tokens=3)
+        config.speculative_config = MagicMock(
+            num_speculative_tokens=3, max_num_new_slots_for_drafting=0
+        )
 
     assert dcp.get_dcp_workspace_max_num_tokens(config) == 16
 
@@ -554,7 +554,7 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     config = MagicMock()
     config.model_config.dtype = torch.bfloat16
     config.model_config.max_model_len = 64
-    config.model_config.hf_config.index_topk = 8
+    config.model_config.hf_text_config.index_topk = 8
     config.scheduler_config.max_num_batched_tokens = 64
     config.scheduler_config.max_num_seqs = 2
     config.cache_config.block_size = 4
@@ -584,7 +584,7 @@ def test_sparse_mla_workspace_preserves_non_dcp_size():
 
     config = MagicMock()
     config.model_config.max_model_len = 1
-    config.model_config.hf_config.index_topk = 7
+    config.model_config.hf_text_config.index_topk = 7
     config.scheduler_config.max_num_seqs = 3
     config.cache_config.block_size = 4
     config.parallel_config.decode_context_parallel_size = 1
