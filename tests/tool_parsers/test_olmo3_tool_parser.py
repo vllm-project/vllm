@@ -239,6 +239,56 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
 
 
+@pytest.mark.parametrize("text", ["Let me check.", "a < b.\n", "\n"])
+@pytest.mark.parametrize("streaming", [True, False])
+def test_tool_call_after_content(
+    streaming: bool, text: str, default_tokenizer: TokenizerLike
+):
+    """The chat template writes content right before <function_calls>."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    model_output = f"{text}<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>"
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=streaming
+    )
+
+    assert content == text
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+@pytest.mark.parametrize(
+    "model_output_deltas",
+    [
+        # The tag is one token for Olmo-3-7B-Instruct ...
+        ["Let me check.", "<function_calls>", "get_weather(city='San"],
+        # ... and several for Olmo-3-32B-Think.
+        ["Let me check", ".<", "function", "_calls", ">get", "_weather(city='San"],
+        ["Let me check.<function_calls>get_weather(city='San"],
+        ["Let me <", "b>check</b>.<function_calls>get_weather(city='San"],
+    ],
+)
+def test_streaming_tool_call_after_content_with_large_steps(
+    model_output_deltas: list[str], default_tokenizer: TokenizerLike
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    model_output_deltas = [
+        *model_output_deltas,
+        " Francisco', metric='celsius')</function_calls>",
+    ]
+    text = "".join(model_output_deltas).split("<function_calls>")[0]
+
+    reconstructor = run_tool_extraction_streaming(tool_parser, model_output_deltas)
+
+    assert reconstructor.other_content == text
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """Test regex timeout is handled gracefully."""
