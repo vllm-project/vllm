@@ -1150,6 +1150,29 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """`object_pairs_hook` that refuses to silently resolve duplicate keys.
+
+    Standard ``json.loads`` keeps the *last* of any repeated key, at every
+    nesting depth. For tool-call arguments that means text quoted into an
+    ``object`` argument can append a duplicate key that silently overrides the
+    value the model itself emitted (e.g. a guard
+    ``{"dry_run": true, ... "dry_run": false}`` resolves to ``false``), with
+    nothing to signal that the decoded value differs from what was emitted. On a
+    duplicate we raise so the caller does not silently resolve it: the value
+    falls back to preserving the raw string rather than returning the last-wins
+    object.
+    """
+    seen: dict[str, Any] = {}
+    for key, val in pairs:
+        if key in seen:
+            raise ValueError(
+                f"duplicate key in tool-call object/array argument: {key!r}"
+            )
+        seen[key] = val
+    return seen
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
@@ -1221,7 +1244,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             continue
         if candidate_type in ("object", "array"):
             try:
-                parsed = json.loads(value)
+                parsed = json.loads(value, object_pairs_hook=_reject_duplicate_keys)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
             if _is_json_finite(parsed):
@@ -1231,7 +1254,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             continue
 
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(value, object_pairs_hook=_reject_duplicate_keys)
     except (json.JSONDecodeError, ValueError):
         return value
     # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
