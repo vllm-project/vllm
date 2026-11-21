@@ -87,10 +87,17 @@ def rescale_image_size(
     return image
 
 
-def normalize_image(image: Image.Image) -> Image.Image:
-    """Normalize EXIF orientation so the pixel data matches visual display."""
+def normalize_image(image: Image.Image, *, in_place: bool = False) -> Image.Image:
+    """Normalize EXIF orientation so the pixel data matches visual display.
+
+    When `in_place=True`, mutates `image` in place (avoiding a full-image copy
+    when no transposition is needed) and returns the same object.
+    """
     with contextlib.suppress(Exception):
-        image = ImageOps.exif_transpose(image)
+        if in_place:
+            ImageOps.exif_transpose(image, in_place=True)
+        else:
+            image = ImageOps.exif_transpose(image)
     return image
 
 
