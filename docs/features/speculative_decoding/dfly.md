@@ -27,7 +27,8 @@ vllm serve tencent/Hy4-flash-FP8 \
 - BF16 computation with unquantized weights, online MoE-only block FP8
   quantization, or compressed-tensors W8A8 FP8 checkpoints using 128×128
   weight blocks and dynamic group-128 activations. HY4 Flash checkpoints may also
-  use weight-only MXFP4 (group-32) weights; draft layers must be BF16 or FP8.
+  use weight-only MXFP4 (group-32) weights or ModelOpt NVFP4 experts
+  (`modelopt_fp4`); draft layers must be BF16 or FP8.
 - Matching target and draft KV cache dtype: BF16 (`auto` or `bfloat16`)
   or `fp8_ds_mla`. Omit the draft KV override to inherit the target dtype.
 - Matching target and draft tensor parallelism. Pipeline, prefill context,
