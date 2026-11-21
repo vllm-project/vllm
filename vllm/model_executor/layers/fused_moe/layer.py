@@ -76,6 +76,33 @@ def make_parallel_config(
     return moe_parallel_config
 
 
+def resolve_skip_final_all_reduce(
+    reduce_results: bool,
+    moe_parallel_config: FusedMoEParallelConfig,
+    zero_expert_type=None,
+) -> bool:
+    """Whether the MoE output is left un-reduced for the caller to reduce.
+
+    The consumer fuses the all-reduce of the MoE output into its next RMSNorm,
+    so the runner must skip its own late all-reduce. The naive
+    all-gather/reduce-scatter all2all path is the only EP all2all container
+    whose combine returns an un-reduced output, so it keeps the deferral
+    there; every self-reducing combine (DeepEP, MoRI, NIXL, NVLink, MoonEP,
+    alltoall_batched, ...) and the sequence-parallel layout are reduced
+    elsewhere. The XPU `batched_triton` path is also un-reduced but does not
+    use this consumer contract.
+    """
+    return bool(
+        not reduce_results
+        and (
+            not moe_parallel_config.use_all2all_kernels
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+        )
+        and not moe_parallel_config.is_sequence_parallel
+        and zero_expert_type is None
+    )
+
+
 def determine_expert_counts(
     num_experts: int,
     num_redundant_experts: int,
@@ -256,11 +283,8 @@ def FusedMoEFactory(
     )
 
     # Resolve the deferred all-reduce request against the parallel config.
-    skip_final_all_reduce = (
-        not reduce_results
-        and not moe_parallel_config.use_all2all_kernels
-        and not moe_parallel_config.is_sequence_parallel
-        and zero_expert_type is None
+    skip_final_all_reduce = resolve_skip_final_all_reduce(
+        reduce_results, moe_parallel_config, zero_expert_type
     )
 
     global_num_experts, logical_num_experts, num_fused_shared_experts = (
