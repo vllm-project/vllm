@@ -375,6 +375,9 @@ class FrontendArgs(BaseFrontendArgs):
     add it to the server using `app.add_middleware()`."""
     enable_request_id_headers: bool = False
     """If specified, API server will add X-Request-Id header to responses."""
+    disable_sagemaker_integration: bool = False
+    """Python frontend only. Skip SageMaker route registration and bootstrap,
+    including the SageMaker aliases for runtime LoRA adapter management."""
     disable_fastapi_docs: bool = False
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT

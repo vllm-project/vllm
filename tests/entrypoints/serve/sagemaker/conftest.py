@@ -27,7 +27,7 @@ def smollm2_lora_files():
 
 
 @pytest.fixture(scope="module")
-def basic_server_with_lora(smollm2_lora_files):
+def basic_server_with_lora(request: pytest.FixtureRequest, smollm2_lora_files):
     """Basic server fixture with standard configuration."""
     args = [
         "--dtype",
@@ -43,6 +43,7 @@ def basic_server_with_lora(smollm2_lora_files):
         "2",
         "--max-num-seqs",
         "64",
+        *getattr(request, "param", []),
     ]
 
     envs = {

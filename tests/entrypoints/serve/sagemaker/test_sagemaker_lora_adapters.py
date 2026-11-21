@@ -1,12 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from http import HTTPStatus
+
 import openai  # use the official async_client for correctness check
 import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 
 from .conftest import MODEL_NAME_SMOLLM
+
+
+@pytest.mark.skipif(envs.VLLM_USE_RUST_FRONTEND, reason="Python frontend only")
+@pytest.mark.parametrize(
+    "basic_server_with_lora", [["--disable-sagemaker-integration"]], indirect=True
+)
+def test_disable_sagemaker_keeps_native_lora_endpoints(
+    basic_server_with_lora: RemoteOpenAIServer,
+    smollm2_lora_files,
+):
+    server = basic_server_with_lora
+    adapter_name = "smollm2-native-lora"
+    load_response = requests.post(
+        server.url_for("v1/load_lora_adapter"),
+        json={"lora_name": adapter_name, "lora_path": smollm2_lora_files},
+    )
+    assert load_response.status_code == HTTPStatus.OK
+
+    alias_load_response = requests.post(
+        server.url_for("adapters"),
+        json={"name": "smollm2-sagemaker-lora", "src": smollm2_lora_files},
+    )
+    assert alias_load_response.status_code == HTTPStatus.NOT_FOUND
+    alias_unload_response = requests.delete(server.url_for("adapters", adapter_name))
+    assert alias_unload_response.status_code == HTTPStatus.NOT_FOUND
+
+    unload_response = requests.post(
+        server.url_for("v1/unload_lora_adapter"),
+        json={"lora_name": adapter_name},
+    )
+    assert unload_response.status_code == HTTPStatus.OK
 
 
 @pytest.mark.asyncio
