@@ -125,7 +125,7 @@ def expert_plan(
     rows = tokens * topk
     max_ctas = min(num_experts, rows) + (rows - min(num_experts, rows)) // tile
     if not use_sm100_kernels():
-        # The Hopper GEMMs (`moe_sm90.bmm`) take any tile.
+        # No TRT-LLM-gen kernels (Hopper): only `route`'s layout.
         return ExpertPlan(tile, max_ctas, (0, 0))
     names = configs(nvfp4, tile)
     kernels = []
