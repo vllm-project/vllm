@@ -3,6 +3,7 @@
 
 import json
 import os
+import struct
 import tempfile
 from types import SimpleNamespace
 
@@ -12,11 +13,15 @@ from safetensors.torch import save_file
 
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.weight_cache.protocol import hash_checkpoint
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    _safetensors_header,
+    hash_checkpoint,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
 )
+from vllm.transformers_utils.utils import MAX_SAFETENSORS_HEADER_BYTES
 
 
 def test_filter_duplicate_safetensors_files_missing_weight():
@@ -251,3 +256,45 @@ def test_finds_shards_listed_by_the_index(tmp_path, monkeypatch, shard_names, is
     assert use_safetensors == shard_names[0].endswith(".safetensors")
     assert len(fetched) == (use_safetensors and not is_local)
     assert (hash_checkpoint(str(tmp_path)) is not None) == use_safetensors
+
+
+def _write_safetensors_shard(path, declared_len: int, payload: bytes = b"{}") -> None:
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", declared_len))
+        f.write(payload)
+
+
+def test_safetensors_header_valid(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    payload = b'{"__metadata__": {}}'
+    _write_safetensors_shard(shard, len(payload), payload)
+
+    assert _safetensors_header(str(shard)) == struct.pack("<Q", len(payload)) + payload
+    assert hash_checkpoint(str(tmp_path)) is not None
+
+
+def test_safetensors_header_length_exceeds_file(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    _write_safetensors_shard(shard, 2**63)
+
+    with pytest.raises(ValueError, match="exceeds the 10-byte file"):
+        hash_checkpoint(str(tmp_path))
+
+
+def test_safetensors_header_length_above_cap(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    declared_len = MAX_SAFETENSORS_HEADER_BYTES + 1
+    with open(shard, "wb") as f:
+        f.write(struct.pack("<Q", declared_len))
+        f.truncate(8 + declared_len)
+
+    with pytest.raises(ValueError, match="exceeds the maximum"):
+        _safetensors_header(str(shard))
+
+
+def test_safetensors_header_truncated_prefix(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    shard.write_bytes(b"\x00\x01")
+
+    with pytest.raises(ValueError, match="8-byte"):
+        _safetensors_header(str(shard))

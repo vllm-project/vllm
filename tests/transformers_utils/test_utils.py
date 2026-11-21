@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import struct
+
+import pytest
+
 from vllm.transformers_utils.utils import (
     is_azure,
     is_cloud_storage,
     is_gcs,
     is_s3,
+    parse_safetensors_file_metadata,
 )
 
 
@@ -35,3 +40,19 @@ def test_is_cloud_storage():
     assert is_cloud_storage("az://model-container/path")
     assert not is_cloud_storage("/unix/local/path")
     assert not is_cloud_storage("nfs://nfs-fqdn.local")
+
+
+def test_parse_safetensors_file_metadata(tmp_path):
+    path = tmp_path / "model.safetensors"
+    payload = b'{"weight": {"dtype": "F16"}}'
+    path.write_bytes(struct.pack("<Q", len(payload)) + payload)
+
+    assert parse_safetensors_file_metadata(path) == {"weight": {"dtype": "F16"}}
+
+
+def test_parse_safetensors_file_metadata_rejects_bogus_length(tmp_path):
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(struct.pack("<Q", 2**63) + b"{}")
+
+    with pytest.raises(ValueError, match="exceeds the 10-byte file"):
+        parse_safetensors_file_metadata(path)
