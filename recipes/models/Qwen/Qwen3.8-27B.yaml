@@ -439,13 +439,18 @@ guide: |
   GSM8K 0.951 (MI300X) and 0.952 (MI325X); RULER `niah_single_2` at 128K 1.00 on both.
 
   ```bash
-  export VLLM_ROCM_USE_AITER=1
-
-  vllm serve Qwen/Qwen3.8-27B-FP8 \
-    --tensor-parallel-size 1 \
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_USE_RUST_FRONTEND=1 \
+    vllm/vllm-openai-rocm:nightly Qwen/Qwen3.8-27B-FP8 \
     --attention-backend ROCM_AITER_FA \
     --kv-cache-dtype fp8 \
-    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
     --reasoning-parser qwen3 \
     --mm-encoder-tp-mode data
   ```
