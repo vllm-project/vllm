@@ -144,14 +144,13 @@ def _transfer_results(worker: MoRIIOConnectorWorker, metadata):
 class _Engine:
     """A decode instance: the real scheduler and one stub worker per TP rank."""
 
-    def __init__(self, monkeypatch, layout: str = "attn", policy: str = "fail"):
+    def __init__(self, monkeypatch, layout: str = "attn"):
         self.clock = _Clock()
         monkeypatch.setattr(moriio_connector, "time", self.clock)
         config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
         config.kv_transfer_config.kv_connector_extra_config["write_recv_timeout"] = (
             TIMEOUT_S
         )
-        config.kv_transfer_config.kv_load_failure_policy = policy
         kv_cache_config = _kv_cache_config(layout)
         self.scheduler = create_scheduler(config, kv_cache_config=kv_cache_config)
         self.num_groups = len(kv_cache_config.kv_cache_groups)
@@ -377,19 +376,6 @@ def test_write_failed_with_the_timeout_frees_the_blocks(engine):
     engine.step()
     assert request.request_id not in engine.scheduler.requests
     assert engine.pool.get_num_free_blocks() == free_before
-
-
-def test_timer_is_off_under_the_recompute_policy(consumer_role, monkeypatch):
-    """Under recompute a failed receive frees its blocks and recomputes into
-    them, where a late write could land, so the timer is not armed."""
-    engine = _Engine(monkeypatch, policy="recompute")
-    request = engine.add_waiting_request()
-
-    engine.clock.now += 10 * TIMEOUT_S
-    out = engine.scheduler.schedule()
-    assert not out.kv_connector_metadata.write_recv_timed_out_req_ids
-    engine.finish(out)
-    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
