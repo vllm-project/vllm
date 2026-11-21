@@ -83,10 +83,55 @@ def test_get_spec_cls_defaults_to_cpu():
     assert spec_cls is CPUOffloadingSpec
 
 
-def test_create_cpu_offloading_spec():
-    spec = _create_spec()
+@pytest.mark.parametrize("spec_name", [None, "CPUOffloadingSpec"])
+@pytest.mark.parametrize("extra_config", [{}, {"canonical_layout": False}])
+def test_create_cpu_offloading_spec(spec_name, extra_config):
+    spec = _create_spec(spec_name=spec_name, extra_config=extra_config)
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_chunks > 0
+    assert spec.config.canonical_layout is False
+
+
+@pytest.mark.parametrize("spec_name", [None, "CPUOffloadingSpec"])
+def test_cpu_spec_rejects_canonical_layout(spec_name):
+    with pytest.raises(ValueError, match="canonical_layout.*CPUOffloadingSpec"):
+        _create_spec(
+            spec_name=spec_name,
+            canonical_layout=True,
+            extra_config={"canonical_layout": True},
+        )
+
+
+def test_tiering_spec_accepts_canonical_layout():
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        canonical_layout=True,
+        extra_config={"canonical_layout": True},
+    )
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.config.canonical_layout is True
+    assert spec.num_chunks > 0
+
+
+@pytest.mark.parametrize("spec_name", ["CPUOffloadingSpec", "TieringOffloadingSpec"])
+def test_builtin_spec_rejects_unknown_extra_config(spec_name):
+    with pytest.raises(ValueError, match=f"{spec_name}: unknown_option"):
+        _create_spec(spec_name=spec_name, extra_config={"unknown_option": True})
+
+
+@pytest.mark.parametrize("spec_name", ["CPUOffloadingSpec", "TieringOffloadingSpec"])
+def test_builtin_spec_accepts_shared_extra_config(spec_name):
+    spec = _create_spec(
+        spec_name=spec_name,
+        extra_config={
+            "blocks_per_chunk": 1,
+            "offload_prompt_only": False,
+            "self_describing_kv_events": True,
+            "sync_load_budget_bytes": 1024,
+        },
+    )
+    assert not spec.offload_prompt_only
 
 
 @pytest.mark.parametrize("shared_region", [False, True])
@@ -800,7 +845,10 @@ def test_offloading_spec_uses_normalized_chunk_geometry():
 def test_create_dynamic_spec_receives_config():
     config = make_offloading_config(
         spec_name="SingleArgExternalOffloadingSpec",
-        extra_config={"spec_module_path": "tests.v1.kv_offload.test_factory"},
+        extra_config={
+            "spec_module_path": "tests.v1.kv_offload.test_factory",
+            "custom_option": True,
+        },
     )
 
     spec = OffloadingSpecFactory.create_spec(config)

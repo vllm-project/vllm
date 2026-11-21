@@ -560,6 +560,33 @@ def test_cpu_offloading_metrics() -> None:
         del llm
 
 
+@pytest.mark.parametrize("spec_name", [None, "CPUOffloadingSpec"])
+def test_cpu_offloading_rejects_canonical_layout(
+    monkeypatch, vllm_runner, spec_name
+) -> None:
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    extra_config: dict = {"cpu_bytes_to_use": 16 << 20, "canonical_layout": True}
+    if spec_name is not None:
+        extra_config["spec_name"] = spec_name
+
+    with (
+        pytest.raises(ValueError, match="canonical_layout.*CPUOffloadingSpec"),
+        vllm_runner(
+            "facebook/opt-125m",
+            max_model_len=128,
+            gpu_memory_utilization=0.2,
+            enforce_eager=True,
+            enable_prefix_caching=True,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="OffloadingConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config=extra_config,
+            ),
+        ),
+    ):
+        pass
+
+
 @pytest.mark.parametrize("multiprocessing", [True, False])
 def test_sleep_keeps_offloaded_blocks_unless_reset(
     monkeypatch: pytest.MonkeyPatch, multiprocessing: bool

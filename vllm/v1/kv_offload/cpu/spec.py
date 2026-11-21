@@ -50,6 +50,25 @@ def _all_workers_barrier() -> None:
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     SHARED_REGION_PER_RANK = True
+    # Includes the shared options consumed by OffloadingConnector and its factory.
+    _allowed_extra_config_keys = frozenset(
+        {
+            "async_init",
+            "async_init_pin_pace",
+            "block_size",
+            "blocks_per_chunk",
+            "cache_policy_module_path",
+            "cpu_bytes_to_use",
+            "eviction_policy",
+            "max_tracker_size",
+            "offload_prompt_only",
+            "self_describing_kv_events",
+            "spec_module_path",
+            "spec_name",
+            "store_threshold",
+            "sync_load_budget_bytes",
+        }
+    )
 
     @classmethod
     def build_metric_definitions(
@@ -98,8 +117,30 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return definitions
 
+    def _validate_extra_config(self) -> None:
+        """Validate the options supported by this spec and its subclasses."""
+        unexpected_keys = self.extra_config.keys() - self._allowed_extra_config_keys
+        # Specs that only support direct layout still accept an explicit false.
+        unexpected_keys.discard("canonical_layout")
+        if unexpected_keys:
+            raise ValueError(
+                f"Unexpected kv_connector_extra_config keys for "
+                f"{type(self).__name__}: {', '.join(sorted(unexpected_keys))}"
+            )
+
+        if (
+            self.config.canonical_layout
+            and "canonical_layout" not in self._allowed_extra_config_keys
+        ):
+            raise ValueError(
+                f"canonical_layout is not supported by {type(self).__name__}. "
+                "Set spec_name to TieringOffloadingSpec or remove "
+                "canonical_layout from kv_connector_extra_config."
+            )
+
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        self._validate_extra_config()
 
         # Pre-fault and pin the region in the background; the engine serves
         # without offloading until every worker is ready.

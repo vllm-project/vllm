@@ -101,6 +101,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     SHARED_REGION_PER_RANK = False
+    _allowed_extra_config_keys = CPUOffloadingSpec._allowed_extra_config_keys | {
+        "backpressure",
+        "canonical_layout",
+        "secondary_tiers",
+        "tier_poll_interval_s",
+    }
 
     @classmethod
     @override
