@@ -21,6 +21,12 @@ from .utils import _skip_if_insufficient_gpus_for_tp, get_test_prompts, greedy_s
 # Even with in-process scheduling, near-tie tokens still flip on up to 3 of 20
 # prompts in CI, greedy and seeded. A sharding bug diverges wholesale instead.
 MAX_DIVERGENT_PROMPTS = 3
+# Seeded sampling at temperature 1.0 is far more sensitive: any logit difference
+# between the two boots can move a draw across a CDF boundary. In the MTP test,
+# 4 or 5 of the 20 prompts diverge in a few percent of CI runs (Nov 2-18), always
+# GSM8K prompts from {12, 13, 16, 17, 18} and never the low-entropy repeat
+# prompts. A sharding or per-request seed bug still diverges far beyond this.
+MAX_DIVERGENT_SEEDED_PROMPTS = 6
 
 
 def _is_sharded_sampling_active(worker) -> bool:
@@ -89,9 +95,9 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
         shard_greedy, shard_seeded = run(disable_sharding=False)
 
         # A sharding bug shows up as wholesale divergence, not isolated flips.
-        for name, ref_outputs, shard_outputs in (
-            ("greedy", ref_greedy, shard_greedy),
-            ("seeded", ref_seeded, shard_seeded),
+        for name, ref_outputs, shard_outputs, max_divergent in (
+            ("greedy", ref_greedy, shard_greedy, MAX_DIVERGENT_PROMPTS),
+            ("seeded", ref_seeded, shard_seeded, MAX_DIVERGENT_SEEDED_PROMPTS),
         ):
             divergent = []
             for i, (ref, out) in enumerate(zip(ref_outputs, shard_outputs)):
@@ -102,7 +108,7 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
                         f"  replicated: {ref.outputs[0].text!r}\n"
                         f"  sharded:    {out.outputs[0].text!r}"
                     )
-            assert len(divergent) <= MAX_DIVERGENT_PROMPTS, (
+            assert len(divergent) <= max_divergent, (
                 f"{name}: {len(divergent)}/{len(ref_outputs)} prompts diverged "
                 f"at {divergent}, beyond near-tie noise"
             )
