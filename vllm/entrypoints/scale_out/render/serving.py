@@ -20,7 +20,11 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.minicpm5 import resolve_search_tool_choice
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    has_tool_search_output,
+)
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     extract_mm_features,
 )
@@ -353,6 +357,9 @@ class ServingRender(BaseServing):
                 err_type="invalid_request_error",
                 param="previous_response_id",
             )
+
+        if has_tool_search_output(request.input):
+            request = resolve_search_tool_choice(request)
 
         result = await self.online_renderer.render_responses(
             request,
