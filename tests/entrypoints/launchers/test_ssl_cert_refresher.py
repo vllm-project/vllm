@@ -118,7 +118,7 @@ async def test_serve_http_stops_ssl_refresher_when_server_exits(
         load=MagicMock(),
     )
     server_error = RuntimeError("server failed") if failure_stage == "serve" else None
-    server = SimpleNamespace(serve=AsyncMock(side_effect=server_error))
+    server = SimpleNamespace(serve=AsyncMock(side_effect=server_error), started=True)
     ssl_cert_refresher = MagicMock()
     loop = asyncio.get_running_loop()
 
