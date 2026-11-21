@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import json
 import tempfile
 from pathlib import Path
@@ -373,3 +374,114 @@ def test_run_comb_warmup_default_is_backward_compatible(
 
     assert calls == [0]
     assert measured == [{"run_number": 0}]
+
+
+class _StubServer:
+    """Stands in for `ServerProcess` by writing the requested result file."""
+
+    def __init__(self, failing: tuple[str, ...] = ()):
+        self.ran: list[str] = []
+        self.failing = failing
+
+    def run_subcommand(self, cmd: list[str]):
+        result_dir = Path(cmd[cmd.index("--result-dir") + 1])
+        filename = cmd[cmd.index("--result-filename") + 1]
+        self.ran.append(filename)
+        if filename in self.failing:
+            raise RuntimeError("synthetic run failure")
+        (result_dir / filename).write_text("{}")
+
+    def after_bench(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        (["warmup.json", "run=0.json"], ["warmup.json", "run=1.json"]),
+        (["warmup.json", "run=0.json", "run=1.json"], []),
+    ],
+)
+def test_run_comb_resume_warms_up_restarted_server(
+    tmp_path: Path, existing: list[str], expected: list[str]
+):
+    """Resuming measures on a new server, so a leftover `warmup.json` must not
+    skip the warmup unless no measured run is left."""
+    base_path = tmp_path / "combination"
+    base_path.mkdir()
+    for filename in existing:
+        (base_path / filename).write_text("{}")
+    server = _StubServer()
+
+    sweep_serve.run_comb(
+        server,  # type: ignore[arg-type]
+        [],
+        serve_comb=ParameterSweepItem(),
+        bench_comb=ParameterSweepItem({"num_prompts": 320}),
+        link_vars=[],
+        base_path=base_path,
+        num_runs=2,
+        warmup_num_prompts=32,
+        dry_run=False,
+    )
+
+    assert server.ran == expected
+
+
+def _patch_run_server(monkeypatch: pytest.MonkeyPatch, servers: list[_StubServer]):
+    @contextlib.contextmanager
+    def fake_run_server(*args, **kwargs):
+        yield servers.pop(0)
+
+    monkeypatch.setattr(sweep_serve, "run_server", fake_run_server)
+
+
+def _run_combs(experiment_dir: Path, *, num_runs: int, continue_on_error: bool):
+    return sweep_serve.run_combs(
+        [],
+        [],
+        [],
+        show_stdout=False,
+        server_ready_timeout=1,
+        serve_params=ParameterSweep.from_records([{}]),
+        bench_params=ParameterSweep.from_records([{"num_prompts": 100}]),
+        link_vars=[],
+        experiment_dir=experiment_dir,
+        num_runs=num_runs,
+        warmup_num_prompts=0,
+        dry_run=False,
+        continue_on_error=continue_on_error,
+    )
+
+
+def test_run_combs_resume_retries_recorded_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A run recorded by `--continue-on-error` is retried by the next invocation
+    instead of raising for its missing result file."""
+    resumed = _StubServer()
+    _patch_run_server(monkeypatch, [_StubServer(failing=("run=1.json",)), resumed])
+
+    first_data = _run_combs(tmp_path, num_runs=3, continue_on_error=True)
+    assert list(first_data["run_number"]) == [0, 2]
+    assert len(list(tmp_path.rglob("run=1.failure.json"))) == 1
+
+    resumed_data = _run_combs(tmp_path, num_runs=3, continue_on_error=False)
+    assert list(resumed_data["run_number"]) == [0, 1, 2]
+    assert resumed.ran == ["run=1.json"]
+    assert not list(tmp_path.rglob("*.failure.json"))
+
+
+def test_run_combs_resume_ignores_failure_outside_requested_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Resuming with a smaller `--num-runs` reuses the existing results instead
+    of starting a server for a failed run that is no longer requested."""
+    servers = [_StubServer(failing=("run=2.json",)), _StubServer()]
+    _patch_run_server(monkeypatch, servers)
+
+    _run_combs(tmp_path, num_runs=3, continue_on_error=True)
+    resumed_data = _run_combs(tmp_path, num_runs=2, continue_on_error=False)
+
+    assert list(resumed_data["run_number"]) == [0, 1]
+    assert len(servers) == 1

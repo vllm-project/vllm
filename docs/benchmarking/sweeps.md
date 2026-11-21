@@ -113,6 +113,7 @@ cleanup scope.
 
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
+    Runs recorded as failed by `--continue-on-error` are retried, and the warmup is repeated for each parameter combination that still has runs left to measure.
 
 ### Workload Explorer
 

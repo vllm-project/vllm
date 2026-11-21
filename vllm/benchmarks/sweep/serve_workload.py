@@ -241,6 +241,7 @@ def explore_combs_workloads(
             serve_comb=serve_comb,
             bench_params=bench_params,
             experiment_dir=experiment_dir,
+            num_runs=num_runs,
             dry_run=dry_run,
         ) as server:
             for bench_comb in bench_params:
