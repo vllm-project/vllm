@@ -1778,14 +1778,16 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             del hf_data["videos"]
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
+            sampled_metadata = []
             for item in videos:
                 video_array, metadata = item
 
                 # don't update mm_kwargs inplace
-                video_mm_kwargs = dict(**hf_kwargs)
-                video_mm_kwargs["do_sample_frames"] = metadata.get(
-                    "do_sample_frames", True
+                video_mm_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+                video_mm_kwargs.setdefault(
+                    "do_sample_frames", metadata.get("do_sample_frames", True)
                 )
+                video_mm_kwargs["return_metadata"] = True
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
@@ -1800,23 +1802,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     ),
                     video_mm_kwargs,
                 )
-                sampled_indices = None
-                out_meta = (
-                    video_outputs.get("video_metadata")
-                    if hasattr(video_outputs, "get")
-                    else None
-                )
+                # Absent if the caller disabled `return_metadata` in a scoped
+                # kwarg; the timestamp helper then keeps the input metadata.
+                out_meta = video_outputs.get("video_metadata")
+                sampled = None
                 if out_meta:
-                    first = (
+                    sampled = (
                         out_meta[0][0] if isinstance(out_meta[0], list) else out_meta[0]
                     )
-                    sampled_indices = getattr(first, "frames_indices", None)
-                if sampled_indices is None:
-                    sampled_indices = getattr(video_metadata, "frames_indices", None)
-                if sampled_indices is not None and isinstance(metadata, dict):
-                    if hasattr(sampled_indices, "tolist"):
-                        sampled_indices = sampled_indices.tolist()
-                    metadata["frames_indices"] = [int(idx) for idx in sampled_indices]
+                sampled_metadata.append(sampled)
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
             video_outputs = dict(
@@ -1824,11 +1818,16 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_grid_thw=torch.cat(video_grid_thw_lst),
             )
 
+            metadata_overrides = self._sampled_frame_metadata_overrides(
+                mm_items, sampled_metadata
+            )
+
             # Videos were processed above, so drop their placeholders from the text.
             mm_counts = {**mm_items.get_all_counts(), "video": 0}
             prompt_text = self._get_hf_mm_text(mm_counts)
         else:
             video_outputs = dict()
+            metadata_overrides = None
 
         if hf_data:
             processed_data = self.info.ctx.call_hf_processor(
@@ -1845,6 +1844,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 hf_data, hf_kwargs, passthrough_data, processed_data
             ),
             mm_items,
+            metadata_overrides=metadata_overrides,
         )
 
     def _with_video_timestamps(

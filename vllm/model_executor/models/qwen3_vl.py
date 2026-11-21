@@ -1091,8 +1091,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         do_sample_frames: bool | None = None,
         sampled_fps: float | None = None,
         sampled_num_frames: int | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
     ) -> list[int]:
-        video_processor = self.get_video_processor()
+        video_processor = self.get_video_processor(**(hf_processor_mm_kwargs or {}))
         temporal_patch_size = video_processor.temporal_patch_size
         indices = metadata["frames_indices"]
 
@@ -1119,13 +1120,11 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
                 sampled_fps = sampled_fps if sampled_fps else video_processor.fps
                 num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
 
-            num_frames = min(
-                min(
+                num_frames = min(
                     max(num_frames, video_processor.min_frames),
                     video_processor.max_frames,
-                ),
-                total_num_frames,
-            )
+                    total_num_frames,
+                )
             indices = (
                 np.linspace(0, total_num_frames - 1, num_frames)
                 .round()
@@ -1478,6 +1477,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     do_sample_frames=video_scoped_kwargs["do_sample_frames"],
                     sampled_fps=video_scoped_kwargs.get("fps"),
                     sampled_num_frames=video_scoped_kwargs.get("num_frames"),
+                    hf_processor_mm_kwargs=video_scoped_kwargs,
                 )
                 timestamps_per_video.append(timestamps)
 
@@ -1496,7 +1496,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     video_scoped_kwargs["fps"] = None
 
                 video_outputs = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**video_mm_kwargs),
+                    self.info.get_hf_processor(**video_scoped_kwargs),
                     dict(text=self._get_hf_mm_text({"video": 1}), **video_mm_data),
                     video_mm_kwargs,
                 )
