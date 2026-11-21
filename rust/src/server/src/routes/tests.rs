@@ -42,6 +42,7 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::task::{EngineTask, GenerationTask};
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
@@ -1353,6 +1354,52 @@ async fn cohere_routes_follow_the_python_gates() {
     );
     assert_eq!(post_status(&disabled, CHAT).await, StatusCode::NOT_FOUND);
     assert_eq!(post_status(&disabled, RENDER).await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn speech_to_text_routes_follow_the_engine_transcription_task() {
+    const ROUTES: [&str; 2] = ["/v1/audio/transcriptions", "/v1/audio/translations"];
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-speech-to-text-routes",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = AppState::new(vec!["model".to_string()], chat);
+
+    let asr = build_router(Arc::new(state.with_supported_tasks([
+        EngineTask::Generation(GenerationTask::Generate),
+        EngineTask::Generation(GenerationTask::Transcription),
+    ])));
+    for uri in ROUTES {
+        assert_route_not_supported(&asr, "POST", uri, uri).await;
+    }
+
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-speech-to-text-routes-off",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let text_only = build_router(Arc::new(
+        AppState::new(vec!["model".to_string()], chat)
+            .with_supported_tasks([EngineTask::Generation(GenerationTask::Generate)]),
+    ));
+    for uri in ROUTES {
+        let response = text_only
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
