@@ -1344,6 +1344,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             ),
         )
 
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
