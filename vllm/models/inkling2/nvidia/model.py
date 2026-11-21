@@ -44,6 +44,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.inkling.nvidia.sconv_swa_attn import InklingConvState
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
@@ -187,6 +188,10 @@ class Inkling2DecoderLayer(nn.Module):
                 kernel_size=config.sconv_kernel_size,
                 prefix=f"{prefix}.conv_state" + (f".pass{p}" if p else ""),
                 replicate_hidden=True,
+                # Only the Triton `_conv` (SM12x, TP=1) skips null-block stores;
+                # the native conv/all-reduce/sequence-parallel kernels do not.
+                tail_only=current_platform.is_device_capability_family(120)
+                and get_tensor_model_parallel_world_size() == 1,
             )
             for p in range(num_passes)
         )
