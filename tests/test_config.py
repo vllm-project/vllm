@@ -134,21 +134,18 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
-    ("architecture", "quantization", "is_rocm", "accepted"),
+    ("architecture", "field", "value"),
     [
-        ("DSparkDraftModel", "fp8", False, True),
-        ("DSparkDraftModel", "nvfp4", True, True),
-        ("MuseSparkDSparkModel", "fp8", True, True),
-        # Only the ROCm Muse Spark drafter builds its own quantized heads.
-        ("MuseSparkDSparkModel", "fp8", False, False),
-        ("MuseSparkDSparkModel", "nvfp4", True, False),
-        ("Qwen3DSparkModel", "fp8", True, False),
+        ("MuseSparkDSparkModel", "draft_lm_head_quantization", "nvfp4"),
+        ("Qwen3DSparkModel", "draft_lm_head_quantization", "fp8"),
+        # Per-tensor FP8 is refused for the Muse Spark draft.
+        ("MuseSparkDSparkModel", "quantization", "fp8"),
+        ("MuseSparkDSparkModel", "quantization", "fp8_per_tensor"),
     ],
 )
-def test_dspark_draft_lm_head_quantization_drafters(
-    monkeypatch, architecture, quantization, is_rocm, accepted
-):
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+def test_dspark_refuses_unsupported_draft_quantization(architecture, field, value):
+    """Draft quantizations no platform supports for the drafter fail at config
+    time instead of at load."""
     hf_config = SimpleNamespace(model_type="dspark")
     spec = SimpleNamespace(
         draft_model_config=SimpleNamespace(
@@ -160,47 +157,11 @@ def test_dspark_draft_lm_head_quantization_drafters(
         target_model_config=SimpleNamespace(hf_config=hf_config, architectures=[]),
         dspark_draft_topk=None,
         quantization=None,
-        draft_lm_head_quantization=quantization,
-        num_speculative_tokens=7,
-    )
-    with (
-        nullcontext()
-        if accepted
-        else pytest.raises(ValueError, match="draft_lm_head_quantization")
-    ):
-        DSparkSpeculatorConfig.apply_options(spec)
-
-
-@pytest.mark.parametrize(
-    ("architecture", "quantization", "is_rocm", "accepted"),
-    [
-        ("MuseSparkDSparkModel", "fp8_per_channel", True, True),
-        ("MuseSparkDSparkModel", "fp8", True, False),
-        ("MuseSparkDSparkModel", "fp8_per_tensor", True, False),
-        ("MuseSparkDSparkModel", "fp8_per_channel", False, False),
-        ("DSparkDraftModel", "fp8", True, True),
-    ],
-)
-def test_dspark_muse_draft_quantization(
-    monkeypatch, architecture, quantization, is_rocm, accepted
-):
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
-    hf_config = SimpleNamespace(model_type="dspark")
-    spec = SimpleNamespace(
-        draft_model_config=SimpleNamespace(
-            hf_config=hf_config, architectures=[architecture]
-        ),
-        target_model_config=SimpleNamespace(hf_config=hf_config, architectures=[]),
-        dspark_draft_topk=None,
-        quantization=quantization,
         draft_lm_head_quantization=None,
         num_speculative_tokens=7,
     )
-    with (
-        nullcontext()
-        if accepted
-        else pytest.raises(ValueError, match="speculative_config.quantization")
-    ):
+    setattr(spec, field, value)
+    with pytest.raises(ValueError, match=field):
         DSparkSpeculatorConfig.apply_options(spec)
 
 

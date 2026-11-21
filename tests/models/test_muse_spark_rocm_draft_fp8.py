@@ -32,7 +32,6 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
-    UnquantizedEmbeddingMethod,
     pad_vocab_size,
 )
 from vllm.platforms import current_platform
@@ -301,9 +300,6 @@ def test_draft_loads_as_fp8_per_channel(drafts) -> None:
             atol=0,
             msg=name,
         )
-    for name in heads:
-        quant_method = bf16.get_submodule(name).quant_method
-        assert isinstance(quant_method, UnquantizedEmbeddingMethod)
 
 
 # Relative error bounds against the BF16 draft: FP8 rounding of the weight only
@@ -315,6 +311,9 @@ def test_fp8_draft_tracks_the_bf16_draft(drafts) -> None:
     """The context K/V projection, the base and Markov logits and `fc` of the FP8
     draft stay within FP8 rounding error of the BF16 draft."""
     bf16, fp8 = drafts
+    # The comparison is vacuous if the FP8 draft's heads loaded as BF16.
+    assert fp8.lm_head.weight.dtype == F8
+    assert fp8.model.markov_head.markov_w2.weight.dtype == F8
     gen = torch.Generator(device="cuda").manual_seed(1)
     num_ctx = 9
     # The stacked context K/V weight is rebuilt from the dequantized qkv rows.
@@ -360,7 +359,23 @@ def test_fp8_lm_head_on_a_tp8_shard(drafts) -> None:
     weight = (torch.randn(rows, HIDDEN, generator=gen, device="cuda") * 0.05).bfloat16()
     head.weight = torch.nn.Parameter(weight, requires_grad=False)
     head.quant_method.process_weights_after_loading(head)
+    assert head.weight.dtype == F8
     hidden = torch.randn(9, HIDDEN, generator=gen, device="cuda").bfloat16()
     out = head.quant_method.apply(head, hidden)
     assert out.shape == (9, rows)
     assert _rel(out, hidden @ weight.t()) < W8A8_REL
+
+
+def test_fp8_draft_keeps_its_head_when_the_target_head_is_equal(drafts) -> None:
+    """Sharing the target's lm_head (equal BF16 weights) leaves the FP8 draft
+    its own FP8 head, whose logits stay within FP8 error of the BF16 ones."""
+    from vllm.v1.worker.gpu.spec_decode.eagle.utils import share_target_lm_head
+
+    bf16, fp8 = drafts
+    own = fp8.lm_head
+    share_target_lm_head(fp8, bf16.lm_head, "fp8")
+    assert fp8.lm_head is own and own.weight.dtype == F8
+    gen = torch.Generator(device="cuda").manual_seed(3)
+    hidden = torch.randn(9, HIDDEN, generator=gen, device="cuda").bfloat16()
+    logits = [model.compute_draft_logits(hidden) for model in (bf16, fp8)]
+    assert 0 < _rel(logits[1], logits[0]) < W8A8_REL

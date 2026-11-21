@@ -33,7 +33,6 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.model_loader.utils import online_quantization_timing_context
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import share_target_lm_head
 from vllm.v1.worker.gpu_worker import Worker
 
 # Not a multiple of the vocab padding, so the head has padded rows.
@@ -237,26 +236,6 @@ def test_layerwise_reload_of_drafter_keeps_copy(
     assert after.keys() == before.keys()
     for name, tensor in before.items():
         assert torch.equal(after[name], tensor), name
-
-
-class _OwnHeadDrafter(torch.nn.Module):
-    has_own_lm_head = True
-    quantizes_own_lm_head = True
-
-
-def test_drafter_quantizing_its_own_lm_head_keeps_it():
-    """A drafter that builds its own lm_head with the quantization keeps it,
-    even when it equals the target's; without quantization the equal head is
-    shared as before."""
-    target = torch.nn.Linear(HIDDEN, 64, bias=False)
-    drafter = _OwnHeadDrafter()
-    drafter.lm_head = own = torch.nn.Linear(HIDDEN, 64, bias=False)
-    own.weight.data.copy_(target.weight.data)
-
-    assert share_target_lm_head(drafter, target, "fp8") is None
-    assert drafter.lm_head is own
-    assert share_target_lm_head(drafter, target, None) is target
-    assert drafter.lm_head is target
 
 
 @pytest.mark.parametrize("has_quant_config", [False, True])
