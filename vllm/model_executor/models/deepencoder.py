@@ -18,7 +18,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionConfig
 
+from vllm import envs
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -348,6 +350,23 @@ class ImageEncoderViT(nn.Module):
         else:
             return abs_pos
 
+    def _forward_net_3_batch_invariant(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate the final strided convolution as a batch-invariant linear op."""
+        conv = self.net_3
+        pad_h, pad_w = conv.padding
+        kernel_h, kernel_w = conv.kernel_size
+        stride_h, stride_w = conv.stride
+        padded = F.pad(x, (pad_w, pad_w, pad_h, pad_h))
+        patches = padded.unfold(2, kernel_h, stride_h).unfold(3, kernel_w, stride_w)
+        batch, _, height, width, _, _ = patches.shape
+        rows = patches.permute(0, 2, 3, 1, 4, 5).reshape(-1, conv.input_size)
+        output = linear_batch_invariant(rows, conv.weight.flatten(1), conv.bias)
+        return (
+            output.view(batch, height, width, conv.out_channels)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
         if self.pos_embed is not None:
@@ -358,9 +377,10 @@ class ImageEncoderViT(nn.Module):
 
         neck_output = self.neck(x.permute(0, 3, 1, 2))
         conv2_output = self.net_2(neck_output)
-        conv3_output = self.net_3(conv2_output)
-
-        return conv3_output
+        if current_platform.is_rocm() and envs.VLLM_BATCH_INVARIANT:
+            # MIOpen may use atomic split-K accumulation for this convolution.
+            return self._forward_net_3_batch_invariant(conv2_output)
+        return self.net_3(conv2_output)
 
 
 class Block(nn.Module):
