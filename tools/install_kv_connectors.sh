@@ -10,10 +10,11 @@ set -eu
 requirements_dir=$1
 CUDA_MAJOR="${CUDA_VERSION%%.*}"
 CUDA_VERSION_DASH=$(echo "${CUDA_VERSION}" | cut -d. -f1,2 | tr '.' '-')
-# lmcache requires explicit specifying CUDA_HOME
+# lmcache requires explicit specifying CUDA_HOME.
+# libcublas-dev is already installed in vllm-runtime-base; do not add it here
+# or the fallback's apt-get purge would remove it from the runtime image.
 export CUDA_HOME=/usr/local/cuda
 BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
-            libcublas-dev-${CUDA_VERSION_DASH} \
             libcusolver-dev-${CUDA_VERSION_DASH}"
 
 KV_REQUIREMENTS="${requirements_dir}/kv_connectors.txt"
