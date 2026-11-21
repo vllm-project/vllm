@@ -200,6 +200,16 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        """Deliver a generic control RPC to the scheduler-side KV connector.
+
+        The payload is opaque to vLLM and forwarded verbatim to the
+        connector's `on_rpc` hook. Returns the connector's response bytes, or
+        `None` if the connector does not implement the hook.
+        """
+        ...
+
+    @abstractmethod
     async def sleep(
         self, level: int = 1, mode: "PauseMode" = "abort", reset_connector: bool = True
     ) -> None:
