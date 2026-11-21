@@ -14,6 +14,7 @@ time rather than being committed to the repository.
 
 import ast
 import logging
+import math
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -41,7 +42,17 @@ MLA_ATTENTION_FILE = (
 )
 
 # Backends to skip during doc generation
-SKIP_BACKENDS = {"CUSTOM", "TORCH_SDPA"}
+SKIP_BACKENDS = {
+    "CUSTOM",
+    "TORCH_SDPA",
+    # Backend.NO_ATTENTION points at vllm.v1.attention.backends.no_attention,
+    # which does not exist anywhere in the tree. Tracked in #59423.
+    "NO_ATTENTION",
+}
+
+# Factory used by composite backends, which are assigned at module level rather
+# than declared with a `class` statement.
+COMPOSITE_FACTORY = "create_composite_attention_backend"
 
 BACKEND_KV_DTYPE_EXCLUDES: dict[str, set[str]] = {
     # fp8 is an alias for fp8_ds_mla for FlashMLA Sparse
@@ -951,6 +962,302 @@ def parse_impl_bool_attr(
     return default
 
 
+def _find_composite_factory_call(tree: ast.AST, name: str) -> ast.Call | None:
+    """Find a module-level `name = create_composite_attention_backend(...)`."""
+    for node in getattr(tree, "body", []):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == name):
+            continue
+        call = node.value
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == COMPOSITE_FACTORY
+        ):
+            return call
+    return None
+
+
+def _resolve_imported_class_path(tree: ast.AST, class_name: str) -> str | None:
+    """Map a name imported with `from x.y import Name` back to `x.y.Name`."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                if (alias.asname or alias.name) == class_name:
+                    return f"{node.module}.{alias.name}"
+    return None
+
+
+def _call_kwarg(call: ast.Call, key: str) -> ast.expr | None:
+    for keyword in call.keywords:
+        if keyword.arg == key:
+            return keyword.value
+    return None
+
+
+def _literal_int_tuple(node: ast.expr | None) -> tuple[int, ...] | None:
+    """Evaluate a literal tuple/list of ints, or None if it isn't one."""
+    if node is None:
+        return None
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError):
+        return None
+    if isinstance(value, int):
+        return (value,)
+    if isinstance(value, list | tuple) and all(isinstance(v, int) for v in value):
+        return tuple(value)
+    return None
+
+
+def _csv_items(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _intersect_csv(first: str, second: str) -> str:
+    """Intersect two comma-separated capability lists, keeping `first`'s order."""
+    allowed = set(_csv_items(second))
+    return ", ".join(item for item in _csv_items(first) if item in allowed)
+
+
+def _spec_allows_block_size(spec: str, size: int) -> bool:
+    """Whether a parsed block-size spec admits `size`.
+
+    `parse_block_sizes` renders `Any`, or a list whose items are either explicit
+    sizes or a multiple-of form such as `%16`.
+    """
+    if spec.strip() == "Any":
+        return True
+    for item in _csv_items(spec):
+        if item.startswith("%"):
+            if size % int(item[1:]) == 0:
+                return True
+        elif item == str(size):
+            return True
+    return False
+
+
+def _intersect_block_specs(first: str, second: str) -> str | None:
+    """Intersect two block-size specs as `_intersect_kernel_block_sizes` would.
+
+    `Any` is the identity, two multiple-of forms combine to their least common
+    multiple, and an explicit list is filtered by the other spec. Returns None
+    for anything else, so the caller reports a gap rather than guessing.
+    """
+    first, second = first.strip(), second.strip()
+    if first == "Any":
+        return second
+    if second == "Any":
+        return first
+    steps = [_csv_items(spec) for spec in (first, second)]
+    if all(len(items) == 1 and items[0].startswith("%") for items in steps):
+        return f"%{math.lcm(*(int(items[0][1:]) for items in steps))}"
+    for listed, other in ((first, second), (second, first)):
+        explicit = [item for item in _csv_items(listed) if not item.startswith("%")]
+        if len(explicit) == len(_csv_items(listed)):
+            sizes = [s for s in explicit if _spec_allows_block_size(other, int(s))]
+            return ", ".join(sizes) or None
+    return None
+
+
+def _mm_prefix_variants(tree: ast.AST, policy_name: str) -> set[int] | None:
+    """Variants a routing policy routes image masks to.
+
+    Reads `variant_uses_mm_prefix`, which the in-tree policies express as
+    `return variant == N`. Returns None when the form isn't recognised, so the
+    caller can refuse to guess.
+    """
+    policy = find_class_in_ast(tree, policy_name)
+    if policy is None:
+        path = _resolve_imported_class_path(tree, policy_name)
+        if path is None:
+            return None
+        policy_file = get_file_from_class_path(path)
+        if policy_file is None:
+            return None
+        policy = find_class_in_ast(ast.parse(policy_file.read_text()), policy_name)
+        if policy is None:
+            return None
+    method = find_method(policy, "variant_uses_mm_prefix")
+    if method is None:
+        return None
+    for node in ast.walk(method):
+        if not (isinstance(node, ast.Return) and isinstance(node.value, ast.Compare)):
+            continue
+        compare = node.value
+        if not (len(compare.ops) == 1 and isinstance(compare.ops[0], ast.Eq)):
+            continue
+        variant = _literal_int_tuple(compare.comparators[0])
+        if variant is not None:
+            return {variant[0]}
+    return None
+
+
+# What `analyze_backend` reports for a capability a class does not state.
+_UNSTATED_CAPABILITIES = {
+    "dtypes": "fp16, bf16",
+    "kv_cache_dtypes": "auto",
+    "block_sizes": "Any",
+    "head_sizes": "Any",
+    "attn_types": "Decoder",
+    "compute_capability": "Any",
+}
+
+_INHERITED_FLAGS = (
+    "is_mla",
+    "supports_sink",
+    "supports_non_causal",
+    "is_sparse",
+    "supports_mm_prefix",
+    "supports_dcp",
+)
+
+
+def _parent_class_path(class_path: str) -> str | None:
+    """Class path of `class_path`'s first base, if it can be located."""
+    file_path = get_file_from_class_path(class_path)
+    if file_path is None:
+        return None
+    tree = ast.parse(file_path.read_text())
+    class_node = find_class_in_ast(tree, class_path.rsplit(".", 1)[1])
+    if class_node is None:
+        return None
+    parent = _get_parent_class_name(class_node)
+    if parent is None:
+        return None
+    if find_class_in_ast(tree, parent) is not None:
+        return f"{class_path.rsplit('.', 1)[0]}.{parent}"
+    parent_file = _resolve_import_to_file(tree, parent, file_path)
+    if parent_file is None:
+        return None
+    try:
+        relative = parent_file.relative_to(REPO_ROOT)
+    except ValueError:
+        return None
+    return f"{relative.with_suffix('').as_posix().replace('/', '.')}.{parent}"
+
+
+def _analyze_composite_child(name: str, class_path: str) -> dict[str, Any] | None:
+    """Analyze a composite's child, filling unstated fields from its ancestors.
+
+    `analyze_backend` reads a single ClassDef, so a thin subclass that only
+    overrides behaviour reports the unstated-capability defaults for everything
+    it inherits. Walk the base chain and let the most derived class that actually
+    states a value win.
+
+    Limitation: a subclass that restates a default is indistinguishable from one
+    that says nothing, so the ancestor's value wins there.
+    """
+    merged: dict[str, Any] | None = None
+    seen: set[str] = set()
+    path: str | None = class_path
+    while path and path not in seen:
+        seen.add(path)
+        info = analyze_backend(name, path)
+        if info is None:
+            break
+        if merged is None:
+            merged = dict(info)
+        else:
+            for field, unstated in _UNSTATED_CAPABILITIES.items():
+                if merged[field] == unstated:
+                    merged[field] = info[field]
+            for field in _INHERITED_FLAGS:
+                merged[field] = merged[field] or info[field]
+        path = _parent_class_path(path)
+    return merged
+
+
+def analyze_composite_backend(
+    backend_name: str, class_path: str, tree: ast.AST, call: ast.Call
+) -> dict[str, Any] | None:
+    """Build a table row for a backend produced by `COMPOSITE_FACTORY`.
+
+    Every field mirrors what `CompositeAttentionBackend` in
+    `vllm/v1/attention/backends/composite.py` actually declares: dtypes, KV
+    dtypes and block sizes are intersections of the two children, head sizes and
+    the compute-capability major come from the explicit keywords, DCP is
+    hard-disabled, and the capability flags the composite does not override keep
+    the `AttentionBackend` defaults. Returns None if anything cannot be read
+    statically, so the caller reports a gap instead of publishing a guess.
+    """
+    if len(call.args) < 2:
+        return None
+    module = class_path.rsplit(".", 1)[0]
+    children = []
+    for arg in call.args[:2]:
+        if not isinstance(arg, ast.Name):
+            return None
+        # A child is either imported from another module or declared locally.
+        if find_class_in_ast(tree, arg.id) is not None:
+            child_path = f"{module}.{arg.id}"
+        else:
+            child_path = _resolve_imported_class_path(tree, arg.id)
+        if child_path is None:
+            return None
+        child = _analyze_composite_child(arg.id, child_path)
+        if child is None:
+            return None
+        children.append(child)
+    general, causal = children
+
+    head_sizes = _literal_int_tuple(_call_kwarg(call, "head_sizes"))
+    kernel_block_sizes = _literal_int_tuple(_call_kwarg(call, "kernel_block_sizes"))
+    device_major = _literal_int_tuple(_call_kwarg(call, "device_major"))
+    # `get_supported_head_sizes` returns `list(head_sizes)` verbatim, and
+    # `supports_compute_capability` pins `capability.major`, so both keywords
+    # must be present for the row to be meaningful.
+    if not head_sizes or device_major is None:
+        return None
+
+    if kernel_block_sizes:
+        admitted = [
+            size
+            for size in kernel_block_sizes
+            if all(_spec_allows_block_size(c["block_sizes"], size) for c in children)
+        ]
+        block_sizes = ", ".join(str(size) for size in admitted) or None
+    else:
+        block_sizes = _intersect_block_specs(
+            general["block_sizes"], causal["block_sizes"]
+        )
+    if block_sizes is None:
+        return None
+
+    routing = _call_kwarg(call, "routing_policy")
+    if not isinstance(routing, ast.Name):
+        return None
+    mm_variants = _mm_prefix_variants(tree, routing.id)
+    if mm_variants is None:
+        return None
+    supports_mm_prefix = all(
+        variant not in mm_variants or child["supports_mm_prefix"]
+        for variant, child in enumerate(children)
+    )
+
+    return {
+        "name": backend_name,
+        "dtypes": _intersect_csv(general["dtypes"], causal["dtypes"]),
+        "kv_cache_dtypes": _intersect_csv(
+            general["kv_cache_dtypes"], causal["kv_cache_dtypes"]
+        ),
+        "block_sizes": block_sizes,
+        "head_sizes": ", ".join(str(size) for size in head_sizes),
+        "attn_types": "Decoder",
+        "compute_capability": f"{device_major[0]}.x",
+        # Not overridden by CompositeAttentionBackend, so the base defaults hold.
+        "is_mla": False,
+        "supports_sink": False,
+        "supports_non_causal": False,
+        "is_sparse": False,
+        "supports_mm_prefix": supports_mm_prefix,
+        # CompositeAttentionBackend.supports_dcp returns False unconditionally.
+        "supports_dcp": False,
+    }
+
+
 def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None:
     """Analyze a backend class and extract feature information."""
     file_path = get_file_from_class_path(class_path)
@@ -966,6 +1273,9 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
     class_name = class_path.rsplit(".", 1)[1]
     class_node = find_class_in_ast(tree, class_name)
     if class_node is None:
+        call = _find_composite_factory_call(tree, class_name)
+        if call is not None:
+            return analyze_composite_backend(backend_name, class_path, tree, call)
         return None
 
     # Check if this is an MLA backend by parent class or naming
@@ -1736,12 +2046,21 @@ def build_blocks() -> dict[str, str]:
     mla_prefill_backends = parse_mla_prefill_backends()
 
     all_backends = []
+    unanalyzed = []
     for backend_name, class_path in attention_backends_map.items():
         if backend_name in SKIP_BACKENDS:
             continue
         info = analyze_backend(backend_name, class_path)
         if info:
             all_backends.append(info)
+        else:
+            unanalyzed.append(f"{backend_name} ({class_path})")
+    if unanalyzed:
+        raise ValueError(
+            "Registered attention backends are missing from the generated "
+            f"tables: {', '.join(sorted(unanalyzed))}. Teach analyze_backend how "
+            "they are defined, or add them to SKIP_BACKENDS with a reason."
+        )
     if fa_features:
         all_backends = _expand_flash_attn_variants(all_backends, fa_features)
     if fi_features:
