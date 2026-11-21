@@ -1003,7 +1003,7 @@ class EngineCore:
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
         ):
-            raise RuntimeError("Failed to reset the KV connector cache.")
+            raise RuntimeError("Failed to reset the KV prefix or connector cache.")
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
