@@ -868,11 +868,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 persistent=False,
             )
         self.vllm_config = vllm_config
-        # The FlashInfer and Triton/FLA prefills emit mid-prefill states, so an
-        # align-mode checkpoint needs no split prefill. AITER FlyDSL cannot, so
+        # The FlashInfer and Triton/FLA prefills emit mid-prefill states, so a
+        # prefix-cache checkpoint needs no split prefill. AITER FlyDSL cannot, so
         # its steps that carry a checkpoint run the Triton/FLA prefill instead.
         self._checkpoint_alignment: int | None = None
-        if vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.enable_prefix_caching:
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
             elif (
