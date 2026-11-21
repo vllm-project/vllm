@@ -4,7 +4,7 @@
 
 import threading
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -26,6 +26,7 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.green_context_pools import GreenContextPools
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
@@ -311,7 +312,10 @@ class UBatchRunner:
     Each microbatch gets a thread and its own forward context. Only one thread
     holds the GPU at a time; they hand off to each other at the communication
     points inside the model (see `vllm.v1.worker.ubatching`), so one
-    microbatch's expert all-to-all overlaps the other's compute.
+    microbatch's expert all-to-all overlaps the other's compute. Under the
+    `attention-feed-forward-overlap` schedule the compute stream belongs to the
+    attention SM pool and each microbatch's comm stream to the feed-forward
+    pool, so one microbatch's attention overlaps the rest of the other's layer.
     """
 
     def __init__(
@@ -350,11 +354,27 @@ class UBatchRunner:
             else None
             for _ in range(self.num_ubatches)
         ]
-        self.comm_stream = torch.cuda.Stream(
-            device=device, priority=dbo_comm_stream_priority()
-        )
-        # Threads and graph capture must use the same compute stream.
-        self.capture_stream = torch.cuda.Stream(device=device)
+        self.sm_pools: GreenContextPools | None = None
+        self.comm_streams: list[torch.cuda.Stream] | None = None
+        if self.parallel_config.dbo_schedule == "attention-feed-forward-overlap":
+            self.sm_pools = GreenContextPools(
+                device.index
+                if device.index is not None
+                else torch.accelerator.current_device_index(),
+                self.parallel_config.dbo_attention_sms,
+                self.num_ubatches,
+            )
+            # Threads, graph capture and replay all use the attention pool's
+            # stream; each microbatch's feed-forward stage has its own stream.
+            self.capture_stream = self.sm_pools.attn_stream
+            self.comm_streams = self.sm_pools.rest_streams
+            self.comm_stream = self.comm_streams[0]
+        else:
+            self.comm_stream = torch.cuda.Stream(
+                device=device, priority=dbo_comm_stream_priority()
+            )
+            # Threads and graph capture must use the same compute stream.
+            self.capture_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         if self.parallel_config.dbo_schedule == "all-reduce-overlap":
@@ -366,12 +386,38 @@ class UBatchRunner:
             if pynccl_comm is not None:
                 pynccl_comm.bind_stream(self.comm_stream)
         self._pending_finish: Callable[[], Any] | None = None
-        self.sm_control = create_sm_control_context(self.parallel_config)
+        # The pools partition the SMs; DBO's SM reservation does not apply.
+        self.sm_control: Any = (
+            nullcontext()
+            if self.sm_pools is not None
+            else create_sm_control_context(self.parallel_config)
+        )
         current_platform.prepare_ubatch_streams(
             self.device,
-            (current_stream(), self.capture_stream, self.comm_stream),
+            (
+                current_stream(),
+                self.capture_stream,
+                *(self.comm_streams or [self.comm_stream]),
+            ),
             self.num_ubatches,
         )
+
+    @contextmanager
+    def pool_stream(self):
+        """Run the body on the attention pool's stream, if there is one.
+
+        Microbatches run (and their graphs replay) on that stream so that the
+        pools apply; the caller's stream is ordered before and after.
+        """
+        if self.sm_pools is None:
+            yield
+            return
+        caller_stream = current_stream()
+        stream = self.sm_pools.attn_stream
+        stream.wait_stream(caller_stream)
+        with torch.cuda.stream(stream):
+            yield
+        caller_stream.wait_stream(stream)
 
     def prepare(
         self,
@@ -488,8 +534,9 @@ class UBatchRunner:
         model_inputs: dict[str, Any],
         ubatch_state: UBatchState,
     ) -> Any:
-        finish = self.begin_capturable_run(model, model_inputs, ubatch_state)
-        return finish()
+        with self.pool_stream():
+            finish = self.begin_capturable_run(model, model_inputs, ubatch_state)
+            return finish()
 
     def begin_capturable_run(
         self,
@@ -520,7 +567,9 @@ class UBatchRunner:
             ready_barrier=self.ready_barrier,
             schedule=self.parallel_config.dbo_schedule,
             token_offsets=[s.token_slice.start for s in ubatch_slices],
+            comm_streams=self.comm_streams,
         )
+        comm_streams = self.comm_streams or [self.comm_stream]
 
         outputs: dict[int, Any] = {}
         errors: dict[int, BaseException] = {}
@@ -533,7 +582,7 @@ class UBatchRunner:
                 torch.accelerator.set_device_index(self.device.index)
                 if for_capture:
                     # Allocate cuBLAS workspaces before capture.
-                    for stream in (compute_stream, self.comm_stream):
+                    for stream in (compute_stream, *comm_streams):
                         with torch.cuda.stream(stream):
                             torch.cuda.current_blas_handle()
                             if current_platform.is_rocm():
@@ -618,7 +667,8 @@ def maybe_build_ubatch_runner(
     """Build the microbatch runner, or None when DBO is not in use.
 
     With more than one DP rank, the DP handshake agrees on each split. With one
-    DP rank, only `all-reduce-overlap` splits, as a local decision.
+    DP rank, only `all-reduce-overlap` and `attention-feed-forward-overlap`
+    split, as a local decision.
     """
     parallel_config = vllm_config.parallel_config
     if not parallel_config.use_ubatching:

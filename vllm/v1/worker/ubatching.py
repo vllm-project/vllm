@@ -48,6 +48,9 @@ class UBatchContext:
         self.schedule = schedule
         self.token_offset = token_offset
         self.recv_hook = None
+        # The stream of the microbatch that registered recv_hook (see
+        # dbo_register_recv_hook); None runs the hook on the current stream.
+        self.recv_hook_stream: torch.cuda.Stream | None = None
 
     def __enter__(self):
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
@@ -61,6 +64,9 @@ class UBatchContext:
         self._restore_context()
         # Assume we want to start on the compute stream
         self.update_stream(self.compute_stream)
+        if self.schedule == "attention-feed-forward-overlap":
+            # Only attention runs on the attention pool (the compute stream).
+            self.switch_to_comm_sync()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -68,6 +74,9 @@ class UBatchContext:
         _CURRENT_CONTEXTS[self.id] = None
         del _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         self.maybe_run_recv_hook()
+        if self.schedule == "attention-feed-forward-overlap":
+            # End on the stream the step started (and the graph is captured) on.
+            self.switch_to_compute_sync()
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
         return False
@@ -125,16 +134,31 @@ class UBatchContext:
         self._wait_comm_done()
 
     def maybe_run_recv_hook(self):
-        if self.recv_hook is not None:
-            self.recv_hook()
-            self.recv_hook = None
+        if self.recv_hook is None:
+            return
+        hook, stream = self.recv_hook, self.recv_hook_stream
+        self.recv_hook = None
+        self.recv_hook_stream = None
+        if stream is None or stream == current_stream():
+            hook()
+            return
+        # The hook completes the peer microbatch's receive, so its kernels
+        # belong on the peer's stream, ahead of the work that consumes the
+        # received data. With one comm stream this never triggers; under
+        # attention-feed-forward-overlap each microbatch's feed-forward stage
+        # has its own stream.
+        with torch.cuda.stream(stream):
+            hook()
 
     def yield_(self):
         self.current_stream = current_stream()
         self._cpu_yield()
         self.update_stream(self.current_stream)
 
-    def yield_and_switch_from_compute_to_comm(self):
+    def yield_and_switch_from_compute_to_comm(self, schedule: str | None = None):
+        """With `schedule`, a no-op unless that schedule is running."""
+        if schedule is not None and schedule != self.schedule:
+            return
         assert current_stream() == self.compute_stream
         self._signal_compute_done()
         self._cpu_yield()
@@ -207,6 +231,8 @@ def dbo_register_recv_hook(recv_hook):
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
         next_ctx.recv_hook = recv_hook
+        # The peer runs the hook on behalf of this microbatch: on this stream.
+        next_ctx.recv_hook_stream = current_stream()
 
 
 def dbo_get_previous_event(func, *args, **kwargs):
@@ -226,6 +252,7 @@ def make_ubatch_contexts(
     ready_barrier: threading.Barrier,
     schedule: str | None = "default",
     token_offsets: list[int] | None = None,
+    comm_streams: list[torch.cuda.Stream] | None = None,
 ) -> list[UBatchContext]:
     global _NUM_UBATCHES, _CURRENT_CONTEXTS, _SCHEDULE
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
@@ -248,7 +275,10 @@ def make_ubatch_contexts(
         ctx = UBatchContext(
             id=i,
             compute_stream=compute_stream,
-            comm_stream=comm_stream,
+            # One comm stream per microbatch when `comm_streams` is given.
+            comm_stream=comm_streams[i % len(comm_streams)]
+            if comm_streams
+            else comm_stream,
             forward_context=forward_contexts[i],
             ready_barrier=ready_barrier,
             cpu_wait_event=cpu_events[i],
