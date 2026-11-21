@@ -88,6 +88,9 @@ def nvfp4_marlin_process_scales(
             "FP8-S0E5M3 format to speedup the dequantization."
         )
 
+    if a_dtype is None:
+        a_dtype = marlin_scales.dtype
+
     # convert to half first, we would convert to fp8 later
     marlin_scales = marlin_scales.to(torch.half)
 
@@ -114,7 +117,18 @@ def nvfp4_marlin_process_scales(
         marlin_scales = (marlin_scales.float() * scale_factor).to(torch.half)
 
     marlin_scales = marlin_scales * (2**7)
-    marlin_scales[marlin_scales < 2] = 0
+    # The half kernel path decodes every S0E5M3 value exactly. The bfloat16
+    # path cannot represent values below 2 (top bit 0), so drop those.
+    if a_dtype != torch.half:
+        too_small = marlin_scales < 2
+        if (too_small & (marlin_scales > 0)).any():
+            logger.warning_once(
+                "NVFP4 Marlin with bfloat16 activations sets block scales below "
+                "about 2^-14 of the largest block scale of a layer (E4M3 "
+                "subnormal scales, for example) to zero, which drops the "
+                "weights of their blocks. float16 activations keep them."
+            )
+        marlin_scales[too_small] = 0
     marlin_scales = marlin_scales.view(torch.int16) << 1
     marlin_scales = marlin_scales.view(torch.float8_e4m3fn)
     marlin_scales = marlin_scales[:, 1::2].contiguous()
