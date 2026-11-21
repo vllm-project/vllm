@@ -28,6 +28,7 @@ import anthropic
 import cloudpickle
 import httpx
 import openai
+import psutil
 import pytest
 import requests
 import torch
@@ -66,6 +67,9 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_cuda():
     from vllm.third_party.pynvml import (
+        NVMLError_NotSupported,
+        nvmlDeviceGetComputeRunningProcesses,
+        nvmlDeviceGetGraphicsRunningProcesses,
         nvmlDeviceGetHandleByIndex,
         nvmlDeviceGetHandleByUUID,
         nvmlDeviceGetMemoryInfo,
@@ -1586,9 +1590,21 @@ def record_gpu_memory_usage_stats(
             gb_total = total_b / 2**30
         else:
             dev_handle = get_nvml_device_handle(device)
-            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
-            gb_used = mem_info.used / 2**30
-            gb_total = mem_info.total / 2**30
+            try:
+                mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+                used_b, total_b = mem_info.used, mem_info.total
+            except NVMLError_NotSupported:
+                # Integrated GPUs (e.g. GB10 / DGX Spark) share system memory
+                # and lack this query, so sum the per-process allocations.
+                processes = [
+                    *nvmlDeviceGetComputeRunningProcesses(dev_handle),
+                    *nvmlDeviceGetGraphicsRunningProcesses(dev_handle),
+                ]
+                used_by_pid = {p.pid: p.usedGpuMemory or 0 for p in processes}
+                used_b = sum(used_by_pid.values())
+                total_b = psutil.virtual_memory().total
+            gb_used = used_b / 2**30
+            gb_total = total_b / 2**30
         output[device] = (gb_used, gb_total)
     return output
 
