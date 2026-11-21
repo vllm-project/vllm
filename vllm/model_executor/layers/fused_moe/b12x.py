@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.b12x import (
     B12X_BLOCK_CODECS,
     B12xWarmupUnit,
@@ -237,12 +238,24 @@ def _csf_scale_planes(swizzled: torch.Tensor) -> Any:
     )
 
 
-def _canonicalize_fp4_zero_signs_(packed: torch.Tensor) -> None:
-    """Clear sign bits from packed FP4 zero values in place."""
-    packed = packed.view(torch.uint8)
-    magnitude = packed & 0x77
+@triton.jit
+def _canonicalize_fp4_zero_signs_kernel(packed, size, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    values = tl.load(packed + offsets, offsets < size, other=0)
+    magnitude = values & 0x77
     nonzero = (magnitude | (magnitude >> 1) | (magnitude >> 2)) & 0x11
-    packed.bitwise_and_(0x77 | (nonzero << 3))
+    tl.store(packed + offsets, values & (0x77 | (nonzero << 3)), offsets < size)
+
+
+def _canonicalize_fp4_zero_signs_(packed: torch.Tensor) -> None:
+    """Clear FP4 zero sign bits without full-weight temporary tensors."""
+    assert packed.is_contiguous()
+    packed = packed.view(torch.uint8)
+    size = packed.numel()
+    if size:
+        _canonicalize_fp4_zero_signs_kernel[(triton.cdiv(size, 4096),)](
+            packed, size, 4096
+        )
 
 
 class B12xExperts(mk.FusedMoEExpertsModular):

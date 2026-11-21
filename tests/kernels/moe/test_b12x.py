@@ -62,6 +62,37 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
+@pytest.mark.parametrize("size", [256, 4097, 1 << 20])
+def test_fp4_zero_sign_canonicalization_preserves_nonzero_values(size: int) -> None:
+    packed = torch.arange(size, device="cuda", dtype=torch.int32).to(torch.uint8)
+    values = packed.clone()
+    expected = torch.where((values & 0x07) == 0, values & 0xF7, values)
+    expected = torch.where((values & 0x70) == 0, expected & 0x7F, expected)
+    pointer = packed.data_ptr()
+
+    b12x._canonicalize_fp4_zero_signs_(packed)
+
+    assert packed.data_ptr() == pointer
+    torch.testing.assert_close(packed, expected, rtol=0, atol=0)
+
+    torch.accelerator.synchronize()
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
+    b12x._canonicalize_fp4_zero_signs_(packed)
+    torch.accelerator.synchronize()
+    assert torch.accelerator.max_memory_allocated() == allocated
+
+
+def test_fp4_zero_sign_canonicalization_beyond_int32_offsets() -> None:
+    packed = torch.full(((1 << 31) + 4096,), 0x88, device="cuda", dtype=torch.uint8)
+    packed[-2048:] = 0x99
+
+    b12x._canonicalize_fp4_zero_signs_(packed)
+
+    assert torch.count_nonzero(packed[:-2048]).item() == 0
+    assert torch.all(packed[-2048:] == 0x99).item()
+
+
 def _quantize_nvfp4_linear(
     weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
