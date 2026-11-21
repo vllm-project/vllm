@@ -641,11 +641,12 @@ class CompilationConfig:
     if the encoder is compilable. Disabled by default until more models are
     supported/tested to work."""
 
-    # Vision encoder CUDA graph
+    # Multimodal encoder CUDA graph
     cudagraph_mm_encoder: bool = False
-    """Enable CUDA graph capture for multimodal encoder (ViT).
-    When enabled, captures full encoder forward as CUDA graph
-    for each token budget level."""
+    """Enable CUDA graph capture for supported multimodal encoders.
+    Vision models capture the encoder forward for each token budget level.
+    Voxtral Realtime captures its log-mel extraction and convolutions; its
+    transformer encoder remains in the normal model graphs. Off by default."""
 
     encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
     """Token budget levels for encoder CUDA graph capture.
@@ -669,7 +670,8 @@ class CompilationConfig:
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
-    auto-inference. A batch with more items runs eagerly in one forward."""
+    auto-inference. A batch with more items runs eagerly in one forward.
+    Audio-only encoders such as Voxtral Realtime ignore it."""
 
     encoder_cudagraph_max_frames_per_batch: int | None = None
     """Maximum total video frames per batch for encoder CUDA graph capture.

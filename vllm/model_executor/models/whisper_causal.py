@@ -609,21 +609,12 @@ class WhisperCausalEncoder(nn.Module):
         )
         self.layer_norm = CausalRMSNorm(config.d_model)
 
-    def forward_conv(
-        self, input_features: torch.Tensor | list[torch.Tensor]
-    ) -> torch.Tensor:
-        hidden_states = []
-        for features in input_features:
-            embeds = nn.functional.gelu(self.conv1(features))
-            embeds = nn.functional.gelu(self.conv2(embeds))
-
-            embeds = embeds.transpose(-1, -2).to(embeds.dtype)
-
-            hidden_states.append(embeds)
-
-        hidden_states = torch.cat(hidden_states)
-
-        return hidden_states
+    def forward_conv(self, input_features: torch.Tensor) -> torch.Tensor:
+        """Map log-mel features `(..., num_mel_bins, num_frames)` to
+        embeddings `(..., num_frames / total_stride, d_model)`."""
+        embeds = nn.functional.gelu(self.conv1(input_features))
+        embeds = nn.functional.gelu(self.conv2(embeds))
+        return embeds.transpose(-1, -2)
 
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
