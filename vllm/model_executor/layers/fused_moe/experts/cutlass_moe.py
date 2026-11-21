@@ -1094,6 +1094,21 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
         )
 
     @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        # run_cutlass_moe_mxfp4 has no bias epilogue.
+        if moe_config.has_bias:
+            return False, "kernel does not support expert biases"
+        return mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
+    @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
