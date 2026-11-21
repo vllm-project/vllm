@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Flagship Qwen3 MoE instruct model with 235B total and 22B active parameters, tuned for high-quality text generation."
   date_added: 2025-10-15
-  date_updated: 2026-04-17
+  date_updated: 2026-11-09
   tasks:
     - text
   performance_headline: "Verified on 4x/8x H200, MI300X/MI325X/MI355X nodes (BF16 and FP8)"
@@ -71,6 +71,34 @@ variants:
     vram_minimum_gb: 152
     description: "RedHatAI NVFP4 quantization"
 
+  mxfp4:
+    model_id: "amd/Qwen3-235B-A22B-Instruct-2507-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (AMD)"
+    # Weights are 126.8 GB on disk (lm_head and router gates stay BF16): ceil(126.8 x 1.2).
+    vram_minimum_gb: 153
+    description: "AMD Quark MXFP4 weights and activations, for MI350X/MI355X"
+    supported_hardware: ["arch:gfx950"]
+    # ROCM_AITER_FA keeps chunked and prefix-cached context only from #59098 (after v0.34.0).
+    min_vllm_version: "0.35.0"
+    tp: 1
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--block-size"
+      - "16"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+      SAFETENSORS_FAST_GPU: "1"
+    hardware_overrides:
+      mi350x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+      mi355x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+
 compatible_strategies:
   - single_node_tp
   - single_node_tep
@@ -88,6 +116,14 @@ kv_offload_support:
 hardware_overrides: {}
 
 strategy_overrides: {}
+
+troubleshooting:
+  - title: "Shuffle KV cache layout is not supported with sliding window, sinks, or speculative decoding (multi-token decode)."
+    when: { variants: [mxfp4], features: [spec_decoding] }
+    body: |
+      The MXFP4 (AMD) variant sets `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1`, which ROCM_AITER_FA
+      does not support with speculative decoding. Turn speculative decoding off, or unset
+      `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT` to keep it.
 
 guide: |
   ## Overview
@@ -147,6 +183,25 @@ guide: |
     --no-enable-prefix-caching
   ```
 
+  ### AMD MXFP4 (MI350X / MI355X)
+
+  The MXFP4 (AMD) variant serves [amd/Qwen3-235B-A22B-Instruct-2507-MXFP4](https://huggingface.co/amd/Qwen3-235B-A22B-Instruct-2507-MXFP4),
+  an AMD Quark checkpoint with MXFP4 weights and activations. MXFP4 needs gfx950, so this
+  variant is for MI350X and MI355X only. It runs on one GPU:
+
+  - The weights are 126.8 GB. With an FP8 KV cache a token takes 94 KiB
+    (94 layers x 4 KV heads x 128 x K and V). After the weights and warmup, one
+    288 GB GPU leaves at least 125 GiB of KV cache, about 1.4M tokens or five full
+    262,144-token contexts.
+  - `--attention-backend ROCM_AITER_FA` selects the AITER flash-attention backend,
+    and `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1` stores the KV cache in the layout
+    AITER's assembly paged-attention decode kernel reads.
+  - `--kv-cache-dtype fp8` stores the KV cache in FP8. The checkpoint has no KV
+    scales, so the scales default to 1.0.
+  - `--block-size 16` is required with the shuffle layout: the default of 64 fails
+    at startup, and AITER has no FP8 decode kernel for 32-token blocks.
+  - `SAFETENSORS_FAST_GPU=1` loads the safetensors shards directly to the GPU.
+
   ### TPU Deployment
 
   - [Qwen3-32B on Trillium (v6e)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen3)
@@ -176,4 +231,5 @@ guide: |
 
   - [Model card](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507)
   - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3-235B-A22B-FP8)
+  - [AMD MXFP4 checkpoint](https://huggingface.co/amd/Qwen3-235B-A22B-Instruct-2507-MXFP4)
   - [vLLM documentation](https://docs.vllm.ai/)
