@@ -1148,7 +1148,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(FUSED_GDN_DECODE_ARCHS)
     set(FUSED_GDN_DECODE_SRC
-      "csrc/gdn/fused_gdn_decode_kernel.cu")
+      "csrc/gdn/fused_gdn_decode_kernel.cu"
+      "csrc/gdn/fused_gdn_decode_16bit_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_GDN_DECODE_SRC}"
       CUDA_ARCHS "${FUSED_GDN_DECODE_ARCHS}")

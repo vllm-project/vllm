@@ -553,6 +553,42 @@ def test_masked_route_needs_layer_masked_mha(
     assert metadata.prefill.route is expected
 
 
+def test_hisparse_skips_sliding_window_sparse_layers(
+    default_vllm_config, dist_init, workspace_init
+):
+    """A sliding-window sparse MLA layer is never a HiSparse source.
+
+    Its KV is owned by the sliding-window manager, which HiSparse never binds,
+    so a HiSparse cache handle on it failed its first KV write (HY4 Flash).
+    """
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V3.2",
+        max_model_len=4096,
+        num_gpu_blocks=128,
+        block_size=64,
+        dtype="bfloat16",
+    )
+    vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    with set_current_vllm_config(vllm_config), torch.device(DEVICE_TYPE):
+        layer = mla_attention.MLAAttention(
+            num_heads=128,
+            scale=192**-0.5,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            kv_b_proj=ColumnParallelLinear(512, 128 * 256, bias=False),
+            cache_config=CacheConfig(block_size=64),
+            prefix="placeholder",
+            attn_backend=FlashMLASparseBackend,
+            use_sparse=True,
+            topk_indices_buffer=torch.empty((4096, 2048), dtype=torch.int32),
+            sliding_window=512,
+        )
+    assert layer.hisparse_cache is None
+
+
 def test_unified_mla_prepares_batch_without_slot_mapping(monkeypatch):
     layer = SimpleNamespace(
         prepare_kv_cache_update=MagicMock(),
