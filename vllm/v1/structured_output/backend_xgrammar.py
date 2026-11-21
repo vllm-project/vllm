@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -200,8 +202,8 @@ class XgrammarBackend(StructuredOutputBackend):
 
     @staticmethod
     def _create_compiler(
-        tokenizer_info: "xgr.TokenizerInfo",
-    ) -> "xgr.GrammarCompiler":
+        tokenizer_info: xgr.TokenizerInfo,
+    ) -> xgr.GrammarCompiler:
         return xgr.GrammarCompiler(
             tokenizer_info,
             max_threads=8,
@@ -211,8 +213,8 @@ class XgrammarBackend(StructuredOutputBackend):
 
     @staticmethod
     def _filter_special_tokens(
-        tokenizer: "TokenizerLike", tokenizer_info: "xgr.TokenizerInfo"
-    ) -> "xgr.TokenizerInfo":
+        tokenizer: TokenizerLike, tokenizer_info: xgr.TokenizerInfo
+    ) -> xgr.TokenizerInfo:
         """Filter ALL special tokens from tokenizer_info"""
         special_token_ids = {
             token_id

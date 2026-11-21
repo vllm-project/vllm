@@ -9,7 +9,6 @@ from typing import Any
 import torch
 from packaging import version
 from torch.cuda.memory import CUDAPluggableAllocator
-from torch.utils.cpp_extension import load_inline
 
 from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -72,6 +71,8 @@ def compile_nccl_allocator():
         _nccl_allocator_failed_to_compile = True
         return
     try:
+        from torch.utils.cpp_extension import load_inline
+
         out_dir = tempfile.gettempdir()
         nccl_allocator_libname = "nccl_allocator"
         nccl_include_paths = find_nccl_include_paths()

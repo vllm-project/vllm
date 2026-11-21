@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, cast
 
 from vllm.config import VllmConfig
 from vllm.device_allocator import get_mem_allocator_instance
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -35,6 +34,10 @@ def capture_pool(
 ) -> Generator[tuple[int, int] | None]:
     """Yield the pool to capture into, the cuMem graph pool when sleep offloads
     graph memory, and point NCCL's graph allocator at it."""
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        set_graph_pool_id,
+    )
+
     if vllm_config.use_cumem_cudagraph_pool and not _outside_cumem.get():
         allocator = cast("CuMemAllocator", get_mem_allocator_instance())
         with allocator.cudagraph_pool() as cumem_pool:
