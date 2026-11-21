@@ -12,7 +12,11 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    InputBuffers,
+    combine_sampled_and_draft_tokens,
+)
 
 DEVICE = current_platform.device_type
 
@@ -164,3 +168,47 @@ def test_prepare_dcp_local_seq_lens_matches_reference(
         )
         assert batch.dcp_local_seq_lens is not None
         assert torch.equal(batch.dcp_local_seq_lens.cpu(), expected.to(torch.int32))
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="triton kernel needs CUDA or XPU",
+)
+def test_combine_sampled_and_draft_tokens_masks_negative_draft_padding():
+    """A draft row's -1 padding must never land in input_ids.
+
+    The runner pads draft rows with -1 when a step schedules fewer draft
+    tokens than the maximum. Under async scheduling the next step's
+    scheduled draft count can exceed the row's valid prefix, so the
+    combine kernel reads the padding; storing it into input_ids trips the
+    embedding gather's device-side assert (ind >= 0).
+    """
+    device = torch.device(DEVICE)
+    input_ids = torch.full((3,), -1, dtype=torch.int64, device=device)
+    idx_mapping = torch.tensor([1], dtype=torch.int64, device=device)
+    last_sampled_tokens = torch.tensor([41, 87], dtype=torch.int64, device=device)
+    query_start_loc = torch.tensor([0, 3], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([6], dtype=torch.int32, device=device)
+    prefill_len = torch.tensor([0, 0], dtype=torch.int64, device=device)
+    # Row for req_state 1: one valid proposal, then -1 padding from a
+    # proposing step that scheduled K=1 below the maximum of 2.
+    draft_tokens = torch.tensor([[5, -1], [7, -1]], dtype=torch.int64, device=device)
+    cu_num_logits = torch.tensor([0, 3], dtype=torch.int32, device=device)
+
+    logits_indices = combine_sampled_and_draft_tokens(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits=3,
+    )
+
+    # 1 bonus token + 2 scheduled draft slots: the second draft slot reads
+    # the row's -1 padding and must be substituted with the request's last
+    # sampled token instead of reaching the embedding gather.
+    assert input_ids.tolist() == [87, 7, 87]
+    assert logits_indices.tolist() == [0, 1, 2]
