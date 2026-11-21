@@ -159,6 +159,27 @@ def test_gather_preserves_mixed_modalities() -> None:
     assert is_mm_embed.all()
 
 
+def test_prepare_mm_inputs_passes_prompt_embeds_through() -> None:
+    embeds = torch.randn(3, HIDDEN_SIZE)
+    data = MultiModalKwargsItem(
+        {"embedding": MultiModalFieldElem(data=embeds, field=MultiModalBatchedField())}
+    )
+    runner = _make_runner(
+        [
+            _feature("embeds", 2, 3, modality="prompt_embeds", data=data),
+            _feature("image", 6, 1, data=_item(7)),
+        ],
+        cached=[],
+    )
+
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0, 1]})
+
+    # Only the image goes to the encoder; the embeds are cached as given.
+    assert mm_hashes == ["image"]
+    assert [modality for modality, _ in mm_kwargs] == ["image"]
+    assert torch.equal(runner.encoder_cache.encoder_outputs["embeds"], embeds)
+
+
 def test_execute_mm_encoder_batches_by_modality_and_restores_order() -> None:
     model = _EncoderModel()
     runner = EncoderRunner(

@@ -17,12 +17,15 @@ from vllm.v1.worker.cpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
 )
+from vllm.v1.worker.cpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.cpu.rope import get_rope_state
 from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
 class DefaultModelState(ModelState):
+    supports_prompt_embeds = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -31,6 +34,16 @@ class DefaultModelState(ModelState):
         device: torch.device,
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
+
+        self.prompt_embeds_state: PromptEmbedsState | None = None
+        if self.model_config.enable_prompt_embeds:
+            self.prompt_embeds_state = PromptEmbedsState(self.max_num_reqs, self.dtype)
+            if not self.supports_mm_inputs:
+                # Persistent buffer analogous to encoder_runner.inputs_embeds.
+                embeds_buffer_size = (self.max_num_tokens, self.inputs_embeds_size)
+                self.inputs_embeds = torch.zeros(
+                    embeds_buffer_size, dtype=self.dtype, device=self.device
+                )
 
         self.rope_state = get_rope_state(
             self.model_config,
@@ -57,10 +70,18 @@ class DefaultModelState(ModelState):
                 new_req_data.prefill_token_ids,
                 mm_features=mm_features,
             )
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.add_request(req_index, new_req_data)
+
+    def remove_request(self, req_id: str) -> None:
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.remove_request(req_id)
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
-        return self.encoder_runner.inputs_embeds[:num_tokens]
+        if self.supports_mm_inputs:
+            return self.encoder_runner.inputs_embeds[:num_tokens]
+        return self.inputs_embeds[:num_tokens]
 
     def prepare_inputs_embeds(
         self,
@@ -71,16 +92,25 @@ class DefaultModelState(ModelState):
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
 
-        self.execute_mm_encoder(scheduled_encoder_inputs)
+        if self.supports_mm_inputs:
+            self.execute_mm_encoder(scheduled_encoder_inputs)
 
-        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
-        if self.mm_pruner is not None and mm_embeds:
-            # EVS: recompute mrope positions for pruned media.
-            mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
+            mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+            if self.mm_pruner is not None and mm_embeds:
+                # EVS: recompute mrope positions for pruned media.
+                mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
 
-        inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_ids_unpadded, mm_embeds, is_mm_embed
-        )
+            inputs_embeds = self.encoder_runner.get_inputs_embeds(
+                input_ids_unpadded, mm_embeds, is_mm_embed
+            )
+        else:
+            input_embeddings = self.model.embed_input_ids(input_ids_unpadded)
+            self.inputs_embeds[: input_embeddings.shape[0]] = input_embeddings
+            inputs_embeds = self.inputs_embeds
+
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.apply(input_batch, inputs_embeds)
+
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
     def prepare_inputs(
@@ -100,7 +130,7 @@ class DefaultModelState(ModelState):
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
-        if self.supports_mm_inputs:
+        if self.supports_mm_inputs or self.prompt_embeds_state is not None:
             model_inputs["inputs_embeds"] = self.dummy_inputs_embeds(num_tokens)
         if self.rope_state is not None:
             model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
