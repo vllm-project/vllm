@@ -749,6 +749,8 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             state_content_bytes = None
             if quant_mode == KVQuantMode.KITTY:
+                # The worker builds layer configs without a current vLLM config,
+                # so customize_spec cannot read kitty_boost_ratio here.
                 from vllm.v1.attention.ops.kitty.tiles import (
                     kitty_d_boost,
                     kitty_state_content_bytes,

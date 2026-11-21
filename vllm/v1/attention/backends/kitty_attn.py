@@ -77,7 +77,7 @@ def _workspace(*shapes_and_dtypes) -> list[torch.Tensor]:
 
 class KittyAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    forward_includes_kv_cache_update: bool = True  # forward method updates the kv cache
+    forward_includes_kv_cache_update: bool = True
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["kitty"]
@@ -139,41 +139,33 @@ class KittyAttentionBackend(AttentionBackend):
 
 @dataclass
 class KittyMetadata(AttentionMetadata):
-    # number of tokens to process in this step across all requests
     num_actual_tokens: int
     # The batch is split [decodes | continuations | fresh prefills]: decodes are
     # the leading query_len = 1 run, fresh prefills the trailing run with no
     # cache. The runner sorts non-decodes by query length, so continuations may
     # also contain fresh requests (old_len = 0), which that path handles.
-    num_decodes: int  # number of decode requests, i.e requests with query_len = 1
-    num_continuations: int  # number of prefill continuation requests
-    # number of fresh prefill requests (i.e without any existing cache)
+    num_decodes: int
+    num_continuations: int
     num_fresh_prefills: int
-    num_decode_tokens: int  # must be equal to num_decodes; assert check
-    num_continuation_tokens: int  # total number of tokens in continuation requests
-    query_start_loc: torch.Tensor  # [num_reqs + 1] cumulative query offsets
-    query_start_loc_cpu: torch.Tensor  # cpu version of the query_start_loc
-    seq_lens_cpu: torch.Tensor  # cache length after this step
-    old_lens: torch.Tensor  # [num_reqs] cache length before this step
-    old_lens_cpu: np.ndarray  # cpu version of old_lens
-    # block table for the packed pages only; residual pages are handled separately
-    block_table: torch.Tensor
-    k_jobs: torch.Tensor  # [Jk, 2] (request, block) K blocks sealed this step
-    v_jobs: torch.Tensor  # [Jv, 2] (request, block) V blocks sealed in this step
+    num_decode_tokens: int
+    num_continuation_tokens: int
+    query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    seq_lens_cpu: torch.Tensor  # cache lengths after this step
+    old_lens: torch.Tensor  # [num_reqs] cache lengths before this step
+    old_lens_cpu: np.ndarray
+    block_table: torch.Tensor  # packed pages only
+    k_jobs: torch.Tensor  # [Jk, 2] (request, block) K pages sealed this step
+    v_jobs: torch.Tensor  # [Jv, 2] (request, block) V pages sealed this step
     k_writes: torch.Tensor  # [3, n] (token, request, row) residual K writes
-    v_writes: torch.Tensor  # [3, n]
-    # [num_decodes] max(1, cdiv(old_len, 128)), chunks for split-KV decoding
-    num_chunks: torch.Tensor
-    # [num_fresh_prefills + 1] int32, cumulative tokens offsets for fresh
-    # prefills, starting at 0
-    fresh_cu_seqlens: torch.Tensor
-    fresh_max_query_len: int  # maximum query lengths for a fresh prefill request
-    # [num_continuations, 2, 2] int32: (cu_seqlens_q, cu_seqlens_k) per request
-    continuation_cu_seqlens: torch.Tensor
+    v_writes: torch.Tensor  # [3, n] residual V writes
+    num_chunks: torch.Tensor  # [num_decodes] split-KV chunks per decode
+    fresh_cu_seqlens: torch.Tensor  # [num_fresh_prefills + 1] int32
+    fresh_max_query_len: int
+    continuation_cu_seqlens: torch.Tensor  # [num_continuations, 2, 2] int32
 
 
 class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
-    # no cuda graph support in this implementation. a future PR could handle it.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(
@@ -184,7 +176,6 @@ class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        # no speculative decoding for now
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
         if is_workspace_manager_initialized():
             model_config = vllm_config.model_config
@@ -198,14 +189,11 @@ class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
                 kv_cache_spec.num_kv_heads,
                 head_size,
             )
-            # decode requests processed in a batch; so, get workspace memory for
-            # each decode request
+            # Decodes run batched; continuations run one request at a time.
             current_workspace_manager().get_simultaneous(
                 ((max_num_reqs, num_heads, NUM_SPLITS, head_size + 1), torch.float32),
                 ((max_num_reqs, num_heads), torch.float32),
             )
-            # continuation prefills processed sequentially, so enough to get
-            # workspace memory for the largest possible continuation request
             current_workspace_manager().get_simultaneous(
                 (context, model_config.dtype), (context, model_config.dtype)
             )
@@ -228,20 +216,14 @@ class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
         ) = split_decodes_prefills_and_extends(cam, decode_threshold=1)
         assert num_decode_tokens == num_decodes
 
-        # cumulative query offsets, in CPU
         qsl_cpu = cam.query_start_loc_cpu[: num_reqs + 1]
         assert cam.seq_lens_cpu_upper_bound is not None
-        # total cache lengths of all requests AFTER this step
         seq_lens_cpu = cam.seq_lens_cpu_upper_bound[:num_reqs]
         plan = plan_kitty_step(qsl_cpu.numpy(), seq_lens_cpu.numpy())
 
-        # number of chunks for decode requests
         num_chunks = np.maximum(-(-plan.old_lens[:num_decodes] // KITTY_PAGE_SIZE), 1)
-        fresh_start = num_reqs - num_fresh  # starting index of fresh prefill jobs
-        # cumulative query offsets for fresh prefills
-        fresh_qsl = qsl_cpu[fresh_start:].numpy()
-        fresh_cu = fresh_qsl - fresh_qsl[0]  # rebase fresh offsets so they start at 0
-        # [num_continuations, 2, 2]: ([0, q_len], [0, seq_len]) per continuation
+        fresh_qsl = qsl_cpu[num_reqs - num_fresh :].numpy()
+        fresh_cu = fresh_qsl - fresh_qsl[0]
         cont = slice(num_decodes, num_decodes + num_continuations)
         cont_cu = np.zeros((num_continuations, 2, 2), dtype=np.int64)
         cont_cu[:, 0, 1] = np.diff(qsl_cpu.numpy())[cont]
@@ -256,8 +238,7 @@ class KittyMetadataBuilder(AttentionMetadataBuilder[KittyMetadata]):
             fresh_cu,
             cont_cu.ravel(),
         ]
-        # pack the attention metadata together to avoid multiple CPU -> GPU
-        # transfers, then unpack as needed
+        # One host-to-device copy for all of the step's metadata.
         packed = torch.empty(
             sum(p.size for p in parts), dtype=torch.int64, pin_memory=PIN_MEMORY
         )
@@ -320,8 +301,6 @@ def kitty_continuation_attention(
     q_len = query.shape[0]
     seq_len = old_len + q_len
     shape = (seq_len, *key.shape[1:])
-    # either allocate from the workspace (if workspace was initialized), or
-    # allocate tensors now
     k_full, v_full = _workspace((shape, key.dtype), (shape, key.dtype))
     kitty_dequant_context(
         packed_cache,
@@ -411,14 +390,12 @@ class KittyAttentionImpl(AttentionImpl[KittyMetadata]):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert output is not None  # output buffer must already exist
+        assert output is not None
         assert output_scale is None and output_block_scale is None
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
 
-        # slicing q, k, v, out here, in case those tensors are bigger than the
-        # actual number of tokens
         md = attn_metadata
         n = md.num_actual_tokens
         q = query[:n]
@@ -435,7 +412,6 @@ class KittyAttentionImpl(AttentionImpl[KittyMetadata]):
         # 1. Attention on the cache as it was before this step.
         nd = md.num_decodes
         if nd:
-            # batching all decode attention requests
             mid_o, lse = _workspace(
                 ((nd, self.num_heads, NUM_SPLITS, self.head_size + 1), torch.float32),
                 ((nd, self.num_heads), torch.float32),
@@ -456,7 +432,6 @@ class KittyAttentionImpl(AttentionImpl[KittyMetadata]):
                 mid_o,
                 lse,
             )
-        # next, processing the continuation prefill requests sequentially
         qsl = md.query_start_loc_cpu
         for req in range(nd, nd + md.num_continuations):
             start, end = int(qsl[req]), int(qsl[req + 1])
@@ -476,7 +451,6 @@ class KittyAttentionImpl(AttentionImpl[KittyMetadata]):
                 self.d_boost,
                 self.fa_version,
             )
-        # finally, batching the fresh prefills in one kernel
         if md.num_fresh_prefills:
             start = nd + md.num_continuations
             t0 = int(qsl[start])
@@ -539,9 +513,6 @@ class KittyResidualMetadata:
 
 class KittyResidualMetadataBuilder(AttentionMetadataBuilder[KittyResidualMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
     def build(
         self,
