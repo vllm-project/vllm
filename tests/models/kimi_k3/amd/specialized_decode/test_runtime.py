@@ -894,3 +894,65 @@ def test_mla_weight_views_fall_back_per_model():
         reasons[0] == f"layer {ffn[0]}: MLA heads/q_lora/kv_lora/nope/rope/v "
         "(16, 1536, 512, 128, 64, 128)"
     )
+
+
+def _m1_ready_mla(q_scale: float, k_scale: float) -> SimpleNamespace:
+    """A K3 MLA wrapper (what `mla_weight_reasons` reads of it) M1 can run but
+    for its scales; meta tensors of the kernels' shapes."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
+        MLA_HEADS,
+        MLA_KV,
+        MLA_NOPE,
+        MLA_Q,
+        MLA_ROPE,
+        MLA_V,
+    )
+
+    def t(*shape, dtype=torch.bfloat16):
+        return torch.empty(shape, dtype=dtype, device="meta")
+
+    n, u8 = MLA_HEADS, torch.uint8
+    attn = SimpleNamespace(
+        kv_lora_rank=MLA_KV,
+        attn_backend=SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA"),
+        impl=SimpleNamespace(dcp_world_size=1),
+        use_pcp=False,
+        hisparse_cache=None,
+        kv_cache_dtype="fp8",
+        is_aiter_triton_fp4_bmm_enabled=True,
+        _q_scale_float=q_scale,
+        _k_scale_float=k_scale,
+        W_K=t(n, MLA_KV, MLA_NOPE // 2, dtype=u8),
+        W_K_scale=t(n, MLA_KV, MLA_NOPE // 32, dtype=u8),
+        W_V=t(n, MLA_V, MLA_KV // 2, dtype=u8),
+        W_V_scale=t(n, MLA_V, MLA_KV // 32, dtype=u8),
+    )
+    return SimpleNamespace(
+        num_heads=n, q_lora_rank=MLA_Q, qk_nope_head_dim=MLA_NOPE,
+        qk_rope_head_dim=MLA_ROPE, v_head_dim=MLA_V, mla_attn=attn,
+        rotary_emb=None, indexer=None, dcp_q_replicate=False,
+        fused_qkv_a_proj=SimpleNamespace(weight=t(MLA_Q + MLA_KV + MLA_ROPE, HIDDEN)),
+        g_proj=SimpleNamespace(weight=t(n * MLA_V, HIDDEN)),
+        q_a_layernorm=SimpleNamespace(weight=t(MLA_Q)),
+        kv_a_layernorm=SimpleNamespace(weight=t(MLA_KV)),
+        q_b_proj=SimpleNamespace(weight=t(n * (MLA_NOPE + MLA_ROPE), MLA_Q)),
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("q_scale, k_scale", [(1.0, 1.0), (0.5, 1.0), (1.0, 2.0)])
+def test_mla_scales_other_than_one_run_vllm_ops(q_scale, k_scale):
+    """M1a writes its fp8 query and KV rows unscaled: an MLA layer with a q or
+    k scale other than 1.0 runs vLLM's ops (mla_weight_reasons names it)."""
+    pytest.importorskip("flydsl")
+    w = _m1_ready_mla(q_scale, k_scale)
+    layers = [SimpleNamespace(self_attn=SimpleNamespace(mla_attn=w))] * 93
+    model = SimpleNamespace(
+        config=_k3_text_config(), layers=layers, start_layer=0, end_layer=93
+    )
+    reasons = mla_weight_reasons(model)
+    if (q_scale, k_scale) == (1.0, 1.0):
+        assert reasons == []
+    else:
+        assert reasons
+        assert all(r.endswith(": q / k scales must be 1.0") for r in reasons)
