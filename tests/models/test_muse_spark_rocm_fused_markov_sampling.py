@@ -171,110 +171,6 @@ def _fused(spec: DSparkSpeculator):
     return MuseSparkFusedMarkov(spec.model)
 
 
-@pytest.mark.parametrize(
-    "gfx950, monokernel, batch_sharded, expected",
-    [
-        (True, False, False, True),
-        (False, False, False, False),
-        # --monokernel takes the fused Markov rounds of ops.fused_markov.
-        (True, True, False, False),
-        (True, False, True, False),
-    ],
-)
-def test_fused_markov_gating(monkeypatch, gfx950, monokernel, batch_sharded, expected):
-    """This module on gfx950, except with --monokernel (ops.fused_markov) or
-    batch-sharded sampling (the speculator's sharded loop)."""
-    import vllm.platforms.rocm as rocm_platform
-    from vllm.models.muse_spark.amd.ops.fused_markov_sampling import (
-        use_fused_markov_sampling,
-    )
-
-    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: gfx950)
-    config = SimpleNamespace(
-        kernel_config=SimpleNamespace(monokernel=monokernel),
-        parallel_config=SimpleNamespace(enable_batch_sharded_sampling=batch_sharded),
-    )
-    assert use_fused_markov_sampling(config) == expected
-
-
-@pytest.mark.parametrize("d2t_offset, identity", [(0, True), (7, False)])
-def test_loading_sets_the_draft_map_flag(monkeypatch, d2t_offset, identity):
-    """The draft's process_weights_after_loading sets the flag the hook reads."""
-    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
-    from vllm.models.muse_spark.amd.dspark import MuseSparkDSparkForCausalLM
-
-    # The DFlash base step and the draft kernels need a full model.
-    monkeypatch.setattr(
-        DFlashQwen3ForCausalLM, "process_weights_after_loading", lambda self: None
-    )
-    monkeypatch.setattr(
-        "vllm.models.muse_spark.amd.dspark.maybe_attach_drafter", lambda lm: None
-    )
-    spec = _speculator(torch.device("cpu"), 1.0, seed=0)
-    draft = MuseSparkDSparkForCausalLM.__new__(MuseSparkDSparkForCausalLM)
-    nn.Module.__init__(draft)
-    draft.model = spec.model.model
-    draft.draft_id_to_target_id = nn.Parameter(
-        torch.full((VOCAB,), d2t_offset), requires_grad=False
-    )
-    fused = _fused(spec)
-    fused.model = draft
-    draft.sample_sequential = fused.sample
-    draft.process_weights_after_loading()
-    assert (fused.why_not(spec) is None) == identity
-
-
-@pytest.mark.parametrize(
-    "attr, value, reason",
-    [
-        ("draft_watermarker", object(), "watermarker"),
-        ("use_confidence_head", True, "adaptive verification"),
-        ("use_acceptance_estimator", True, "adaptive verification"),
-        ("_draft_topk", 64, "top-k"),
-    ],
-)
-def test_fused_markov_declines_unsupported_speculator_state(attr, value, reason):
-    """Each unsupported speculator state sends the step to the stock loop."""
-    from vllm.models.muse_spark.amd.ops.fused_markov_sampling import (
-        MuseSparkFusedMarkov,
-    )
-
-    spec = _speculator(torch.device("cpu"), 1.0, seed=0)
-    setattr(spec, attr, value)
-    got = MuseSparkFusedMarkov(spec.model).why_not(spec)
-    assert got is not None and reason in got
-    assert (
-        MuseSparkFusedMarkov(spec.model).why_not(
-            _speculator(torch.device("cpu"), 1.0, seed=0)
-        )
-        is None
-    )
-
-
-def test_fused_markov_declines_non_identity_draft_map():
-    spec = _speculator(torch.device("cpu"), 1.0, seed=0)
-    spec.model.d2t_is_identity = False
-    assert "draft->target" in _fused(spec).why_not(spec)
-
-
-def test_fused_markov_declines_a_narrower_draft_vocab():
-    """A cache wider than the draft vocabulary keeps columns the kernel would
-    not write."""
-    spec = _speculator(torch.device("cpu"), 1.0, seed=0)
-    spec.draft_logits = DraftLogitsCache(
-        MAX_REQS, N_SPEC, VOCAB + 1, dtype=torch.float32, fill=0.0, device="cpu"
-    )
-    assert "cache width" in _fused(spec).why_not(spec)
-
-
-def test_fused_markov_takes_greedy_and_fp64_drafts():
-    """Greedy drafts and fp64 Gumbel noise run the fused launches."""
-    cpu = torch.device("cpu")
-    for kwargs in ({"greedy": True}, {"fp64": True}, {"greedy": True, "fp64": True}):
-        spec = _speculator(cpu, 1.0, seed=0, **kwargs)
-        assert _fused(spec).why_not(spec) is None
-
-
 def _hidden(spec: DSparkSpeculator) -> torch.Tensor:
     return torch.zeros(MAX_REQS * N_SPEC, 8, device=spec.draft_tokens.device)
 
@@ -501,7 +397,81 @@ def test_fused_markov_takes_an_fp8_markov_head(dist_init, monkeypatch, num_reqs)
         quant_method=quant_method,
     )
     assert spec.model.model.markov_head.markov_w2.weight.dtype != torch.bfloat16
-    assert _fused(spec).why_not(spec) is None
     ref_tokens, ref_cache, tokens, cache = _run_both(spec, num_reqs)
     assert torch.equal(tokens, ref_tokens)
     _assert_within_one_ulp(cache, ref_cache)
+
+
+def _load_draft_with_map(monkeypatch, spec: DSparkSpeculator, d2t_offset: int):
+    """A Muse DSpark draft around `spec`'s Markov head whose loaded
+    draft-to-target map adds `d2t_offset`, with the fused sampler as its hook."""
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+    from vllm.models.muse_spark.amd.dspark import MuseSparkDSparkForCausalLM
+
+    # The DFlash base step and the draft kernels need a full model.
+    monkeypatch.setattr(
+        DFlashQwen3ForCausalLM, "process_weights_after_loading", lambda self: None
+    )
+    monkeypatch.setattr(
+        "vllm.models.muse_spark.amd.dspark.maybe_attach_drafter", lambda lm: None
+    )
+    draft = MuseSparkDSparkForCausalLM.__new__(MuseSparkDSparkForCausalLM)
+    nn.Module.__init__(draft)
+    draft.model = spec.model.model
+    draft.draft_id_to_target_id = nn.Parameter(
+        torch.full((VOCAB,), d2t_offset, device=spec.draft_tokens.device),
+        requires_grad=False,
+    )
+    fused = _fused(spec)
+    fused.model = draft
+    draft.process_weights_after_loading()
+    return fused
+
+
+@_rocm_only
+@pytest.mark.parametrize("state", ["draft_map", "wider_cache", "confidence_head"])
+def test_fused_markov_hook_drafts_what_the_stock_loop_drafts(monkeypatch, state):
+    """With the fused sampler installed as the draft's hook, steps in states it
+    does not handle (a loaded non-identity draft-to-target map, a cache wider
+    than the draft vocabulary, a confidence head) draft the stock loop's
+    tokens, cached logits and confidences."""
+    device = torch.device("cuda")
+    num_reqs = 3
+    spec = _speculator(device, 1.0, seed=7, cache_dtype=torch.bfloat16)
+    fused = _fused(spec)
+    if state == "draft_map":
+        offset = 7
+        fused = _load_draft_with_map(monkeypatch, spec, offset)
+        spec.model.map_draft_to_target = lambda ids: (ids + offset) % VOCAB
+        spec._d2t_scatter_index = (torch.arange(VOCAB, device=device) + offset) % VOCAB
+    elif state == "wider_cache":
+        spec.draft_logits = DraftLogitsCache(
+            MAX_REQS, N_SPEC, VOCAB + 1, dtype=torch.bfloat16, fill=0.0, device=device
+        )
+        spec._draft_scatter_buf = torch.full(
+            (MAX_REQS, VOCAB + 1), float("-inf"), dtype=torch.bfloat16, device=device
+        )
+    else:
+        spec.use_confidence_head = True
+        spec.model.compute_confidence = lambda hidden, embeds: embeds.float().sum(-1)
+        spec.draft_token_confidence_probs = torch.zeros(
+            MAX_REQS, N_SPEC, dtype=torch.float32, device=device
+        )
+
+    def run() -> list[torch.Tensor]:
+        spec.draft_tokens.fill_(-1)
+        spec.draft_logits.values.zero_()
+        DSparkSpeculator._sample_sequential(spec, num_reqs, _hidden(spec))
+        torch.accelerator.synchronize()
+        outputs = [
+            spec.draft_tokens[:num_reqs].clone(),
+            spec.draft_logits.values.clone(),
+        ]
+        if state == "confidence_head":
+            outputs.append(spec.draft_token_confidence_probs[:num_reqs].clone())
+        return outputs
+
+    expected = run()
+    spec.model.sample_sequential = fused.sample
+    for got, want in zip(run(), expected):
+        torch.testing.assert_close(got, want, rtol=0, atol=0, equal_nan=True)
