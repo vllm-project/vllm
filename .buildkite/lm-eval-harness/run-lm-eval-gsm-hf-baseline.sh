@@ -42,5 +42,5 @@ done
 
 lm_eval --model hf \
   --model_args "pretrained=$MODEL,parallelize=True" \
-  --tasks gsm8k --num_fewshot "$FEWSHOT" --limit "$LIMIT" \
+  --tasks gsm8k_platinum --num_fewshot "$FEWSHOT" --limit "$LIMIT" \
   --batch_size "$BATCH_SIZE"

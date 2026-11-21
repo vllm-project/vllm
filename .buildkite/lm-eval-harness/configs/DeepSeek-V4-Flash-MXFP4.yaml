@@ -4,7 +4,7 @@
 # on gfx950 TP=4 (AITER_MXFP4_BF16 backend); default rtol=0.08.
 model_name: "amd/DeepSeek-V4-Flash-MXFP4"
 tasks:
-- name: "gsm8k"
+- name: "gsm8k_platinum"
   metrics:
   - name: "exact_match,strict-match"
     value: 0.95

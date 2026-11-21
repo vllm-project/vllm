@@ -1,6 +1,6 @@
 model_name: "RedHatAI/gemma-4-31B-it-FP8-dynamic"
 tasks:
-- name: "gsm8k"
+- name: "gsm8k_platinum"
   metrics:
   - name: "exact_match,strict-match"
     value: 0.937
