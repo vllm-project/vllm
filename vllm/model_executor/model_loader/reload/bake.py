@@ -73,16 +73,16 @@ class Targets:
                 self.by_storage.setdefault(storage, []).append(target)
                 self.by_name[(module, key)] = target
 
-    def at(self, storage: int, start: int, stop: int) -> Target | None:
-        """The target a write to bytes [start, stop) lands in: on a storage
-        several tensors view (e.g. a fused weight), the smallest whose bytes
-        contain it; `None` if none does."""
+    def containing(self, storage: int, start: int, stop: int) -> list[Target]:
+        """The targets whose bytes contain a write to [start, stop), smallest
+        first; on a storage several tensors view (e.g. a fused weight) there
+        can be more than one."""
         targets = [
             t
             for t in self.by_storage.get(storage, ())
             if t.byte_offset <= start and stop <= t.byte_stop
         ]
-        return min(targets, key=lambda t: t.byte_stop - t.byte_offset, default=None)
+        return sorted(targets, key=lambda t: t.byte_stop - t.byte_offset)
 
 
 def _storage_key(t: torch.Tensor) -> int | None:
@@ -118,6 +118,7 @@ class Copy:
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dtype: torch.dtype
+    byte_stop: int  # past its last byte; `byte_offset` if it copies nothing
 
 
 @dataclass(slots=True)
@@ -162,16 +163,10 @@ class _PlanSink:
         self.wrote.add(name)
         key = dest.untyped_storage()._cdata  # dest is never a trace
         self.last_writer[key] = name
-        self.copies[name].append(
-            Copy(
-                src=src,
-                storage=key,
-                byte_offset=dest.storage_offset() * dest.dtype.itemsize,
-                shape=tuple(dest.shape),
-                stride=tuple(dest.stride()),
-                dtype=dest.dtype,
-            )
-        )
+        start = dest.storage_offset() * dest.dtype.itemsize
+        shape, stride, size = tuple(dest.shape), tuple(dest.stride()), dest.itemsize
+        stop = byte_span(start, shape, stride, size)[1] if dest.numel() else start
+        self.copies[name].append(Copy(src, key, start, shape, stride, dest.dtype, stop))
         return dest
 
     def value_read(self, trace: TraceTensor) -> NoReturn:
