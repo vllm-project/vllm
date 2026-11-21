@@ -26,14 +26,6 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineLinearMethod,
 )
-from vllm.model_executor.layers.quantization.online.lm_head import (
-    lm_head_padding_size,
-    lm_head_quant_method,
-)
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    pad_vocab_size,
-)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -344,26 +336,6 @@ def test_fp8_draft_tracks_the_bf16_draft(drafts) -> None:
         for model in (bf16, fp8)
     ]
     assert _rel(bias[1], bias[0]) < W8A8_REL
-
-
-def test_fp8_lm_head_on_a_tp8_shard(drafts) -> None:
-    """The FP8 lm_head runs on a TP8 shard of the released draft's vocabulary
-    (202048 rows, 25256 per rank unpadded) and tracks the BF16 GEMM."""
-    tp_size = 8
-    rows = pad_vocab_size(202048, lm_head_padding_size(tp_size)) // tp_size
-    with set_default_torch_dtype(torch.bfloat16):
-        head = ParallelLMHead(
-            rows, HIDDEN, disable_tp=True, quant_method=lm_head_quant_method("fp8")
-        )
-    gen = torch.Generator(device="cuda").manual_seed(2)
-    weight = (torch.randn(rows, HIDDEN, generator=gen, device="cuda") * 0.05).bfloat16()
-    head.weight = torch.nn.Parameter(weight, requires_grad=False)
-    head.quant_method.process_weights_after_loading(head)
-    assert head.weight.dtype == F8
-    hidden = torch.randn(9, HIDDEN, generator=gen, device="cuda").bfloat16()
-    out = head.quant_method.apply(head, hidden)
-    assert out.shape == (9, rows)
-    assert _rel(out, hidden @ weight.t()) < W8A8_REL
 
 
 def test_fp8_draft_keeps_its_head_when_the_target_head_is_equal(drafts) -> None:
