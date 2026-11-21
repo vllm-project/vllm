@@ -95,10 +95,15 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     On integrated GPUs, a host-to-device copy straight from a safetensors mmap
     takes its page faults inside the driver copy, which is several times slower
     than faulting them on the CPU, so touch one byte per page of `src` first.
-    PyTorch already stages non-contiguous and dtype-converting copies through
-    a CPU temporary. Sources with at most one element are skipped: they count
-    as contiguous with any stride, which `view(torch.uint8)` rejects.
+    Sources with at most one element are skipped: they count as contiguous with
+    any stride, which `view(torch.uint8)` rejects. Pageable CPU temporaries are
+    staged through pinned memory.
     """
+    if src.device.type == "cpu" and dst.device.type == "cuda":
+        computed = src.untyped_storage().resizable() and not src.is_pinned()
+        if computed or src.dtype != dst.dtype or not src.is_contiguous():
+            staged = torch.empty(dst.shape, dtype=dst.dtype, pin_memory=True)
+            return dst.copy_(staged.copy_(src))
     if (
         src.dtype != dst.dtype
         and src.dtype in _BYTE_CONTAINERS
