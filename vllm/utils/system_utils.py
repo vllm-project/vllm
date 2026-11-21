@@ -42,7 +42,7 @@ def update_environment_variables(envs_dict: dict[str, str]):
 
 
 def claim_triton_cache_dir() -> None:
-    """Default ``TRITON_CACHE_DIR`` under ``VLLM_CACHE_ROOT`` for this process.
+    """Default `TRITON_CACHE_DIR` under `VLLM_CACHE_ROOT` for this process.
 
     Call before anything compiles, so that a value present here is the
     caller's rather than one torch exported while building an autotuner.
