@@ -45,14 +45,20 @@ class _FakeParallelConfig:
         default_factory=lambda: _FakeEPLBConfig(num_redundant_experts=32)
     )
     enable_elastic_ep: bool = True
+    pipeline_stage_rank: int | None = None
 
     def __post_init__(self) -> None:
+        if self.pipeline_stage_rank is not None and not (
+            0 <= self.pipeline_stage_rank < self.pipeline_parallel_size
+        ):
+            raise ValueError("pipeline_stage_rank out of range")
         if not self.enable_eplb and self.eplb_config.num_redundant_experts:
             raise ValueError("redundant experts require EPLB")
         if self.enable_elastic_ep and not self.enable_eplb:
             raise ValueError("elastic EP requires EPLB")
 
 
+@pytest.mark.parametrize("pipeline_stage_rank", [None, 1])
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
 @pytest.mark.skipif(
     current_platform.is_rocm(),
@@ -60,8 +66,10 @@ class _FakeParallelConfig:
 )
 def test_dspark_parallel_config_preserves_eplb_for_dsv4_and_dsv41(
     model_type: str,
+    pipeline_stage_rank: int | None,
 ):
-    target_config = _FakeParallelConfig()
+    # pipeline_stage_rank=1: the target runs stage 1 of 2 in this instance.
+    target_config = _FakeParallelConfig(pipeline_stage_rank=pipeline_stage_rank)
     draft_model_config = _FakeModelConfig(
         hf_config=_FakeHFConfig(model_type=model_type)
     )
@@ -80,6 +88,7 @@ def test_dspark_parallel_config_preserves_eplb_for_dsv4_and_dsv41(
 
     assert draft_config is not target_config
     assert draft_config.pipeline_parallel_size == 1
+    assert draft_config.pipeline_stage_rank is None
     assert draft_config.tensor_parallel_size == 4
     assert draft_config.enable_eplb
     assert draft_config.eplb_config.num_redundant_experts == 32
