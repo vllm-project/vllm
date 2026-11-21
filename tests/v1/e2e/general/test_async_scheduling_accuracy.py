@@ -62,8 +62,10 @@ def test_without_spec_decoding(
     vllm_runner: type[VllmRunner],
     hf_runner: type[HfRunner],
     sample_json_schema,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Check target-model accuracy across scheduling and executor configurations."""
+    _enable_rocm_batch_invariance(monkeypatch)
     struct_outputs = StructuredOutputsParams(json=sample_json_schema)
     test_sampling_params: list[dict[str, Any]] = [
         dict(),
@@ -109,8 +111,9 @@ def test_without_spec_decoding(
 
 def _enable_rocm_batch_invariance(monkeypatch: pytest.MonkeyPatch) -> None:
     if current_platform.is_rocm():
-        # hipBLASLt picks GEMM solutions by batch shape, so sync and async runs
-        # can flip near-tie greedy tokens and shift spec-decode acceptance.
+        # hipBLASLt picks GEMM solutions by batch shape, which differs between
+        # configs and even between runs of one config, so near-tie scores can
+        # exceed the HF tolerances and spec-decode acceptance can shift.
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
         monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
 
