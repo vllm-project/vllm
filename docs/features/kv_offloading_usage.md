@@ -135,6 +135,12 @@ Secondary tiers are not supported yet on engines whose workers span several node
 
 By default, each worker copies its own GPU page to the CPU tier unchanged, so an offloaded block is stored in whatever form that worker happens to hold it.
 
+For head-sharded attention, a direct block holds each rank's local layers in sequence. Changing the tensor-parallel (TP) size changes their byte offsets even when the total block size stays the same. The filesystem and object-store tiers include the topology in their storage keys. P2P peers check it before exchanging blocks.
+
+With single-node multiprocessing and tensor parallelism alone, engines that fully replicate MLA KV across ranks can share direct blocks between TP sizes greater than one (for example, TP=2 and TP=4). A TP=1 engine uses a separate namespace.
+
+When upgrading from Model Runner V1, a head-sharded direct cache that used a topology-independent namespace starts cold, even at the same TP size. Its files and objects stay in the old namespace.
+
 With `"canonical_layout": true`, workers instead convert their local pages into one common representation, the canonical page: the block's complete KV (every KV head and every token), with each worker writing its slice into a fixed position. The format is versioned and doesn't depend on how a particular engine splits the KV across its workers.
 
 Having a single, well-defined representation enables several things:
