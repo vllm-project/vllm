@@ -1081,7 +1081,7 @@ class JitWarmupRegistry:
     def __len__(self) -> int:
         return sum(len(registrations) for registrations in self._registrations.values())
 
-    def warmup(self) -> None:
+    def warmup(self) -> bool:
         """Expand registrations and compile each wrapper/key pair once."""
         from tqdm import tqdm
 
@@ -1108,7 +1108,7 @@ class JitWarmupRegistry:
                 kernel_items.append((kernel, compile_keys))
 
         if not kernel_items:
-            return
+            return False
 
         parallel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
         serial_items = []
@@ -1147,3 +1147,4 @@ class JitWarmupRegistry:
                     sum(len(keys) for _, keys in parallel_items),
                 )
             compile_kernels(serial_items)
+        return True
