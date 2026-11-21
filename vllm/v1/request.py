@@ -248,6 +248,7 @@ class Request:
         self.update_block_hashes()
 
         self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
+        self.aux_output_external_hit_limit: int | None = None
 
         # Used for streaming
         self.resumable = resumable
