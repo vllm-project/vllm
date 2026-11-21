@@ -21,7 +21,8 @@ logger = init_logger(__name__)
 class JobState:
     """Thread-safe completion tracker for a set of per-block I/O tasks.
 
-    Each task calls task_done(success) when it finishes.
+    Each task calls task_done(success) when it finishes. The errno of the
+    first failing task, if any, is kept for the job's result.
     """
 
     __slots__ = (
@@ -29,6 +30,7 @@ class JobState:
         "_n_tasks",
         "_completed",
         "_success",
+        "_error_errno",
         "_transfer_time",
         "_lock",
     )
@@ -38,6 +40,7 @@ class JobState:
         self._n_tasks = n_tasks
         self._completed = 0
         self._success = True
+        self._error_errno: int | None = None
         self._transfer_time = 0.0
         self._lock = threading.Lock()
 
@@ -46,15 +49,24 @@ class JobState:
         return self._job_id
 
     def task_done(
-        self, success: bool, transfer_time: float
-    ) -> tuple[bool, bool, float]:
-        """Returns if job completed and success flag."""
+        self, success: bool, transfer_time: float, error_errno: int | None = None
+    ) -> tuple[bool, bool, float, int | None]:
+        """Returns if job completed, success flag, total transfer time and the
+        errno of the first failed task (None if none failed or it is unknown).
+        """
         with self._lock:
             self._completed += 1
             self._transfer_time += transfer_time
             if not success:
+                if self._success:
+                    self._error_errno = error_errno
                 self._success = False
-            return self._completed == self._n_tasks, self._success, self._transfer_time
+            return (
+                self._completed == self._n_tasks,
+                self._success,
+                self._transfer_time,
+                self._error_errno,
+            )
 
 
 class DualQueueThreadPool:
@@ -76,7 +88,8 @@ class DualQueueThreadPool:
         self._condition = threading.Condition(threading.Lock())
         self._stop = False
         self._threads: list[threading.Thread] = []
-        self._finished_q: deque[tuple[JobId, bool, float]] = deque()
+        # (job_id, success, transfer_time, error_errno)
+        self._finished_q: deque[tuple[JobId, bool, float, int | None]] = deque()
         self._inflight_jobs = 0  # guarded by _condition
 
         for i in range(n_read_threads):
@@ -127,7 +140,7 @@ class DualQueueThreadPool:
                 self._store_q.append((fn, state))
             self._condition.notify(n_tasks)
 
-    def get_finished(self) -> list[tuple[JobId, bool, float]]:
+    def get_finished(self) -> list[tuple[JobId, bool, float, int | None]]:
         # No lock needed: deque is thread-safe for concurrent append/popleft,
         # and the manager is the sole popper.
         jobs = []
@@ -175,7 +188,9 @@ class DualQueueThreadPool:
                 start_time = time.monotonic()
                 task()
                 transfer_time = time.monotonic() - start_time
-                job_finished, success, total_time = state.task_done(True, transfer_time)
+                job_finished, success, total_time, error_errno = state.task_done(
+                    True, transfer_time
+                )
             except Exception as exc:
                 transfer_time = time.monotonic() - start_time
                 logger.error(
@@ -183,12 +198,16 @@ class DualQueueThreadPool:
                     state.job_id,
                     exc,
                 )
-                job_finished, success, total_time = state.task_done(
-                    False, transfer_time
+                job_finished, success, total_time, error_errno = state.task_done(
+                    False,
+                    transfer_time,
+                    exc.errno if isinstance(exc, OSError) else None,
                 )
 
             if job_finished:
                 with self._condition:
-                    self._finished_q.append((state.job_id, success, total_time))
+                    self._finished_q.append(
+                        (state.job_id, success, total_time, error_errno)
+                    )
                     self._inflight_jobs -= 1
                     self._condition.notify_all()

@@ -7,6 +7,7 @@ until explicitly released, allowing precise control over when the manager
 observes store completions and their apparent latency.
 """
 
+import errno
 import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
@@ -95,6 +96,8 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
         # When True, stores complete with success=False, like a tier whose
         # writes are rejected (e.g. ENOSPC on a full filesystem).
         self.fail_stores = False
+        # errno reported with failed stores; None means the tier doesn't know.
+        self.fail_errno: int | None = None
         self.num_store_submissions = 0
 
     def lookup(self, key, req_context):
@@ -106,7 +109,11 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
             for key in job_metadata.keys:
                 self.blocks[key] = True
         self._held_jobs.append(
-            JobResult(job_id=job_metadata.job_id, success=not self.fail_stores)
+            JobResult(
+                job_id=job_metadata.job_id,
+                success=not self.fail_stores,
+                error_errno=self.fail_errno if self.fail_stores else None,
+            )
         )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
@@ -618,6 +625,34 @@ class TestBackpressure:
         assert self.tier.num_store_submissions == _BP_FAILURE_THRESHOLD
         statuses = [self.primary._policy.get(k) for k in keys]
         assert all(s is not None and s.ref_cnt == 0 for s in statuses)
+
+    def _fail_stores_with(self, fail_errno, num_stores):
+        bp = _ema_detector(self.tier)
+        bp._decay_half_life_s = 0.0
+        bp._completions = _BP_WARMUP
+        self.tier.fail_stores = True
+        self.tier.fail_errno = fail_errno
+        for i in range(num_stores):
+            self._store_and_complete(to_keys([920 + i]))
+        return bp
+
+    @pytest.mark.parametrize("fail_errno", [errno.ENOSPC, errno.EDQUOT, errno.EIO])
+    def test_capacity_and_persistent_failures_activate_pressure(
+        self, setup, fail_errno
+    ):
+        """A full tier (ENOSPC/EDQUOT) or one that rejects writes (EIO) is
+        throttled after the failure threshold, as for an unknown errno."""
+        bp = self._fail_stores_with(fail_errno, _BP_FAILURE_THRESHOLD)
+        assert bp.is_under_pressure() is True
+
+    @pytest.mark.parametrize("fail_errno", [errno.EMFILE, errno.EAGAIN, errno.EINTR])
+    def test_transient_failures_do_not_activate_pressure(self, setup, fail_errno):
+        """Errors that say nothing about the tier (e.g. the process ran out of
+        file descriptors) must not throttle stores to it."""
+        bp = self._fail_stores_with(fail_errno, 3 * _BP_FAILURE_THRESHOLD)
+        assert bp.is_under_pressure() is False
+        assert bp.stats["consecutive_store_failures"] == 0
+        assert self.tier.num_store_submissions == 3 * _BP_FAILURE_THRESHOLD
 
 
 class TestStoreFailures:
