@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
 )
+from vllm.models.kimi_k3.amd import akr_kda_prefill
 from vllm.models.kimi_k3.amd.specialized_decode.levers import EAGERPREP, lever_on
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
@@ -261,17 +262,21 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             and _adaptive_verification_enabled(self.vllm_config)
         ):
             attn_metadata = replace(attn_metadata, uniform_spec_sequence_length=None)
-        if attn_metadata.checkpoint is None:
-            return attn_metadata
-        # The shared builder keys checkpoint rows on every request; the ROCm
-        # prefill path indexes them by prefill_query_start_loc, so rebuild with
-        # those rows.
-        return replace(
-            attn_metadata,
-            checkpoint=self._build_checkpoint_metadata(
-                common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
-            ),
+        if attn_metadata.checkpoint is not None:
+            # The shared builder keys checkpoint rows on every request; the ROCm
+            # prefill path indexes them by prefill_query_start_loc, so rebuild
+            # with those rows.
+            attn_metadata = replace(
+                attn_metadata,
+                checkpoint=self._build_checkpoint_metadata(
+                    common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
+                ),
+            )
+        # Host chunk counts of the prefill sequences for amd_kernels' KDA prefill.
+        akr_kda_prefill.attach_chunk_counts(
+            attn_metadata, common_attn_metadata.query_start_loc_cpu
         )
+        return attn_metadata
 
     def _build_spec_decode_fused(
         self,

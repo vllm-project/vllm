@@ -57,6 +57,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_fp8_paged_mqa_logits,
 )
 
+from . import akr_dsa
 from .ops.fp4_indexer import (
     decode_layout,
     decode_tile_size,
@@ -379,9 +380,11 @@ def _fp4_indexer(
         assert q_scales is not None and q_weights is not None
         # pure decode, every key and decode row the caller's; padding rows
         # past them still get the reset
+        # (graph-padded: the caller's rows may exceed the decode rows and the
+        # slot mapping, and its prep already reset every row's top-k)
         rows = q_payload.shape[0]
-        assert not m.num_prefills and m.num_decode_tokens == rows
-        assert m.slot_mapping.numel() == rows <= q.shape[0]
+        assert not m.num_prefills and m.num_decode_tokens <= rows <= q.shape[0]
+        assert m.slot_mapping.numel() <= rows
         if q.shape[0] > rows:
             out[rows : q.shape[0]].fill_(-1)
     elif fused_prep:
@@ -439,11 +442,24 @@ def _fp4_indexer(
             end = min(start + tile_rows, m.num_decode_tokens)
             row_ends = ends[start:end]
             quantized = None
-            if prepped and start == 0 and end == q_payload.shape[0]:
-                # the starts are decode rows' (0 .. end): the clamp is a no-op
-                quantized = (q_payload, q_scales)
-                tile_weights, rel_starts = q_weights, starts
-            elif fused_prep:
+            # amd_kernels: scorer + select in one launch (a single tile, no prefill)
+            akr_fused = (
+                score_rows is not None
+                and start == 0
+                and end == m.num_decode_tokens
+                and akr_dsa.score_topk_supported(
+                    starts.numel() - 1, block_table.shape[1] * 64, cache, out
+                )
+            )
+            if prepped and start == 0 and end <= q_payload.shape[0]:
+                # the starts are decode rows' (0 .. num_decode_tokens): the clamp
+                # is a no-op unless this first tile ends before the last row
+                quantized = (q_payload[:end], q_scales[:end])
+                tile_weights = q_weights[:end]
+                rel_starts = (
+                    starts if end == m.num_decode_tokens else starts.clamp(0, end)
+                )
+            elif fused_prep or akr_fused:
                 q_payload, q_scales, tile_weights, rel_starts = (
                     quantize_queries_and_weights(
                         q[start:end],
@@ -459,6 +475,23 @@ def _fp4_indexer(
                 tile_weights = weights[start:end].float() * weight_scale
                 rel_starts = starts if start == 0 else starts - start
                 rel_starts = rel_starts.clamp(0, end - start)
+            max_qlen = min(end - start, decode.write_max_decode_len or end - start)
+            selected = out[start:end]
+            if akr_fused:
+                assert quantized is not None
+                if akr_dsa.score_topk(
+                    quantized[0],
+                    quantized[1],
+                    tile_weights,
+                    cache,
+                    block_table[: starts.numel() - 1],
+                    rel_starts,
+                    row_ends,
+                    max_qlen,
+                    selected,
+                    score_rows[start:end],
+                ):
+                    continue
             logits = score_paged(
                 q[start:end],
                 cache,
@@ -466,10 +499,9 @@ def _fp4_indexer(
                 block_table[: starts.numel() - 1],
                 rel_starts,
                 row_ends,
-                min(end - start, decode.write_max_decode_len or end - start),
+                max_qlen,
                 quantized,
             )
-            selected = out[start:end]
             if score_rows is not None:
                 # The sparse backend merges scores directly into local CSR slots.
                 _select(logits, row_ends, selected, score_rows[start:end])
@@ -825,12 +857,26 @@ class _MSState:
         self.ev_q = torch.cuda.Event()
         self.ev_merge = torch.cuda.Event()
         self.ev_done = torch.cuda.Event()
+        self.ev_qg = torch.cuda.Event()
         # 0: idle, 1: forked (indexer op pending), 2: merged (attn pending).
         self.stage = 0
         self.rows = 0
         self.kv: tuple[torch.Tensor, torch.Tensor] | None = None
         self.pending: tuple[torch.Tensor, torch.Tensor, int] | None = None
         self.joined = True
+        self.reset_akr()
+
+    def reset_akr(self) -> None:
+        """amd_kernels hand-offs of one layer pass (see ``akr_dsa``)."""
+        # the prologue kernels do this pass's KV / indexer-key inserts and prep
+        self.akr_pro = False
+        self.akr_qg = False
+        self.ev_q_done = False
+        self.skip_kv_update = False
+        # gathered latent query for the sparse MLA; aux gate for the combine
+        self.q_lat: torch.Tensor | None = None
+        self.gate: torch.Tensor | None = None
+        self.folded = False
 
     def take_pending(self, rows: int) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Called by the sparse MLA backend: hand over the merged CSR slots.
@@ -896,17 +942,124 @@ def _ms_fork(x: torch.Tensor, layer_name: str) -> torch.Tensor:
     st.stage = 0
     st.pending = None
     st.kv = None
+    st.reset_akr()
     if _ms_active(layer):
         ind = layer.indexer
         aux = layer.aux_stream
-        st.ev_fork.record()
-        with torch.cuda.stream(aux):
-            aux.wait_event(st.ev_fork)
-            ik = ind.k_index_norm(ind.wk_index(x)[0])
-            iv = ind.wv_index(x)[0]
-        st.kv = (ik, iv)
+        rows = x.shape[0]
+        if layer.akr_pro:
+            st.akr_pro = akr_dsa.prologue_runtime_ok(
+                layer, *_akr_prologue_ctx(layer, rows)
+            )
+        if layer.akr_qg:
+            st.akr_qg = akr_dsa.qgather_runtime_ok(layer, rows)
+        if not st.akr_pro:
+            # (the prologue kernel does the key side itself)
+            st.ev_fork.record()
+            with torch.cuda.stream(aux):
+                aux.wait_event(st.ev_fork)
+                ik = ind.k_index_norm(ind.wk_index(x)[0])
+                iv = ind.wv_index(x)[0]
+            st.kv = (ik, iv)
         st.stage = 1
     return x.new_empty(0)
+
+
+def _akr_prologue_ctx(layer, rows: int):
+    """``(rows, table_width, kv_cache, kv_slots, index cache, index slots)``."""
+    ind = layer.indexer
+    md = get_forward_context().attn_metadata
+    im = md[ind.k_cache.prefix]
+    _, _, kv_cache, kv_slots = get_attention_context(layer.mla_attn.layer_name)
+    return (
+        rows,
+        im.block_table.shape[1] * 64 if im.block_table is not None else 0,
+        kv_cache,
+        kv_slots,
+        ind.k_cache.kv_cache,
+        im.slot_mapping,
+    )
+
+
+def _ms_prologue(
+    qkv: torch.Tensor, token: torch.Tensor, layer_name: str
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """q_a / kv_a norms of the (extended) qkv_a output: the amd_kernels K_A
+    (also the KV + indexer-key inserts and the head weights) when this pass is a
+    multi-stream decode, else the stock norms."""
+    layer = _MS_LAYERS[layer_name]
+    st = layer.ms_state
+    if st.stage == 1 and st.akr_pro:
+        _, _, kv_cache, kv_slots = get_attention_context(layer.mla_attn.layer_name)
+        im = get_forward_context().attn_metadata[layer.indexer.k_cache.prefix]
+        q_c, kv_c, idx_w = akr_dsa.prologue_a(
+            layer,
+            qkv,
+            kv_cache,
+            kv_slots,
+            layer.indexer.k_cache.kv_cache,
+            im.slot_mapping,
+        )
+        st.skip_kv_update = True  # the MLA layer must not insert the KV again
+        st.ev_q.record()  # q_c and the key are ready for the aux stream
+        st.ev_q_done = True
+        return q_c, kv_c, idx_w
+    q_c = layer.q_a_layernorm(qkv[:, : layer.q_lora_rank])
+    kv_c = layer.kv_a_layernorm(
+        qkv[:, layer.q_lora_rank : layer.q_lora_rank + layer.kv_lora_rank]
+    )
+    return (
+        q_c,
+        kv_c,
+        qkv.new_empty(
+            (qkv.shape[0], layer.indexer.index_num_heads), dtype=torch.float32
+        ),
+    )
+
+
+def _ms_prologue_fake(
+    qkv: torch.Tensor, token: torch.Tensor, layer_name: str
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    layer = _MS_LAYERS[layer_name]
+    m = qkv.shape[0]
+    return (
+        qkv.new_empty((m, layer.q_lora_rank)),
+        qkv.new_empty((m, layer.kv_lora_rank)),
+        qkv.new_empty((m, layer.indexer.index_num_heads), dtype=torch.float32),
+    )
+
+
+def _ms_q(
+    q_c: torch.Tensor, token: torch.Tensor, layer_name: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The query projection: the amd_kernels q_b + W_UK + DCP gather (the gathered
+    latent query goes to the sparse MLA through the layer state; the returned q is
+    then unused) when this pass is a multi-stream decode, else the stock q_b."""
+    layer = _MS_LAYERS[layer_name]
+    st = layer.ms_state
+    if st.stage == 1 and st.akr_qg:
+        if not st.ev_q_done:
+            # q_c is ready: the aux stream starts now, not behind the gather
+            st.ev_q.record()
+            st.ev_q_done = True
+        st.q_lat = akr_dsa.qgather(layer, q_c)
+        # the aux-stream score gather may start only once this kernel is done
+        # (two spinning kernels must not wait for each other's residency)
+        st.ev_qg.record()
+        q = q_c.new_empty((q_c.shape[0], layer.num_heads, layer.qk_head_dim))
+    else:
+        q = layer.q_b_proj(q_c)[0].view(-1, layer.num_heads, layer.qk_head_dim)
+    return q, q_c.new_empty(0)
+
+
+def _ms_q_fake(
+    q_c: torch.Tensor, token: torch.Tensor, layer_name: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    layer = _MS_LAYERS[layer_name]
+    return (
+        q_c.new_empty((q_c.shape[0], layer.num_heads, layer.qk_head_dim)),
+        q_c.new_empty(0),
+    )
 
 
 def _ms_fork_fake(x: torch.Tensor, layer_name: str) -> torch.Tensor:
@@ -914,7 +1067,12 @@ def _ms_fork_fake(x: torch.Tensor, layer_name: str) -> torch.Tensor:
 
 
 def _ms_indexer(
-    x: torch.Tensor, q_c: torch.Tensor, token: torch.Tensor, layer_name: str
+    x: torch.Tensor,
+    q_c: torch.Tensor,
+    token: torch.Tensor,
+    layer_name: str,
+    idx_w: torch.Tensor,
+    q_token: torch.Tensor,
 ) -> torch.Tensor:
     layer = _MS_LAYERS[layer_name]
     st = layer.ms_state
@@ -926,8 +1084,11 @@ def _ms_indexer(
         return layer.g_proj(x)[0]
     from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as be
 
-    assert st.kv is not None
-    ik, iv = st.kv
+    if st.akr_pro:
+        ik = iv = None
+    else:
+        assert st.kv is not None
+        ik, iv = st.kv
     st.kv = None
     rows = st.rows
     dcp = get_dcp_group()
@@ -937,21 +1098,42 @@ def _ms_indexer(
     mm = get_forward_context().attn_metadata[layer.mla_attn.layer_name]
     _, block_stride_rows = flat_kv_row_view(kv_cache, mm.block_size)
     width = dcp.world_size * topk.shape[1]
-    ends = be._score_widths.get((scores.device, width))
-    if ends is None or ends.numel() < rows:
-        # Created on main before the fork so both streams see it filled.
-        be._score_widths[(scores.device, width)] = torch.full(
-            (max(rows, 1024),), width, dtype=torch.int32, device=scores.device
-        )
-    token_pages = getattr(mm, "_dcp_token_pages", None)
-    if token_pages is None or token_pages.shape[0] != rows:
-        token_pages = mm.block_table[mm.req_id_per_token[:rows]]
-        mm._dcp_token_pages = token_pages
+
+    def merge_inputs():
+        # The merge's per-row page table and key-width vector.
+        ends = be._score_widths.get((scores.device, width))
+        if ends is None or ends.numel() < rows:
+            be._score_widths[(scores.device, width)] = torch.full(
+                (max(rows, 1024),), width, dtype=torch.int32, device=scores.device
+            )
+        token_pages = getattr(mm, "_dcp_token_pages", None)
+        if token_pages is None or token_pages.shape[0] != rows:
+            token_pages = mm.block_table[mm.req_id_per_token[:rows]]
+            mm._dcp_token_pages = token_pages
+        return token_pages
+
     aux = layer.aux_stream
-    st.ev_q.record()
+    token_pages = None
+    if not st.ev_q_done:
+        # Created on main before the fork so both streams see it filled. (After the
+        # prologue the fork event is already recorded and the aux stream must not
+        # wait for the query gather behind it: it builds them itself.)
+        token_pages = merge_inputs()
+        st.ev_q.record()
     with torch.cuda.stream(aux):
         aux.wait_event(st.ev_q)
+        if token_pages is None:
+            token_pages = merge_inputs()
         index_q = ind.wq_index(q_c)[0].view(-1, ind.index_num_heads, ind.index_head_dim)
+        if st.akr_pro:
+            # K_B (query MXFP4 + top-k reset); the key and weights came from K_A
+            q_payload, q_scales = akr_dsa.prologue_b(
+                layer, index_q, topk, ind.k_cache.kv_cache
+            )
+            prepped = dict(q_payload=q_payload, q_scales=q_scales, q_weights=idx_w)
+            ik = iv = index_q  # (unused by the prepped path)
+        else:
+            prepped = {}
         _fp4_indexer(
             index_q,
             ik,
@@ -965,22 +1147,34 @@ def _ms_indexer(
             ind.cp_interleave,
             ind.indexer_weight_scale * ind.index_softmax_scale,
             scores,
+            **prepped,
         )
-        gathered = layer.ms_comm.custom_all_gather(
-            scores[:rows].view(torch.int32), dim=1
-        ).view(torch.float32)
-        packed, indptr = be.merge_dcp_scores(
-            gathered,
-            topk[:rows],
-            token_pages,
-            dcp.rank_in_group,
-            dcp.world_size,
-            mm.block_size,
-            block_stride_rows,
+        if st.q_lat is not None:
+            # the query gather (main) and the score gather spin on their peers:
+            # keep them apart
+            aux.wait_event(st.ev_qg)
+        merged = akr_dsa.gather_merge(
+            scores[:rows], topk[:rows], token_pages, mm.block_size, block_stride_rows
         )
+        if merged is not None:
+            packed, indptr = merged
+        else:
+            gathered = layer.ms_comm.custom_all_gather(
+                scores[:rows].view(torch.int32), dim=1
+            ).view(torch.float32)
+            packed, indptr = be.merge_dcp_scores(
+                gathered,
+                topk[:rows],
+                token_pages,
+                dcp.rank_in_group,
+                dcp.world_size,
+                mm.block_size,
+                block_stride_rows,
+            )
         st.ev_merge.record()
         gate = layer.g_proj(x)[0]
         st.ev_done.record()
+    st.gate = gate
     st.pending = (packed, indptr, rows)
     st.stage = 2
     st.joined = False
@@ -993,7 +1187,12 @@ def _ms_indexer(
 
 
 def _ms_indexer_fake(
-    x: torch.Tensor, q_c: torch.Tensor, token: torch.Tensor, layer_name: str
+    x: torch.Tensor,
+    q_c: torch.Tensor,
+    token: torch.Tensor,
+    layer_name: str,
+    idx_w: torch.Tensor,
+    q_token: torch.Tensor,
 ) -> torch.Tensor:
     g_proj = _MS_LAYERS[layer_name].g_proj
     return x.new_empty((x.shape[0], g_proj.output_size_per_partition))
@@ -1014,28 +1213,35 @@ def _ms_join(
     gate: torch.Tensor,
     x: torch.Tensor,
     q_c: torch.Tensor,
+    idx_w: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
-    # x and q_c are inputs only to keep their main-stream buffers alive (and
-    # unreused) until the aux reads of them are joined here.
+) -> None:
+    """Join the aux stream and gate `attn_out` in place (the amd_kernels combine
+    may have done both already). x, q_c and idx_w are inputs only to keep their
+    main-stream buffers alive (and unreused) until the aux reads of them are joined
+    here."""
     st = _MS_LAYERS[layer_name].ms_state
     if not st.joined:
         torch.cuda.current_stream().wait_event(st.ev_done)
         st.joined = True
-        if st.stage == 2:
-            # Attention did not consume the merge (no DCP decode rows).
-            st.pending = None
-            st.stage = 0
-    out = torch.empty_like(attn_out)
+    if st.stage == 2:
+        # Attention did not consume the merge (no DCP decode rows).
+        st.pending = None
+        st.stage = 0
+    st.gate = None
+    if st.folded:
+        st.folded = False
+        return
     n = attn_out.numel()
     if n:
         if attn_out.is_contiguous() and gate.is_contiguous():
             _gate_mul_kernel[(triton.cdiv(n, 1024),)](
-                attn_out, gate, out, n, BLOCK=1024
+                attn_out, gate, attn_out, n, BLOCK=1024
             )
         else:
-            out.copy_((attn_out.float() * gate.float().sigmoid()).to(out.dtype))
-    return out
+            attn_out.copy_(
+                (attn_out.float() * gate.float().sigmoid()).to(attn_out.dtype)
+            )
 
 
 def _ms_join_fake(
@@ -1043,19 +1249,29 @@ def _ms_join_fake(
     gate: torch.Tensor,
     x: torch.Tensor,
     q_c: torch.Tensor,
+    idx_w: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
-    return torch.empty_like(attn_out)
+) -> None:
+    return None
 
 
 direct_register_custom_op(
     op_name="kimi_dsa_ms_fork", op_func=_ms_fork, fake_impl=_ms_fork_fake
 )
 direct_register_custom_op(
+    op_name="kimi_dsa_ms_prologue",
+    op_func=_ms_prologue,
+    fake_impl=_ms_prologue_fake,
+)
+direct_register_custom_op(op_name="kimi_dsa_ms_q", op_func=_ms_q, fake_impl=_ms_q_fake)
+direct_register_custom_op(
     op_name="kimi_dsa_ms_indexer", op_func=_ms_indexer, fake_impl=_ms_indexer_fake
 )
 direct_register_custom_op(
-    op_name="kimi_dsa_ms_join", op_func=_ms_join, fake_impl=_ms_join_fake
+    op_name="kimi_dsa_ms_join",
+    op_func=_ms_join,
+    mutates_args=["attn_out"],
+    fake_impl=_ms_join_fake,
 )
 
 
@@ -1078,6 +1294,13 @@ class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
         name = self.mla_attn.layer_name
         _MS_LAYERS[name] = self
         self.ms_name = name
+        # amd_kernels: the prologue (extended qkv_a GEMM + K_A / K_B) and the
+        # fused q_b + W_UK + query gather; the sparse MLA, the combine and the
+        # score gather/merge live in their own call sites.
+        self.akr_w: akr_dsa.LayerWeights | None = None
+        self.akr_pro = akr_dsa.prologue_static_ok(self)
+        self.akr_qg = akr_dsa.qgather_static_ok(self)
+        self.mla_attn._akr_ms_state = self.ms_state
 
     @property
     def aux_stream(self) -> torch.cuda.Stream:
@@ -1098,28 +1321,53 @@ class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
         name = self.ms_name
         token = torch.ops.vllm.kimi_dsa_ms_fork(hidden_states, name)
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-        q_c, kv_lora = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
-        )
-        q_c = self.q_a_layernorm(q_c)
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+        q_end = self.q_lora_rank
+        kv_end = q_end + self.kv_lora_rank
+        if self.akr_pro:
+            q_c, kv_c_normed, idx_w = torch.ops.vllm.kimi_dsa_ms_prologue(
+                qkv_lora, token, name
+            )
+            k_pe = qkv_lora[:, kv_end : kv_end + self.qk_rope_head_dim]
+        else:
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+            )
+            q_c = self.q_a_layernorm(q_c)
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            kv_c_normed = self.kv_a_layernorm(kv_c)
+            idx_w = token
         k_pe = k_pe.unsqueeze(1)
-        gate = torch.ops.vllm.kimi_dsa_ms_indexer(hidden_states, q_c, token, name)
+        q_token = token
+        if self.akr_qg:
+            # before the indexer op: its aux-stream score gather waits for this one
+            q, q_token = torch.ops.vllm.kimi_dsa_ms_q(q_c, token, name)
+        gate = torch.ops.vllm.kimi_dsa_ms_indexer(
+            hidden_states, q_c, token, name, idx_w, q_token
+        )
         self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        if not self.akr_qg:
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
-        attn_out = torch.ops.vllm.kimi_dsa_ms_join(
-            attn_out, gate, hidden_states, q_c, name
-        )
+        torch.ops.vllm.kimi_dsa_ms_join(attn_out, gate, hidden_states, q_c, idx_w, name)
         if skip_o_proj:
             return attn_out
         return self.o_proj(attn_out)[0]
+
+
+def _akr_post_load(w: MultiHeadLatentAttentionWrapper) -> None:
+    """amd_kernels weights of one DSA layer and the compile-only warm-up (called at
+    the end of ``MLAAttention.process_weights_after_loading``)."""
+    w.akr_w = akr_dsa.build_weights(w)  # type: ignore[attr-defined]
+    if w.akr_w.w_uv_t is not None:  # type: ignore[attr-defined]
+        w.mla_attn.akr_w_uv_t = w.akr_w.w_uv_t  # type: ignore[attr-defined]
+    akr_dsa.warm_up(w, w.akr_w)  # type: ignore[attr-defined]
 
 
 class KimiK3DSAAttention(nn.Module):
@@ -1356,6 +1604,7 @@ class KimiK3DSAAttention(nn.Module):
             if ms_comm is not None:
                 wrapper_cls = KimiK3DSAMultiStreamMLAWrapper
                 wrapper_kwargs = {"ms_comm": ms_comm}
+        akr_dsa.init_comms(self)
         self.mla_attn = wrapper_cls(
             self.hidden_size,
             self.num_local_heads,
@@ -1374,6 +1623,10 @@ class KimiK3DSAAttention(nn.Module):
         if isinstance(self.mla_attn, KimiK3DSAMultiStreamMLAWrapper):
             # The sparse MLA backend takes the aux-stream merge from here.
             self.mla_attn.mla_attn.impl._dsa_ms_state = self.mla_attn.ms_state
+        # amd_kernels weights and warm-up, after MLAAttention's own post-load
+        self.mla_attn.mla_attn._akr_post_load = functools.partial(
+            _akr_post_load, self.mla_attn
+        )
 
     def get_input_quant_key(self) -> None:
         # The generic MLA wrapper also feeds these activations to the gate.

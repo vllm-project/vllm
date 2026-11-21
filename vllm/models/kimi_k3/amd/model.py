@@ -221,6 +221,12 @@ class KimiK3ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
 
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.language_model.compute_logits_local(hidden_states)
+
+    def compute_logits_owned(self, *args):
+        return self.language_model.compute_logits_owned(*args)
+
     def get_model_state_cls(self) -> type:
         return self.language_model.get_model_state_cls()
 

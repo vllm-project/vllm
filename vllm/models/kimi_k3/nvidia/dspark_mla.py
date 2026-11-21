@@ -31,6 +31,23 @@ from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
+
+def _akr_aiter_ar() -> bool:
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    from vllm.models.kimi_k3.amd import akr_draft
+
+    return akr_draft.aiter_ar()
+
+
+def _akr_draft_logits(model, hidden_states: torch.Tensor):
+    from vllm.models.kimi_k3.amd import akr_draft
+
+    return akr_draft.compute_logits(model, hidden_states)
+
+
 _GROUPED_KV_CACHE_DTYPES = frozenset(
     {"auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2"}
 )
@@ -102,6 +119,8 @@ class K3DSparkDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # ROCm: AITER's fused all-reduce + RMSNorm (amd_kernels `draft` route, DAR)
+        self.aiter_ar = _akr_aiter_ar()
 
     def forward(
         self,
@@ -115,7 +134,7 @@ class K3DSparkDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = fused_allreduce_rms_norm(
-                hidden_states, residual, self.input_layernorm
+                hidden_states, residual, self.input_layernorm, self.aiter_ar
             )
 
         hidden_states = self.self_attn(
@@ -123,7 +142,7 @@ class K3DSparkDecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
         hidden_states, residual = fused_allreduce_rms_norm(
-            hidden_states, residual, self.post_attention_layernorm
+            hidden_states, residual, self.post_attention_layernorm, self.aiter_ar
         )
         # The MLP output is reduced by the next layer's input_layernorm (or by
         # the model's final_norm).
@@ -425,7 +444,7 @@ class K3DSparkModel(nn.Module):
                 residual=residual,
             )
         hidden_states, _ = fused_allreduce_rms_norm(
-            hidden_states, residual, self.final_norm
+            hidden_states, residual, self.final_norm, self.layers[0].aiter_ar
         )
         return hidden_states
 
@@ -472,6 +491,7 @@ class K3DSparkForCausalLM(nn.Module):
         # Assigned by load_dspark_model from the target. Keeping no placeholder
         # avoids a transient full-vocabulary allocation for this 163k-vocab model.
         self.lm_head: nn.Module | None = None
+        self._akr_lmhead = False  # set by the speculator's amd_kernels set-up
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
@@ -506,6 +526,10 @@ class K3DSparkForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert self.lm_head is not None
+        if self._akr_lmhead:  # amd_kernels lm_head GEMM + all-gather exchange
+            logits = _akr_draft_logits(self, hidden_states)
+            if logits is not None:
+                return logits
         return self.logits_processor(self.lm_head, hidden_states)
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

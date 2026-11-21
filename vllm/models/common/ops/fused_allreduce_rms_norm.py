@@ -14,6 +14,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     _AR_RESIDUAL_RMS_NORM,
+    _can_use_aiter_fused_ar_rms,
     _can_use_flashinfer,
     flashinfer_trtllm_fused_allreduce_norm,
 )
@@ -24,8 +25,10 @@ def fused_allreduce_rms_norm(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     norm: RMSNorm,
+    use_aiter: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer.
+    """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer (or, with
+    `use_aiter`, AITER's fused custom all-reduce on ROCm when it takes this payload).
 
     ``hidden_states`` is the per-rank *partial* output of a row-parallel linear
     run with ``reduce_results=False``; ``norm`` is the RMSNorm applied right
@@ -58,6 +61,17 @@ def fused_allreduce_rms_norm(
                 norm_out=norm_out,
             )
             return norm_out, hidden_states
+
+    if use_aiter and _can_use_aiter_fused_ar_rms(hidden_states):
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
+            input_=hidden_states,
+            residual=residual,
+            weight=norm.weight,
+            epsilon=norm.variance_epsilon,
+            gemma_norm=False,
+        )
 
     reduced = tensor_model_parallel_all_reduce(hidden_states)
     return norm(reduced, residual)

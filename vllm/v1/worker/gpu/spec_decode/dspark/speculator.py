@@ -30,6 +30,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
@@ -113,6 +114,47 @@ class DSparkSpeculator(DFlashSpeculator):
             self.use_acceptance_estimator = False
         return model
 
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        super().load_model(target_model)
+        if current_platform.is_rocm():
+            # Kimi-K3 on ROCm: the amd_kernels drafter / sampling routes (each falls
+            # back to the stock path when its preconditions fail).
+            from vllm.models.kimi_k3.amd import akr_draft
+
+            akr_draft.setup(self, target_model)
+
+    def _store_hidden_states(
+        self,
+        num_tokens: int,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_graph_tokens: int = 0,
+    ) -> None:
+        if getattr(self, "_akr_ctx", None) is not None:
+            from vllm.models.kimi_k3.amd import akr_draft
+
+            if akr_draft.store_hidden_states(
+                self,
+                num_tokens,
+                last_hidden_states,
+                aux_hidden_states,
+                num_graph_tokens,
+            ):
+                return
+        super()._store_hidden_states(
+            num_tokens, last_hidden_states, aux_hidden_states, num_graph_tokens
+        )
+
+    def _prepare_graph_forward(
+        self, num_reqs: int, attn_metadata: dict[str, Any] | None
+    ) -> None:
+        if getattr(self, "_akr_ctx", None) is not None:
+            from vllm.models.kimi_k3.amd import akr_draft
+
+            if akr_draft.prepare_graph_forward(self, num_reqs, attn_metadata):
+                return
+        super()._prepare_graph_forward(num_reqs, attn_metadata)
+
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")
@@ -178,6 +220,13 @@ class DSparkSpeculator(DFlashSpeculator):
             self, num_reqs, head_hidden
         ):
             return
+
+        if getattr(self, "_akr_markov", None) is not None:
+            from vllm.models.kimi_k3.amd import akr_sampling
+
+            # amd_kernels: all steps in one persistent launch (False: not this step)
+            if akr_sampling.markov_sequential(self, num_reqs, head_hidden):
+                return
 
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.kimi_k3.amd import akr_k1k2
 from vllm.models.kimi_k3.amd.specialized_decode.levers import KDAK1, lever_on
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
@@ -124,8 +125,18 @@ def _k2(
     if not getattr(m.routed_output_transform, "row_sharded", False):
         w_up = w_up.narrow(0, runner.rank * moe.UP_N, moe.UP_N)
     out = torch.empty_like(prefix)
-    k2.k2_launch(
-        _k2_key(layer, runner, core.size(0), reset, m1b_in is not None, dsa),
+    key = _k2_key(layer, runner, core.size(0), reset, m1b_in is not None, dsa)
+    # amd_kernels K2 (VLLM_KIMI_AKR_K2=1) takes the launches without an MLA / DSA M1b
+    if getattr(runner, "akr_k2", None) is None:
+        launch = k2.k2_launch
+    else:
+
+        def launch(key, **kw):
+            if not akr_k1k2.k2_launch(runner, key, **kw):
+                k2.k2_launch(key, **kw)
+
+    launch(
+        key,
         core=core,
         w_o=layer.self_attn.o_proj.weight,
         prefix=prefix,
@@ -253,33 +264,48 @@ class WholeLayer(_Layer):
             runner.step_begin()
         conv_state, rstate = self.caches()
         s = prefix_sum.size(0)
-        core = prefix_sum.new_empty(s, kda.PROJ)
-        kda.kda_pre(
-            self._k1_key(
-                m.spec_state_indices_tensor.size(-1),
-                conv_state.size(-1),
-                prefix_delta is not None,
-            ),
-            prefix=prefix_sum,
-            delta=prefix_delta,
-            blocks=block_residual,
-            ares_nw=layer.self_attention_res_norm.weight,
-            ares_qk=layer.self_attention_res_proj.weight.view(kda.HIDDEN),
-            in_nw=layer.input_layernorm.weight,
-            w_in=attn.in_proj_qkvgfab.weight,
-            w_fb=attn.f_b_proj.weight,
-            conv_w=attn.conv1d.weight.view(kda.QKV, 4),
-            conv_state=conv_state,
-            a_log=attn.A_log,
-            dt_bias=attn.dt_bias,
-            on_w=attn.o_norm.weight,
-            rstate=rstate,
-            st_idx=m.spec_state_indices_tensor,
-            num_acc=m.num_accepted_tokens,
-            core_out=core,
-            layer=layer.layer_idx,
-            **runner.launch_args(),
-        )
+        core = None
+        if getattr(runner, "akr_k1", None) is not None:
+            # amd_kernels K1 (VLLM_KIMI_AKR_K1=1); None: the stock launch below
+            core = akr_k1k2.k1_launch(
+                self,
+                step,
+                prefix_sum,
+                block_residual,
+                prefix_delta,
+                attn,
+                m,
+                conv_state,
+                rstate,
+            )
+        if core is None:
+            core = prefix_sum.new_empty(s, kda.PROJ)
+            kda.kda_pre(
+                self._k1_key(
+                    m.spec_state_indices_tensor.size(-1),
+                    conv_state.size(-1),
+                    prefix_delta is not None,
+                ),
+                prefix=prefix_sum,
+                delta=prefix_delta,
+                blocks=block_residual,
+                ares_nw=layer.self_attention_res_norm.weight,
+                ares_qk=layer.self_attention_res_proj.weight.view(kda.HIDDEN),
+                in_nw=layer.input_layernorm.weight,
+                w_in=attn.in_proj_qkvgfab.weight,
+                w_fb=attn.f_b_proj.weight,
+                conv_w=attn.conv1d.weight.view(kda.QKV, 4),
+                conv_state=conv_state,
+                a_log=attn.A_log,
+                dt_bias=attn.dt_bias,
+                on_w=attn.o_norm.weight,
+                rstate=rstate,
+                st_idx=m.spec_state_indices_tensor,
+                num_acc=m.num_accepted_tokens,
+                core_out=core,
+                layer=layer.layer_idx,
+                **runner.launch_args(),
+            )
         if layer.is_block_write_layer:
             # the prefix restarts at the attention's output
             prefix_sum = torch.empty_like(prefix_sum)
