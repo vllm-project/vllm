@@ -16,6 +16,7 @@ steps:
   - vllm/model_executor/models/utils.py
   - vllm/transformers_utils/model_arch_config_convertor.py
   - vllm/models/deepseek_v41/quant_config.py
+  - vllm/models/muse_spark/nvidia/muse_moe_runner.py
   - vllm/utils/humming.py
   - tests/quantization
   - tests/single_rank_group.py
