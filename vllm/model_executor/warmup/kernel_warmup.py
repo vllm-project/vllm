@@ -38,6 +38,9 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.modelopt_block_triton_warmup import (
+    modelopt_block_triton_warmup,
+)
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
@@ -313,6 +316,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
     replayssm_lifecycle_warmup(worker.model_runner)
+    modelopt_block_triton_warmup(worker)
     if enable_jit_warmup and worker.vllm_config.cache_config.enable_prefix_caching:
         # Copy-on-write first copies blocks mid-serving.
         blocks = torch.zeros(2, 1, dtype=torch.int64, device=worker.device)
