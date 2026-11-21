@@ -608,8 +608,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        *,
+        use_sequence_parallel: bool | None = None,
     ) -> torch.Tensor:
         """Return full embeddings or a token shard after combining vocabulary owners."""
+        if use_sequence_parallel is None:
+            use_sequence_parallel = self.use_sequence_parallel
         embedding = self.ngram_embedding
         if embedding.supports_prefetch:
             # Prefetch contains full tokens even when hidden states are sharded.
@@ -621,7 +625,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 input_ids, query_start_loc, ngram_context
             )
             embeddings = embedding(ngram_ids).flatten(-2)
-        if not self.use_sequence_parallel:
+        if not use_sequence_parallel:
+            if self.use_reduce_scatter:
+                output_dtype = embeddings.dtype
+                if is_fp8(embeddings):
+                    embeddings = embeddings.view(torch.int8)
+                embeddings = get_etp_group().all_reduce(embeddings)
+                embeddings = embeddings.view(output_dtype)
             return embeddings
         return self._sp_shard_embeddings(embeddings)
 

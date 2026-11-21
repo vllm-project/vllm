@@ -41,6 +41,19 @@ steps:
       - tests/models/qwen4_exp/test_ple.py
       - tests/models/qwen4_exp/test_tpsp.py
 
+- label: ":nvidia: (H100) [Nightly] Qwen4 Exp HC-SP small batches"
+  key: qwen4-exp-hc-sp-small-batch-4-gpus
+  optional: true
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: h100
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - tests/models/qwen4_exp/test_tpsp.py
+  commands:
+  - pytest -v -s models/qwen4_exp/test_tpsp.py::test_hc_sp_small_batch_serving
+
 - label: ":nvidia: (L4) Distributed Models"
   key: distributed-model-tests-2-gpus
   automatic_shard: true
