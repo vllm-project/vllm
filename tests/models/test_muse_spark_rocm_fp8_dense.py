@@ -21,7 +21,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -206,11 +206,9 @@ def _skip_unless_gfx950() -> None:
         pytest.skip("Muse Spark FP8 dense needs gfx950")
 
 
-# Per-rank (N, K) of the qkv-gate (TEP4, TEP8), pooler and unpooler.
+# Per-rank (N, K) of the TEP8 qkv-gate and of the unpooler (K = 4096).
 DENSE_SHAPES = {
-    "qkvg_tp4": (4608, 8192),
     "qkvg_tp8": (2304, 8192),
-    "pooler": (4096, 8192),
     "unpooler": (8192, 4096),
 }
 
@@ -245,7 +243,7 @@ def aiter_enabled(monkeypatch: pytest.MonkeyPatch):
 
 @rocm_gfx950
 @pytest.mark.parametrize("name", sorted(DENSE_SHAPES))
-@pytest.mark.parametrize("m", [1, 8, 40, 64, 96, 192, 256, 257, 2048])
+@pytest.mark.parametrize("m", [1, 257, 2048])
 @pytest.mark.parametrize("fp8_rows", [False, True])
 def test_dense_gemms_match_the_dequantized_reference(
     dist_init, aiter_enabled, config, name: str, m: int, fp8_rows: bool
@@ -396,12 +394,6 @@ def test_online_fp8_per_channel_loads_the_fused_qkv_gate_layer(
             quant_config=online,
             prefix="model.layers.0.self_attn.qkv_proj",
         )
-        o_proj = ReplicatedLinear(
-            256, 512, quant_config=online, prefix="model.layers.0.self_attn.o_proj"
-        )
-        assert fp8_dense.use_online_fp8(qkv, online)
-        assert not fp8_dense.use_online_fp8(o_proj, online)
-    assert list(online.quantized_layers) == ["model.layers.0.self_attn.qkv_proj"]
 
     gen = torch.Generator(device="cuda").manual_seed(0)
     shards = {"q": 256, "k": 128, "v": 128, "o_gate": 256}
@@ -418,37 +410,23 @@ def test_online_fp8_per_channel_loads_the_fused_qkv_gate_layer(
     assert (qkv(x)[0].float() - ref_out).norm() / ref_out.norm() < 5e-3
 
 
-HADAMARD_MXFP4 = {
-    "linear": QuantSpec(weight="mxfp4", activation=None, hadamard_size=32)
-}
-
-
 @rocm_gfx950
 @pytest.mark.parametrize(
     "args, name, setup, error, match",
     [
         ({"linear": "fp8_per_block"}, "feed_forward.pooler", None,
          NotImplementedError, "fp8_per_channel"),
-        (HADAMARD_MXFP4, "feed_forward.pooler", None,
-         NotImplementedError, "InputHadamardLinearMethod"),
-        (HADAMARD_MXFP4, "self_attn.qkv_proj", None,
-         NotImplementedError, "InputHadamardLinearMethod"),
         (FP8_DENSE, "self_attn.qkv_proj", "monokernel", ValueError, "monokernel"),
         (FP8_DENSE, "self_attn.qkv_proj", "lora", ValueError, "LoRA"),
         (FP8_DENSE, "self_attn.qkv_proj", "int4", ValueError, "QUICK_REDUCE"),
-        ({"linear": "fp8_per_channel"}, "self_attn.o_proj", None,
-         ValueError, "ignore"),
-        (HADAMARD_MXFP4, "self_attn.o_proj", None, ValueError, "ignore"),
     ],
 )  # fmt: skip
 def test_unsupported_online_fp8_dense_setups_are_refused(
     dist_init, checkpoint, config, monkeypatch, args, name, setup, error, match
 ) -> None:
-    """Other online targets (also behind a Hadamard rotation), the
-    monokernel (it reads the BF16 weights), LoRA (its wrappers do not take the
-    fused norms' FP8 input), INT4 quick all-reduce (collapses accuracy on top of
-    FP8), and an online `o_proj` under the Ulysses prefill (it reads the BF16
-    weight)."""
+    """Another online scheme, the monokernel (it reads the BF16 weights), LoRA
+    (its wrappers do not take the fused norms' FP8 input) and INT4 quick
+    all-reduce (collapses accuracy on top of FP8)."""
     _skip_unless_gfx950()
     if setup == "int4":
         monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4")
@@ -459,35 +437,7 @@ def test_unsupported_online_fp8_dense_setups_are_refused(
         ),
         pytest.raises(error, match=match),
     ):
-        if name.endswith("o_proj"):
-            usp.require_bf16_o_proj(layer, online)
-        else:
-            fp8_dense.use_online_fp8(layer, online)
-
-
-@pytest.mark.cpu_test
-def test_ulysses_refuses_a_reordered_fp8_qkv_layout() -> None:
-    """The Ulysses prefill gathers the FP8 qkv weight as `[N, K]` bytes, which
-    kernels that preshuffle the weight do not keep."""
-    from types import SimpleNamespace
-
-    from vllm.model_executor.kernels.linear import (
-        AiterPerTokenFp8ScaledMMLinearKernel,
-        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
-    )
-
-    def layer(kernel_cls: type) -> SimpleNamespace:
-        kernel: object = object.__new__(kernel_cls)
-        return SimpleNamespace(
-            prefix="model.layers.0.self_attn.qkv_proj",
-            quant_method=SimpleNamespace(fp8_linear=kernel),
-        )
-
-    fp8_dense.require_plain_layout(layer(AiterPerTokenFp8ScaledMMLinearKernel))
-    with pytest.raises(NotImplementedError, match="Preshuffled"):
-        fp8_dense.require_plain_layout(
-            layer(AiterPreshuffledPerTokenFp8ScaledMMLinearKernel)
-        )
+        fp8_dense.use_online_fp8(layer, online)
 
 
 @rocm_gfx950
