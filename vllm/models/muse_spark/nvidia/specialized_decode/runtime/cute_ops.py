@@ -8,13 +8,14 @@ checks that decide where each one runs.
     Paged decode attention of the 8-token verify step (one request, 1 + 7 draft
     tokens) fused with the attention output's weightless RMS norm and sigmoid
     gate: the o_proj input of a decoder layer. Contract: head_dim 64, 8 query
-    heads per KV head, bf16 [pages, num_kv_heads, 16, 128] cache (K | V per
-    slot), 8 query rows per request, any context length L >= 8, and the
-    layer's sliding window if it has one. One launch covers the KV heads of
-    the rank. With max_model_len past 2048 (or a window) a split kernel
-    spreads a request's pages over `attn2_splits` z slices, merged through a
-    workspace. The launch shape depends on max_model_len only, not on the
-    step, so it is graph-capturable once `prepare_attn2` has compiled it.
+    heads per KV head, a bf16 or fp8 cache of 16- or 32-slot
+    pages (`cutedsl/attention/kv_format.py`), 8 query rows per request, any
+    context length L >= 8, and the layer's sliding window if it has one. One
+    launch covers the KV heads of the rank. With max_model_len past 2048 (or a
+    window) a split kernel spreads a request's pages over `attn2_splits` z
+    slices, merged through a workspace. The launch shape depends on
+    max_model_len only, not on the step, so it is graph-capturable once
+    `prepare_attn2` has compiled it.
 
     attn2 has no fallback of its own: the executor's plan() leaves every step
     it does not cover (prefill, other query lengths) to the stock forward.
@@ -50,6 +51,7 @@ from vllm.models.muse_spark.common.moe import MuseSparkRouter
 from vllm.platforms import current_platform
 
 from ..cutedsl.attention import attn2 as _attn2
+from ..cutedsl.attention import kv_format as _kvf
 from ..cutedsl.attention import qkv_front as _front
 from ..cutedsl.common.host import fp32
 from ..cutedsl.moe import routing
@@ -106,7 +108,6 @@ QKV_FRONT_KERNEL = "the QKV front CuTe kernel"
 HIDDEN_SIZE = _front.HIDDEN
 k_split = _front.k_split
 supports_shape = _front.supports_shape
-kv_cache_layout_ok = _front.kv_cache_layout_ok
 prepare_qkv_front = _front.prepare
 qkv_front = _front.qkv_front
 # qkv_front without its checks, for a call supports_call took with its out.
@@ -128,6 +129,54 @@ attn2_available = qkv_front_available = routing_available = sm100_family
 def unavailable(kernel: str) -> str:
     """The reason a deployment whose GPUs cannot run `kernel` is refused."""
     return f"GPUs outside the SM100 family ({kernel})"
+
+
+# The cache dtypes of the attention layer both kernels read and write, per
+# layer (--kv-cache-dtype-skip-layers keeps some layers BF16): BF16, FP8 E4M3
+# with per-tensor scales.
+KV_CACHE_KINDS = {
+    "auto": "bf16",
+    "bfloat16": "bf16",
+    "fp8": "fp8",
+    "fp8_e4m3": "fp8",
+}
+KvQuant = _kvf.KvQuant
+KvLayout = _kvf.KvLayout
+
+
+def unsupported_kv_cache(attention: torch.nn.Module) -> str | None:
+    """Why the kernels cannot read and write this attention layer's (the
+    vLLM `Attention`'s) KV cache, or None."""
+    dtype = attention.kv_cache_dtype
+    if dtype not in KV_CACHE_KINDS:
+        return f"KV cache dtype {dtype}"
+    if attention.kv_sharing_target_layer_name is not None:
+        return "a KV cache shared with another layer"
+    if KV_CACHE_KINDS[dtype] != "bf16" and (
+        attention._k_scale.numel() != 1 or attention._v_scale.numel() != 1
+    ):
+        return f"per-head {dtype} KV cache scales"
+    return None
+
+
+def kv_quant(attention: torch.nn.Module) -> KvQuant | None:
+    """The quantized cache of this attention layer with its loaded per-tensor
+    scales (those the stock attention reads), or None for a BF16 one."""
+    kind = KV_CACHE_KINDS[attention.kv_cache_dtype]
+    if kind == "bf16":
+        return None
+    return KvQuant(kind, attention._k_scale_float, attention._v_scale_float)
+
+
+def kv_layout(attention: torch.nn.Module, kv_cache: torch.Tensor) -> KvLayout:
+    """The layout (format, page slots) of this layer's bound cache."""
+    return _kvf.layout_of(kv_cache, KV_CACHE_KINDS[attention.kv_cache_dtype])
+
+
+def kv_cache_layout_ok(attention: torch.nn.Module, kv_cache: torch.Tensor) -> bool:
+    """Whether the layer's bound cache has a layout the kernels read."""
+    kind = KV_CACHE_KINDS[attention.kv_cache_dtype]
+    return _kvf.layout_ok(kv_cache, attention.num_kv_heads, kind)
 
 
 def unsupported_attn2(layer: torch.nn.Module) -> str | None:
@@ -341,13 +390,15 @@ def supports_call(
     kv_cache: torch.Tensor,
     num_kv_heads: int,
     out: torch.Tensor | None = None,
+    kv_quant: KvQuant | None = None,
 ) -> bool:
     """Whether the QKV front takes this call of a layer with `num_kv_heads`
-    (with `out`, the full check before `launch_qkv_front`); otherwise the
-    caller keeps the unfused path."""
+    and a cache quantized as `kv_quant` (None: BF16) (with `out`, the full
+    check before `launch_qkv_front`); otherwise the caller keeps the unfused
+    path."""
     return (
         _front.unsupported(
-            x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out
+            x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out, kv_quant
         )
         is None
         and kv_cache.shape[1] == num_kv_heads
