@@ -99,7 +99,8 @@ CHECK_STRINGS = {
         ),
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
-        allowed_files={"setup.py"},
+        # These run before vLLM's dependencies are installed.
+        allowed_files={"setup.py", "tools/csrc_build_inputs.py"},
     ),
     "triton": ForbiddenString(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",

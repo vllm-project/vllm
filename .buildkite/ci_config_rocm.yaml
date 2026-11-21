@@ -30,6 +30,7 @@ run_all_patterns:
   - "tests/vllm_test_utils/"
   - "vllm/envs.py"
   - "vllm/__init__.py"
+  - "tools/csrc_build_inputs.py"
   - "csrc/"
   - "cmake/"
 run_all_exclude_patterns:
