@@ -55,7 +55,14 @@ _TOKENIZER_NEWLINE = "\u010a"
 
 
 def _normalize_model_output(text: str) -> str:
-    return text.replace(_TOKENIZER_SPACE, " ").replace(_TOKENIZER_NEWLINE, "\n")
+    # SentencePiece may emit U+0120 / U+010A. Some checkpoints also collapse
+    # the attribute onto the tag: <functionname="foo"> / <paramname="bar">.
+    return (
+        text.replace(_TOKENIZER_SPACE, " ")
+        .replace(_TOKENIZER_NEWLINE, "\n")
+        .replace("<functionname=", "<function name=")
+        .replace("<paramname=", "<param name=")
+    )
 
 
 def _strip_thinking_content(text: str) -> str:
@@ -345,14 +352,16 @@ class MiniCPM5XMLToolParser(ToolParser):
                     )
 
             name, args = _normalize_alias_tool_call(name, args, tool_names)
-            if name not in tool_names:
-                content.append(text[start:pos])
-            elif required[name].issubset(args):
+            if name in tool_names and required[name].issubset(args):
                 calls.append(
                     FunctionCall(
                         name=name, arguments=json.dumps(args, ensure_ascii=False)
                     )
                 )
+            else:
+                # Keep rejected blocks visible. Dropping them makes a failed
+                # call disappear from both tool_calls and content.
+                content.append(text[start:pos])
         return "".join(content), calls, pos
 
     def extract_tool_calls(

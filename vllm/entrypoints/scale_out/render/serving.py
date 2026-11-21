@@ -20,7 +20,10 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.responses.minicpm5 import resolve_search_tool_choice
+from vllm.entrypoints.openai.responses.minicpm5 import (
+    replay_minicpm5_tool_search,
+    resolve_search_tool_choice,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     has_tool_search_output,
@@ -359,7 +362,13 @@ class ServingRender(BaseServing):
             )
 
         if has_tool_search_output(request.input):
-            request = resolve_search_tool_choice(request)
+            # previous_response_id is rejected above, so only this request's
+            # search results can be recovered. Full replay is MiniCPM5-specific.
+            model_type = getattr(self.model_config.hf_config, "model_type", "")
+            if isinstance(model_type, str) and model_type.startswith("minicpm5"):
+                request = replay_minicpm5_tool_search(request, [])
+            else:
+                request = resolve_search_tool_choice(request)
 
         result = await self.online_renderer.render_responses(
             request,

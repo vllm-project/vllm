@@ -321,7 +321,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                             item
                             for item in prev_response.output
                             if item.type
-                            in ("message", "function_call", "custom_tool_call")
+                            in (
+                                "reasoning",
+                                "message",
+                                "function_call",
+                                "custom_tool_call",
+                            )
                         ]
                     )
                 )

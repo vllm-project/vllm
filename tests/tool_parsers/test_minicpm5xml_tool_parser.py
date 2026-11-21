@@ -480,7 +480,7 @@ def test_nameless_param_cannot_satisfy_required(parser: ToolParser) -> None:
     )
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
-    assert not out.content
+    assert "get_weather" in (out.content or "")
 
 
 def test_duplicate_params_keep_first_value(parser: ToolParser) -> None:
@@ -500,6 +500,7 @@ def test_case_sensitive_param_name_invalid(parser: ToolParser) -> None:
     text = '<function name="get_weather"><param name="City">北京</param></function>\n'
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
+    assert "get_weather" in (out.content or "")
 
 
 def test_no_required_and_zero_param_valid(parser: ToolParser) -> None:
@@ -593,6 +594,7 @@ def test_extra_arguments_do_not_satisfy_required(parser: ToolParser) -> None:
     )
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
+    assert "unknown" in (out.content or "")
 
 
 def test_zero_arg_tool_ignores_extra_arguments(parser: ToolParser) -> None:
@@ -904,3 +906,32 @@ def test_responses_namespace_function(parser: ToolParser, stream: bool) -> None:
     assert_tool_calls(
         calls, [make_tool_call("math__sum_values", {"nums": [1, 2], "exact": True})]
     )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_collapsed_tag_names(parser: ToolParser, stream: bool) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<functionname="get_weather">'
+        '<paramname="city">Paris</param>'
+        "</function>"
+    )
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(text), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert_tool_calls(calls, [make_tool_call("get_weather", {"city": "Paris"})])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_missing_required_stays_in_content(parser: ToolParser, stream: bool) -> None:
+    request = make_request(make_tools_weather())
+    text = '<function name="get_weather"><param name="date">2026-11-21</param></function>'
+    if stream:
+        streamed = run_tool_extraction_streaming(parser, list(text), request)
+        assert not streamed.tool_calls
+        assert "get_weather" in streamed.other_content
+    else:
+        out = parser.extract_tool_calls(text, request)
+        assert not out.tool_calls
+        assert "get_weather" in (out.content or "")
