@@ -513,7 +513,6 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
 
         req = TranscriptionRequest(
-            model=model_config.model,
             audio=audio.to_base64(audio.format),
             language=language,
             streaming=StreamingMode.OFFLINE,

@@ -626,7 +626,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
       "Tensor query_start, int stream_offset, int stream_width, "
       "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
-      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor? norm_weight, "
       "float eps, float norm_eps, Tensor! out) -> ()");
   // Its short conv and AttnRes mix on an already reduced input.
   ops.def(
@@ -634,7 +634,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
       "Tensor query_start, int stream_offset, int stream_width, "
       "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
-      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor? norm_weight, "
       "float eps, float norm_eps, Tensor! out) -> ()");
   // Its sequence-parallel collectives: the reduce-scatter of the partial
   // sums, and the conv + mix of a token shard that all-gathers the mixes.

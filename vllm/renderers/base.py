@@ -1210,13 +1210,18 @@ class BaseRenderer(ABC, Generic[_T]):
         self._truncate_expanded_prompt(engine_input, tok_params)
         return engine_input
 
-    def _get_skip_decoder_start_token(self) -> bool:
-        """Whether the multimodal processor supplies a complete decoder prefix."""
+    def _should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        """Whether the decoder prompt already carries its complete prefix."""
         if self.mm_processor is not None:
             from vllm.multimodal.processing import EncDecMultiModalProcessor
 
             if isinstance(self.mm_processor, EncDecMultiModalProcessor):
-                return self.mm_processor.skip_decoder_start_token
+                return self.mm_processor.should_skip_decoder_start_token(
+                    decoder_prompt_token_ids
+                )
         return False
 
     def _process_enc_dec(
@@ -1238,7 +1243,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 else self._process_singleton(dec_prompt, skip_mm_cache=skip_mm_cache)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
-            skip_decoder_start_token=self._get_skip_decoder_start_token(),
+            skip_decoder_start_token=self._should_skip_decoder_start_token,
         )
 
     async def _process_enc_dec_async(
@@ -1265,7 +1270,7 @@ class BaseRenderer(ABC, Generic[_T]):
             encoder_input=encoder_input,
             decoder_input=decoder_input,
             decoder_start_token_id=self.get_dec_start_token_id(),
-            skip_decoder_start_token=self._get_skip_decoder_start_token(),
+            skip_decoder_start_token=self._should_skip_decoder_start_token,
         )
 
     def process_for_engine(

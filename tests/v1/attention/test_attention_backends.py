@@ -2000,6 +2000,164 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
 
 
 @pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
+    or not current_platform.is_device_capability_family(100),
+    reason="Mixed causal attention needs FlashInfer TRTLLM-Gen on SM100-family GPUs",
+)
+@pytest.mark.parametrize(
+    "head_size,sliding_window,num_kv_heads",
+    [
+        pytest.param(256, 32, 8, id="sliding-window"),
+        pytest.param(512, None, 2, id="full-attention"),
+    ],
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_flashinfer_mixed_causal_backend(
+    tmp_path, monkeypatch, head_size, sliding_window, num_kv_heads, kv_cache_dtype
+):
+    """Per-request causal flags through the FlashInfer builder and impl.
+
+    Bidirectional queries longer than the window reach its right bound, and
+    CUDA graph padding tokens follow the real ones.
+    """
+    from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    set_random_seed(0)
+    block_size = 16
+    num_heads = 16
+    num_blocks = 64
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    scale = head_size**-0.5
+    # (query_len, context_len, causal)
+    reqs = [(1, 127, True), (48, 252, False), (16, 184, True), (48, 0, False)]
+    num_query_tokens = sum(q for q, _, _ in reqs)
+    num_tokens = num_query_tokens + 3
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=num_heads * head_size,
+        head_dim=head_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        num_hidden_layers=1,
+        max_position_embeddings=4096,
+    ).save_pretrained(tmp_path)
+    config = create_vllm_config(
+        model_name=str(tmp_path),
+        max_model_len=4096,
+        dtype=dtype,
+        num_gpu_blocks=num_blocks,
+        block_size=block_size,
+        max_num_seqs=8,
+        max_num_batched_tokens=256,
+    )
+    config.cache_config.cache_dtype = kv_cache_dtype
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.attention_config.use_trtllm_attention = True
+    config.diffusion_config = DiffusionConfig(canvas_length=48)
+    spec = create_standard_kv_cache_spec(config)
+    monkeypatch.setattr(
+        fi,
+        "get_per_layer_parameters",
+        lambda *_: {
+            "layer": PerLayerParameters(
+                window_left=-1 if sliding_window is None else sliding_window - 1,
+                logits_soft_cap=0.0,
+                sm_scale=scale,
+                has_sinks=False,
+            ),
+        },
+    )
+
+    common = create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[q + c for q, c, _ in reqs], query_lens=[q for q, _, _ in reqs]
+        ),
+        block_size,
+        device,
+    )
+    common.causal = torch.tensor(
+        [causal for _, _, causal in reqs], dtype=torch.int32, device=device
+    )
+    ks = [
+        torch.randn(c, num_kv_heads, head_size, dtype=dtype, device=device)
+        for _, c, _ in reqs
+    ]
+    vs = [torch.randn_like(k) for k in ks]
+    cache = create_and_prepopulate_kv_cache(
+        ks,
+        vs,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype,
+        device,
+        num_blocks,
+        common,
+        KVCacheLayout.BLHNC,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    common.num_actual_tokens = num_tokens
+    query = torch.randn(num_tokens, num_heads, head_size, dtype=dtype, device=device)
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype, device=device)
+    value = torch.randn_like(key)
+    output = torch.empty_like(query)
+    with set_current_vllm_config(config):
+        builder = fi.FlashInferMetadataBuilder(spec, ["layer"], config, device)
+        metadata = builder.build(0, common)
+        impl = fi.FlashInferImpl(
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            scale=scale,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            attn_type=AttentionType.DECODER,
+        )
+    assert metadata.num_prefills == len(reqs)
+    layer = MockAttentionLayer(device)
+    impl.do_kv_cache_update(
+        layer,
+        key[:num_query_tokens],
+        value[:num_query_tokens],
+        cache,
+        common.slot_mapping,
+    )
+    impl.forward(layer, query, key, value, cache, metadata, output=output)
+
+    def stored(x: torch.Tensor) -> torch.Tensor:
+        if kv_cache_dtype == "auto":
+            return x.float()
+        return x.to(current_platform.fp8_dtype()).float()
+
+    groups = num_heads // num_kv_heads
+    start = 0
+    for i, (q_len, context_len, causal) in enumerate(reqs):
+        end = start + q_len
+        full_k = stored(torch.cat((ks[i], key[start:end]))).repeat_interleave(
+            groups, dim=1
+        )
+        full_v = stored(torch.cat((vs[i], value[start:end]))).repeat_interleave(
+            groups, dim=1
+        )
+        scores = torch.einsum("qhd,khd->hqk", stored(query[start:end]), full_k)
+        q_pos = torch.arange(q_len, device=device)[:, None] + context_len
+        k_pos = torch.arange(context_len + q_len, device=device)[None, :]
+        allowed = (k_pos <= q_pos) | (not causal)
+        if sliding_window is not None:
+            allowed &= (k_pos - q_pos).abs() < sliding_window
+        probs = (scores * scale).masked_fill(~allowed[None], float("-inf")).softmax(-1)
+        reference = torch.einsum("hqk,khd->qhd", probs, full_v)
+        atol, rtol = (2e-2, 2e-2) if kv_cache_dtype == "auto" else (6e-2, 2e-2)
+        torch.testing.assert_close(
+            output[start:end].float(), reference, atol=atol, rtol=rtol
+        )
+        start = end
+
+
+@pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )

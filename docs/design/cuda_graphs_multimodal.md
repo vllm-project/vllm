@@ -35,6 +35,15 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
 | `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
 
+Audio encoders use the same manager and protocol:
+
+| Architecture | Models | Graph scope | Attention backends |
+| ------------ | ------ | ----------- | ------------------ |
+| `Qwen3ASRForConditionalGeneration` | `Qwen3-ASR` | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+| `Qwen3OmniMoeThinkerForConditionalGeneration` | `Qwen3-Omni` (audio tower) | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+
+For these audio towers the conv frontend runs eagerly before each replay; token budgets count encoder output tokens, and the smallest budget is one attention window (104 tokens, 8 s of audio). Other attention backends keep the audio tower eager. `encoder_cudagraph_max_vision_items_per_batch` also caps the number of audio clips per graph.
+
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
     For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.

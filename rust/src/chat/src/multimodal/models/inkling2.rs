@@ -22,6 +22,7 @@ use serde_json::Value;
 use crate::RendererSelection;
 
 const MODEL_TYPE: &str = RendererSelection::INKLING2_MODEL_TYPE;
+const LOOP_MODEL_TYPE: &str = RendererSelection::INKLING2_LOOP_MODEL_TYPE;
 const IMAGE_PLACEHOLDER: &str = "<|content_image|>";
 /// `<|unused_200054|>`: one per decoder image token, overwritten by embeddings.
 const IMAGE_PAD_ID: TokenId = 200054;
@@ -56,7 +57,10 @@ impl ModelProcessorSpec for Inkling2Spec {
     }
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
-        metadata.config_model_type() == Some(MODEL_TYPE)
+        matches!(
+            metadata.config_model_type(),
+            Some(MODEL_TYPE | LOOP_MODEL_TYPE)
+        )
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {

@@ -13,6 +13,7 @@ from transformers import Qwen2VLConfig
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMRoPE
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.request import Request
@@ -72,7 +73,7 @@ def _add_request(
         ),
     )
     model_state = DefaultModelState(
-        config, FakeMRoPEModel(), None, torch.device("cuda", 0)
+        config, FakeMRoPEModel(), None, torch.device(current_platform.device_type)
     )
     model_state.add_request(0, new_req_data)
     model_state.apply_staged_writes()

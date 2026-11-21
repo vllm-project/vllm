@@ -2275,6 +2275,7 @@ _PEER_GROUP = {
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA Only Test")
 @pytest.mark.parametrize(
     "options,parallel,error",
     [
@@ -2290,6 +2291,11 @@ _PEER_GROUP = {
 )
 def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        staticmethod(lambda device_id=0: DeviceCapability(8, 9)),
+    )
     config = ParallelConfig(
         **({"data_parallel_size": 2} | parallel), distributed_executor_backend="mp"
     )
@@ -3323,7 +3329,7 @@ def test_parallel_drafting_is_deprecated(caplog_vllm):
         )
     assert "parallel_drafting is deprecated" in caplog_vllm.text
 
-    with pytest.raises(ValueError, match="only supported by the dflash and dspark"):
+    with pytest.raises(ValueError, match="not supported by method"):
         SpeculativeConfig(
             model="ngram", num_speculative_tokens=2, parallel_drafting=True
         )
@@ -5007,8 +5013,7 @@ def test_gemma4_assistant_needs_no_hash_lookahead(model_type):
         ),
     )
 
-    assert speculative_config.use_gemma4_mtp()
-    assert speculative_config.use_eagle()
+    assert isinstance(speculative_config.speculator_config, Gemma4MTPSpeculatorConfig)
     assert speculative_config.speculator_config.num_hash_lookahead_tokens == 0
 
 
@@ -5373,12 +5378,11 @@ def _make_qwen3_omni_dspark_configs():
     )
     target_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
-            model_type="qwen3_omni_moe",
-            architectures=["Qwen3OmniMoeForConditionalGeneration"],
-            thinker_config=SimpleNamespace(text_config=text_config),
+            model_type="qwen3_omni_moe_thinker",
+            architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         ),
         hf_text_config=text_config,
-        architectures=["Qwen3OmniMoeForConditionalGeneration"],
+        architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         get_hidden_size=lambda: 2048,
         get_total_num_hidden_layers=lambda: 48,
         get_vocab_size=lambda: 152064,

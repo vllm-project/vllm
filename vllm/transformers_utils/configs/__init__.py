@@ -81,12 +81,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Step5Config": "vllm.transformers_utils.configs.step5",
     "Step5VLConfig": "vllm.transformers_utils.configs.step5",
     "FlintConfig": "vllm.models.flint.configs",
-    "InklingModelConfig": "vllm.models.inkling.configs",
-    "InklingAudioConfig": "vllm.models.inkling.configs",
-    "InklingVisionConfig": "vllm.models.inkling.configs",
-    "InklingMMConfig": "vllm.models.inkling.configs",
     "Inkling2ModelConfig": "vllm.models.inkling2.configs",
     "Inkling2MMConfig": "vllm.models.inkling2.configs",
+    "Inkling2LoopMMConfig": "vllm.models.inkling2.configs",
     # Upstream Transformers classes registered in _CONFIG_REGISTRY
     "DeepseekV3Config": "transformers",
     "HyperCLOVAXConfig": "transformers",
@@ -159,12 +156,9 @@ __all__ = [
     "Step5Config",
     "Step5VLConfig",
     "FlintConfig",
-    "InklingModelConfig",
-    "InklingAudioConfig",
-    "InklingVisionConfig",
-    "InklingMMConfig",
     "Inkling2ModelConfig",
     "Inkling2MMConfig",
+    "Inkling2LoopMMConfig",
 ]
 
 

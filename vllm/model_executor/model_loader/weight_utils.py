@@ -37,6 +37,7 @@ from vllm.config.load import (
     LoadConfig,
 )
 from vllm.distributed import (
+    get_node_count,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
@@ -983,12 +984,14 @@ def _prefetch_all_checkpoints(
         raise ValueError("safetensors prefetch block size must be >= 1")
 
     if torch.distributed.is_initialized():
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
+        # The page cache is per node and every rank reads every file, so split
+        # the files among the ranks of each node rather than across all ranks.
+        world = get_world_group()
+        local_world_size = max(world.world_size // get_node_count(), 1)
+        local_rank = world.local_rank % local_world_size
     else:
-        rank = 0
-        world_size = 1
-    paths_to_prefetch = sorted_files[rank::world_size]
+        local_rank, local_world_size = 0, 1
+    paths_to_prefetch = sorted_files[local_rank::local_world_size]
     total_for_rank = len(paths_to_prefetch)
 
     async def _prefetch_all() -> None:

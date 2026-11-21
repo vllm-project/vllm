@@ -7,7 +7,6 @@ import logging
 import os
 import sys
 import tempfile
-import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -114,6 +113,7 @@ if TYPE_CHECKING:
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
+    VLLM_MAX_STOP_TOKEN_IDS: int = 128
     VLLM_MAX_TOKENIZE_TOKENS: int | None = None
     VLLM_MAX_NUM_BAD_WORDS: int = 128
     VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
@@ -306,7 +306,7 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
-    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str | None = None
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_MORI_EP_V2: bool | None = None
@@ -583,34 +583,6 @@ def get_vllm_port() -> int | None:
                 "check the warning in: https://docs.vllm.ai/en/latest/configuration/env_vars.html"
             ) from None
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
-
-
-def _generate_shm_name() -> str:
-    import pybase64
-
-    # Fit macOS's 30-character limit without truncating the UUID.
-    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
-    return "vllm_mm_" + encoded_uuid.rstrip("=")
-
-
-def get_env_or_set_default(
-    env_name: str,
-    default_factory: Callable[[], str],
-) -> Callable[[], str]:
-    """Create a lambda that returns an environment variable value if set,
-    or generates and sets a default value using the provided factory function.
-    """
-
-    def _get_or_set_default() -> str:
-        value = os.getenv(env_name)
-        if value is not None:
-            return value
-
-        default_value = default_factory()
-        os.environ[env_name] = default_value
-        return default_value
-
-    return _get_or_set_default
 
 
 # The start-* and end* here are used by the documentation generator
@@ -1231,6 +1203,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Maximum number of stop strings allowed in a single request.
     "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of stop token IDs allowed in a single request.
+    "VLLM_MAX_STOP_TOKEN_IDS": lambda: int(
+        os.environ.get("VLLM_MAX_STOP_TOKEN_IDS", "128")
+    ),
     # Maximum number of tokens allowed for /tokenize, /detokenize, and
     # /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
     # set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
@@ -2199,13 +2175,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES": lambda: bool(
         int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))
     ),
-    # Name of the shared memory buffer used for object storage.
-    # Only effective when mm_config.mm_processor_cache_type == "shm".
-    # Automatically generates a unique UUID-based name per process tree
-    # if not explicitly set.
-    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": get_env_or_set_default(
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-        _generate_shm_name,
+    # Deprecated: use mm_config.mm_shm_cache_buffer_name instead.
+    # This environment variable will be removed in v0.36.0.
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": lambda: os.getenv(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(

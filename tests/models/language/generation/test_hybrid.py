@@ -1106,3 +1106,81 @@ def test_zaya_cca_state(
                 name_0="hf",
                 name_1="vllm",
             )
+
+
+def test_zaya_cca_exports_state_at_checkpoint() -> None:
+    """A checkpoint holds the CCA state of the prefill stopped at its offset.
+
+    A decode leads the batch, so the prefills' tokens start after its token.
+    Nothing else in the cache changes.
+    """
+    import torch
+    from torch import nn
+
+    from vllm.model_executor.layers.mamba.checkpoint import (
+        MambaPrefillCheckpointMetadata,
+    )
+    from vllm.model_executor.models.zaya import ZayaCCA
+    from vllm.v1.attention.backends.short_conv_attn import (
+        ShortConvAttentionMetadata,
+    )
+
+    channels, groups, delayed_dim, num_slots = 12, 3, 4, 8
+    cca = object.__new__(ZayaCCA)
+    nn.Module.__init__(cca)
+    cca.history_len = 2
+    cca.conv_qk_depthwise = nn.Conv1d(channels, channels, 2, groups=channels)
+    cca.conv_qk_grouped = nn.Conv1d(channels, channels, 2, groups=groups)
+    torch.manual_seed(0)
+    initial = (
+        torch.randn(num_slots, channels, cca.history_len),
+        torch.randn(num_slots, delayed_dim),
+    )
+
+    def run(qk, delayed, num_decodes, prefill_lens, slots, checkpoint=None):
+        cca.kv_cache = tuple(t.clone() for t in initial)
+        query_start_loc = torch.tensor([0, *prefill_lens]).cumsum(0)
+        metadata = ShortConvAttentionMetadata(
+            num_prefills=len(prefill_lens),
+            num_prefill_tokens=sum(prefill_lens),
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decodes,
+            num_reqs=num_decodes + len(prefill_lens),
+            query_start_loc_p=query_start_loc,
+            has_initial_states_p=torch.zeros(len(prefill_lens), dtype=torch.bool),
+            state_indices_tensor_p=torch.tensor(slots[num_decodes:]),
+            state_indices_tensor_d=torch.tensor(slots[:num_decodes]).view(-1, 1),
+            query_start_loc_d=None,
+            num_accepted_tokens=None,
+            seq_lens=torch.tensor([1] * num_decodes + prefill_lens),
+            checkpoint=checkpoint,
+        )
+        with torch.no_grad():
+            cca._mix_with_state(metadata, qk, delayed, torch.zeros(delayed_dim))
+        return cca.kv_cache
+
+    prefill_lens, offsets, checkpoint_slots = [40, 24], [32, 16], [5, 6]
+    num_tokens = 1 + sum(prefill_lens)
+    qk, delayed = (
+        torch.randn(num_tokens, channels),
+        torch.randn(num_tokens, delayed_dim),
+    )
+    checkpoint = MambaPrefillCheckpointMetadata(
+        checkpoint_offsets=torch.tensor(offsets),
+        state_indices=torch.tensor(checkpoint_slots),
+        offsets=offsets,
+    )
+    without_checkpoint = run(qk, delayed, 1, prefill_lens, [1, 2, 3])
+    with_checkpoint = run(qk, delayed, 1, prefill_lens, [1, 2, 3], checkpoint)
+
+    starts = [1, 1 + prefill_lens[0]]
+    for start, offset, slot in zip(starts, offsets, checkpoint_slots):
+        rows = slice(start, start + offset)
+        stopped = run(qk[rows], delayed[rows], 0, [offset], [7])
+        for state, stopped_state, plain in zip(
+            with_checkpoint, stopped, without_checkpoint
+        ):
+            torch.testing.assert_close(state[slot], stopped_state[7], rtol=0, atol=0)
+            state[slot] = plain[slot]
+    for state, plain in zip(with_checkpoint, without_checkpoint):
+        torch.testing.assert_close(state, plain, rtol=0, atol=0)

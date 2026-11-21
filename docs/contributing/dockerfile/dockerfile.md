@@ -34,10 +34,6 @@ The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 certificate removals when the image is rebuilt. This complements the Python
 `certifi` bundle used by other HTTP clients.
 
-The `extensions-build` stage can also produce an optional source-built Triton
-wheel. `vllm-openai-base` installs that wheel after its other Python
-dependencies so dependency resolution cannot restore an older Triton version.
-
 When `INSTALL_KV_CONNECTORS=true`, `vllm-openai-base` also installs a minimal
 AWS EFA userspace (libfabric, aws-ofi-nccl and hwloc), which NIXL's LIBFABRIC
 backend and Mooncake's EFA transport load at runtime. Kernel modules and host

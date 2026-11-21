@@ -9,6 +9,7 @@ outputs are scaled by an fp32 factor per row.
 """
 
 import functools
+import math
 import os
 from dataclasses import dataclass
 
@@ -18,6 +19,22 @@ import torch
 from . import use_sm100_kernels
 
 _SOURCE = os.path.join(os.path.dirname(__file__), "trtllm_bmm.cu")
+
+# The GEMMs' TMA accesses can reach the first 128 KiB of an operand however
+# few of its rows are used (Blackwell's 128 KiB OOB address generation), so,
+# as in FlashInfer's MoE launchers (`maybeGetMinTokenCount`), every operand
+# and output is backed by at least that much memory.
+MIN_OPERAND_BYTES = 128 * 1024
+
+
+def operand(
+    rows: int, *shape: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    """`torch.empty((rows, *shape))`, allocated with enough rows to span
+    `MIN_OPERAND_BYTES`."""
+    row_bytes = math.prod(shape) * dtype.itemsize
+    alloc_rows = max(rows, -(-MIN_OPERAND_BYTES // row_bytes))
+    return torch.empty((alloc_rows, *shape), dtype=dtype, device=device)[:rows]
 
 
 @functools.cache
@@ -128,15 +145,22 @@ def expert_plan(
         # No TRT-LLM-gen kernels (Hopper): only `route`'s layout.
         return ExpertPlan(tile, max_ctas, (0, 0))
     names = configs(nvfp4, tile)
+    keys = _KERNELS[(nvfp4, tile)]
     kernels = []
-    for key, (n, k) in zip(_KERNELS[(nvfp4, tile)], shapes):
-        ((index, layout),) = (v for name, v in names.items() if key in name)
-        assert layout == (3 if tile >= 128 else 1)  # R128c4 / R8c4 activations
-        size = _module()[0].bmm_workspace_size(
-            nvfp4, tile, index, n, k, num_experts, max_ctas
-        )
-        assert size == 0, size
-        kernels.append(index)
+    for projection, (n, k) in enumerate(shapes):
+        # The projection's kernel, else the other's (an unrolled K loop, say,
+        # needs K to be a multiple of its double K tile).
+        for key in (keys[projection], keys[1 - projection]):
+            ((index, layout),) = (v for name, v in names.items() if key in name)
+            assert layout == (3 if tile >= 128 else 1)  # R128c4 / R8c4 activations
+            size = _module()[0].bmm_workspace_size(
+                nvfp4, tile, index, n, k, num_experts, max_ctas
+            )
+            if size == 0:
+                kernels.append(index)
+                break
+        else:
+            raise AssertionError(f"no Inkling2 expert GEMM for {(n, k)}, tile {tile}")
     return ExpertPlan(tile, max_ctas, (kernels[0], kernels[1]))
 
 
@@ -158,11 +182,15 @@ def load_kernels(
         tiles = torch.zeros(2 * plan.max_ctas + 2, dtype=torch.int32, device=device)
         for projection, (weight, scale) in enumerate(zip(weights, weight_scales)):
             k = weight.shape[2]
-            act = torch.empty((plan.rows, k), dtype=weight.dtype, device=device)
-            act_scale = torch.empty(
-                (plan.rows, scale.shape[2]), dtype=scale.dtype, device=device
+            act = operand(plan.rows, k, dtype=weight.dtype, device=device)
+            act_scale = operand(
+                plan.rows, scale.shape[2], dtype=scale.dtype, device=device
             )
-            row_scale = ones.new_empty(plan.rows) if nvfp4 else None
+            row_scale = (
+                operand(plan.rows, dtype=torch.float32, device=device)
+                if nvfp4
+                else None
+            )
             bmm(act, act_scale, row_scale, weight, scale, ones, tiles, plan, projection)
 
 
@@ -185,7 +213,7 @@ def bmm(
     """
     nvfp4 = weight.dtype == torch.uint8
     n = weight.shape[1]
-    out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
+    out = operand(plan.rows, n, dtype=torch.bfloat16, device=act.device)
     m = plan.max_ctas
     _module()[0].bmm_run(
         nvfp4,

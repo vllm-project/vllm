@@ -117,6 +117,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "KimiK3MTPModel",
         "KimiK31ForConditionalGeneration",
@@ -806,25 +807,20 @@ class VllmConfig:
         }
 
     def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
-        """Request counts of the FULL graphs of one-token draft decodes, the
-        draft steps after the first of EAGLE, EAGLE3, single-module MTP and
-        draft models: the request-count grid up to `max_num_seqs`. The target's
-        decode cap can be far lower: off SM100 its default is 512 / (1 + K)
-        requests, 64 at K=7. Above it the K - 1 draft steps would run eagerly
-        and pay their host launch time on every step, while their graphs are
-        small. Empty without such steps or decode graphs."""
+        """Request counts of the FULL graphs of one-token draft decodes (see
+        `SpeculatorConfig.one_token_draft_decodes`): the request-count grid up
+        to `max_num_seqs`. The target's decode cap can be far lower: off SM100
+        its default is 512 / (1 + K) requests, 64 at K=7. Above it the K - 1
+        draft steps would run eagerly and pay their host launch time on every
+        step, while their graphs are small. Empty without such steps or decode
+        graphs."""
         speculative_config = self.speculative_config
         sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
         if (
             not sizes
             or speculative_config is None
             or self.num_speculative_tokens < 2
-            or speculative_config.method
-            not in ("eagle", "eagle3", "mtp", "draft_model")
-            or (
-                speculative_config.use_multi_module_mtp()
-                and not speculative_config.use_gemma4_mtp()
-            )
+            or not speculative_config.speculator_config.one_token_draft_decodes
         ):
             return []
         max_requests = self.scheduler_config.max_num_seqs
@@ -1568,6 +1564,19 @@ class VllmConfig:
             return
         model_dtype = str(self.model_config.dtype).removeprefix("torch.")
         if model_dtype == cache_dtype:
+            return
+        if (
+            cache_dtype == "float16"
+            and model_dtype == "bfloat16"
+            and current_platform.is_device_capability_family(120)
+            and getattr(self.model_config, "architecture", None)
+            in (
+                "Inkling2ForConditionalGeneration",
+                "Inkling2LoopForConditionalGeneration",
+            )
+            and self.speculative_config is None
+        ):
+            # Inkling2's SM12 kernel converts stored KV to the query dtype.
             return
         allowed = (
             f"`auto` or `{model_dtype}`"

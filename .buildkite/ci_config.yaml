@@ -34,6 +34,21 @@ run_all_exclude_patterns:
   - "csrc/rocm/"
   - "cmake/hipify.py"
   - "cmake/cpu_extension.cmake"
+# run_all_patterns matches that only the CUDA build reads (the cmake files only
+# when VLLM_GPU_LANG is CUDA): they run every CUDA step but not every AMD step.
+cuda_only_run_all_patterns:
+  - "docker/Dockerfile$"
+  - "requirements/cuda.txt"
+  - "requirements/kv_connectors.txt"
+  - "requirements/build/cuda.txt"
+  - "requirements/test/cuda.txt"
+  - "cmake/external_projects/deepgemm.cmake"
+  - "cmake/external_projects/deepselect.cmake"
+  - "cmake/external_projects/flashkda.cmake"
+  - "cmake/external_projects/flashmla.cmake"
+  - "cmake/external_projects/fmha_sm100.cmake"
+  - "cmake/external_projects/tml_fa4.cmake"
+  - "cmake/external_projects/vllm_flash_attn.cmake"
 registries: public.ecr.aws/q9t5s3a7
 repositories:
   main: "vllm-ci-postmerge-repo"
