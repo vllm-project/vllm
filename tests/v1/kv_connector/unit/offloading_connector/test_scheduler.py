@@ -2699,6 +2699,40 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
     assert on_compute.first_live_chunk_idx(req_status, 0) == 2
 
 
+def test_load_path_autotune_is_skipped_with_async_init(monkeypatch):
+    """async_init pins the region after the engine starts serving, so there is
+    nothing to measure against when the worker is created."""
+    from vllm.v1.kv_offload.cpu import spec as cpu_spec
+
+    monkeypatch.setattr(cpu_spec.current_platform, "is_cuda", lambda: True)
+    kv_config = KVCacheConfig(
+        num_blocks=20,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+
+    def make_spec(**extra_config) -> CPUOffloadingSpec:
+        config = create_vllm_config(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"cpu_bytes_to_use": 1 << 24, **extra_config},
+        )
+        return CPUOffloadingSpec(build_offloading_config(config, kv_config))
+
+    assert not make_spec().enable_load_path_autotune
+    assert make_spec(enable_load_path_autotune=True).enable_load_path_autotune
+    spec = make_spec(enable_load_path_autotune=True, async_init=True)
+    assert spec.async_init
+    assert not spec.enable_load_path_autotune
+
+
 def test_async_init_offloads_only_after_workers_are_ready(request_runner):
     block_size = 4
     runner = request_runner(
