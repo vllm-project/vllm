@@ -13,6 +13,7 @@ engine tests require an accepted owner to generate real tokens after drain begin
 
 import asyncio
 import contextlib
+import contextvars
 import gc
 import inspect
 import logging
@@ -26,6 +27,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 import uvicorn
@@ -50,8 +52,12 @@ from vllm.logger import configure_logging_from_args
 from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
+    _PluginLifecycle,
     attach_endpoint_plugins,
+    cancel_endpoint_plugin_startup,
     init_endpoint_plugins_state,
+    start_endpoint_plugins,
+    stop_endpoint_plugins,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -838,6 +844,414 @@ async def test_stop_hooks_share_one_time_limit(
             "(--endpoint-plugin-stop-timeout); abandoned: second; skipped: first"
         )
     ]
+    assert await _pending_plugin_tasks() == []
+
+
+_plugin_context: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_plugin_context", default="unset"
+)
+
+
+class _TaskScopedPlugin(DummyAdminEndpointPlugin):
+    """Holds task-scoped resources from `start` to `stop`: an anyio cancel
+    scope, which an MCP `ClientSession` opens, and a context variable."""
+
+    def __init__(self, events: list[str], name: str):
+        super().__init__(events)
+        self.name = name
+        self.tasks: list[asyncio.Task | None] = []
+
+    async def start(self, state: State) -> None:
+        await super().start(state)
+        self.tasks.append(asyncio.current_task())
+        self.scope = anyio.CancelScope()
+        self.scope.__enter__()
+        _plugin_context.set(self.name)
+
+    async def stop(self, state: State) -> None:
+        self.tasks.append(asyncio.current_task())
+        self.events.append(f"context:{_plugin_context.get()}")
+        self.scope.__exit__(None, None, None)
+        await super().stop(state)
+
+
+@pytest.mark.asyncio
+async def test_start_and_stop_run_in_one_task_per_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Each plugin's `start` and `stop` run in the same task, and each plugin
+    has its own task, so a plugin can exit in `stop` an anyio cancel scope it
+    entered in `start` and read context variables it set there."""
+    events: list[str] = []
+    plugins = [_TaskScopedPlugin(events, "first"), _TaskScopedPlugin(events, "second")]
+    app = await _build_plugin_app(monkeypatch, plugins, None, _NativeServing(events))
+
+    async with asyncio.timeout(_TIMEOUT_S), app.router.lifespan_context(app):
+        events.append("serving")
+
+    assert events == [
+        "start:first",
+        "start:second",
+        "serving",
+        "context:second",
+        "stop:second",
+        "context:first",
+        "stop:first",
+        "native_shutdown",
+    ]
+    assert await _pending_plugin_tasks() == []
+    first, second = plugins
+    assert first.tasks[0] is first.tasks[1]
+    assert second.tasks[0] is second.tasks[1]
+    assert first.tasks[0] is not second.tasks[0]
+
+
+class _HangingStartPlugin(DummyAdminEndpointPlugin):
+    """`start` waits until cancelled, then records the cancellation."""
+
+    name = "hanging_start"
+
+    def __init__(self, events: list[str]):
+        super().__init__(events)
+        self.starting = asyncio.Event()
+
+    async def start(self, state: State) -> None:
+        await super().start(state)
+        self.starting.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.events.append("start_cancelled:hanging_start")
+            raise
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_stops_only_started_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancelling plugin startup cancels the `start` that is running. That
+    plugin is not stopped, later plugins never start, and the plugins ahead
+    of it stop in reverse order."""
+    events: list[str] = []
+    hanging = _HangingStartPlugin(events)
+    plugins = [_dummy("first", events), hanging, _dummy("never", events)]
+    app = await _build_plugin_app(monkeypatch, plugins, None, _NativeServing(events))
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            pytest.fail("startup must not complete")
+
+    task = asyncio.create_task(run_lifespan())
+    async with asyncio.timeout(_TIMEOUT_S):
+        await hanging.starting.wait()
+        cancel_endpoint_plugin_startup(app.state)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert events == [
+        "start:first",
+        "start:hanging_start",
+        "start_cancelled:hanging_start",
+        "stop:first",
+        "native_shutdown",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_task_cancelled_before_shutdown_stops_once():
+    """If something other than shutdown cancels a started plugin's task, for
+    example event loop teardown, the task calls `stop` before it ends, and a
+    later shutdown does not call `stop` again."""
+    events: list[str] = []
+    plugin = _TaskScopedPlugin(events, "first")
+    state = State()
+    state.endpoint_plugins = [plugin]
+    state.args = _build_args()
+
+    async with asyncio.timeout(_TIMEOUT_S):
+        await start_endpoint_plugins(state)
+        (plugin_task,) = (t for t in asyncio.all_tasks() if t in plugin.tasks)
+        plugin_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await plugin_task
+        await stop_endpoint_plugins(state)
+
+    assert events == ["start:first", "context:first", "stop:first"]
+    assert plugin.tasks[0] is plugin.tasks[1]
+
+
+async def _pending_plugin_tasks() -> list[asyncio.Task]:
+    """Plugin lifecycle tasks still running, after letting ended ones settle."""
+    for _ in range(3):
+        await asyncio.sleep(0)
+    return [
+        t
+        for t in asyncio.all_tasks()
+        if not t.done()
+        and "_PluginLifecycle" in getattr(t.get_coro(), "__qualname__", "")
+    ]
+
+
+class _CleanupOnCancelStartPlugin(DummyAdminEndpointPlugin):
+    """`start` waits until cancelled, then waits for `release` before ending,
+    raising `error` if set."""
+
+    name = "slow_cancel"
+
+    def __init__(self, events: list[str], error: type[Exception] | None = None):
+        super().__init__(events)
+        self.starting = asyncio.Event()
+        self.cleaning = asyncio.Event()
+        self.release = asyncio.Event()
+        self.error = error
+
+    async def start(self, state: State) -> None:
+        await super().start(state)
+        self.starting.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.events.append("start_cancelled:slow_cancel")
+            self.cleaning.set()
+            while not self.release.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.release.wait()
+            if self.error is not None:
+                raise self.error("cleanup failed") from None
+            raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancels", [1, 2])
+@pytest.mark.parametrize("error", [None, RuntimeError])
+async def test_lifespan_cancellation_during_start(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_logs: pytest.LogCaptureFixture,
+    cancels: int,
+    error: type[Exception] | None,
+):
+    """Cancelling the lifespan task, once or again while the running `start`
+    cleans up, cancels that `start` and waits for it to end. The plugin is not
+    stopped and the plugins ahead of it stop in reverse order. The lifespan
+    re-raises the cancellation after cleanup; an exception raised by `start`
+    while cleaning up is its context."""
+    events: list[str] = []
+    slow = _CleanupOnCancelStartPlugin(events, error)
+    plugins = [_dummy("first", events), slow, _dummy("never", events)]
+    app = await _build_plugin_app(monkeypatch, plugins, None, _NativeServing(events))
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            pytest.fail("startup must not complete")
+
+    task = asyncio.create_task(run_lifespan())
+    async with asyncio.timeout(_TIMEOUT_S):
+        await slow.starting.wait()
+        task.cancel()
+        await slow.cleaning.wait()
+        for _ in range(cancels - 1):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done()
+        slow.release.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+    if error is not None:
+        assert isinstance(exc_info.value.__context__, error)
+
+    assert events == [
+        "start:first",
+        "start:slow_cancel",
+        "start_cancelled:slow_cancel",
+        "stop:first",
+        "native_shutdown",
+    ]
+    assert not [r for r in plugin_logs.records if "failed to stop" in r.getMessage()]
+    assert await _pending_plugin_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_start_cancelled_before_plugin_task_runs():
+    """Cancelling startup after a plugin's task is created, before the task
+    first runs, ends the wait for `start` instead of hanging it."""
+    events: list[str] = []
+    lifecycle = _PluginLifecycle(_dummy("first", events), State())
+    lifecycle.cancel_start()
+    async with asyncio.timeout(_TIMEOUT_S):
+        with pytest.raises(asyncio.CancelledError):
+            await lifecycle.wait_started()
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_skipped_plugin_task_cancelled_does_not_stop():
+    """A plugin skipped at the stop time limit is never stopped, even if its
+    task is cancelled before it wakes up."""
+    events: list[str] = []
+    lifecycle = _PluginLifecycle(_dummy("first", events), State())
+    async with asyncio.timeout(_TIMEOUT_S):
+        assert not await lifecycle.wait_started()
+        lifecycle.end_without_stop()
+        lifecycle.task.cancel()
+        await lifecycle.task
+    assert events == ["start:first"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_startup_cancellation_does_not_interrupt_cleanup():
+    """Shutdown can call `cancel_endpoint_plugin_startup` more than once, for
+    example a signal followed by a watchdog exit. Only the first call cancels
+    the running `start`, so the cleanup it does before propagating the
+    cancellation runs to completion."""
+    events: list[str] = []
+    release = asyncio.Event()
+
+    class _Cleanup(DummyAdminEndpointPlugin):
+        name = "cleanup"
+        starting = asyncio.Event()
+        cleaning = asyncio.Event()
+
+        async def start(self, state: State) -> None:
+            self.starting.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cleaning.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    events.append("cleanup_interrupted")
+                    raise
+                events.append("cleanup_done")
+                raise
+
+    plugin = _Cleanup(events)
+    state = State()
+    state.endpoint_plugins = [plugin]
+    task = asyncio.create_task(start_endpoint_plugins(state))
+    async with asyncio.timeout(_TIMEOUT_S):
+        await plugin.starting.wait()
+        cancel_endpoint_plugin_startup(state)
+        await plugin.cleaning.wait()
+        cancel_endpoint_plugin_startup(state)
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert events == ["cleanup_done"]
+
+
+_EXITING_START_CHILD = """
+import asyncio, sys
+from starlette.datastructures import State
+from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
+from vllm.plugins.endpoint_plugins.interface import (
+    start_endpoint_plugins, stop_endpoint_plugins)
+
+class Exiting(DummyAdminEndpointPlugin):
+    name = "exiting"
+    async def start(self, state):
+        raise {error}
+
+class Printed(list):
+    def append(self, event):
+        super().append(event)
+        print("EVENT=" + event, flush=True)
+
+first = DummyAdminEndpointPlugin(Printed())
+first.name = "first"
+state = State()
+state.endpoint_plugins = [first, Exiting()]
+
+async def lifespan():
+    try:
+        await start_endpoint_plugins(state)
+    finally:
+        await stop_endpoint_plugins(state)
+
+asyncio.run(lifespan())
+"""
+
+
+@pytest.mark.parametrize(
+    ("error", "returncode"),
+    [("SystemExit(42)", 42), ("KeyboardInterrupt", -signal.SIGINT)],
+)
+def test_process_exit_from_start(error: str, returncode: int):
+    """`SystemExit` and `KeyboardInterrupt` from `start` leave the event loop,
+    as they do from any asyncio task. The plugins ahead stop once during event
+    loop teardown, and nothing reports an unretrieved task exception."""
+    result = subprocess.run(
+        [sys.executable, "-c", _EXITING_START_CHILD.format(error=error)],
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT_S,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == returncode, output
+    events = [
+        line.removeprefix("EVENT=")
+        for line in result.stdout.splitlines()
+        if line.startswith("EVENT=")
+    ]
+    assert events == ["start:first", "stop:first"], output
+    for text in ("never retrieved", "failed to stop", "cancelled before shutdown"):
+        assert text not in output, output
+
+
+@pytest.mark.asyncio
+async def test_failed_task_group_child_stops_plugin_once(
+    plugin_logs: pytest.LogCaptureFixture,
+):
+    """When a child of an anyio task group opened in `start` fails, the task
+    group cancels the plugin's task. The task logs a warning and calls `stop`,
+    and shutdown does not call `stop` again."""
+    events: list[str] = []
+    child_failed = asyncio.Event()
+
+    class _TaskGroupPlugin(DummyAdminEndpointPlugin):
+        name = "task_group"
+
+        async def start(self, state: State) -> None:
+            await super().start(state)
+            self.stack = contextlib.AsyncExitStack()
+            group = await self.stack.enter_async_context(anyio.create_task_group())
+
+            async def child() -> None:
+                await asyncio.sleep(0)
+                child_failed.set()
+                raise RuntimeError("transport closed")
+
+            group.start_soon(child)
+
+        async def stop(self, state: State) -> None:
+            await super().stop(state)
+            with contextlib.suppress(Exception):
+                await self.stack.aclose()
+
+    state = State()
+    state.endpoint_plugins = [_TaskGroupPlugin(events)]
+    state.args = _build_args()
+
+    async with asyncio.timeout(_TIMEOUT_S):
+        await start_endpoint_plugins(state)
+        await child_failed.wait()
+        await _pending_plugin_tasks()
+        await stop_endpoint_plugins(state)
+
+    assert events == ["start:task_group", "stop:task_group"]
+    assert [
+        r.getMessage()
+        for r in plugin_logs.records
+        if "cancelled before" in r.getMessage()
+    ] == [
+        (
+            "Endpoint plugin task_group task was cancelled before shutdown; "
+            "calling its stop hook"
+        )
+    ]
+    assert await _pending_plugin_tasks() == []
 
 
 class _PrintedEvents(list):
@@ -1056,6 +1470,9 @@ def test_shutdown_during_plugin_lifecycle(
     assert events == ["start:A", "start:B", *expected], output
     abandoned = "abandoned: B; skipped: A" in output
     assert abandoned == (case == "hung_stop"), output
+    # Every plugin task ends and every task exception is retrieved.
+    assert "Task was destroyed but it is pending" not in output, output
+    assert "exception was never retrieved" not in output, output
 
 
 class _StartOnlyPlugin(_LegacyEndpointPlugin):
