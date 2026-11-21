@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     _resolve_activation_key,
+    _resolve_humming_activation_key,
     _user_moe_activation_override_is_set,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
@@ -161,7 +162,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.weight_dtype = "gpt_oss_mxfp4"
         self.activation_key = _resolve_activation_key(None)
-        self.activation_override_is_set = _user_moe_activation_override_is_set()
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
         self.max_capture_size = moe.max_capture_size
@@ -361,8 +361,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 _cache_permute_indices=self._cache_permute_indices,
-                activation_key=self.activation_key,
-                activation_override_is_set=self.activation_override_is_set,
+                activation_quant_key=self.activation_key,
             )
         )
 
@@ -661,10 +660,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
         self.activation_key = _resolve_activation_key(activation_key)
-        self.activation_override_is_set = _user_moe_activation_override_is_set()
         self.is_k3_situ_aiter = False
         self.is_k3_situ_int4_gfx942 = False
         self.mxfp4_backend, self.experts_cls = self._select_backend()
+        if self.mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+            self.activation_key = _resolve_humming_activation_key(
+                self.activation_key,
+                activation_override_is_set=_user_moe_activation_override_is_set(),
+            )
 
         self.max_capture_size = moe.max_capture_size
 
@@ -943,8 +946,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 _cache_permute_indices=self._cache_permute_indices,
                 activation=self.moe.activation,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
-                activation_key=self.activation_key,
-                activation_override_is_set=self.activation_override_is_set,
+                activation_quant_key=self.activation_key,
             )
         )
 

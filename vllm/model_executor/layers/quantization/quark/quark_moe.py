@@ -1624,7 +1624,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         activation_override: "QuantSpec | None" = None,
     ):
         super().__init__(moe, weight_quant_key, activation_quant_key)
-        self.moe_activation_override = activation_override
+        self.moe_activation_override: QuantKey | None = (
+            activation_override.activation if activation_override is not None else None
+        )
         self.weight_dtype = next(
             dtype
             for dtype, quant_key in _WEIGHT_QUANT_KEY_MAP.items()
@@ -1865,7 +1867,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         """Setup kernel using oracle functions for MXFP4 schemes (W4A16, W4A8)."""
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
-        override = self.moe_activation_override
 
         if self.model_type == "gpt_oss":
             converted_weights = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
@@ -1879,8 +1880,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_bias=w2_bias,
                 w13_input_scale=layer.w13_input_scale,
                 w2_input_scale=layer.w2_input_scale,
-                activation_key=override.activation if override is not None else None,
-                activation_override_is_set=override is not None,
+                activation_quant_key=self.moe_activation_override,
             )
         else:
             converted_weights = convert_weight_to_mxfp4_moe_kernel_format(
@@ -1893,8 +1893,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 activation=self.moe.activation,
-                activation_key=override.activation if override is not None else None,
-                activation_override_is_set=override is not None,
+                activation_quant_key=self.moe_activation_override,
             )
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = converted_weights
 

@@ -545,25 +545,32 @@ def _resolve_activation_key(
     return user_override
 
 
-def _humming_input_schema(
+def _resolve_humming_activation_key(
     activation_key: QuantKey | None,
-    activation_override_is_set: bool = False,
-) -> "BaseInputSchema | None":
-    """Humming input schema for an already-resolved activation key."""
-    if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
-        return None
+    *,
+    activation_override_is_set: bool,
+) -> QuantKey | None:
+    """Resolve Humming's default activation format before weight conversion."""
     if (
         activation_key == kMxfp8Dynamic
         and not activation_override_is_set
+        and not envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
         and current_platform.is_device_capability_family(90)
     ):
-        # Humming's SM90 W4A8 kernels are tuned for block FP8 activations, so
-        # run a checkpoint's MXFP8 that way. An explicit request is honored.
         logger.info_once(
             "Running checkpoint MXFP8 MoE activations as block FP8 "
             "(group 128) on Hopper."
         )
-        activation_key = kFp8Dynamic128Sym
+        return kFp8Dynamic128Sym
+    return activation_key
+
+
+def _humming_input_schema(
+    activation_key: QuantKey | None,
+) -> "BaseInputSchema | None":
+    """Humming input schema for an already-resolved activation key."""
+    if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
+        return None
     from vllm.model_executor.layers.quantization.utils.humming import (
         quant_key_to_input_schema,
     )
@@ -983,8 +990,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w13_input_scale: torch.Tensor | None = None,
     w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
-    activation_key: QuantKey | None = None,
-    activation_override_is_set: bool = False,
+    activation_quant_key: QuantKey | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1025,9 +1031,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "gpt_oss_mxfp4"},
-            input_schema=_humming_input_schema(
-                activation_key, activation_override_is_set
-            ),
+            input_schema=_humming_input_schema(activation_quant_key),
             allow_input_schema_fallback=False,
         )
         return (
@@ -1615,8 +1619,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
     use_separated_a4w4: bool = False,
-    activation_key: QuantKey | None = None,
-    activation_override_is_set: bool = False,
+    activation_quant_key: QuantKey | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1685,9 +1688,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "mxfp4"},
-            input_schema=_humming_input_schema(
-                activation_key, activation_override_is_set
-            ),
+            input_schema=_humming_input_schema(activation_quant_key),
             allow_input_schema_fallback=False,
         )
         return (
