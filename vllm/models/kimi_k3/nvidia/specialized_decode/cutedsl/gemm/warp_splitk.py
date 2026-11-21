@@ -613,7 +613,7 @@ def compile_warp_splitk(device_index: int, n: int, k: int, tactic: WarpSplitKTac
     """Code for an [n, k] weight with dynamic M (at most 32 rows), PDL on."""
     check_tactic(tactic, n, k)
     dtype = _torch.bfloat16
-    with _torch.cuda.device(device_index):
+    with _torch.accelerator.device_index(device_index):
         shapes: tuple[tuple[tuple[int, ...], bool], ...] = (
             ((n, k), False),
             ((_MAX_M, k), True),

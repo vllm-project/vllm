@@ -1,65 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
 import sys
 
-import regex as re
-
-# --------------------------------------------------------------------------- #
-# Regex: match `torch.cuda.xxx` but allow `torch.accelerator.xxx`
-# --------------------------------------------------------------------------- #
-_TORCH_CUDA_PATTERNS = [
-    r"\btorch\.cuda\.(empty_cache|synchronize|device_count|current_device|memory_reserved|memory_allocated|max_memory_allocated|max_memory_reserved|reset_peak_memory_stats|memory_stats|mem_get_info|set_device|device\()\b",
-    r"\btorch\.cuda\.(manual_seed|manual_seed_all)\b",
-    r"\bwith\storch\.cuda\.device\b",
-    # Calls torch.cuda.{_is_compiled/_device_count_amdsmi/_device_count_nvml} internally
-    r"\bcuda_device_count_stateless\(\)\b",
-    r"\bcurrent_platform\.mem_get_info\(\)\b",
-]
-
-ALLOWED_FILES = {
-    "vllm/platforms/",
-    "vllm/device_allocator/",
-    "vllm/distributed/weight_transfer/ipc_engine.py",
-    "vllm/distributed/weight_transfer/sharded_rdt_engine.py",
-    "tests/distributed/test_packed_tensor.py",
-    # Wraps (rather than calls) the torch.cuda sync APIs.
-    "vllm/v1/conf_compute_utils.py",
+_BANNED_CALLS = {
+    "cuda_device_count_stateless": "Use current_platform.device_count() instead.",
+    "current_platform.mem_get_info": "Use torch.accelerator.get_memory_info() instead.",
 }
 
 
-def scan_file(path: str) -> int:
-    with open(path, encoding="utf-8") as f:
-        content = f.read()
-    for pattern in _TORCH_CUDA_PATTERNS:
-        for match in re.finditer(pattern, content, re.MULTILINE):
-            # Calculate line number from match position
-            line_num = content[: match.start() + 1].count("\n") + 1
-            matched_text = match.group(0)
-            if "manual_seed" in matched_text:
-                print(
-                    f"{path}:{line_num}: "
-                    "\033[91merror:\033[0m "
-                    f"Found {matched_text} API call. Use set_random_seed instead."
-                )
-                return 1
-            print(
-                f"{path}:{line_num}: "
-                "\033[91merror:\033[0m "  # red color
-                "Found torch.cuda API call. Please refer RFC "
-                "https://github.com/vllm-project/vllm/issues/30679, use "
-                "torch.accelerator API instead."
-            )
-            return 1
-    return 0
+def _qualified_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _qualified_name(node.value)
+        return f"{owner}.{node.attr}" if owner is not None else None
+    return None
 
 
-def main():
-    returncode = 0
-    for filename in sys.argv[1:]:
-        if any(filename.startswith(prefix) for prefix in ALLOWED_FILES):
+def check_source(source: str, filepath: str = "<string>") -> list[str]:
+    try:
+        tree = ast.parse(source, filename=filepath)
+    except SyntaxError:
+        return []
+
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        returncode |= scan_file(filename)
-    return returncode
+        name = _qualified_name(node.func)
+        if name in _BANNED_CALLS:
+            violations.append(
+                f"{filepath}:{node.lineno}: Found {name}() API call. "
+                f"{_BANNED_CALLS[name]}"
+            )
+    return violations
+
+
+def check_file(filepath: str) -> list[str]:
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            source = f.read()
+    except (OSError, UnicodeDecodeError):
+        return []
+    return check_source(source, filepath)
+
+
+def main() -> int:
+    violations = [v for filepath in sys.argv[1:] for v in check_file(filepath)]
+    for violation in violations:
+        print(violation)
+    return 1 if violations else 0
 
 
 if __name__ == "__main__":

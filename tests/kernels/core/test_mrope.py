@@ -210,7 +210,7 @@ def test_mrope_row_offset_int64():
     mrope_section = [13, 13, 13]
     row_stride = (n_qh + n_kh + n_kh) * hd  # packed qkv row
     num_tokens = 2**31 // row_stride + 8
-    free, _ = current_platform.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < 2 * num_tokens * row_stride * 2:
         pytest.skip("not enough free device memory")
 
