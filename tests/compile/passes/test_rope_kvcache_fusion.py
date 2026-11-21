@@ -157,7 +157,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
         # Mirror the worker spec-collection loop: the backend publishes its
         # packing (e.g. ROCM_ATTN's separate K/V head groups).
-        self.kv_cache_spec = self.attn_backend.customize_spec(
+        spec = self.attn_backend.customize_spec(
             AttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -165,6 +165,8 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
             )
         )
+        assert isinstance(spec, AttentionSpec)
+        self.kv_cache_spec = spec
 
         # Initialize attn MetadataBuilder
         self.builder = self.attn_backend.get_builder_cls()(

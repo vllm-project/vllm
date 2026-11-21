@@ -14,7 +14,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import KVCacheLayout, MambaSpec
-from vllm.v1.worker.utils import allocate_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache, kv_cache_components
 
 PREFILL_KWARGS = {
     "num_tokens": 128,
@@ -169,7 +169,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         mixer.replayssm_buffer_len = 16
         mixer.get_state_shape = lambda: spec.shapes
         mixer.get_state_dtype = lambda: spec.dtypes
-        mixer.bind_kv_cache(page)
+        mixer.bind_kv_cache(kv_cache_components(page, spec))
         for tensor in mixer.kv_cache:
             tensor.fill_(3)
         mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)

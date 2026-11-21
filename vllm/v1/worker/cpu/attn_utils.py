@@ -33,6 +33,7 @@ from vllm.v1.worker.utils import (
     customize_layer_config,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
+    split_kv_cache_components,
 )
 
 if TYPE_CHECKING:
@@ -82,8 +83,10 @@ def get_kv_cache_layer_configs(
             continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if layer_config := attn_module.get_kv_cache_config(vllm_config):
-            layer_configs[layer_name] = customize_layer_config(
-                attn_module.get_attn_backend(), layer_config, layer_name
+            layer_configs.update(
+                customize_layer_config(
+                    attn_module.get_attn_backend(), layer_config, layer_name
+                )
             )
     return layer_configs
 
@@ -169,7 +172,7 @@ def init_attn_backend(
                     "FastPrefill", attn_backend
                 )
 
-            layer_kv_cache_spec = kv_cache_group_spec.kv_cache_specs[layer_name]
+            layer_kv_cache_spec = kv_cache_group_spec.layer_specs[layer_name]
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts get separate metadata builders.
@@ -223,14 +226,16 @@ def init_kv_cache(
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
         )
-    for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
+    shared_layers = get_shared_kv_cache_layers(vllm_config)
+    for layer_name, target in shared_layers.items():
         kv_caches[layer_name] = kv_caches[target]
-
-    bindable_caches = map_kv_caches_to_kernel_blocks(
-        {name: cache for name, cache in kv_caches.items() if name in forward_context},
-        attn_groups,
+    bind_kv_cache_to_layers(
+        split_kv_cache_components(
+            map_kv_caches_to_kernel_blocks(kv_caches, attn_groups), kv_cache_config
+        ),
+        forward_context,
+        shared_layers,
     )
-    bind_kv_cache_to_layers(bindable_caches, forward_context)
     return kv_caches
 
 

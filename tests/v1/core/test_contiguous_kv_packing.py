@@ -48,7 +48,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
 )
-from vllm.v1.worker.utils import allocate_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache, kv_cache_components
 
 MEMORY = 8 * 1024 * 1024
 
@@ -152,7 +152,7 @@ class _MambaLayer(MambaBase):
 
 def _mamba_states(cache, spec):
     mixer = _MambaLayer(spec)
-    mixer.bind_kv_cache(cache)
+    mixer.bind_kv_cache(kv_cache_components(cache, spec))
     return mixer.kv_cache
 
 
