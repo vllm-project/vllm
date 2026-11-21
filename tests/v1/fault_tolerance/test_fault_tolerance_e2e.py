@@ -16,6 +16,7 @@ from typing import Any
 import psutil
 import pytest
 import requests
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
@@ -225,12 +226,29 @@ def _get_ft_status(server) -> dict:
     return resp.json()
 
 
+def _assert_health_metric(server, rank: int, healthy: bool) -> None:
+    resp = requests.get(server.url_for("metrics"), timeout=10)
+    resp.raise_for_status()
+    samples = [
+        sample
+        for family in text_string_to_metric_families(resp.text)
+        if family.name == "vllm:engine_healthy"
+        for sample in family.samples
+    ]
+    assert len(samples) == 1, samples
+    assert samples[0].labels == {"engine": str(rank)}
+    assert samples[0].value == int(healthy)
+
+
 def _assert_serving_and_healthy(servers) -> None:
     """Wait until every engine is healthy, then serve one request per server."""
     healthy = _wait_for_engines(
         list(servers), match_key="status", match_values={"healthy"}
     )
     assert all(healthy), healthy
+    for server, status in zip(servers, healthy):
+        assert status is not None
+        _assert_health_metric(server, status["id"], True)
     _in_parallel(lambda s: _complete(s.get_client()), servers)
 
 
@@ -444,6 +462,8 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
         # The rank that raised carries the fault info from its own exception.
         assert faulted[faulted_rank].get("fault_info"), faulted[faulted_rank]
+        for rank, server in servers_by_rank.items():
+            _assert_health_metric(server, rank, False)
 
         # 4. retry every engine.
         round_id = str(uuid.uuid4())
@@ -531,6 +551,8 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization):
 
         # 4. DEAD engine rejects retry: recovery requires UNHEALTHY.
         assert faulted[victim_rank]["status"] == "dead", faulted[victim_rank]
+        for rank, server in servers_by_rank.items():
+            _assert_health_metric(server, rank, False)
         _apply_ft(victim, "retry")
         ft_error = _wait_for_ft_failure(victim, FAULT_DETECTION_DEADLINE_S)
         assert ft_error is not None, (
