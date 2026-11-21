@@ -33,6 +33,10 @@ from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.amd.model import MuseSparkDecoderLayer
 from vllm.models.muse_spark.amd.mono.drafter import maybe_attach_drafter
 from vllm.models.muse_spark.amd.ops import fused_markov
+from vllm.models.muse_spark.amd.ops.fused_markov_sampling import (
+    MuseSparkFusedMarkov,
+    use_fused_markov_sampling,
+)
 from vllm.models.muse_spark.common.layers import (
     MuseSparkRMSNorm,
     materialize_residual_path_constants,
@@ -349,6 +353,9 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             and not vllm_config.parallel_config.enable_batch_sharded_sampling
         ):
             self.sample_sequential = fused_markov.sample_sequential  # type: ignore[assignment]
+        if use_fused_markov_sampling(vllm_config):
+            fused = MuseSparkFusedMarkov(self)
+            self.sample_sequential = fused.sample  # type: ignore[assignment]
 
     def forward(  # type: ignore[override]
         self,
