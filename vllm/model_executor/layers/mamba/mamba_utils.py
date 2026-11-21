@@ -42,16 +42,12 @@ def gdn_replayssm_executed_width(num_speculative_tokens: int) -> int:
 
     Shorter rows are padded with no-op tokens up to this width.
     """
-    if num_speculative_tokens == 0:
-        return 1
-    if 1 <= num_speculative_tokens <= 3:
-        return 4
-    if 4 <= num_speculative_tokens <= 7:
-        return 8
-    raise ValueError(
-        "FlashInfer GDN ReplaySSM supports 0 through 7 speculative tokens; got "
-        f"{num_speculative_tokens}"
-    )
+    if not 0 <= num_speculative_tokens <= 7:
+        raise ValueError(
+            "FlashInfer GDN ReplaySSM supports 0 through 7 speculative tokens; got "
+            f"{num_speculative_tokens}"
+        )
+    return num_speculative_tokens + 1
 
 
 def configure_flashinfer_gdn_env() -> None:

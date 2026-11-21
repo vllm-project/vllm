@@ -195,7 +195,7 @@ def _reconstruct_replayssm_state(
 )
 @pytest.mark.parametrize(
     "width,query_len,accepted",
-    [(1, 1, 1), (4, 3, 2), (8, 6, 4), (8, 8, 4)],
+    [(1, 1, 1), (3, 3, 2), (4, 3, 2), (6, 6, 4), (8, 6, 4), (8, 8, 4)],
 )
 @torch.inference_mode()
 def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
@@ -246,7 +246,7 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
         v = random_tensor(query_len, 2, 128) * 0.1
         a, b = random_tensor(query_len, 2) * 0.2, random_tensor(query_len, 2)
         mixed_qkv = torch.cat((q.flatten(1), k.flatten(1), v.flatten(1)), dim=-1)
-        if width == query_len and width in (4, 8):
+        if width == query_len > 1:
             projection = mixed_qkv.new_zeros(query_len, mixed_qkv.shape[1] + 128)
             projection[:, : mixed_qkv.shape[1]].copy_(mixed_qkv)
             mixed_qkv = projection[:, : mixed_qkv.shape[1]]

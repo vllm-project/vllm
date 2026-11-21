@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_utils import gdn_replayssm_executed_width
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     flashinfer_replayssm_autotune_supported,
 )
@@ -270,7 +269,6 @@ def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
     )
 
     query_len = config.num_speculative_tokens + 1
-    assert query_len <= gdn_replayssm_executed_width(config.num_speculative_tokens)
     max_num_reqs = min(
         runner.scheduler_config.max_num_seqs,
         num_committable_kv_blocks(runner) - 1,
