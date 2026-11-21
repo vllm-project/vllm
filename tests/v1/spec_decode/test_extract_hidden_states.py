@@ -107,6 +107,20 @@ def test_extract_hidden_states_config_preserves_vlm_text_config():
     )
 
 
+def test_extract_hidden_states_config_preserves_nested_decoder():
+    """Preserve the text config under `decoder`, as in Nemotron 3.5 Parse."""
+    decoder = LlamaConfig(hidden_size=128, num_attention_heads=8)
+    target_config = PreTrainedConfig(decoder=decoder)
+
+    extract_config = ExtractHiddenStatesConfig(
+        target_config,
+        eagle_aux_hidden_state_layer_ids=[1, 2],
+    )
+
+    assert get_hf_text_config(extract_config) is decoder
+    assert extract_config.to_dict()["decoder"]["num_attention_heads"] == 8
+
+
 def test_extract_hidden_states_speculative_config_vlm():
     """SpeculativeConfig with a VLM target must build without errors."""
     nested_text_config = LlamaConfig(
