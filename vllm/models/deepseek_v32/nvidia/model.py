@@ -225,20 +225,22 @@ class DeepseekV32Model(torch.nn.Module):
             prefix=f"{prefix}.layers",
         )
         speculative_config = vllm_config.speculative_config
+        attention_config = vllm_config.attention_config
         # Preserve LoRA's global row mapping and auxiliary-state layouts.
         self.shardq_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
+            parallel_config.tensor_parallel_size > 1
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
             and vllm_config.lora_config is None
+            and attention_config.hisparse_config is None
             and (
                 speculative_config is None
                 or not speculative_config.uses_aux_hidden_states
             )
             and not envs.VLLM_BATCH_INVARIANT
-            and all(layer.self_attn.use_shardq for layer in self.layers)
         )
-        self.shardq_min_tokens = (
-            vllm_config.attention_config.sparse_mla_shard_q_min_tokens
-        )
+        self.shardq_min_tokens = 1024
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
