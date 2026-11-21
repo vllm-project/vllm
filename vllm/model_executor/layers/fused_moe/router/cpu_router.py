@@ -33,6 +33,17 @@ def _grouped_topk(
     routed_scaling_factor: float,
     e_score_correction_bias: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    num_experts = gating_output.shape[-1]
+    if num_expert_group > 0 and topk_group > 0:
+        experts_per_group = num_experts // num_expert_group
+        num_eligible_experts = topk_group * experts_per_group
+        if topk > num_eligible_experts:
+            raise ValueError(
+                f"topk={topk} exceeds the {num_eligible_experts} experts "
+                f"available in the {topk_group} selected groups of "
+                f"{experts_per_group} experts; reduce topk or increase "
+                "topk_group."
+            )
     gating_output = gating_output.float()
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
