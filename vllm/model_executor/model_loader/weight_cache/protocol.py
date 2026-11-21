@@ -291,15 +291,6 @@ def hash_rope_parameters(model_config: ModelConfig) -> str:
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
-def _safetensors_header(path: str) -> bytes:
-    """Return the raw safetensors header (length prefix + JSON) of a file.
-
-    The header carries tensor names, dtypes, shapes and byte offsets, so it is
-    a content fingerprint of the shard without reading any weight bytes.
-    """
-    return read_safetensors_header(path)
-
-
 def hash_checkpoint(model: str) -> str | None:
     """Fingerprint checkpoint content from local safetensors metadata.
 
@@ -320,7 +311,7 @@ def hash_checkpoint(model: str) -> str | None:
     hasher = safe_hash(b"", usedforsecurity=False)
     for path in sorted(files, key=os.path.basename):
         hasher.update(os.path.basename(path).encode())
-        hasher.update(_safetensors_header(path))
+        hasher.update(read_safetensors_header(path))
     return hasher.hexdigest()
 
 
