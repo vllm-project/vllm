@@ -385,6 +385,7 @@ def test_marlin_gemm(
         ],
         *[(m, 4096, 18560, "strided") for m in (8, 96, 128)],
         *[(m, 4096, 18560, "minimal_workspace") for m in (8, 96, 128)],
+        (96, 4096, 18560, "below_profile_workspace"),
         *[
             (m, 8192, 4096, "contiguous")
             for m in (
@@ -429,12 +430,13 @@ def test_marlin_nvfp4_projection_profiles(size_m, size_k, size_n, layout):
     )
     workspace = marlin_make_workspace_new(inputs.device, max_blocks_per_sm=2)
     workspace_guard = None
-    if layout == "minimal_workspace":
+    if layout in ("minimal_workspace", "below_profile_workspace"):
         sms = torch.cuda.get_device_properties(inputs.device).multi_processor_count
         workspace_guard = torch.full(
             (2 * sms + 64,), 12345, dtype=torch.int32, device=inputs.device
         )
-        workspace = workspace_guard[:sms]
+        lock_count = sms if layout == "minimal_workspace" else 2 * sms - 1
+        workspace = workspace_guard[:lock_count]
         workspace.zero_()
 
     def run(inputs, output=None):

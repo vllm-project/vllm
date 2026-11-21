@@ -419,6 +419,13 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       // The generic validator pads M and scale bytes beyond these NVFP4
       // kernels' actual launch allocations.
       max_shared_mem_new = grouped_m32_part ? 34816 : 43520;
+      if (grouped_m32_part && prob_m == 96) {
+        // Whole-K tiles per CTA avoid cross-CTA reductions at this shape.
+        int mn_tiles =
+            prob_m_split / (16 * thread_m_blocks) * (prob_n / thread_n);
+        int tiles_per_cta = div_ceil(mn_tiles, blocks);
+        if (mn_tiles % tiles_per_cta == 0) blocks = mn_tiles / tiles_per_cta;
+      }
     } else
   #endif
     {
