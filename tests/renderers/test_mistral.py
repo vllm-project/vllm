@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat as OpenAIJsonSchemaResponseFormat,
 )
@@ -196,3 +197,51 @@ def test_apply_mistral_chat_template_thinking_chunk():
     )
 
     assert string_tokens == expected_tokens
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("tool_name", "expected_name"),
+    [('exec_command":', "invalid_tool_call"), ("exec_command", "exec_command")],
+    ids=["invalid", "valid"],
+)
+def test_render_messages_replaces_invalid_tool_call_names(
+    tool_name: str, expected_name: str, use_async: bool
+) -> None:
+    model = "mistralai/Magistral-Small-2509"
+    tokenizer = MistralTokenizer.from_pretrained(model)
+    renderer = MistralRenderer(
+        VllmConfig(
+            model_config=ModelConfig(
+                model, tokenizer_mode="mistral", skip_tokenizer_init=True
+            )
+        ),
+        tokenizer=tokenizer,
+    )
+    messages = [
+        {"role": "user", "content": "List /app."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "unsupported call"},
+    ]
+
+    if use_async:
+        _, prompt = asyncio.run(renderer.render_messages_async(messages, ChatParams()))
+    else:
+        _, prompt = renderer.render_messages(messages, ChatParams())
+
+    token_ids = prompt.get("prompt_token_ids")
+    assert isinstance(token_ids, list)
+    rendered = tokenizer.mistral.decode(
+        token_ids, special_token_policy=SpecialTokenPolicy.KEEP
+    )
+    assert f"[TOOL_CALLS]{expected_name}[ARGS]" in rendered

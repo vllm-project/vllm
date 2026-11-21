@@ -3,6 +3,8 @@
 
 from typing import Any
 
+import regex as re
+
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
@@ -49,6 +51,50 @@ def safe_apply_chat_template(
         raise ValueError(str(e)) from e
 
 
+_VALID_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _has_invalid_name(tool_call: Any) -> bool:
+    function = tool_call.get("function") if isinstance(tool_call, dict) else None
+    name = function.get("name") if isinstance(function, dict) else None
+    return isinstance(name, str) and not _VALID_TOOL_NAME.fullmatch(name)
+
+
+def _replace_invalid_tool_call_names(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    """Replace the tool call names that mistral-common rejects by `invalid_tool_call`.
+
+    Messages without an invalid name are returned unchanged.
+    """
+    replaced: list[ChatCompletionMessageParam] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            replaced.append(message)
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not any(
+            _has_invalid_name(call) for call in tool_calls
+        ):
+            replaced.append(message)
+            continue
+        replaced.append(
+            {
+                **message,
+                "tool_calls": [
+                    {
+                        **call,
+                        "function": {**call["function"], "name": "invalid_tool_call"},
+                    }
+                    if _has_invalid_name(call)
+                    else call
+                    for call in tool_calls
+                ],
+            }
+        )
+    return replaced
+
+
 def _get_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
     kwargs = params.get_apply_chat_template_kwargs()
     if params.response_format is not None:
@@ -88,7 +134,9 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
         prompt_raw = safe_apply_chat_template(
-            tokenizer, messages, **_get_chat_template_kwargs(params)
+            tokenizer,
+            _replace_invalid_tool_call_names(messages),
+            **_get_chat_template_kwargs(params),
         )
 
         prompt = parse_dec_only_prompt(prompt_raw)
@@ -114,7 +162,9 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
         prompt_raw = await self._apply_chat_template_async(
-            tokenizer, messages, **_get_chat_template_kwargs(params)
+            tokenizer,
+            _replace_invalid_tool_call_names(messages),
+            **_get_chat_template_kwargs(params),
         )
 
         prompt = parse_dec_only_prompt(prompt_raw)
