@@ -1189,6 +1189,15 @@ def safetensors_weights_iterator(
                     param = f.get_tensor(name)
                     yield name, param
 
+    # Quantized models skip the missing-weight check, so fail here instead of
+    # leaving the weights these tensors belong to uninitialized.
+    if leftover_state_dict:
+        raise ValueError(
+            f"{len(leftover_state_dict)} tensors in the checkpoint do not match "
+            "the tensor names in its torchao safetensors metadata, e.g. "
+            f"{sorted(leftover_state_dict)[:3]}."
+        )
+
 
 def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
