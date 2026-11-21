@@ -17,10 +17,11 @@ matched pushes whose P→D handshake has finished so the writer can
 (re-)issue the WRITE without ever blocking on the network.
 
 Wake model: the writer self-polls every
-`_PUSH_WRITER_POLL_INTERVAL_MS` only while it has unmatched
-`_push_finished_blocks` (i.e. P-side blocks waiting for a D PUSH_REG
-notif that has no other wake source). All other progress is
-event-driven: the engine main thread sets `_push_writer_wake` from
+`_PUSH_WRITER_POLL_INTERVAL_MS` while it has unmatched
+`_push_finished_blocks` (P-side blocks waiting for a D PUSH_REG
+notif) or a WRITE whose completion notification has not been sent.
+All other progress is event-driven: the engine main thread sets
+`_push_writer_wake` from
 `start_load_kv` (when handing it new work) and from `get_finished`
 (so each engine step gives the writer a chance to drain NIXL notifs);
 the handshake-completion callback sets the same event after a deferred
@@ -113,6 +114,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._send_failures: set[ReqId] = set()
         self._sending_transfers_lock = threading.Lock()
+        # handle -> (decode agent, completion notif). Popped once the WRITE
+        # is DONE. Not attached to the NIXL WRITE: that notification is sent
+        # from the UCX flush callback, which can run before an SGL put's
+        # pending fragments are visible on D (vllm-project/vllm#68671).
+        self._push_completion_notifs: dict[int, tuple[str, bytes]] = {}
 
         # Writer-thread owned matching state.
         # P-side: finished request blocks received from scheduler metadata
@@ -332,13 +338,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                             self._handle_push_reg_notif(notif)
                         else:
                             self._pending_completion_notifs.put(notif)
+
+                # 5. Tell D a WRITE is complete only after local status is DONE.
+                self._poll_push_write_completions()
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
 
-            # Self-poll only while there is no other wake source: P-side
-            # finished blocks waiting for a D PUSH_REG match. All other
-            # progress is event-driven (see module docstring).
-            if self._push_finished_blocks:
+            # Self-poll while a PUSH_REG match or a completion notif is
+            # still outstanding. Everything else is event-driven.
+            if self._push_finished_blocks or self._push_completion_notifs:
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
                 self._push_writer_wake.wait()
@@ -752,11 +760,30 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
 
-        notif_id = f"{remote_request_id}:{self.world_size}".encode()
-
         if len(local_block_ids) == 0:
             logger.warning("No blocks to push for request %s", request_id)
             return None
+
+        stage = self._single_remote_stage(dst_engine_id)
+        try:
+            decode_agent = self._remote_agents[dst_engine_id][
+                (stage.pp_rank, remote_rank)
+            ]
+        except KeyError:
+            self._log_failure(
+                failure_type="notification_failed",
+                msg="No NIXL agent for the decode rank; not posting the KV write.",
+                req_id=request_id,
+                dst_engine_id=dst_engine_id,
+                remote_rank=remote_rank,
+            )
+            self.xfer_stats.record_failed_notification()
+            return None
+
+        # Sent after check_xfer_state reports DONE, not with the WRITE.
+        # NIXL would otherwise emit it from the UCX flush callback, before
+        # an SGL put's queued fragments are visible on the decode worker.
+        notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
         # Prefix caching: D allocated only uncached blocks, so on a partial hit it
         # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
@@ -783,7 +810,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Get descs ids. Pair k writes local region pairs.local[k] into remote
         # region pairs.remote[k] at its cache group's blocks.
-        stage = self._single_remote_stage(dst_engine_id)
         pairs = stage.pairs
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
@@ -813,8 +839,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 local_block_descs_ids,
                 remote_xfer_side_handle,
                 remote_block_descs_ids,
-                notif_msg=notif_id,
             )
+            with self._sending_transfers_lock:
+                self._push_completion_notifs[handle] = (decode_agent, notif_id)
             self.nixl_wrapper.transfer(handle)
             # Caller tracks the handle (atomically with the request's other
             # writes) so P can free blocks once all of them are done.
@@ -834,9 +861,82 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # via the lease / watchdog.
             with self._sending_transfers_lock:
                 self._send_failures.add(request_id)
+                if handle is not None:
+                    self._push_completion_notifs.pop(handle, None)
             if not self._handle_failed_transfer(request_id, handle):
                 return handle
             return None
+
+    def _poll_push_write_completions(self) -> None:
+        """Send completion notifications for WRITEs whose data has landed.
+
+        Local DONE means every posted fragment has finished, which is the
+        point at which the decode worker can read the blocks. The NIXL
+        notification attached to a WRITE is earlier than that on UCX builds
+        that flush an SGL put before its pending fragments.
+        """
+        claimed: list[tuple[str, str, bytes]] = []
+        with self._sending_transfers_lock:
+            for req_id, handles in self._sending_transfers.items():
+                for handle in handles:
+                    if handle not in self._push_completion_notifs:
+                        continue
+                    try:
+                        state = self.nixl_wrapper.check_xfer_state(handle)
+                    except Exception:
+                        logger.debug(
+                            "Push WRITE status check failed for %s",
+                            req_id,
+                            exc_info=True,
+                        )
+                        continue
+                    if state != "DONE":
+                        continue
+                    agent_name, notif_msg = self._push_completion_notifs.pop(handle)
+                    claimed.append((req_id, agent_name, notif_msg))
+        for req_id, agent_name, notif_msg in claimed:
+            self._send_push_completion_notif(req_id, agent_name, notif_msg)
+
+    def _on_xfer_done(self, req_id: str, handle: int) -> None:
+        pending = self._push_completion_notifs.pop(handle, None)
+        if pending is None:
+            return
+        agent_name, notif_msg = pending
+        self._send_push_completion_notif(req_id, agent_name, notif_msg)
+
+    def _send_push_completion_notif(
+        self, req_id: str, agent_name: str, notif_msg: bytes
+    ) -> None:
+        try:
+            self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_msg)
+        except Exception as e:
+            self._log_failure(
+                failure_type="notification_failed",
+                msg="Decode worker was not told that the KV write completed. "
+                "It keeps waiting until the lease expires.",
+                req_id=req_id,
+                error=e,
+                remote_agent_name=agent_name,
+            )
+            self.xfer_stats.record_failed_notification()
+
+    def _handle_failed_transfer(
+        self,
+        req_id: str,
+        handle: int | None,
+        failed_req_ids: set[str] | None = None,
+        record_failed_transfer: bool = True,
+        error: BaseException | None = None,
+    ) -> bool:
+        if handle is not None:
+            self._push_completion_notifs.pop(handle, None)
+        return super()._handle_failed_transfer(
+            req_id,
+            handle,
+            failed_req_ids,
+            record_failed_transfer,
+            error,
+        )
 
     # --- Notification handling on engine main thread ------------------ #
 
