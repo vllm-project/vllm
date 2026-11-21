@@ -25,7 +25,10 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.platforms import current_platform
-from vllm.v1.worker.ubatching import dbo_enabled
+from vllm.v1.worker.ubatching import (
+    dbo_enabled,
+    dbo_tp_all_reduce_add_rmsnorm_mxfp8,
+)
 
 MiB = 1024 * 1024
 
@@ -209,7 +212,9 @@ def allreduce_gemma_rms_norm_mxfp8(
     with the quant as an epilogue of the Triton norm instead of its own launch.
     The fused all-reduce + norm kernels have no quantized output, so this only
     covers the plain collective + Triton norm; when one of them would run it
-    returns `None` and the caller keeps the unfused path.
+    returns `None` and the caller keeps the unfused path. In a DBO microbatch
+    with VLLM_DBO_TP_DMA_AR_FUSED_NORM, the norm kernel also does the SDMA
+    all-reduce's dequantize-add.
 
     Returns `(x_q, x_scale, normed, residual_out)`: float8_e4m3fn values
     `[M, N]`, row-major E8M0 scales `[M, N // 32]`, the bf16 normed rows
@@ -226,6 +231,16 @@ def allreduce_gemma_rms_norm_mxfp8(
             return None
         if _can_use_aiter_fused_ar_rms(hidden_states):
             return None
+        if dbo_enabled("all-reduce-overlap"):
+            fused = dbo_tp_all_reduce_add_rmsnorm_mxfp8(
+                hidden_states,
+                residual,
+                norm.weight,
+                norm.variance_epsilon,
+                return_normed,
+            )
+            if fused is not None:
+                return fused
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
     if return_normed:
         return gemma_fused_add_rmsnorm_mxfp8_and_bf16(
