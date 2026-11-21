@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
-    check_torch_archive_size,
+    load_torch_payload,
     safe_to_dense,
 )
 
@@ -30,6 +30,13 @@ from .base import MediaIO, MediaWithBytes
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
+
+
+def _frame_to_hwc(frame: MediaWithBytes[Image.Image | torch.Tensor]) -> npt.NDArray:
+    """Convert a frame loaded by `ImageMediaIO` to an HWC array."""
+    if isinstance(frame.media, torch.Tensor):
+        return frame.media.permute(1, 2, 0).numpy()
+    return np.asarray(frame)
 
 
 class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]):
@@ -164,7 +171,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 frame_parts = data.split(",")
 
             frames = np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
+                [_frame_to_hwc(load_frame(frame_data)) for frame_data in frame_parts]
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
@@ -255,11 +262,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
-        check_torch_archive_size(data, parameter="video_embeds")
-        buffer = BytesIO(data)
-        with check_sparse_tensor_invariants_threadsafe():
-            tensor = torch.load(buffer, weights_only=True)
-            return safe_to_dense(tensor, parameter="video_embeds")
+        return load_torch_payload(data, parameter="video_embeds")
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:

@@ -245,8 +245,7 @@ class TestImageEmbedsValidation:
         malicious_tensor = _create_malicious_sparse_tensor()
         encoded = _encode_tensor(malicious_tensor)
 
-        # Should raise RuntimeError due to invalid sparse tensor
-        with pytest.raises((RuntimeError, ValueError)) as exc_info:
+        with pytest.raises(VLLMValidationError) as exc_info:
             io_handler.load_base64("", encoded.decode("utf-8"))
 
         error_msg = str(exc_info.value).lower()
@@ -261,7 +260,7 @@ class TestImageEmbedsValidation:
         torch.save(malicious_tensor, buffer)
         buffer.seek(0)
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             io_handler.load_bytes(buffer.read())
 
     def test_valid_numpy_tensor_accepted(self):
@@ -340,8 +339,7 @@ class TestAudioEmbedsValidation:
         malicious_tensor = _create_malicious_sparse_tensor()
         encoded = _encode_tensor(malicious_tensor)
 
-        # Should raise RuntimeError due to invalid sparse tensor
-        with pytest.raises((RuntimeError, ValueError)) as exc_info:
+        with pytest.raises(VLLMValidationError) as exc_info:
             io_handler.load_base64("", encoded.decode("utf-8"))
 
         error_msg = str(exc_info.value).lower()
@@ -356,7 +354,7 @@ class TestAudioEmbedsValidation:
         torch.save(malicious_tensor, buffer)
         buffer.seek(0)
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             io_handler.load_bytes(buffer.read())
 
 
@@ -387,7 +385,7 @@ class TestSparseTensorValidationIntegration:
         io_handler = ImageEmbeddingMediaIO()
         attack_payload = _encode_tensor(_create_malicious_sparse_tensor())
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             io_handler.load_base64("", attack_payload.decode("utf-8"))
 
     def test_attack_scenario_chat_api_audio(self):
@@ -398,7 +396,7 @@ class TestSparseTensorValidationIntegration:
         io_handler = AudioEmbeddingMediaIO()
         attack_payload = _encode_tensor(_create_malicious_sparse_tensor())
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             io_handler.load_base64("", attack_payload.decode("utf-8"))
 
 
@@ -570,11 +568,15 @@ def _view_of_large_storage() -> bytes:
 class TestCompressedStorageLimit:
     """`torch.load` inflates compressed storages in full before returning."""
 
+    @pytest.mark.parametrize("as_str", [False, True])
     def test_prompt_embeds_rejects_view_of_large_storage(
-        self, model_config, compressed_decode_limit
+        self, model_config, compressed_decode_limit, as_str
     ):
+        encoded = _view_of_large_storage()
+        payload = encoded.decode() if as_str else encoded
+
         with pytest.raises(VLLMValidationError, match="VLLM_MAX_EMBED_DECODE_BYTES"):
-            safe_load_prompt_embeds(model_config, _view_of_large_storage())
+            safe_load_prompt_embeds(model_config, payload)
 
     @pytest.mark.parametrize("io_cls,parameter", EMBEDDING_MEDIA_IO)
     def test_media_io_rejects_view_of_large_storage(

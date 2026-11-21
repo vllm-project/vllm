@@ -80,6 +80,8 @@ A PR that adds significant complexity or a substantial amount of new code must b
 
 Ensure that all changes to vLLM are sound and do not violate existing contracts. Specifically, verify that all affected deployments which share an execution pathway with the changed code will remain correct. Trace related implementations, alternative backends sharing the same flow, and affected call sites of modified functions.
 
+Use the [vLLM security review skill](../review-vllm-security/SKILL.md) when a change affects how vLLM handles untrusted input, how callers can consume shared resources, or who can access data or privileged actions. Verify the relevant safeguards on each affected entry point and backend.
+
 When adding features or changing contracts, ensure that relevant feature compatibility is assessed. Identify any potential incompatibilities or breaking changes and justify them explicitly in the PR notes.
 
 When adding functionality, consider parallels with existing designs and identify opportunities to simplify and unify them rather than adding a separate implementation alongside them.
@@ -177,6 +179,8 @@ Ensure the PR makes clear, concise claims about the accomplishment:
 - For performance optimizations, what specific model/hardware/serving configurations & workloads are being targeted and how can the performance gains be measured?
 
 For the stated claims, ensure the PR provides sufficient evidence, examples, or references to support them, making it easy for reviewers to verify the correctness and impact of the changes.
+
+For newly added tests, the PR description must disclose the commit SHA tests were run on, the testing commands and pytest summary output, including test time.
 
 Present main and PR results with full commands (including server startup), commit IDs, and model/hardware configuration. Paste or attach raw reproducer, accuracy, and benchmark output;  summary tables are not a substitute. For repeated benchmarks, report run count and variability. For kernel performance changes, include before/after profile visualizations/timelines when they help explain the measured gains. Link relevant CI failures or regressing PRs when they motivate the change. Use detail tags to organize and contain long sections.
 

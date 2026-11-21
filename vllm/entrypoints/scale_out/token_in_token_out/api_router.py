@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
@@ -25,6 +26,7 @@ from .protocol import (
     AbortRequestsRequest,
     GenerateRequest,
     GenerateResponseBase,
+    RenderedGenerateResponse,
 )
 from .serving import ServingTokens
 
@@ -44,6 +46,13 @@ def engine_client(request: Request) -> EngineClient:
 
 
 router = APIRouter()
+
+
+async def _send_parts(parts: list[bytes]) -> AsyncGenerator[bytes, None]:
+    """Yields `parts`, dropping each so sent parts can be freed."""
+    parts.reverse()
+    while parts:
+        yield parts.pop()
 
 
 @router.post(
@@ -68,6 +77,13 @@ async def generate(request: GenerateRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
+        )
+
+    elif isinstance(generator, RenderedGenerateResponse):
+        return StreamingResponse(
+            _send_parts(generator.parts),
+            media_type="application/json",
+            headers={"content-length": str(sum(map(len, generator.parts)))},
         )
 
     elif isinstance(generator, GenerateResponseBase):

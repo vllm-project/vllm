@@ -10,9 +10,14 @@ import pytest
 import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+    Qwen3OmniMoeAudioEncoderConfig,
+)
 
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.multimodal.processing import InputProcessingContext
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.
@@ -410,6 +415,46 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         loaded_model = dspark_utils.load_dspark_model(target_model, vllm_config)
 
     assert loaded_model.model.embed_tokens is target_embedding
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires a GPU")
+def test_qwen3_omni_audio_encoder_has_no_gpu_sync(
+    monkeypatch, default_vllm_config, dist_init
+):
+    """The audio tower takes host lengths, so a prefill must not read the GPU."""
+    import vllm.utils.gpu_sync_debug as gpu_sync_debug
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeAudioEncoder,
+        _get_feat_extract_output_lengths,
+    )
+
+    config = Qwen3OmniMoeAudioEncoderConfig(
+        d_model=64,
+        encoder_layers=1,
+        encoder_attention_heads=4,
+        encoder_ffn_dim=128,
+        downsample_hidden_size=32,
+        output_dim=48,
+        n_window_infer=200,
+    )
+    with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
+        encoder = Qwen3OmniMoeAudioEncoder(config)
+    # Multiple chunks and attention windows, with ragged tails.
+    feature_lens = torch.tensor([950, 130], device="cpu")
+    aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
+    features = torch.randn(
+        config.num_mel_bins, int(feature_lens.sum()), device="cuda"
+    ).to(torch.bfloat16)
+
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
+    gpu_sync_debug.enable_gpu_sync_check()
+    with torch.no_grad():
+        output = gpu_sync_debug.with_gpu_sync_check(encoder)(
+            features, feature_lens, aftercnn_lens
+        )
+
+    assert output.shape == (int(aftercnn_lens.sum()), config.output_dim)
 
 
 if __name__ == "__main__":

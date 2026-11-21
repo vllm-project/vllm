@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 
 from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
@@ -117,6 +118,60 @@ def test_image_size_hwc_chw(image):
     assert items.get_image_size(0) == (W, H)
 
 
+@pytest.mark.parametrize("axis", [0, 1, 2])
+@pytest.mark.skip_global_cleanup
+def test_parse_image_normalizes_negative_strides(axis):
+    """Flipped NumPy images are contiguous before reaching HF processors."""
+    image = np.arange(H * W * 3, dtype=np.uint8).reshape(H, W, 3)
+    flipped = np.flip(image, axis=axis)
+
+    items = MultiModalDataParser().parse_mm_data({"image": flipped})["image"]
+    parsed = items.get(0)
+
+    assert all(stride >= 0 for stride in parsed.strides)
+    assert parsed.flags.c_contiguous
+    np.testing.assert_array_equal(parsed, flipped)
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_image_preserves_positive_stride_numpy_array():
+    """Positive-stride arrays remain zero-copy through image parsing."""
+    image = np.zeros((H, W, 3), dtype=np.uint8)
+    view = image[:, ::2]
+
+    items = MultiModalDataParser().parse_mm_data({"image": view})["image"]
+
+    assert items.get(0) is view
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2, 3])
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_parse_video_normalizes_negative_strides(axis, with_metadata):
+    """Flipped NumPy videos are contiguous before reaching HF processors."""
+    video = np.arange(2 * H * W * 3, dtype=np.uint8).reshape(2, H, W, 3)
+    flipped = np.flip(video, axis=axis)
+    data = (flipped, {"fps": 1.0}) if with_metadata else flipped
+
+    items = MultiModalDataParser().parse_mm_data({"video": data})["video"]
+    parsed = items.get(0)
+
+    assert all(stride >= 0 for stride in parsed.strides)
+    assert parsed.flags.c_contiguous
+    np.testing.assert_array_equal(parsed, flipped)
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_video_preserves_positive_stride_numpy_array():
+    """Positive-stride arrays remain zero-copy through video parsing."""
+    video = np.zeros((2, H, W, 3), dtype=np.uint8)
+    view = video[:, :, ::2]
+
+    items = MultiModalDataParser().parse_mm_data({"video": view})["video"]
+
+    assert items.get(0) is view
+
+
 @pytest.mark.parametrize(
     "frame",
     [
@@ -171,6 +226,27 @@ def test_parse_video_frame_list_as_single_video(frames):
     video = items.get(0)
     assert isinstance(video, np.ndarray)
     np.testing.assert_array_equal(video, np.stack([np.asarray(f) for f in frames]))
+
+
+@pytest.mark.parametrize("mode", ["L", "LA", "RGBA", "P"])
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_parse_video_converts_pil_frames_to_rgb(mode, with_metadata):
+    """PIL video frames are converted to RGB like PIL images."""
+    rng = np.random.default_rng(0)
+    channels = {"L": (), "LA": (2,), "RGBA": (4,), "P": (3,)}[mode]
+    frames = [
+        Image.fromarray(rng.integers(0, 256, (H, W, *channels), dtype=np.uint8))
+        for _ in range(2)
+    ]
+    if mode == "P":
+        frames = [frame.convert("P") for frame in frames]
+    data = (frames, {"fps": 1.0}) if with_metadata else frames
+
+    parsed = MultiModalDataParser().parse_mm_data({"video": data})["video"].get(0)
+
+    expected = [convert_image_mode(frame, "RGB") for frame in frames]
+    np.testing.assert_array_equal(np.array(parsed), np.array(expected))
 
 
 @pytest.mark.parametrize(
