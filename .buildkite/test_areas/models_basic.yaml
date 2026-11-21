@@ -576,6 +576,19 @@ steps:
       commands:
       - pytest -v -s models/qwen3_5/ kernels/mamba/test_gdn_output_projection.py
 
+- label: ":nvidia: (B200) Nemotron Shortcut"
+  key: nemotron-shortcut-unit-tests-b200
+  automatic_shard: true
+  timeout_in_minutes: 60
+  device: b200-k8s
+  # test_sdsa_engine.py runs TP2.
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/models/nemotron_shortcut/
+  - tests/models/nemotron_shortcut/
+  commands:
+  - pytest -v -s models/nemotron_shortcut/
+
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
   automatic_shard: true
