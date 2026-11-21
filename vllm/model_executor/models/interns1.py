@@ -207,18 +207,18 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         num_image_patches = image_processor.get_number_of_image_patches(
             image_height,
             image_width,
-            self.ctx.get_merged_mm_kwargs(mm_kwargs),
+            self._get_effective_mm_processor_kwargs(mm_kwargs)["images_kwargs"],
         )
 
         return processor.image_seq_length * num_image_patches
 
     def resolve_target_ratios(self, use_thumbnail: bool | None = None):
-        image_processor = self.get_hf_processor().image_processor
-        min_dynamic_patch = image_processor.min_patches
-        max_dynamic_patch = image_processor.max_patches
+        image_kwargs = self._get_effective_mm_processor_kwargs({})["images_kwargs"]
+        min_dynamic_patch = image_kwargs["min_patches"]
+        max_dynamic_patch = image_kwargs["max_patches"]
         # HF format's InternVL processor uses `crop_to_patches` which is
         # equivalent to `use_thumbnail` in original format.
-        use_thumbnail = image_processor.crop_to_patches
+        use_thumbnail = image_kwargs["crop_to_patches"]
         dynamic_image_size = True
         min_num, max_num = resolve_interns1_min_max_num(
             min_dynamic_patch,

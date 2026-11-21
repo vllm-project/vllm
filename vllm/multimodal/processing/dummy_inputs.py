@@ -19,6 +19,8 @@ from vllm.logger import init_logger
 
 from .context import BaseProcessingInfo
 
+MIN_DUMMY_SIDE = 4
+
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 logger = init_logger(__name__)

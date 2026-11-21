@@ -1314,6 +1314,39 @@ def test_supported_mm_processor_kwargs_is_cached(
     assert calls == 1
 
 
+def test_effective_mm_processor_kwargs_fill_in_processor_defaults():
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        mm_processor_kwargs={"videos_kwargs": {"fps": 1.0}},
+    )
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+    hf_processor = info.get_hf_processor()
+
+    effective = info._get_effective_mm_processor_kwargs({})
+    merged = info._merge_and_resolve_mm_processor_kwargs({})
+
+    assert effective["videos_kwargs"]["fps"] == 1.0
+    assert (
+        effective["videos_kwargs"]["temporal_patch_size"]
+        == hf_processor.video_processor.temporal_patch_size
+    )
+    assert (
+        effective["images_kwargs"]["merge_size"]
+        == hf_processor.image_processor.merge_size
+    )
+    assert "temporal_patch_size" not in merged["videos_kwargs"]
+
+
+def test_effective_mm_processor_kwargs_apply_processor_level_defaults():
+    ctx = build_model_context("OpenGVLab/InternVL3-1B-hf")
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+
+    effective = info._get_effective_mm_processor_kwargs({})
+
+    assert info.get_hf_processor().image_processor.crop_to_patches is False
+    assert effective["images_kwargs"]["crop_to_patches"] is True
+
+
 def test_resolve_mm_processor_kwargs_routes_supported_flat_kwargs():
     kwargs = {
         "size": {"shortest_edge": 64},

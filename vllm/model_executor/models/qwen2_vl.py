@@ -43,7 +43,7 @@ from transformers.models.qwen2_vl.configuration_qwen2_vl import (
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import ModalityData, MultiModalDataDict
@@ -88,6 +88,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -1127,6 +1128,59 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
         return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
+    def _get_video_size_with_most_features(
+        self, overrides: VideoDummyOptions | None = None
+    ) -> ImageSize:
+        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
+        size = self._get_vision_size(
+            merged_mm_kwargs.get("videos_kwargs", {}),
+            default_size=self.get_image_processor().size,
+        )
+        if overrides is None or not (overrides.width or overrides.height):
+            return self.get_image_size_with_most_features(
+                max_pixels=size["longest_edge"]
+            )
+
+        vision_config = self.get_hf_config().vision_config
+        unit = vision_config.patch_size * vision_config.spatial_merge_size
+        max_patches = size["longest_edge"] // (unit * unit)
+        max_width = overrides.width or unit * max_patches
+        max_height = overrides.height or unit * max_patches
+        sizes = [ImageSize(width=max_width, height=max_height)]
+        for h in range(1, max_patches + 1):
+            w = max_patches // h
+            sizes.append(
+                ImageSize(
+                    width=min(unit * w, max_width), height=min(unit * h, max_height)
+                )
+            )
+            if unit * h <= max_height and (w_fit := min(w, max_width // unit)):
+                sizes.append(ImageSize(width=unit * w_fit, height=unit * h))
+            scale = min(1.0, max_width / (unit * w), max_height / (unit * h))
+            sizes.append(
+                ImageSize(
+                    width=max(min(MIN_DUMMY_SIDE, max_width), int(unit * w * scale)),
+                    height=max(min(MIN_DUMMY_SIDE, max_height), int(unit * h * scale)),
+                )
+            )
+
+        def num_tokens(canvas: ImageSize) -> int:
+            if max(canvas) > 200 * min(canvas):
+                return 0
+            height, width = smart_resize(
+                height=canvas.height,
+                width=canvas.width,
+                factor=unit,
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
+            )
+            return (height // unit) * (width // unit)
+
+        return max(
+            sizes,
+            key=lambda canvas: (num_tokens(canvas), -canvas.width * canvas.height),
+        )
+
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
@@ -1140,7 +1194,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
     def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 1) -> int:
         image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_video_size_with_most_features()
 
         num_frames = start_num_frames
 
@@ -1193,7 +1247,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 mm_kwargs={},
             )
 
-        max_size = self.get_image_size_with_most_features()
+        max_size = self._get_video_size_with_most_features()
         max_size_frames = self.get_num_frames_with_most_features(
             seq_len, mm_counts.get("video", 0)
         )
@@ -1267,6 +1321,9 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         video_size, target_num_frames = (
             self.info.get_video_size_and_frames_with_most_features(seq_len, mm_counts)
         )
+        video_overrides = mm_options.get("video")
+        if video_overrides and (video_overrides.width or video_overrides.height):
+            video_size = self.info._get_video_size_with_most_features(video_overrides)
 
         return {
             "image": self._get_dummy_images(

@@ -41,10 +41,17 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
+from transformers.models.muse_glimmer.image_processing_muse_glimmer import (
+    smart_resize,
+)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import (
+    ImageDummyOptions,
+    MultiModalDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.distributed import (
     divide,
     get_pp_group,
@@ -81,6 +88,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -116,6 +124,60 @@ def _text_config(config):
 
 def _muse_glimmer_has_vision(config) -> bool:
     return hasattr(config, "vision_config")
+
+
+def _get_canvas_with_most_tokens(
+    max_tokens: int,
+    factor: int,
+    overrides: ImageDummyOptions | VideoDummyOptions | None = None,
+) -> ImageSize:
+    if overrides is None or not (overrides.width or overrides.height):
+        height, width = max(
+            ((h, max_tokens // h) for h in range(1, max_tokens + 1)),
+            key=lambda hw: (hw[0] * hw[1], -abs(hw[0] - hw[1])),
+        )
+        return ImageSize(width=factor * width, height=factor * height)
+
+    max_width = overrides.width or factor * max_tokens
+    max_height = overrides.height or factor * max_tokens
+
+    def num_tokens(width: int, height: int) -> int:
+        height, width = smart_resize(height, width, factor, max_tokens)
+        return (height // factor) * (width // factor)
+
+    best, best_tokens = ImageSize(width=factor, height=factor), 0
+    if overrides.width and overrides.height:
+        best = ImageSize(width=max_width, height=max_height)
+        best_tokens = num_tokens(*best)
+    grids = sorted(
+        (
+            (ph, pw)
+            for ph in range(1, min(max_tokens, max_height // factor + 1) + 1)
+            for pw in range(1, min(max_tokens // ph, max_width // factor + 1) + 1)
+        ),
+        key=lambda grid: grid[0] * grid[1],
+        reverse=True,
+    )
+    for ph, pw in grids:
+        if ph * pw <= best_tokens:
+            break
+        h_lo = max((ph - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_height))
+        h_hi = min(ph * factor, max_height)
+        w_lo = max((pw - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_width))
+        w_hi = min(pw * factor, max_width)
+        if h_lo > h_hi or w_lo > w_hi:
+            continue
+        candidates = [(w, h) for w in (w_lo, w_hi) for h in (h_lo, h_hi)]
+        candidates += [
+            (w, min(h_hi, max(h_lo, round(ph * w / pw)))) for w in (w_lo, w_hi)
+        ]
+        candidates += [
+            (min(w_hi, max(w_lo, round(pw * h / ph))), h) for h in (h_lo, h_hi)
+        ]
+        for width, height in candidates:
+            if (tokens := num_tokens(width, height)) > best_tokens:
+                best, best_tokens = ImageSize(width=width, height=height), tokens
+    return best
 
 
 IMAGE_TOKEN = "<|patch|>"
@@ -163,39 +225,37 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        processor = self.get_hf_processor()
-        image_processor = processor.image_processor
-        video_processor = processor.video_processor
+        mm_kwargs = self._get_effective_mm_processor_kwargs({})
+        image_kwargs = mm_kwargs["images_kwargs"]
+        video_kwargs = mm_kwargs["videos_kwargs"]
         num_frames = self.get_num_frames_with_most_features(
             seq_len, mm_counts.get("video", 0)
         )
         return {
-            "image": int(image_processor.max_image_tokens),
+            "image": int(image_kwargs["max_image_tokens"]),
             "video": (
                 num_frames
-                // int(video_processor.temporal_patch_size)
-                * int(video_processor.max_video_frame_tokens)
+                // int(video_kwargs["temporal_patch_size"])
+                * int(video_kwargs["max_video_frame_tokens"])
             ),
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_hf_processor().image_processor
-        grid_size = math.isqrt(int(image_processor.max_image_tokens))
-        side = (
-            int(image_processor.patch_size)
-            * int(image_processor.merge_size)
-            * grid_size
+        image_kwargs = self._get_effective_mm_processor_kwargs({})["images_kwargs"]
+        return _get_canvas_with_most_tokens(
+            int(image_kwargs["max_image_tokens"]),
+            int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
         )
-        return ImageSize(width=side, height=side)
 
     def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
         num_videos = max(num_videos, 1)
         groups = max(
             1,
-            seq_len // num_videos // int(video_processor.max_video_frame_tokens),
+            seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
         )
-        temporal_patch_size = int(video_processor.temporal_patch_size)
+        temporal_patch_size = int(video_kwargs["temporal_patch_size"])
         max_groups = max(1, int(video_processor.num_frames) // temporal_patch_size)
         return min(groups, max_groups) * temporal_patch_size
 
@@ -212,25 +272,29 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        processor = self.info.get_hf_processor()
-        video_processor = processor.video_processor
-        image_width, image_height = self.info.get_image_size_with_most_features()
-        video_grid = math.isqrt(int(video_processor.max_video_frame_tokens))
-        video_size = (
-            int(video_processor.patch_size)
-            * int(video_processor.merge_size)
-            * video_grid
+        mm_kwargs = self.info._get_effective_mm_processor_kwargs({})
+        image_kwargs = mm_kwargs["images_kwargs"]
+        video_kwargs = mm_kwargs["videos_kwargs"]
+        image_size = _get_canvas_with_most_tokens(
+            int(image_kwargs["max_image_tokens"]),
+            int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
+            mm_options.get("image"),
+        )
+        video_size = _get_canvas_with_most_tokens(
+            int(video_kwargs["max_video_frame_tokens"]),
+            int(video_kwargs["patch_size"]) * int(video_kwargs["merge_size"]),
+            mm_options.get("video"),
         )
         return {
             "image": self._get_dummy_images(
-                width=image_width,
-                height=image_height,
+                width=image_size.width,
+                height=image_size.height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=video_size,
-                height=video_size,
+                width=video_size.width,
+                height=video_size.height,
                 num_frames=self.info.get_num_frames_with_most_features(
                     seq_len, mm_counts.get("video", 0)
                 ),
