@@ -1,5 +1,11 @@
 # MiniMax M3 specialized decode
 
+M3.1-Flash's all-sparse attention layout uses the separate `amd/mono`
+whole-layer path via `--monokernel`. Both paths accept UMBP's
+canonical KV blocks. Whole-layer decode needs
+`--disable-hybrid-kv-cache-manager` to share attention/indexer block IDs;
+the specialized path below keeps the hybrid manager enabled.
+
 `--monokernel` on MI355X/gfx950 runs each sparse layer (3-59) as vLLM's input
 norm and attention followed by one persistent FlyDSL launch for the rest of the
 layer (`mono/ffn.py`): the attention TP all-reduce and residual add, the Gemma
@@ -22,6 +28,12 @@ Milestone one is deliberately narrow:
 `runtime/` owns refusals, planning, health and shutdown; `mono/` owns the
 kernel and its host launcher. Unsupported static deployments are refused with
 all known reasons.
+
+KV connectors are accepted only when they restore whole blocks produced by
+the same KV cache layout (`only_restores_canonical_kv`). `UMBPStoreConnector`
+supports this contract in embedded and standalone modes. Keep async loading
+and the hybrid KV cache manager enabled so both the FP8 attention KV and
+sparse-indexer K caches can be restored. Other connectors remain refused.
 
 ## Fail-stop
 

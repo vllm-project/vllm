@@ -148,6 +148,39 @@ With `kv_role: "kv_consumer"` the connector only restores and never stores.
 - Pipeline parallelism is rejected.
 - Stores are submitted once per step after the forward pass.
 
+### MiniMax M3 and M3.1 monokernels
+
+The ROCm MiniMax M3 `--monokernel` accepts `UMBPStoreConnector` because it
+restores whole KV blocks produced with the same cache layout. Connectors that
+do not declare `only_restores_canonical_kv` remain unsupported. A
+`MultiConnector` qualifies only when every child declares this capability.
+
+All existing MiniMax monokernel deployment requirements still apply, including
+TP4, compatible AITER MXFP4 expert weights, FP8 attention and indexer caches,
+and block size 128. Keep prefix caching, asynchronous UMBP loading, and the
+hybrid KV cache manager enabled so attention and indexer state are restored
+together. A connector capability declaration does not make an unsupported
+checkpoint weight layout compatible with the monokernel.
+
+MiniMax M3.1-Flash's all-sparse layout uses the existing whole-layer decode
+path, selected by `--monokernel`. That path accepts UMBP in
+embedded and standalone modes under the same canonical-KV contract. It reads
+shared-expert fusion support from the MoE layers. Unlike M3's specialized
+path, whole-layer decode needs matching attention/indexer block IDs: use
+`--disable-hybrid-kv-cache-manager` and eager execution or full-decode CUDA
+graphs. Prefill and ineligible decode steps still use normal execution.
+
+On ROCm, the original `MiniMaxAI/MiniMax-M3.1-Flash` checkpoint needs the
+existing `--quantization-config.moe mxfp4` option to convert its NVFP4 routed
+experts to the kernel's supported format, or use a compatible Quark MXFP4
+checkpoint. Attention/dense weights retain their checkpoint format. To require
+decode kernels rather than allowing drafter-only selection, use
+`--additional-config '{"minimax_m3_monokernel": ["decode"]}'`. Startup fails
+if no selected kernel supports the configuration. Verify the
+`MiniMax-M3 --monokernel: whole-layer mono decode` selection log and check for
+later `mono decode off` messages. Setup logs do not prove every step used the
+monokernel.
+
 With KV events enabled, the scheduler verifies residency on every rank before
 publishing a stored-object event. It periodically rechecks tracked objects
 during engine steps to report removals. These checks do not delay the release

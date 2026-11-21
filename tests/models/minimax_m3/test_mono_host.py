@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import KVTransferConfig
+
 pytest.importorskip("flydsl")
 
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa: E402
@@ -125,6 +127,7 @@ def test_configure_accepts_only_the_two_kv_page_strides():
 def _vllm_config(**overrides):
     cg = SimpleNamespace(requires_piecewise_compilation=lambda: False)
     cfg = SimpleNamespace(
+        kv_transfer_config=None,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=TP,
             data_parallel_size=1,
@@ -154,7 +157,6 @@ def _model(fse: bool = True, shared_mlp: bool = True, aux=(), **attn):
         shared_experts=object() if shared_mlp else None,
     )
     return SimpleNamespace(
-        is_fused_shared_expert_enabled=fse,
         aux_hidden_state_layers=aux,
         layers=[_layer(False, True)] * 3 + [moe] * 2,
     )
@@ -169,6 +171,57 @@ def _mi355x(monkeypatch):
 @pytest.mark.parametrize("aux", [(), (2, 30, 57)])
 def test_config_refusal_accepts_the_supported_deployment(fse, aux):
     assert config_refusal(_vllm_config(), _model(fse=fse, aux=aux)) is None
+
+
+@pytest.mark.parametrize(
+    "connector, children, accepted",
+    [
+        ("UMBPStoreConnector", None, True),
+        ("ExampleConnector", None, False),
+        ("MultiConnector", ["UMBPStoreConnector"], True),
+        ("MultiConnector", ["UMBPStoreConnector", "ExampleConnector"], False),
+        ("MultiConnector", [], False),
+    ],
+)
+def test_whole_layer_decode_requires_canonical_kv(
+    tmp_path, connector, children, accepted
+):
+    from transformers import MiniMaxM3VLConfig
+
+    from vllm.config import (
+        AttentionConfig,
+        CacheConfig,
+        CompilationConfig,
+        ModelConfig,
+        ParallelConfig,
+        VllmConfig,
+    )
+
+    MiniMaxM3VLConfig(
+        architectures=["MiniMaxM3SparseForConditionalGeneration"],
+        text_config={"layer_types": ["minimax_m3_sparse"] * 60},
+    ).save_pretrained(tmp_path)
+    extra = {}
+    if children is not None:
+        extra["connectors"] = [
+            {"kv_connector": child, "kv_role": "kv_both"} for child in children
+        ]
+    config = VllmConfig(
+        model_config=ModelConfig(
+            str(tmp_path), skip_tokenizer_init=True, max_model_len=32768
+        ),
+        parallel_config=ParallelConfig(tensor_parallel_size=4),
+        cache_config=CacheConfig(cache_dtype="fp8", block_size=128),
+        attention_config=AttentionConfig(indexer_kv_dtype="fp8"),
+        compilation_config=CompilationConfig(mode=0, cudagraph_mode="NONE"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector=connector,
+            kv_role="kv_both",
+            kv_connector_extra_config=extra,
+        ),
+    )
+    reason = config_refusal(config, _model(fse=False))
+    assert reason == (None if accepted else "KV connector with noncanonical KV")
 
 
 @pytest.mark.parametrize(
