@@ -716,12 +716,16 @@ class AmpereIndexer(DeepseekV4Indexer):
         self,
         qr: torch.Tensor | QuantizedActivation,
         qr_scale: torch.Tensor | None,
-        indexer_weights: torch.Tensor,
+        indexer_weights: torch.Tensor | None,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
+        hidden_states: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """MXFP4 indexer queries: values `[T, H, 64]`, scales as one int32
         per (token, head), and the FP32 head weights."""
+        if indexer_weights is None:
+            assert hidden_states is not None
+            indexer_weights, _ = self.weights_proj(hidden_states)
         q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_head, self.head_dim)
         values, scales, weights = indexer_q_rope_quant(
             positions,
