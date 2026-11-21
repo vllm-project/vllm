@@ -154,6 +154,54 @@ def test_prefill_dequant_scratch_ignores_unused_capacity(
             torch.testing.assert_close(table, common.block_table_tensor[1:, :width])
 
 
+@pytest.mark.parametrize("head_size", [256, 512])
+def test_q_dtype_requires_trtllm_gen_kernel(head_size, monkeypatch):
+    """FP8 query is only used for head dims with a trtllm-gen kernel."""
+    device = torch.device("cuda")
+    config = create_vllm_config(model_name=MODEL, max_model_len=32768)
+    config.cache_config.cache_dtype = "fp8"
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        _mock_get_per_layer_parameters,
+    )
+    spec = AttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=2,
+        head_size=head_size,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+    with set_current_vllm_config(config):
+        builder = FlashInferMetadataBuilder(spec, ["layer.0"], config, device)
+    expects_fp8 = head_size in (64, 128, 256)
+    for q_dtype in (builder.q_data_type_prefill, builder.q_data_type_decode):
+        assert (q_dtype == current_platform.fp8_dtype()) is expects_fp8
+
+
+def test_model_dtype_when_trtllm_attention_disabled(monkeypatch):
+    """A forced-off TRTLLM backend leaves only native kernels, so Q stays
+    in the model dtype instead of tripping the FP8-query assert."""
+    device = torch.device("cuda")
+    config = create_vllm_config(model_name=MODEL, max_model_len=32768)
+    config.cache_config.cache_dtype = "fp8"
+    config.attention_config.use_trtllm_attention = False
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        _mock_get_per_layer_parameters,
+    )
+    spec = AttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=2,
+        head_size=128,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+    with set_current_vllm_config(config):
+        builder = FlashInferMetadataBuilder(spec, ["layer.0"], config, device)
+    assert builder.q_data_type_prefill == config.model_config.dtype
+    assert builder.q_data_type_decode == config.model_config.dtype
+
+
 def _create_nvfp4_hnd_kv_cache(
     k_contexts,
     v_contexts,

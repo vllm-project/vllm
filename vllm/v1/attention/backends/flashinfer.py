@@ -903,6 +903,13 @@ def _is_xqa_head_dim_supported(head_dim: int) -> bool:
     return 16 <= head_dim <= 256 and head_dim % 16 == 0
 
 
+# TRTLLM-GEN attention cubins are built for head dims 64/128/256. Wider groups,
+# such as Gemma 4's d512 full-attention layers, have no context kernel, so they
+# cannot consume FP8 queries and must keep the model dtype.
+def _is_trtllm_gen_head_dim_supported(head_dim: int) -> bool:
+    return head_dim in (64, 128, 256)
+
+
 @dataclass(slots=True)
 class TRTLLMPrefill:
     """Metadata for the TRTLLM prefill pathway."""
@@ -1382,9 +1389,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # above with model-dtype Q, while SM100 uses trtllm-gen.
             # Architectures with only fa2 (e.g. SM89, SM120) cannot
             # consume FP8 queries, so keep the model dtype for Q there.
-            if current_platform.is_device_capability(
-                90
-            ) or current_platform.is_device_capability_family(100):
+            if current_platform.is_device_capability(90):
+                return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
+            if current_platform.is_device_capability_family(100):
+                # Native FlashInfer does not accept FP8 queries, and only the
+                # trtllm-gen kernel can. Keep the model dtype when TRT-LLM is
+                # disabled or the group's head dim has no trtllm-gen kernel.
+                if (
+                    force_use_trtllm_attention() is False
+                    or not _is_trtllm_gen_head_dim_supported(self.head_dim)
+                ):
+                    return self.model_config.dtype
                 return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
             return self.model_config.dtype
         if cache_dtype.startswith("nvfp4"):
@@ -2425,6 +2440,9 @@ class FlashInferImpl(AttentionImpl):
             self.supports_xqa_or_trtllm_gen_decode
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
+            # Groups without a trtllm-gen kernel keep the model dtype, so the
+            # query must not be pre-quantized upstream.
+            and _is_trtllm_gen_head_dim_supported(head_size)
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
@@ -2482,6 +2500,9 @@ class FlashInferImpl(AttentionImpl):
             self.supports_xqa_or_trtllm_gen_decode
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
+            # Groups without a trtllm-gen kernel keep a model-dtype query,
+            # which the fused output-quant path does not support.
+            and _is_trtllm_gen_head_dim_supported(self.head_size)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
             # The mm-prefix branch quantizes FP8 outputs only, as the composite.
             and (
