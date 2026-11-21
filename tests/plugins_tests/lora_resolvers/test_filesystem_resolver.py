@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 import shutil
 
@@ -63,3 +64,34 @@ async def test_nonlora_adapter(adapter_cache, pa_files):
 
     pa_request = await fs_resolver.resolve_lora(MODEL_NAME, PA_NAME)
     assert pa_request is None
+
+
+@pytest.fixture
+def outside_adapter(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": MODEL_NAME})
+    )
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    return cache_dir, outside
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("absolute", [False, True])
+async def test_rejects_adapter_outside_cache(outside_adapter, absolute):
+    cache_dir, outside = outside_adapter
+    fs_resolver = FilesystemResolver(str(cache_dir))
+    lora_name = str(outside) if absolute else "../outside"
+    assert await fs_resolver.resolve_lora(MODEL_NAME, lora_name) is None
+
+
+@pytest.mark.asyncio
+async def test_symlinked_adapter_in_cache(outside_adapter):
+    cache_dir, outside = outside_adapter
+    (cache_dir / "linked").symlink_to(outside, target_is_directory=True)
+    fs_resolver = FilesystemResolver(str(cache_dir))
+    lora_request = await fs_resolver.resolve_lora(MODEL_NAME, "linked")
+    assert lora_request is not None
+    assert lora_request.lora_path == str(cache_dir / "linked")
