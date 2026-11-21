@@ -46,18 +46,46 @@ logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
+def _emits_col_major_group_scales() -> bool:
+    """Whether QuantFP8 can emit M-major group scales here (CDNA >= 5, see
+    QuantFP8.forward_hip), so the column-major pattern variants can match."""
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() >= 5
+
+
+def _as_group_quant_scale(scale: torch.Tensor) -> torch.Tensor:
+    """A row-major (M, G) scale re-presented the way rocm_aiter_group_fp8_quant
+    returns M-major scales: a contiguous (M, G) tensor holding (G, M) bytes."""
+    return scale.transpose(0, 1).contiguous().view(scale.shape)
+
+
 class AiterRMSNormQuantPattern:
     def __init__(
-        self, epsilon: float, key: FusedRMSQuantKey, match_aiter_quant: bool = True
+        self,
+        epsilon: float,
+        key: FusedRMSQuantKey,
+        match_aiter_quant: bool = True,
+        has_col_major_scales: bool = False,
     ):
         self.epsilon = epsilon
         self.quant_dtype = key.quant.dtype
         self.device = torch.device("cuda")
+        self.has_col_major_scales = has_col_major_scales
 
         self.quant_matcher = MatcherQuantFP8(
             key.quant,
             match_rocm_aiter=match_aiter_quant,
+            has_col_major_scales=has_col_major_scales,
         )
+
+    def fused_quant_kwargs(self) -> dict[str, Any]:
+        """Group-quant kwargs for the fused op. Column-major patterns ask it
+        for M-major scales, presented like rocm_aiter_group_fp8_quant's."""
+        kwargs: dict[str, Any] = {"group_size": 128}
+        if self.has_col_major_scales:
+            kwargs["transpose_scale"] = True
+        return kwargs
 
     def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         return torch.empty(*args, dtype=torch.bfloat16, device=self.device, **kwargs)
@@ -195,6 +223,7 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         group_shape: GroupShape,
         match_aiter_quant: bool = True,
         symmetric: bool = True,
+        has_col_major_scales: bool = False,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(
@@ -202,7 +231,7 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, match_aiter_quant)
+        super().__init__(epsilon, key, match_aiter_quant, has_col_major_scales)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -221,7 +250,7 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
                 x=input,
                 weight=weight,
                 variance_epsilon=self.epsilon,
-                group_size=128,
+                **self.fused_quant_kwargs(),
             )
 
             return at[0], at[1]
@@ -250,6 +279,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         group_shape: GroupShape,
         match_aiter_quant: bool = True,
         symmetric: bool = True,
+        has_col_major_scales: bool = False,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(
@@ -257,7 +287,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, match_aiter_quant)
+        super().__init__(epsilon, key, match_aiter_quant, has_col_major_scales)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -282,7 +312,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
                 residual=residual,
                 weight=weight,
                 variance_epsilon=self.epsilon,
-                group_size=128,
+                **self.fused_quant_kwargs(),
             )
 
             # result, scale, residual
@@ -765,6 +795,24 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
 
+            if match_aiter_quant_op and _emits_col_major_group_scales():
+                # The same two fusions where QuantFP8 asks for M-major scales
+                # (gfx1250, ahead of the Gluon preshuffled block-scale GEMM).
+                AiterRMSFp8GroupQuantPattern(
+                    epsilon,
+                    FP8_DTYPE,
+                    GroupShape(1, 128),
+                    match_aiter_quant_op,
+                    has_col_major_scales=True,
+                ).register(self.patterns)
+                AiterFusedAddRMSFp8GroupQuantPattern(
+                    epsilon,
+                    FP8_DTYPE,
+                    GroupShape(1, 128),
+                    match_aiter_quant_op,
+                    has_col_major_scales=True,
+                ).register(self.patterns)
+
             # Fuse aiter rms_norm + aiter static per-tensor fp8 quant
             AiterRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
@@ -849,10 +897,15 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
 
     FUSED_SILU_MUL_QUANT_OP = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
 
-    def __init__(self, match_aiter_quant_op: bool = True) -> None:
+    def __init__(
+        self, match_aiter_quant_op: bool = True, has_col_major_scales: bool = False
+    ) -> None:
         self.silu_and_mul_matcher = MatcherSiluAndMul()
+        self.has_col_major_scales = has_col_major_scales
         self.quant_matcher = MatcherQuantFP8(
-            quant_key=kFp8Dynamic128Sym, match_rocm_aiter=match_aiter_quant_op
+            quant_key=kFp8Dynamic128Sym,
+            match_rocm_aiter=match_aiter_quant_op,
+            has_col_major_scales=has_col_major_scales,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -877,6 +930,10 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at = self.FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
+            if self.has_col_major_scales:
+                # The fused act+quant kernel has no M-major output, so only
+                # its (1/64-size) scales are transposed afterwards.
+                return at[0], _as_group_quant_scale(at[1])
             return at[0], at[1]
 
         return _replacement
@@ -899,6 +956,13 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         self.register(
             AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
         )
+        if match_aiter_quant_op and _emits_col_major_group_scales():
+            self.register(
+                AiterSiluMulFp8GroupQuantPattern(
+                    match_aiter_quant_op=match_aiter_quant_op,
+                    has_col_major_scales=True,
+                )
+            )
 
         self.dump_patterns(config, self.pm_pass)
 
@@ -1250,8 +1314,10 @@ class MLADualRMSGroupQuantPattern(
     GROUP_QUANT_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
     FUSED_OP = rocm_aiter_ops.get_fused_mla_dual_rms_norm_group_quant_op()
 
-    def __init__(self, epsilon: float) -> None:
+    def __init__(self, epsilon: float, has_col_major_scales: bool = False) -> None:
         self._epsilon = epsilon
+        # Matches the M-major q scale the column-major rms+quant fusion emits.
+        self._has_col_major_scales = has_col_major_scales
 
     def get_inputs(self) -> list[torch.Tensor]:
         q_dim, kv_c_dim, k_pe_dim = 256, 128, 64
@@ -1275,6 +1341,7 @@ class MLADualRMSGroupQuantPattern(
     ]:
         eps = self._epsilon
         group_quant_op = self.GROUP_QUANT_OP
+        col_major = self._has_col_major_scales
 
         def _pattern(
             projected: torch.Tensor,
@@ -1298,6 +1365,8 @@ class MLADualRMSGroupQuantPattern(
                 variance_epsilon=eps,
                 group_size=128,
             )
+            if col_major:
+                quant_kwargs["transpose_scale"] = True
             q_quant = group_quant_op(**quant_kwargs)
             kv_normed = vllm.ir.ops.rms_norm(kv_c, kv_weight, eps)
             return q_quant[0], q_quant[1], kv_normed, k_pe
@@ -1318,6 +1387,7 @@ class MLADualRMSGroupQuantPattern(
     ]:
         eps = self._epsilon
         fused_op = self.FUSED_OP
+        col_major = self._has_col_major_scales
 
         def _replacement(
             projected: torch.Tensor,
@@ -1343,10 +1413,15 @@ class MLADualRMSGroupQuantPattern(
                 eps,
                 eps,
                 128,
-                False,
+                col_major,
             )
+            q_scale = at[1]
+            if col_major:
+                # The op returns a strided column-major view; re-present its
+                # bytes as the contiguous (M, G) tensor the matched op gave.
+                q_scale = q_scale.transpose(0, 1).view(q_scale.shape)
             # q_fp8, q_scale, kv_normed, k_pe
-            return at[0], at[1], at[2], k_pe
+            return at[0], q_scale, at[2], k_pe
 
         return _replacement
 
@@ -1370,3 +1445,7 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
             self.register(MLADualRMSNormPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
             self.register(MLADualRMSGroupQuantPattern(epsilon))
+            if _emits_col_major_group_scales():
+                self.register(
+                    MLADualRMSGroupQuantPattern(epsilon, has_col_major_scales=True)
+                )
