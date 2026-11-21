@@ -172,7 +172,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._worker: CPUOffloadingWorker | None = None
+        self._worker: OffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
         self.cache_policy_module_path: str | None = self.extra_config.get(
@@ -215,7 +215,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             current_platform.is_cuda_alike() and not current_platform.is_rocm()
         ) or current_platform.is_xpu()
 
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
         prefault_shard: tuple[int, int] | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be

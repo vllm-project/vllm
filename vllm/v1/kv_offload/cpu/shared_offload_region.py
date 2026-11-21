@@ -362,6 +362,11 @@ class SharedOffloadRegion:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
 
+    @property
+    def created_file(self) -> bool:
+        """Whether this process created the backing files and still names them."""
+        return self._creator
+
     def prefault_ranges(
         self, shard: tuple[int, int] | None = None
     ) -> list[tuple[int, int]]:

@@ -777,6 +777,31 @@ steps:
       NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' &&
       python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager"
 
+# Its own step: 2-Node above excludes vllm/distributed/kv_transfer/, and an
+# exclusion wins over any include, so it cannot follow the connector.
+- label: ":nvidia: (L4) [Nightly] Distributed 2-Node KV Offload Mirror"
+  key: 2-node-kv-offload-mirror
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  num_nodes: 2
+  no_plugin: true
+  optional: true # TODO: revert with 2-Node above once its infra issue is solved
+  source_file_dependencies:
+  - vllm/v1/kv_offload/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/nixl_utils.py
+  - vllm/distributed/parallel_state.py
+  - vllm/config/kv_transfer.py
+  - tests/distributed/test_kv_offload_mirror.py
+  commands:
+    - >-
+      ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG
+      "pytest -v -s distributed/test_kv_offload_mirror.py"
+      "true"
+
 - label: ":nvidia: (L4) [Nightly] Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
