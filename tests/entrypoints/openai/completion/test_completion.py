@@ -3,13 +3,20 @@
 
 from contextlib import suppress
 
+import aiohttp
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import regex as re
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
+from vllm.benchmarks.lib.endpoint_request_func import (
+    RequestFuncInput,
+    async_request_openai_completions,
+)
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
@@ -341,6 +348,62 @@ async def test_completion_streaming(
     # The last chunk may carry only the finish_reason (Rust); the joined text is
     # checked against the non-streaming output below.
     assert "".join(chunks) == single_output
+
+
+@pytest.mark.asyncio
+async def test_benchmark_sse_metadata(
+    server: RemoteOpenAIServer, client: openai.AsyncOpenAI
+) -> None:
+    """SSE metadata must preserve real model output and benchmark token counts."""
+    prompt = "The capital of France is"
+    reference = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=8,
+        temperature=0,
+        seed=0,
+        extra_body={"ignore_eos": True},
+    )
+    assert reference.usage is not None
+    async with aiohttp.ClientSession() as session:
+
+        async def proxy(request: web.Request) -> web.StreamResponse:
+            async with session.post(
+                server.url_for("v1", "completions"), json=await request.json()
+            ) as upstream:
+                upstream.raise_for_status()
+                response = web.StreamResponse(
+                    headers={"Content-Type": upstream.headers["Content-Type"]}
+                )
+                await response.prepare(request)
+                await response.write(
+                    b"event: message\nid: 1\nretry: 1000\n: keepalive\n"
+                )
+                async for chunk in upstream.content.iter_any():
+                    await response.write(chunk)
+                await response.write_eof()
+                return response
+
+        app = web.Application()
+        app.router.add_post("/v1/completions", proxy)
+        async with TestServer(app) as proxy_server:
+            request = RequestFuncInput(
+                prompt=prompt,
+                api_url=str(proxy_server.make_url("/v1/completions")),
+                prompt_len=reference.usage.prompt_tokens,
+                output_len=8,
+                model=MODEL_NAME,
+                ignore_eos=True,
+                extra_body={"temperature": 0, "seed": 0},
+            )
+            output = await async_request_openai_completions(request, session)
+
+    assert output.success, output.error
+    assert output.generated_text == reference.choices[0].text
+    assert output.output_tokens == reference.usage.completion_tokens == 8
+    assert output.prompt_len == reference.usage.prompt_tokens
+    assert output.ttft > 0
+    assert output.latency >= output.ttft
 
 
 @pytest.mark.asyncio
