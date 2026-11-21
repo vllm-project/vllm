@@ -48,6 +48,12 @@ echo "==> Generating vLLM configuration"
 python3 "${CONVERTER}" "${args[@]}"
 
 echo
+echo "==> Preparing recipe assets"
+python3 "${SCRIPT_DIR}/recipe_assets.py" \
+    --config "${CONFIG_PATH}" \
+    --cache-dir "${RECIPE_ASSET_CACHE_DIR:-${OUTPUT_DIR}/.recipe-assets}"
+
+echo
 echo "==> Loading recipe environment"
 # shellcheck disable=SC1090
 source "${ENV_PATH}"
