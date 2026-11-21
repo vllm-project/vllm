@@ -103,6 +103,10 @@ fn lower_render_request(
         .map(|features| MultiModalFeatures::from_prepared(features, mm_payload))
         .transpose()?;
     let mut text_request = prepared.text_request;
+    // Preserve the renderer's model defaults across the raw generate boundary.
+    let resolved = &prepared.generate_request.sampling_params;
+    text_request.sampling_params.temperature.get_or_insert(resolved.temperature);
+    text_request.sampling_params.top_k.get_or_insert(resolved.top_k);
     let xargs = &mut text_request.sampling_params.vllm_xargs;
     let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
     let ec_transfer_params = hoist_transfer_params(xargs, "ec_transfer_params");

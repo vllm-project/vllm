@@ -347,13 +347,11 @@ class RejectionSampler:
         num_sampled_chunks: list[torch.Tensor] = []
         logprobs_chunks: list[LogprobsTensors] = []
         sampling_mask_chunks: list[SamplingMaskTensors] = []
-        max_num_kept = None
-        if self.sampler.return_sampling_mask:
-            max_num_kept = int(
-                np.max(
-                    self.sampler.sampling_states.top_k.np[input_batch.idx_mapping_np]
-                )
-            )
+        mask_capture = (
+            self.sampler.get_sampling_mask_capture(input_batch.idx_mapping_np)
+            if self.sampler.return_sampling_mask
+            else None
+        )
 
         for start, end in request_chunks:
             lo = int(cu_num_logits_np[start])
@@ -384,16 +382,20 @@ class RejectionSampler:
             )
             if chunk_logprobs is not None:
                 logprobs_chunks.append(chunk_logprobs)
-            if max_num_kept is not None:
-                sampling_mask_chunks.append(
-                    SamplingMaskTensors.from_logits(
-                        processed_logits,
-                        chunk_cu_num_logits,
-                        num_sampled,
-                        max_num_kept,
-                        self.num_speculative_steps + 1,
+            if mask_capture is not None:
+                capture, max_num_kept = mask_capture
+                chunk_capture = capture[start:end]
+                if chunk_capture.any():
+                    sampling_mask_chunks.append(
+                        SamplingMaskTensors.from_logits(
+                            processed_logits,
+                            chunk_cu_num_logits,
+                            num_sampled,
+                            max_num_kept,
+                            self.num_speculative_steps + 1,
+                            captured_requests=chunk_capture,
+                        )
                     )
-                )
             del processed_logits
             sampled_chunks.append(sampled)
             num_sampled_chunks.append(num_sampled)
@@ -422,11 +424,12 @@ class RejectionSampler:
 
         sampled = torch.cat(sampled_chunks)
         num_sampled = torch.cat(num_sampled_chunks)
-        sampling_mask_tensors = (
-            SamplingMaskTensors.cat(sampling_mask_chunks)
-            if sampling_mask_chunks
-            else None
-        )
+        sampling_mask_tensors = None
+        if sampling_mask_chunks:
+            assert mask_capture is not None
+            sampling_mask_tensors = SamplingMaskTensors.cat(
+                sampling_mask_chunks, captured_requests=mask_capture[0]
+            )
         return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors
 
     def __call__(

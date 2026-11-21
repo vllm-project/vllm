@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 from typing import get_args
 
@@ -8,11 +9,12 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
-from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
@@ -20,6 +22,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
 )
+from vllm.v1.worker.gpu.states import RequestState
 
 
 def _make_input_batch(
@@ -393,16 +396,38 @@ def test_logprob_token_ids_with_adaptive_verification():
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Requires CUDA, ROCm or XPU",
 )
-def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
+@pytest.mark.parametrize(
+    "capture",
+    [
+        pytest.param((True, True, True), id="all-capture"),
+        pytest.param((True, False, True), id="mixed-chunks"),
+        pytest.param((False, True, False), id="skip-chunk"),
+        pytest.param((False, False, False), id="skip-batch"),
+    ],
+)
+def test_replay_on_off_preserves_rejection_sampling_and_rng(capture):
     device = torch.device(current_platform.device_type)
     num_reqs = 3
     num_speculative_steps = 3
     rows_per_request = num_speculative_steps + 1
     vocab_size = 8
-    cu_num_logits_np = np.arange(0, 13, rows_per_request, dtype=np.int32)
-    idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
-    input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
-    processed_logits = torch.zeros((12, vocab_size), device=device)
+    num_logits = num_reqs * rows_per_request
+    cu_num_logits_np = np.arange(0, num_logits + 1, rows_per_request, dtype=np.int32)
+    input_batch = InputBatch.make_dummy(
+        num_reqs, num_logits, InputBuffers(num_reqs, num_logits, device)
+    )
+    input_batch = replace(
+        input_batch,
+        cu_num_logits_np=cu_num_logits_np,
+        cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
+        expanded_idx_mapping=input_batch.idx_mapping.repeat_interleave(
+            rows_per_request
+        ),
+        expanded_local_pos=torch.arange(
+            rows_per_request, dtype=torch.int32, device=device
+        ).repeat(num_reqs),
+    )
+    processed_logits = torch.zeros((num_logits, vocab_size), device=device)
     processed_logits[0, 0] = -float("inf")
     processed_logits[rows_per_request + 1, 1] = -float("inf")
     draft_logits = DraftLogitsCache(
@@ -418,93 +443,60 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     )
     draft_sampled[:, 1:] = torch.tensor([0, 1, 2], device=device)
     draft_sampled = draft_sampled.flatten()
-    sampler = SimpleNamespace(
-        logprobs_mode="processed_logprobs",
-        return_sampling_mask=False,
-        logprob_token_ids_state=None,
-        sampling_states=SimpleNamespace(
-            top_k=SimpleNamespace(np=np.full(num_reqs, vocab_size)),
-            temperature=SimpleNamespace(gpu=torch.ones(num_reqs, device=device)),
-            seeds=SimpleNamespace(
-                gpu=torch.arange(num_reqs, dtype=torch.int64, device=device)
-            ),
-        ),
-        use_fp64_gumbel=False,
-        apply_sampling_params=lambda logits, *_: logits,
-        trace_replay_state=None,
-        may_mask_logits=np.zeros(num_reqs, dtype=bool),
+    req_states = RequestState(
+        max_num_reqs=num_reqs,
+        max_model_len=64,
+        max_num_batched_tokens=num_logits,
+        num_speculative_steps=num_speculative_steps,
+        vocab_size=vocab_size,
+        device=device,
     )
-    rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps)
-    pos = torch.arange(12, dtype=torch.int32, device=device)
-
-    pack_calls: list[tuple[list[int], int, int]] = []
-    # A classmethod looked up on its class is a bound method; keep the plain
-    # function so the patched classmethod can forward its own `cls`.
-    bound_from_logits = SamplingMaskTensors.from_logits
-    assert isinstance(bound_from_logits, MethodType)
-    pack = bound_from_logits.__func__
-
-    def track_pack(
-        cls,
-        logits,
-        cu_num_logits,
-        num_sampled_tokens,
-        max_num_kept,
-        rows_per_request=1,
-    ):
-        pack_calls.append(
-            (cu_num_logits.cpu().tolist(), max_num_kept, rows_per_request)
-        )
-        return pack(
-            cls,
-            logits,
-            cu_num_logits,
-            num_sampled_tokens,
-            max_num_kept,
-            rows_per_request,
-        )
-
-    monkeypatch.setattr(
-        SamplingMaskTensors,
-        "from_logits",
-        classmethod(track_pack),
+    spec_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=num_speculative_steps
     )
+    config = VllmConfig()
+    pos = torch.arange(num_logits, dtype=torch.int32, device=device)
 
-    rng_before = torch.get_device_module(device).get_rng_state()
-    off_sampled, off_counts, off_logprobs, off_masks = (
-        rejection_sampler._verify_in_chunks(
+    def verify(return_sampling_mask: bool):
+        sampler = Sampler(
+            config,
+            num_reqs,
+            vocab_size,
+            device,
+            req_states,
+            logprobs_mode="processed_logprobs",
+            num_speculative_tokens=num_speculative_steps,
+            return_sampling_mask=return_sampling_mask,
+        )
+        for req_idx, should_capture in enumerate(capture):
+            sampler.add_request(
+                req_idx,
+                SamplingParams(
+                    seed=req_idx,
+                    top_k=vocab_size,
+                    logprobs=0,
+                    return_sampling_mask=None if should_capture else False,
+                ),
+            )
+        sampler.apply_staged_writes()
+        rejection_sampler = RejectionSampler(sampler, spec_config, device)
+        return rejection_sampler._verify_in_chunks(
             processed_logits,
             input_batch,
             draft_logits,
             draft_sampled,
             pos,
-            max_chunk_logits=8,
-            logprobs_dims=(0, 0),
+            max_chunk_logits=2 * rows_per_request,
+            logprobs_dims=sampler.get_logprobs_dims(input_batch.idx_mapping_np),
         )
-    )
-    rng_after_off = torch.get_device_module(device).get_rng_state()
-    assert pack_calls == []
 
-    sampler.return_sampling_mask = True
-    on_sampled, on_counts, on_logprobs, on_masks = rejection_sampler._verify_in_chunks(
-        processed_logits,
-        input_batch,
-        draft_logits,
-        draft_sampled,
-        pos,
-        max_chunk_logits=8,
-        logprobs_dims=(0, 0),
-    )
+    rng_before = torch.get_device_module(device).get_rng_state()
+    off_sampled, off_counts, off_logprobs, off_masks = verify(False)
+    rng_after_off = torch.get_device_module(device).get_rng_state()
+    on_sampled, on_counts, on_logprobs, on_masks = verify(True)
     rng_after_on = torch.get_device_module(device).get_rng_state()
 
-    assert pack_calls == [
-        ([0, 4, 8], vocab_size, rows_per_request),
-        ([0, 4], vocab_size, rows_per_request),
-    ]
-    assert off_masks is None and on_masks is not None
-    assert on_masks.rows_per_request == rows_per_request
-    assert on_masks.token_ids.shape == (num_reqs * rows_per_request, vocab_size)
-    assert on_masks.packed_mask.shape[0] == num_reqs * rows_per_request
+    assert off_masks is None
     assert off_counts.tolist() == [1, 2, 4]
     assert torch.equal(off_counts, on_counts)
     counts = off_counts.cpu().tolist()
@@ -531,16 +523,40 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert torch.equal(rng_before, rng_after_off)
     assert torch.equal(rng_after_off, rng_after_on)
 
-    masks = (
-        on_masks.to_cpu_nonblocking().tolists(on_counts.cpu().numpy()).to_nested_list()
-    )
-    expected_masks = [
-        torch.isfinite(processed_logits[row]).nonzero().flatten().tolist()
-        for row in mapped_rows
-    ]
+    if any(capture):
+        assert on_masks is not None
+        assert on_masks.rows_per_request == rows_per_request
+        assert on_masks.token_ids.shape == (
+            sum(capture) * rows_per_request,
+            vocab_size,
+        )
+        assert on_masks.packed_mask.shape[0] == sum(capture) * rows_per_request
+        masks = on_masks.to_cpu_nonblocking().tolists(on_counts.cpu().numpy())
+        for req_idx, count in enumerate(counts):
+            start_row = int(cu_num_logits_np[req_idx])
+            expected_masks = [
+                torch.isfinite(processed_logits[row]).nonzero().flatten().tolist()
+                if capture[req_idx]
+                else []
+                for row in range(start_row, start_row + count)
+            ]
+            assert (
+                masks.slice_request(req_idx, count).to_nested_list() == expected_masks
+            )
+            if capture[req_idx]:
+                assert all(
+                    token_id in mask
+                    for token_id, mask in zip(
+                        on_sampled[req_idx, :count].tolist(),
+                        expected_masks,
+                        strict=True,
+                    )
+                )
+    else:
+        assert on_masks is None
     emitted = [
         int(on_sampled[req_idx, slot_idx])
-        for req_idx, count in enumerate(on_counts.cpu().tolist())
+        for req_idx, count in enumerate(counts)
         for slot_idx in range(count)
     ]
     expected_logprobs = torch.stack(
@@ -550,6 +566,4 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         ]
     )
 
-    assert masks == expected_masks
-    assert all(token_id in mask for token_id, mask in zip(emitted, masks))
     torch.testing.assert_close(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)

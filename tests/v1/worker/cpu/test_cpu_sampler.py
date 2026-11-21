@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
@@ -16,6 +18,7 @@ from vllm.v1.watermarking.gumbel import (
     DualKeyGumbelWatermarker,
     GumbelWatermarker,
 )
+from vllm.v1.worker.cpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.cpu.logits_processors import LogitsContext
 from vllm.v1.worker.cpu.sampler import (
     CPUSampler,
@@ -413,6 +416,8 @@ def test_cpu_sampling_mask_matches_wide_finite_support(max_num_kept: int) -> Non
 
 def _make_sampler(
     sampling_params: list[SamplingParams],
+    *,
+    return_sampling_mask: bool = False,
 ) -> tuple[CPUSampler, torch.Tensor]:
     req_states = CPURequestState(
         max_num_reqs=4,
@@ -427,6 +432,7 @@ def _make_sampler(
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
         req_states=req_states,
+        return_sampling_mask=return_sampling_mask,
     )
     req_indices = []
     for i, params in enumerate(sampling_params):
@@ -436,6 +442,43 @@ def _make_sampler(
         req_indices.append(req_idx)
         sampler.add_request(req_idx, params)
     return sampler, torch.tensor(req_indices, dtype=torch.int64)
+
+
+@pytest.mark.parametrize("capture_first", [True, False])
+def test_cpu_sampler_skips_mask_for_opted_out_requests(capture_first: bool) -> None:
+    sampler, req_indices = _make_sampler(
+        [
+            SamplingParams(top_k=2, seed=0, return_sampling_mask=capture_first),
+            SamplingParams(top_k=-1, seed=0, logprobs=0, return_sampling_mask=False),
+        ],
+        return_sampling_mask=True,
+    )
+    device = torch.device("cpu")
+    batch = InputBatch.make_dummy(2, 2, InputBuffers(2, 2, device))
+    batch = replace(
+        batch,
+        idx_mapping=req_indices,
+        idx_mapping_np=req_indices.numpy(),
+        expanded_idx_mapping=req_indices,
+    )
+    logits = torch.stack(
+        (torch.arange(VOCAB_SIZE, dtype=torch.float32), torch.zeros(VOCAB_SIZE))
+    )
+
+    output = sampler(logits, batch)
+
+    assert output.num_sampled.tolist() == [1, 1]
+    assert output.logprobs_tensors is not None
+    masks = output.sampling_mask_tensors
+    if capture_first:
+        assert masks is not None
+        assert masks.token_ids.shape[1] == 2
+        assert masks.tolists().to_nested_list() == [
+            [VOCAB_SIZE - 2, VOCAB_SIZE - 1],
+            [],
+        ]
+    else:
+        assert masks is None
 
 
 @pytest.mark.parametrize(

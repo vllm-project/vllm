@@ -55,14 +55,28 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 
 With `stream=true`, each chunk carries the masks of the tokens it emits.
 
+On either the Python or Rust frontend, set
+`sampling_params.return_sampling_mask` to `false` in an
+`/inference/v1/generate` request to omit the mask from the response.
+The override works with streaming and non-streaming responses in both token
+and text modes. This allows greedy or untruncated sampling while preserving
+requested sampled-token logprobs or routed experts. Omitting the field
+inherits the engine setting. Explicitly requesting `true` requires
+`--return-sampling-mask`.
+
+Model Runner V2 skips mask capture for opted-out requests on GPU and CPU.
+This also applies to fixed-boundary speculative decoding on GPU. The
+`/inference/v1/generate` endpoint defaults to `temperature=1.0` and
+`top_k=0`. Both `0` and `-1` disable top-k truncation.
+
 ## Requirements
 
 | Requirement | Reason |
 | --- | --- |
 | `--return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
-| `temperature > 0` | Greedy has no truncated distribution |
-| `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
+| `temperature > 0` when capturing a mask | Greedy has no truncated distribution |
+| `top_k > 0` when capturing a mask | Bounds mask size; pure top-p can produce vocab-sized masks |
 
 Speculative decoding is supported; each emitted token gets the support of the
 target distribution at its position.

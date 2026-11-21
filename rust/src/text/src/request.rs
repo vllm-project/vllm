@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use enum_as_inner::EnumAsInner;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -33,6 +33,21 @@ pub fn normalize_top_k(value: i64) -> std::result::Result<Option<u32>, String> {
         value => Err(format!(
             "top_k must be -1, 0, or a positive integer, got {value}"
         )),
+    }
+}
+
+/// Deserialize a request's top-k while preserving explicit disable.
+pub fn deserialize_request_top_k<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => normalize_top_k(value)
+            .map(|value| Some(value.unwrap_or(0)))
+            .map_err(serde::de::Error::custom),
     }
 }
 
@@ -78,6 +93,7 @@ pub struct SamplingParams {
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
+    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
     /// Random seed used by the sampler when present.
     pub seed: Option<i64>,
@@ -151,6 +167,9 @@ pub struct SamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
+    /// Override sampling-mask capture for this request. `None` inherits the
+    /// engine setting.
+    pub return_sampling_mask: Option<bool>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
@@ -195,6 +214,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
+            return_sampling_mask: None,
             vllm_xargs: None,
             stream_interval: None,
         }

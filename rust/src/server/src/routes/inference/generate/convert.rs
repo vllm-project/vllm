@@ -88,6 +88,9 @@ pub(super) fn prepare_generate_request(
         detokenize,
     };
     let mut sampling_params = request.sampling_params.inner;
+    // Match Python's raw SamplingParams before engine mask validation.
+    sampling_params.temperature.get_or_insert(1.0);
+    sampling_params.top_k.get_or_insert(0);
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
@@ -186,6 +189,8 @@ mod tests {
             Prompt::TokenIds(vec![11, 22, 33])
         );
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+        assert_eq!(prepared.text_request.sampling_params.temperature, Some(1.0));
+        assert_eq!(prepared.text_request.sampling_params.top_k, Some(0));
         assert_eq!(prepared.text_request.sampling_params.logprobs, Some(2));
         assert_eq!(
             prepared.text_request.sampling_params.prompt_logprobs,
@@ -206,6 +211,29 @@ mod tests {
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_normalizes_explicit_top_k_disable() {
+        for top_k in [-1, 0] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {"top_k": top_k, "return_sampling_mask": false},
+            }))
+            .expect("parse request");
+            let prepared = prepare_generate_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare");
+            assert_eq!(prepared.text_request.sampling_params.top_k, Some(0));
+            assert_eq!(
+                prepared.text_request.sampling_params.return_sampling_mask,
+                Some(false)
+            );
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -159,10 +160,6 @@ async def test_generate_rejects_min_tokens_above_server_cap(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="sampling mask output is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize(
     "server",
     [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
@@ -204,6 +201,204 @@ async def test_generate_sampling_mask(client):
         for top in entry["top_logprobs"]:
             in_support = top["token_id"] in support
             assert in_support == (top["logprob"] > -9999.0)
+
+
+@pytest.mark.asyncio
+async def test_generate_sampling_mask_opt_in_requires_engine_flag(client):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": 1,
+                "top_k": 5,
+                "return_sampling_mask": True,
+            },
+        },
+    )
+    assert response.status_code == 400
+    assert "Enable --return-sampling-mask" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("params", "parameter"),
+    [
+        ({"temperature": 0, "top_k": 5}, "temperature"),
+        ({"top_k": 0}, "top_k"),
+        ({"top_k": -1}, "top_k"),
+        ({}, "top_k"),
+    ],
+)
+async def test_generate_sampling_mask_invalid_sampling_params(
+    client, params, parameter
+):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {"max_tokens": 1, **params},
+        },
+    )
+    assert response.status_code == 400
+    assert f"requires {parameter} > 0" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("stream", "output_mode"), [(True, "tokens"), (False, "text"), (True, "text")]
+)
+@pytest.mark.parametrize("return_sampling_mask", [True, False])
+async def test_generate_sampling_mask_override_in_stream_and_text(
+    client, stream, output_mode, return_sampling_mask
+):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": 5,
+                "ignore_eos": True,
+                "temperature": 1.0,
+                "top_k": 5 if return_sampling_mask else -1,
+                "seed": 0,
+                "logprobs": 0,
+                "return_sampling_mask": return_sampling_mask,
+            },
+            "stream": stream,
+            "output_mode": output_mode,
+        },
+    )
+    response.raise_for_status()
+    if stream:
+        assert response.text.rstrip().endswith("data: [DONE]")
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+    else:
+        events = [response.json()]
+
+    num_tokens = 0
+    for event in events:
+        assert event["output_mode"] == output_mode
+        for choice in event["choices"]:
+            token_ids = choice["token_ids"]
+            if not token_ids:
+                continue
+            num_tokens += len(token_ids)
+            assert len(choice["logprobs"]["content"]) == len(token_ids)
+            mask = choice.get("sampling_mask")
+            if return_sampling_mask:
+                assert mask is not None
+                for token_id, support in zip(token_ids, mask, strict=True):
+                    assert token_id in support
+            else:
+                assert mask is None
+    assert num_tokens == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="sampling-mask opt-out requires the CUDA or ROCm sampler",
+)
+@pytest.mark.parametrize(
+    ("server", "speculative"),
+    [
+        pytest.param(
+            ["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"],
+            False,
+            id="non-speculative",
+        ),
+        pytest.param(
+            [
+                "--return-sampling-mask",
+                "--logprobs-mode",
+                "processed_logprobs",
+                "--speculative-config",
+                json.dumps(
+                    {
+                        "method": "ngram",
+                        "num_speculative_tokens": 2,
+                        "prompt_lookup_min": 1,
+                        "prompt_lookup_max": 2,
+                    }
+                ),
+                "--per-request-spec-decode-metrics",
+                "summary",
+            ],
+            True,
+            id="speculative",
+        ),
+    ],
+    indirect=["server"],
+)
+async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(
+    client, speculative
+):
+    request = {"model": MODEL_NAME, "token_ids": [1] * 8 if speculative else [1, 2, 3]}
+    # The repeated prompt and singleton target support make ngram acceptance
+    # deterministic, so the test exercises rejection sampling with emitted drafts.
+    allowed_token_ids = [1] if speculative else None
+    rollout = {
+        **request,
+        "sampling_params": {
+            "max_tokens": 32,
+            "ignore_eos": True,
+            "top_k": 5,
+            "temperature": 1.0,
+            "seed": 0,
+            "allowed_token_ids": allowed_token_ids,
+        },
+    }
+    eval_request = {
+        **request,
+        "sampling_params": {
+            "max_tokens": 8,
+            "ignore_eos": True,
+            "temperature": 0.0,
+            "return_sampling_mask": False,
+            "logprobs": 0,
+            "allowed_token_ids": allowed_token_ids,
+        },
+    }
+    rollout_response, eval_response = await asyncio.gather(
+        client.post(GEN_ENDPOINT, json=rollout),
+        client.post(GEN_ENDPOINT, json=eval_request),
+    )
+    rollout_response.raise_for_status()
+    eval_response.raise_for_status()
+
+    rollout_choice = rollout_response.json()["choices"][0]
+    for token_id, support in zip(
+        rollout_choice["token_ids"], rollout_choice["sampling_mask"], strict=True
+    ):
+        assert token_id in support
+
+    eval_choice = eval_response.json()["choices"][0]
+    assert eval_choice.get("sampling_mask") is None
+    assert [entry["token_id"] for entry in eval_choice["logprobs"]["content"]] == (
+        eval_choice["token_ids"]
+    )
+    if speculative:
+        for response in (rollout_response, eval_response):
+            stats = response.json()["metrics"]["speculative_decoding"]
+            assert stats["num_accepted_draft_tokens"] > 0
 
 
 @pytest.mark.asyncio

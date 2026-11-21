@@ -451,6 +451,10 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    return_sampling_mask: bool | None = None
+    """Override sampling-mask capture for this request on a mask-enabled server.
+    `None` inherits the server setting. `False` skips capture while preserving
+    other requested outputs, including sampled-token logprobs."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
@@ -965,6 +969,30 @@ class SamplingParams(
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
+
+    def returns_sampling_mask(self, enabled: bool) -> bool:
+        """Whether to return a sampling mask after request validation."""
+        return enabled and self.return_sampling_mask is not False
+
+    def validate_sampling_mask(self, enabled: bool) -> None:
+        """Validate the request against the engine's sampling-mask setting."""
+        if self.return_sampling_mask is True and not enabled:
+            raise VLLMValidationError(
+                "Enable --return-sampling-mask to request sampling mask capture",
+                parameter="return_sampling_mask",
+            )
+        if not self.returns_sampling_mask(enabled):
+            return
+        if self.temperature <= 0:
+            raise VLLMValidationError(
+                "sampling distribution replay requires temperature > 0"
+            )
+        if self.top_k <= 0:
+            raise VLLMValidationError(
+                "sampling distribution replay requires top_k > 0 to "
+                "bound sampling mask size, reduce transfer overhead, "
+                "and avoid potential OOMs"
+            )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs

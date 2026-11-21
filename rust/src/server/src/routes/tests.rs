@@ -41,6 +41,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
@@ -7457,6 +7458,74 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
     assert!(text.contains("Internal server error"), "{text}");
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_sampling_mask_override_reaches_engine() {
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    for sampling_mask in [None, Some(false), Some(true)] {
+        let capture = sampling_mask != Some(false);
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-sampling-mask",
+            move |request_id| {
+                let mut output = request_output_with_logprobs(
+                    request_id,
+                    vec![33],
+                    Some(EngineCoreFinishReason::Stop),
+                    None,
+                    Some(sample_logprobs_for_token(33, 34)),
+                    None,
+                );
+                output.new_sampling_mask = capture.then(|| {
+                    MaybeWireSamplingMask::Direct(SamplingMask {
+                        rows: vec![vec![33, 34]],
+                    })
+                });
+                RequestBatchOutputs {
+                    outputs: vec![output],
+                    ..Default::default()
+                }
+                .into()
+            },
+            move |request| {
+                let params = request.sampling_params.as_ref().unwrap();
+                assert_eq!(params.return_sampling_mask, sampling_mask);
+                assert_eq!(params.logprobs, Some(0));
+            },
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(vec![model.to_string()], chat)),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        );
+        let mut request = json!({
+            "model": model,
+            "token_ids": [11, 22],
+            "sampling_params": {"max_tokens": 1, "logprobs": 0},
+        });
+        if let Some(sampling_mask) = sampling_mask {
+            request["sampling_params"]["return_sampling_mask"] = json!(sampling_mask);
+        }
+        let (status, response) = post_json(&mut app, "/inference/v1/generate", request).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let choice = &response["choices"][0];
+        assert_eq!(choice["token_ids"], json!([33]));
+        assert_eq!(
+            choice.get("sampling_mask"),
+            Some(&if capture {
+                json!([[33, 34]])
+            } else {
+                json!(null)
+            })
+        );
+        assert_eq!(choice["logprobs"]["content"][0]["token_id"], json!(33));
+        engine_task.await.expect("mock engine task");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -88,6 +88,9 @@ class Sampler:
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
+        self.capture_sampling_mask = (
+            np.ones(max_num_reqs, dtype=bool) if return_sampling_mask else None
+        )
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
         )
@@ -104,6 +107,10 @@ class Sampler:
             may_mask |= processor.add_request(req_idx, sampling_params)
         self.needs_logits_processing[req_idx] = needs_processing or may_mask
         self.may_mask_logits[req_idx] = may_mask
+        if self.capture_sampling_mask is not None:
+            self.capture_sampling_mask[req_idx] = sampling_params.returns_sampling_mask(
+                self.return_sampling_mask
+            )
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -127,6 +134,20 @@ class Sampler:
             return None
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
+
+    def get_sampling_mask_capture(
+        self, idx_mapping_np: np.ndarray
+    ) -> tuple[np.ndarray, int] | None:
+        """Return the selected requests and their maximum top-k, if any."""
+        if self.capture_sampling_mask is None:
+            return None
+        capture = self.capture_sampling_mask[idx_mapping_np]
+        if not capture.any():
+            return None
+        max_num_kept = int(
+            np.max(self.sampling_states.top_k.np[idx_mapping_np[capture]])
+        )
+        return capture, max_num_kept
 
     def __call__(
         self,
@@ -196,14 +217,15 @@ class Sampler:
         )
 
         sampling_mask_tensors = None
-        if self.return_sampling_mask:
-            # Size by the validated top_k batch max; wider supports use the bitmask.
-            max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
+        mask_capture = self.get_sampling_mask_capture(idx_mapping_np)
+        if mask_capture is not None:
+            capture, max_num_kept = mask_capture
             sampling_mask_tensors = SamplingMaskTensors.from_logits(
                 processed_logits,
                 input_batch.cu_num_logits,
                 num_sampled,
                 max_num_kept,
+                captured_requests=capture,
             )
 
         # These are GPU tensors.

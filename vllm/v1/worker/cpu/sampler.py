@@ -582,6 +582,9 @@ class CPUSampler:
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.return_sampling_mask = return_sampling_mask
+        self.capture_sampling_mask = (
+            np.ones(max_num_reqs, dtype=bool) if return_sampling_mask else None
+        )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
@@ -591,6 +594,10 @@ class CPUSampler:
         for processor in self.logits_processors:
             needs_processing |= processor.add_request(req_idx, sampling_params)
         self.needs_logits_processing[req_idx] = needs_processing
+        if self.capture_sampling_mask is not None:
+            self.capture_sampling_mask[req_idx] = sampling_params.returns_sampling_mask(
+                self.return_sampling_mask
+            )
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -675,15 +682,24 @@ class CPUSampler:
         )
 
         sampling_mask_tensors = None
-        if self.return_sampling_mask:
-            # Size by the validated top_k batch max; wider supports use the bitmask.
-            max_num_kept = int(np.max(self.sampling_states.top_k_np[idx_mapping_np]))
-            sampling_mask_tensors = CPUSamplingMaskTensors.from_logits(
-                processed_logits,
-                input_batch.cu_num_logits,
-                num_sampled,
-                max_num_kept,
-            )
+        if self.capture_sampling_mask is not None:
+            capture = self.capture_sampling_mask[idx_mapping_np]
+            if capture.any():
+                # Keep request slots but skip scanning logits on opted-out rows.
+                num_captured = (
+                    num_sampled
+                    if capture.all()
+                    else num_sampled.masked_fill(torch.from_numpy(~capture), 0)
+                )
+                max_num_kept = int(
+                    np.max(self.sampling_states.top_k_np[idx_mapping_np[capture]])
+                )
+                sampling_mask_tensors = CPUSamplingMaskTensors.from_logits(
+                    processed_logits,
+                    input_batch.cu_num_logits,
+                    num_captured,
+                    max_num_kept,
+                )
 
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape

@@ -10,6 +10,7 @@ use serde_json::Value;
 use vllm_chat::ChatTool;
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
+pub use vllm_text::request::deserialize_request_top_k;
 
 // ============================================================================
 // Constants
@@ -22,23 +23,6 @@ use vllm_llm::{PromptCacheUsage, TokenUsage};
 /// Helper function for serde default value (returns true).
 pub fn default_true() -> bool {
     true
-}
-
-/// Deserialize an OpenAI request `top_k` while preserving explicit disable.
-///
-/// Null remains `None` so model generation defaults apply. Explicit `-1` and
-/// `0` become `Some(0)` so the request overrides those defaults and disables
-/// top-k sampling. Positive limits are preserved.
-pub fn deserialize_request_top_k<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    match Option::<i64>::deserialize(deserializer)? {
-        None => Ok(None),
-        Some(value) => vllm_text::normalize_top_k(value)
-            .map(|value| Some(value.unwrap_or(0)))
-            .map_err(serde::de::Error::custom),
-    }
 }
 
 /// Effort level for reasoning models.
