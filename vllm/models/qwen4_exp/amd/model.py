@@ -78,7 +78,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
-from .ops.sequence_parallel import sp_reduce_scatter, sp_shard
+from .ops.sequence_parallel import decoder_layer_sp_collectives, sp_shard
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
@@ -196,6 +196,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         self.layer_type = layer_type
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
+        # The four SP collectives of the decoder layer: AITER's lossy INT4 pair
+        # or the exact one, as `decoder_layer_sp_collectives` decides; the other
+        # SP sites (embedding shard, LM-head gather, PLE) always stay on the
+        # common exact path.
+        self.sp_all_gather, self.sp_reduce_scatter = decoder_layer_sp_collectives(
+            vllm_config, self.use_hc_sequence_parallel
+        )
         self.layer_idx = extract_layer_index(prefix)
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
@@ -311,7 +318,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         if self.use_hc_sequence_parallel:
             # Positions retain the full token axis for both text and MRoPE inputs.
-            block_input = sp_all_gather(block_input)[: positions.shape[-1]]
+            block_input = self.sp_all_gather(block_input)[: positions.shape[-1]]
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type in _QSA_LAYER_TYPES:
@@ -324,7 +331,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         mlp_hc = self.mlp_hyper_connection
         if self.use_hc_sequence_parallel:
-            attn_out = sp_reduce_scatter(attn_out)
+            attn_out = self.sp_reduce_scatter(attn_out)
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
@@ -333,14 +340,16 @@ class Qwen4ExpDecoderLayer(nn.Module):
             mlp_out = self.mlp(block_input, already_sequence_parallel=True)
         else:
             if self.use_hc_sequence_parallel:
-                block_input = sp_all_gather(block_input)[: positions.shape[-1]]
+                block_input = self.sp_all_gather(block_input)[: positions.shape[-1]]
             mlp_out = self.mlp(block_input)
             if self.use_hc_sequence_parallel:
                 assert isinstance(self.mlp, Qwen4ExpSparseMoeBlock)
                 reduce_output = self.mlp.experts.moe_config.skip_final_all_reduce
                 # Only sum partial outputs. Reduced outputs already include all ranks.
                 mlp_out = (
-                    sp_reduce_scatter(mlp_out) if reduce_output else sp_shard(mlp_out)
+                    self.sp_reduce_scatter(mlp_out)
+                    if reduce_output
+                    else sp_shard(mlp_out)
                 )
         return hidden_states, mlp_out, injection
 
