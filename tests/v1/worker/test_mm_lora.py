@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -66,10 +67,10 @@ class _FakeEncoderRunner:
 
     def __init__(self, encoder_cache):
         self.encoder_cache = encoder_cache
-        self.callback = None
+        self.callback: Callable[[list[str]], None] | None = None
 
     @contextmanager
-    def mm_lora_batch_callback(self, callback):
+    def mm_lora_batch_callback(self, callback: Callable[[list[str]], None] | None):
         self.callback = callback
         try:
             yield
@@ -111,6 +112,7 @@ def test_activate_mm_loras_skips_prompt_embeds_passthrough():
         scheduled_encoder_inputs={req_id: [0, 1]},
     ):
         # prepare_mm_inputs never sends prompt_embeds to the encoder.
+        assert runner.callback is not None
         runner.callback(["h_img"])
 
     # Only the real "image" item should ever reach the model.
@@ -136,18 +138,17 @@ def test_activate_mm_loras_rejects_unmatched_encoder_batch():
         lora_requests={req_id: object()},
     )
 
-    with (
-        activate_mm_loras(
-            model=_FakeModel(),
-            lora_manager=lora_manager,
-            encoder_runner=runner,
-            req_id_to_index={req_id: 0},
-            lora_state=lora_state,
-            scheduled_encoder_inputs={req_id: [0]},
-        ),
-        pytest.raises(AssertionError, match="h_unknown"),
+    with activate_mm_loras(
+        model=_FakeModel(),
+        lora_manager=lora_manager,
+        encoder_runner=runner,
+        req_id_to_index={req_id: 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={req_id: [0]},
     ):
-        runner.callback(["h_unknown"])
+        assert runner.callback is not None
+        with pytest.raises(AssertionError, match="h_unknown"):
+            runner.callback(["h_unknown"])
     assert lora_manager.set_active_adapters_calls == []
 
 
@@ -174,6 +175,7 @@ def _collect_with_one_batch(features, encoder_outputs, batch_mm_hashes):
         scheduled_encoder_inputs={req_id: list(range(len(features)))},
     ):
         if batch_mm_hashes:
+            assert runner.callback is not None
             runner.callback(batch_mm_hashes)
     return model, lora_manager
 
