@@ -248,12 +248,20 @@ class TestAddSpecialTokens:
         assert default.outputs.score == pytest.approx(explicit.outputs.score)
 
     @pytest.mark.skip_global_cleanup
-    def test_completion_false_does_not_add_tokens(self, llm: LLM):
-        default = _score_single(llm, TEXTS_1[0], TEXTS_2[0], add_special_tokens=None)
-        explicit_false = _score_single(
-            llm, TEXTS_1[0], TEXTS_2[0], add_special_tokens=False
+    def test_completion_false_matches_classify(self, llm: LLM):
+        """`add_special_tokens=False` on completion inputs equals classify."""
+        query, document = TEXTS_1[0], TEXTS_2[0]
+        expected_prompt = query + document
+
+        scored = _score_single(llm, query, document, add_special_tokens=False)
+        (classified,) = _call_classify_fresh(
+            llm,
+            expected_prompt,
+            tokenization_kwargs={"add_special_tokens": False},
         )
-        assert len(_prompt_token_ids(explicit_false)) <= len(_prompt_token_ids(default))
+
+        assert _prompt_token_ids(scored) == _prompt_token_ids(classified)
+        assert scored.outputs.score == pytest.approx(classified.outputs.probs[0])
 
     @pytest.mark.skip_global_cleanup
     def test_chat_none_matches_false(self, llm: LLM):
@@ -271,15 +279,24 @@ class TestAddSpecialTokens:
         assert default.outputs.score == pytest.approx(explicit_false.outputs.score)
 
     @pytest.mark.skip_global_cleanup
-    def test_chat_true_is_accepted(self, llm: LLM):
+    def test_chat_true_matches_classify(self, llm: LLM):
+        """`add_special_tokens=True` on chat inputs equals classify."""
+        query, document = TEXTS_1[0], TEXTS_2[0]
         kwargs = dict(
             chat_template=PLAIN_CONCAT_TEMPLATE,
             chat_template_content_format="auto",
         )
-        explicit_true = _score_single(
-            llm, TEXTS_1[0], TEXTS_2[0], add_special_tokens=True, **kwargs
+        expected_prompt = query + document
+
+        scored = _score_single(llm, query, document, add_special_tokens=True, **kwargs)
+        (classified,) = _call_classify_fresh(
+            llm,
+            expected_prompt,
+            tokenization_kwargs={"add_special_tokens": True},
         )
-        assert isinstance(explicit_true.outputs.score, float)
+
+        assert _prompt_token_ids(scored) == _prompt_token_ids(classified)
+        assert scored.outputs.score == pytest.approx(classified.outputs.probs[0])
 
 
 # =============================================================================
