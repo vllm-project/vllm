@@ -63,10 +63,13 @@ def compute_token_logprobs(
     logits: torch.Tensor, token_ids: torch.Tensor
 ) -> torch.Tensor:
     token_ids = token_ids.to(torch.int64)
-    selected = logits.gather(-1, token_ids).to(torch.float32)
-    # Accumulate the normalizer in FP32. Compilation fuses this cast into the
-    # reduction instead of materializing a full FP32 logits tensor.
-    normalizer = torch.logsumexp(logits.to(torch.float32), dim=-1, keepdim=True)
+    # Keep the shared offset out of both terms of log-softmax. Adding it to
+    # the normalizer and then subtracting it loses small logprobs for large logits.
+    maximum = logits.amax(dim=-1, keepdim=True).to(torch.float32)
+    maximum = torch.where(torch.isfinite(maximum), maximum, 0.0)
+    selected = logits.gather(-1, token_ids).to(torch.float32) - maximum
+    # Compilation fuses the FP32 conversion into the reductions.
+    normalizer = (logits.to(torch.float32) - maximum).exp().sum(-1, keepdim=True).log()
     return selected - normalizer
 
 
