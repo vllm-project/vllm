@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+import zmq
 
 from vllm.distributed.device_communicators import shm_broadcast, shm_tensor_arena
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -30,7 +31,7 @@ from vllm.distributed.device_communicators.shm_tensor_arena import (
     ShmTensorArena,
     _ArenaPickler,
 )
-from vllm.distributed.utils import StatelessProcessGroup
+from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -275,32 +276,38 @@ def worker_fn_test_idle_to_busy():
 
     message1 = "hello world"
     message2 = np.random.randint(1, 100, 100)
+    # Count parks on the notify socket: an idle reader parks once per wait,
+    # a busy reader never parks, whether it spins in Python or natively.
     with mock.patch.object(
-        message_queue._spin_condition, "wait", wraps=message_queue._spin_condition.wait
-    ) as wrapped_wait:
+        message_queue._spin_condition,
+        "poll_notify",
+        wraps=message_queue._spin_condition.poll_notify,
+    ) as parks:
         if not message_queue._is_writer:
+            # This test counts waits under the fixed 1 s grace.
+            message_queue._spin_condition.busy_loop_s = 1
             # Put into idle mode
             message_queue._spin_condition.last_read = 0
 
             # no messages, so expect a TimeoutError
             with pytest.raises(TimeoutError):
                 message_queue.dequeue(timeout=0.01)
-            # wait should only be called once while idle
-            assert wrapped_wait.call_count == 1
+            # an idle reader parks once
+            assert parks.call_count == 1
 
             # sync with the writer and wait for message1
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=5)
             assert recv_message == message1
-            # second call to wait, with a message read, this puts in a busy spin
-            assert wrapped_wait.call_count == 2
+            # still idle: it parked once more, until the write woke it
+            assert parks.call_count == 2
 
             # sync with the writer and wait for message2
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=1)
             assert np.array_equal(recv_message, message2)
-            # in busy mode, we expect wait to have been called multiple times
-            assert wrapped_wait.call_count > 3
+            # the read made it busy, so it waited without parking
+            assert parks.call_count == 2
         else:
             # writer writes two messages in sync with the reader
             dist.barrier()
@@ -331,9 +338,13 @@ def worker_fn_test_busy_to_idle():
 
     message1 = 12345
     message2 = list(range(3))
+    # Count parks on the notify socket: a busy reader never parks, whether it
+    # spins in Python or natively; an idle reader parks once per wait.
     with mock.patch.object(
-        message_queue._spin_condition, "wait", wraps=message_queue._spin_condition.wait
-    ) as wrapped_wait:
+        message_queue._spin_condition,
+        "poll_notify",
+        wraps=message_queue._spin_condition.poll_notify,
+    ) as parks:
         if not message_queue._is_writer:
             # Put into busy mode
             message_queue._spin_condition.busy_loop_s = 9999
@@ -342,23 +353,24 @@ def worker_fn_test_busy_to_idle():
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=1)
             assert recv_message == message1
-            # in busy mode, we expect wait to have been called many times
-            assert wrapped_wait.call_count > 1
+            # in busy mode, the reader waited without parking
+            assert parks.call_count == 0
 
             # simulate busy loop ending
             message_queue._spin_condition.busy_loop_s = 0
-            # ensure we enter idle mode, then record call count
+            # ensure we enter idle mode, then record the park count
             with pytest.raises(TimeoutError):
                 message_queue.dequeue(timeout=0.01)
-            call_count = wrapped_wait.call_count
+            assert parks.call_count == 1
+            call_count = parks.call_count
 
             # sync with the writer and wait for message2
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=1)
             assert recv_message == message2
 
-            # call to wait after idle should only happen once
-            assert wrapped_wait.call_count == call_count + 1
+            # after idling, it parks once more, until the write wakes it
+            assert parks.call_count == call_count + 1
         else:
             # writer writes two messages in sync with the reader
             dist.barrier()
@@ -405,7 +417,7 @@ def worker_fn_tensor_broadcast():
             message_queue.enqueue(big)
         assert wrapped_reduce.call_count == 3
     else:
-        with mock.patch.object(MessageQueue, "recv", wraps=MessageQueue.recv) as recv:
+        with mock.patch.object(message_queue, "recv", wraps=message_queue.recv) as recv:
             received = message_queue.dequeue(timeout=30)
             recv.assert_not_called()
             received_big = message_queue.dequeue(timeout=30)
@@ -453,7 +465,7 @@ def test_broadcast_retains_values_after_ring_reuse(kind, nbytes, overflow, num_o
     payload = torch.from_numpy(array) if kind == "tensor" else array
     try:
         with (
-            mock.patch.object(MessageQueue, "recv", wraps=MessageQueue.recv) as recv,
+            mock.patch.object(reader, "recv", wraps=reader.recv) as recv,
             mock.patch.object(pickle, "loads", wraps=pickle.loads) as loads,
         ):
             writer.enqueue(payload)
@@ -671,7 +683,7 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
 def test_busy_reader_consumes_write_notifications():
     """A reader that never goes idle must still service its notify socket,
     otherwise libzmq queues a command per notification and memory grows with
-    every message read.
+    every message read. Readers without a native fence get a ping per write.
     """
     writer = MessageQueue(
         n_reader=1,
@@ -684,12 +696,820 @@ def test_busy_reader_consumes_write_notifications():
     try:
         writer.wait_until_ready()
         reader.wait_until_ready()
+        writer._wake_mode = reader._wake_mode = shm_broadcast._WAKE_PING
 
         writer.enqueue("payload")
         assert notify_socket.poll(timeout=5000)
         with mock.patch.object(shm_broadcast, "SHM_NOTIFY_POLL_INTERVAL_S", 0):
             assert reader.dequeue(timeout=5) == "payload"
         assert not notify_socket.poll(timeout=0)
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def _read_pair(reader, read_first, sent_second, latencies):
+    assert reader.dequeue(timeout=5) == 1
+    read_first.set()
+    assert reader.dequeue(timeout=5) == 2
+    latencies.append(time.monotonic() - sent_second[0])
+
+
+@pytest.mark.parametrize(
+    "wake_mode",
+    [
+        shm_broadcast._WAKE_PING,
+        pytest.param(
+            shm_broadcast._WAKE_PARKED_PING,
+            marks=pytest.mark.skipif(
+                shm_broadcast._full_fence is None,
+                reason="needs the spinloop extension",
+            ),
+        ),
+    ],
+)
+def test_back_to_back_writes_wake_a_parked_reader(wake_mode):
+    """A write right after another must wake a reader that parked in between.
+
+    The reader never busy-waits, so after each read it parks on the notify
+    socket; the writer sends the second message as soon as the reader has
+    entered its poll, well within zmq's ~1-3 ms flow-control window after the
+    first. A dropped notification would leave the reader asleep until the
+    recheck.
+    """
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=4
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    latencies: list[float] = []
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        cond = reader._spin_condition
+        cond.busy_loop_s = 0
+        writer._wake_mode = reader._wake_mode = wake_mode
+        poller = cond.poller
+        assert poller is not None
+        real_poll = poller.poll
+        parked = threading.Event()
+        first_read = [threading.Event()]
+
+        def poll(*args, **kwargs):
+            # Only a poll that starts after the first message was read counts:
+            # that is the reader parked, waiting for the second.
+            if first_read[0].is_set():
+                parked.set()
+            return real_poll(*args, **kwargs)
+
+        poller.poll = poll
+        with mock.patch.object(shm_broadcast, "SHM_READER_RECHECK_INTERVAL_MS", 2000):
+            for _ in range(50):
+                read_first = threading.Event()
+                first_read[0] = read_first
+                parked.clear()
+                sent_second = [0.0]
+                thread = threading.Thread(
+                    target=_read_pair,
+                    args=(reader, read_first, sent_second, latencies),
+                    daemon=True,
+                )
+                thread.start()
+                writer.enqueue(1)
+                assert read_first.wait(timeout=5)
+                assert parked.wait(timeout=5)  # the reader is in its poll now
+                sent_second[0] = time.monotonic()
+                writer.enqueue(2)
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+        assert max(latencies) < 0.5, f"slowest wake-up {max(latencies):.3f} s"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_writer_ready_waits_for_notify_subscription():
+    """wait_until_ready must not finish before the writer can notify a reader.
+
+    A notification sent before the writer knows a reader's subscription is
+    dropped, so a reader parked on its first message would sleep until the
+    recheck. The reader here subscribes to the data socket first and to the
+    notify socket only after the writer has had time to finish the handshake.
+    """
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=2
+    )
+    handle = writer.export_handle()
+    assert handle.local_subscribe_addr is not None
+    assert handle.local_notify_addr is not None
+    context = zmq.Context()
+    data = context.socket(zmq.SUB)
+    data.setsockopt_string(zmq.SUBSCRIBE, "")
+    data.connect(handle.local_subscribe_addr)
+    notify = context.socket(zmq.SUB)
+    notify.setsockopt_string(zmq.SUBSCRIBE, "")
+    ready = threading.Thread(target=writer.wait_until_ready, daemon=True)
+    try:
+        ready.start()
+        ready.join(timeout=0.5)
+        assert ready.is_alive(), "ready before the notify subscription arrived"
+        notify.connect(handle.local_notify_addr)
+        ready.join(timeout=5)
+        assert not ready.is_alive()
+        assert data.poll(timeout=5000)
+        assert data.recv() == b"READY"
+        writer._spin_condition.notify()
+        assert notify.poll(timeout=5000)
+    finally:
+        writer.shutdown()
+        for socket in (data, notify):
+            socket.close(linger=0)
+        context.term()
+
+
+@pytest.mark.parametrize("has_fence", [True, False])
+def test_writer_picks_wake_mode_every_reader_supports(monkeypatch, has_fence):
+    """One reader without a native fence keeps every write pinging."""
+    if has_fence and shm_broadcast._full_fence is None:
+        pytest.skip("needs the spinloop extension")
+    if not has_fence:
+        monkeypatch.setattr(shm_broadcast, "_full_fence", None)
+    writer = MessageQueue(
+        n_reader=2, n_local_reader=2, max_chunk_bytes=1024, max_chunks=2
+    )
+    readers = [
+        MessageQueue.create_from_handle(writer.export_handle(), rank=r) for r in (0, 1)
+    ]
+    try:
+        threads = [threading.Thread(target=r.wait_until_ready) for r in readers]
+        for t in threads:
+            t.start()
+        writer.wait_until_ready()
+        for t in threads:
+            t.join(timeout=5)
+        want = (
+            shm_broadcast._WAKE_PARKED_PING if has_fence else shm_broadcast._WAKE_PING
+        )
+        assert {writer._wake_mode} | {r._wake_mode for r in readers} == {want}
+    finally:
+        writer.shutdown()
+        for r in readers:
+            r.shutdown()
+
+
+def _wait_parked(writer, rank: int, timeout_s: float = 5) -> bool:
+    """Wait until reader `rank` has set its parked flag."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with writer.buffer.get_park_flags() as flags:
+            if flags[rank]:
+                return True
+        sched_yield()
+    return False
+
+
+@pytest.mark.skipif(
+    shm_broadcast._full_fence is None, reason="needs the spinloop extension"
+)
+def test_writer_pings_only_parked_readers():
+    """A write pings the notify socket only while a reader is parked on it."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=4
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    cond = reader._spin_condition
+    notify = cond.local_notify_socket
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        assert writer._wake_mode == shm_broadcast._WAKE_PARKED_PING
+
+        writer.enqueue(1)
+        assert not notify.poll(timeout=200), "pinged a reader that never parked"
+        assert reader.dequeue(timeout=5) == 1
+
+        cond.busy_loop_s = 0
+        received = []
+        thread = threading.Thread(
+            target=lambda: received.append(reader.dequeue(timeout=5)), daemon=True
+        )
+        thread.start()
+        assert _wait_parked(writer, 0), "reader never parked"
+        sent = time.monotonic()
+        writer.enqueue(2)
+        thread.join(timeout=5)
+        assert received == [2]
+        assert time.monotonic() - sent < 0.5
+        with writer.buffer.get_park_flags() as flags:
+            assert flags[0] == 0, "reader left its parked flag set"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+@pytest.mark.skipif(
+    shm_broadcast._full_fence is None, reason="needs the spinloop extension"
+)
+def test_parked_reader_rechecks_slot_after_setting_its_flag():
+    """A slot written while the reader sets its flag is read without a ping.
+
+    The writer here publishes the slot and skips the ping (no flag was set
+    yet); the reader's re-check after its fence must still see the slot.
+    """
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=2
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        cond = reader._spin_condition
+        cond.busy_loop_s = 0
+        real_fence = shm_broadcast._full_fence
+        assert real_fence is not None
+
+        def fence_after_write():
+            # The reader's flag store is visible; publish the slot now, as a
+            # writer that read the flags just before it would.
+            with writer.acquire_write(timeout=1) as buf:
+                buf[0] = 0
+                buf[1:3] = (1).to_bytes(2, "big")
+                payload = pickle.dumps("raced", protocol=pickle.HIGHEST_PROTOCOL)
+                buf[3:7] = len(payload).to_bytes(4, "big")
+                buf[7 : 7 + len(payload)] = payload
+            real_fence()
+
+        with (
+            mock.patch.object(shm_broadcast, "_full_fence", fence_after_write),
+            mock.patch.object(
+                cond.poller,
+                "poll",
+                side_effect=AssertionError("polled although the slot was ready"),
+            ),
+        ):
+            reader._park(timeout_ms=5000)
+        assert reader.dequeue(timeout=1) == "raced"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_overflow_payloads_survive_rapid_sends():
+    """Every overflow payload reaches the reader intact and in order."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=4
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    sent = [np.full(64 * 1024, i, dtype=np.uint8) for i in range(64)]
+    received: list[np.ndarray] = []
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        thread = threading.Thread(
+            target=lambda: received.extend(reader.dequeue(timeout=10) for _ in sent),
+            daemon=True,
+        )
+        thread.start()
+        for array in sent:
+            writer.enqueue(array, timeout=10)
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+        assert len(received) == len(sent)
+        for want, got in zip(sent, received):
+            np.testing.assert_array_equal(got, want)
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def _dequeue_error(reader) -> list[BaseException]:
+    errors: list[BaseException] = []
+    entered = threading.Event()
+
+    def run():
+        entered.set()
+        try:
+            reader.dequeue()
+        except BaseException as e:
+            errors.append(e)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    assert entered.wait(timeout=5)
+    # Nothing is ever sent, so dequeue() ends up blocked on a data socket. A
+    # shutdown before it gets there is caught too: the cancel ping stays
+    # queued on the cancel socket and the wait returns at once.
+    thread.join(timeout=0.05)
+    assert thread.is_alive(), "dequeue returned before anything was sent"
+    reader.shutdown()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "shutdown did not wake the blocked reader"
+    return errors
+
+
+def test_shutdown_wakes_remote_reader():
+    """A remote reader blocked on its socket stops when shutdown() runs."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=0,
+        max_chunk_bytes=1024,
+        max_chunks=2,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    ready = threading.Thread(target=reader.wait_until_ready, daemon=True)
+    ready.start()
+    writer.wait_until_ready()
+    ready.join(timeout=5)
+    try:
+        errors = _dequeue_error(reader)
+        assert len(errors) == 1 and str(errors[0]) == "cancelled"
+    finally:
+        writer.shutdown()
+
+
+def test_shutdown_wakes_reader_waiting_for_overflow_payload():
+    """A reader that took an overflow slot stops on shutdown() even if the
+    payload never follows on local_socket."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=2
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        with writer.acquire_write() as buf:
+            buf[0] = 1  # overflow; the payload is never sent
+        errors = _dequeue_error(reader)
+        assert len(errors) == 1 and str(errors[0]) == "cancelled"
+    finally:
+        writer.shutdown()
+
+
+def test_remote_send_honours_the_enqueue_timeout(monkeypatch):
+    """XPUB_NODROP blocks a send to a full remote pipe instead of dropping it,
+    so enqueue(timeout=...) must still return within its timeout."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=0,
+        max_chunk_bytes=1024,
+        max_chunks=2,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    ready = threading.Thread(target=reader.wait_until_ready, daemon=True)
+    ready.start()
+    writer.wait_until_ready()
+    ready.join(timeout=5)
+    try:
+
+        def full_pipe(*args, **kwargs):
+            raise zmq.Again
+
+        monkeypatch.setattr(writer.remote_socket, "send_multipart", full_pipe)
+        with pytest.raises(TimeoutError, match="remote readers"):
+            writer.enqueue("dropped", timeout=0.05)
+        assert writer.remote_socket.getsockopt(zmq.SNDTIMEO) == -1
+        monkeypatch.undo()
+        writer.enqueue("delivered", timeout=5)
+        assert reader.dequeue(timeout=5) == "delivered"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_overflow_send_honours_the_enqueue_timeout(monkeypatch):
+    """A timed-out overflow send leaves the slot unpublished, so the reader
+    is not left waiting for a payload that never comes."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=2
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+
+        def full_pipe(*args, **kwargs):
+            raise zmq.Again
+
+        monkeypatch.setattr(writer.local_socket, "send_multipart", full_pipe)
+        with pytest.raises(TimeoutError, match="local readers"):
+            writer.enqueue(np.zeros(4096, dtype=np.uint8), timeout=0.05)
+        assert writer.local_socket.getsockopt(zmq.SNDTIMEO) == -1
+        assert not reader.readable(), "published a slot whose payload never came"
+        monkeypatch.undo()
+        sent = np.arange(4096, dtype=np.int32)
+        writer.enqueue(sent, timeout=5)
+        np.testing.assert_array_equal(reader.dequeue(timeout=5), sent)
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_remote_reader_in_reference_cycle_is_collected_without_blocking():
+    """The remote reader's cancel sockets close with the rest at collection."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=0,
+        max_chunk_bytes=1024,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    reader.cycle = reader
+    reader_ref = weakref.ref(reader)
+    del reader
+
+    collector = threading.Thread(target=gc.collect, daemon=True)
+    collector.start()
+    collector.join(timeout=10)
+
+    assert not collector.is_alive()
+    assert reader_ref() is None
+    writer.shutdown()
+
+
+def _spinloop_ext():
+    return pytest.importorskip("vllm.spinloop", reason="needs the spinloop extension")
+
+
+def test_spinloop_returns_at_its_timeout():
+    """A predicate that never turns true returns False after the timeout."""
+    spinloop = _spinloop_ext()
+    flag = bytearray(8)
+    start = time.monotonic()
+    assert spinloop.spinloop(flag, lambda: False, timeout=0.05) is False
+    # The extension times on CLOCK_MONOTONIC_RAW, time.monotonic on
+    # CLOCK_MONOTONIC, so the two can disagree by a little.
+    assert 0.045 <= time.monotonic() - start < 1.0
+
+
+def test_spinloop_wakes_on_a_store_to_the_watched_bytes():
+    """A store from another thread ends the wait well before its timeout."""
+    spinloop = _spinloop_ext()
+    flag = bytearray(8)
+    timer = threading.Timer(0.02, flag.__setitem__, args=(0, 1))
+    timer.start()
+    start = time.monotonic()
+    try:
+        assert spinloop.spinloop(flag, lambda: flag[0] == 1, timeout=5) is True
+    finally:
+        timer.cancel()
+    assert time.monotonic() - start < 1.0
+
+
+def test_spinloop_propagates_callback_errors():
+    spinloop = _spinloop_ext()
+
+    def broken():
+        raise ValueError("callback failed")
+
+    with pytest.raises(ValueError, match="callback failed"):
+        spinloop.spinloop(bytearray(8), broken, timeout=1)
+
+
+def test_reader_watches_its_own_read_flag():
+    """The bytes a hardware wait is armed on must include every byte
+    `_is_readable` reads, or a store to the uncovered read flag never ends
+    the wait."""
+    writer = MessageQueue(n_reader=3, n_local_reader=3, max_chunk_bytes=1024)
+    readers = [
+        MessageQueue.create_from_handle(writer.export_handle(), rank=r)
+        for r in range(3)
+    ]
+    try:
+        for reader in readers:
+            with (
+                reader.buffer.get_metadata(0) as metadata_buffer,
+                reader._watched_flags(metadata_buffer) as watched,
+            ):
+                assert len(watched) == reader.local_reader_rank + 2
+                metadata_buffer[0] = 1
+                metadata_buffer[reader.local_reader_rank + 1] = 0
+                assert reader._is_readable(metadata_buffer)
+                # The reader's own read flag is the last watched byte.
+                watched[-1] = 1
+                assert not reader._is_readable(metadata_buffer)
+                metadata_buffer[0] = 0
+                watched[-1] = 0
+    finally:
+        writer.shutdown()
+        for reader in readers:
+            reader.shutdown()
+
+
+def test_spin_until_readable_waits_in_the_extension(monkeypatch):
+    """With the extension on, the executor's reply wait is a bounded hardware
+    wait on the reader's flags rather than a sched_yield loop, and still
+    returns on each condition."""
+    spinloop = _spinloop_ext()
+    calls = []
+
+    def recording_spinloop(buffer, callback, timeout):
+        calls.append((len(buffer), timeout))
+        return spinloop.spinloop(buffer, callback, timeout=timeout)
+
+    monkeypatch.setattr(shm_broadcast, "SPINLOOP_EXT_ENABLED", True)
+    monkeypatch.setattr(shm_broadcast, "spinloop", recording_spinloop, raising=False)
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024 * 1024, max_chunks=2
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        # Spin for the whole wait, whatever the grace policy.
+        reader._spin_condition.busy_loop_s = 9999
+        far_future = time.monotonic() + 60
+
+        reader.spin_until_readable(["input"], far_future)
+        reader.spin_until_readable([], time.monotonic())
+        assert calls == []
+
+        start = time.monotonic()
+        reader.spin_until_readable([], start + 0.05)
+        assert 0.05 <= time.monotonic() - start < 1.0
+        assert calls and all(
+            n == 2 and timeout <= shm_broadcast.SPINLOOP_TIMEOUT_SECONDS
+            for n, timeout in calls
+        )
+
+        threading.Timer(0.05, writer.enqueue, args=("message",)).start()
+        reader.spin_until_readable([], far_future)
+        assert reader.readable()
+        assert reader.dequeue(timeout=5) == "message"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+@pytest.fixture
+def adaptive_spin(monkeypatch):
+    monkeypatch.setenv("VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN", "1")
+
+
+def test_adaptive_grace_follows_traffic(adaptive_spin):
+    grace = shm_broadcast._AdaptiveSpinGrace()
+    assert grace.adaptive
+    # Seeded at the pivot: a 1 ms interval gives a 1 ms grace.
+    assert grace.current() == pytest.approx(1e-3)
+    fast = shm_broadcast._AdaptiveSpinGrace()
+    slow = shm_broadcast._AdaptiveSpinGrace()
+    for _ in range(50):
+        fast.train(0.2e-3)
+        slow.train(10e-3)
+    # Faster traffic spins longer, slower parks sooner, within the bounds.
+    assert fast.current() == pytest.approx(2e-3)
+    assert slow.current() == pytest.approx(0.1e-3, rel=0.05)
+    graces = []
+    for interval in (0.0, 0.5e-3, 1e-3, 2e-3, 5e-3, 50e-3):
+        g = shm_broadcast._AdaptiveSpinGrace()
+        for _ in range(50):
+            g.train(interval)
+        graces.append(g.current())
+    assert graces == sorted(graces, reverse=True)
+    assert graces[0] == pytest.approx(2e-3)  # a zero interval clamps to MAX
+    assert graces[-1] == pytest.approx(0.05e-3)  # MIN
+
+
+def test_pinned_grace_ignores_traffic(adaptive_spin):
+    grace = shm_broadcast._AdaptiveSpinGrace(0.0)
+    for _ in range(50):
+        grace.train(1e-6)
+    assert not grace.adaptive and grace.current() == 0.0
+    with pytest.raises(ValueError, match="busy_loop_s"):
+        shm_broadcast._AdaptiveSpinGrace(-1.0)
+
+
+def test_adaptive_grace_rejects_bad_tunables(monkeypatch):
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA", "0")
+    with pytest.raises(ValueError, match="ALPHA"):
+        shm_broadcast._AdaptiveSpinGrace()
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA", "0.25")
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS", "3")
+    with pytest.raises(ValueError, match="MIN_GRACE_MS"):
+        shm_broadcast._AdaptiveSpinGrace()
+
+
+def test_adaptive_spin_is_opt_in(monkeypatch):
+    """Without the switch, readers keep the fixed 1 s grace and writers keep
+    yielding; an explicit busy_loop_s always pins the grace."""
+    monkeypatch.delenv("VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN", raising=False)
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        cond = reader._spin_condition
+        assert not cond.adaptive and cond.busy_loop_s == 1.0
+        assert writer._write_grace is None
+        monkeypatch.setenv("VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN", "1")
+        cond.busy_loop_s = 0.25
+        assert not cond.adaptive and cond.busy_loop_s == 0.25
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_reader_grace_counts_down_from_its_last_read(adaptive_spin):
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        cond = reader._spin_condition
+        assert cond.adaptive
+        cond.last_read = 100.0
+        grace = cond.busy_loop_s
+        assert cond.remaining_grace_s(100.0) == pytest.approx(grace)
+        assert cond.remaining_grace_s(100.0 + grace / 2) == pytest.approx(grace / 2)
+        assert cond.remaining_grace_s(100.0 + 2 * grace) == 0.0
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_native_spin_is_capped_by_the_remaining_grace(adaptive_spin, monkeypatch):
+    """The reader's hardware wait never outlasts its grace, and is skipped
+    once the grace is gone, so a short adaptive grace really parks."""
+    timeouts = []
+
+    def fake_spinloop(buffer, callback, timeout):
+        timeouts.append(timeout)
+        return False
+
+    monkeypatch.setattr(shm_broadcast, "SPINLOOP_EXT_ENABLED", True)
+    monkeypatch.setattr(shm_broadcast, "spinloop", fake_spinloop, raising=False)
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        cond = reader._spin_condition
+        # Pin a long grace so scheduling delays cannot use it up first, with
+        # a known quarter of it left when the reader starts waiting.
+        cond.busy_loop_s = 0.4
+        cond.last_read = time.monotonic() - 0.3
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.01)
+        assert timeouts and timeouts[0] <= 0.1
+        timeouts.clear()
+        cond.last_read = 0.0  # grace long gone
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.01)
+        assert timeouts == []
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_writer_parks_in_doubling_steps(adaptive_spin, monkeypatch):
+    """Past its grace, a writer blocked on a reader sleeps 50 us, 100 us, ...
+    up to VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS instead of yielding."""
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS", "0.4")
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=1
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    sleeps: list[float] = []
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue("held")  # the only block; the reader never reads it
+        with (
+            mock.patch.object(shm_broadcast.time, "sleep", sleeps.append),
+            pytest.raises(TimeoutError),
+        ):
+            writer.enqueue("blocked", timeout=0.05)
+        assert sleeps[:4] == pytest.approx([50e-6, 100e-6, 200e-6, 400e-6])
+        assert sleeps and max(sleeps) == pytest.approx(400e-6)
+        # A park never sleeps past the caller's timeout, even when the first
+        # park step alone is far longer than it.
+        monkeypatch.setattr(shm_broadcast, "_WRITE_PARK_MIN_S", 5.0)
+        monkeypatch.setattr(writer, "_write_park_max_s", 10.0)
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            writer.enqueue("blocked", timeout=0.05)
+        assert time.monotonic() - start < 1.0
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_writer_uses_a_slot_freed_while_it_slept(adaptive_spin, monkeypatch):
+    """A block freed during the writer's last sleep is used, not reported as
+    a timeout, even if the sleep ran past the deadline."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=1
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue("held")
+        real_sleep = time.sleep
+
+        def slow_sleep(seconds):
+            # The reader frees the block while the writer sleeps past its
+            # deadline.
+            assert reader.dequeue(timeout=5) == "held"
+            real_sleep(0.1)
+
+        monkeypatch.setattr(writer._write_grace, "current", lambda: 0.0)
+        monkeypatch.setattr(shm_broadcast.time, "sleep", slow_sleep)
+        writer.enqueue("next", timeout=0.01)
+        monkeypatch.undo()
+        assert reader.dequeue(timeout=5) == "next"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_writer_grace_trains_before_the_payload_copy(adaptive_spin):
+    """The writer learns how long a block took to free, not how long the
+    caller then spent writing into it."""
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        grace = writer._write_grace
+        assert grace is not None
+        with mock.patch.object(grace, "train", wraps=grace.train) as train:
+            with writer.acquire_write(timeout=1) as buf:
+                # Trained before the caller copies its payload into `buf`.
+                train.assert_called_once()
+                buf[0] = 0
+            train.assert_called_once()
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_reader_with_a_tiny_grace_wakes_on_back_to_back_writes(
+    adaptive_spin, monkeypatch
+):
+    """A reader that parks within a sub-millisecond grace of each read must
+    still be woken by the next write, not by the 5 s recheck."""
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS", "0.05")
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=4
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    latencies = []
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        assert reader._spin_condition.busy_loop_s <= 0.05e-3
+        with mock.patch.object(shm_broadcast, "SHM_READER_RECHECK_INTERVAL_MS", 5000):
+            for i in range(50):
+                result: list = []
+                thread = threading.Thread(
+                    target=lambda out=result: out.append(reader.dequeue(timeout=10)),
+                    daemon=True,
+                )
+                thread.start()
+                assert _wait_parked(writer, 0), "reader never parked"
+                sent = time.monotonic()
+                writer.enqueue(i)
+                thread.join(timeout=10)
+                latencies.append(time.monotonic() - sent)
+                assert result == [i]
+        assert max(latencies) < 0.5, f"slowest wake-up {max(latencies):.3f} s"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_reply_wait_parks_past_the_grace(adaptive_spin):
+    """The executor's reply wait spins only within the adaptive grace, then
+    parks in short steps, and returns as soon as the reply lands or engine
+    input arrives."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024 * 1024, max_chunks=2
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        cond = reader._spin_condition
+        cond.last_read = 0.0  # grace long gone
+        far_future = time.monotonic() + 60
+        with mock.patch.object(
+            cond, "poll_notify", wraps=cond.poll_notify
+        ) as poll_notify:
+            # Parks in steps of at most REMOTE_POLL_WAIT_MS until the deadline.
+            start = time.monotonic()
+            reader.spin_until_readable([], start + 0.05)
+            assert 0.04 <= time.monotonic() - start < 0.5
+            parks = poll_notify.call_count
+            assert parks > 1
+        threading.Timer(0.05, writer.enqueue, args=("reply",)).start()
+        start = time.monotonic()
+        reader.spin_until_readable([], far_future)
+        assert time.monotonic() - start < 1.0
+        assert reader.readable()
+        assert reader.dequeue(timeout=5) == "reply"
+        # Engine input arriving mid-wait ends it within one park step.
+        pending: list[str] = []
+        threading.Timer(0.05, pending.append, args=("input",)).start()
+        cond.last_read = 0.0
+        start = time.monotonic()
+        reader.spin_until_readable(pending, far_future)
+        assert pending and time.monotonic() - start < 1.0
     finally:
         writer.shutdown()
         reader.shutdown()
