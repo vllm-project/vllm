@@ -129,6 +129,23 @@ async def test_load(
         )
         after.callback(engine.shutdown)
 
+        # A ready first rank must not hide a paused peer from the API server.
+        core_client = engine.engine_core
+        assert isinstance(core_client, DPLBAsyncMPClient)
+        paused_engine = core_client.core_engines[-1]
+        await core_client._call_utility_async(
+            "pause_scheduler", "abort", False, engine=paused_engine
+        )
+        try:
+            readiness = await core_client.call_utility_all_async("check_ready")
+            assert readiness == [True] * (DP_SIZE - 1) + [False]
+            assert not await engine.check_health_gpu()
+        finally:
+            await core_client._call_utility_async(
+                "resume_scheduler", engine=paused_engine
+            )
+        assert await engine.check_health_gpu()
+
         # The first request an engine serves pays a few hundred milliseconds of
         # one-off setup, and while it does the engine holds the requests already
         # routed to it while reporting itself idle, which is enough to skew the
