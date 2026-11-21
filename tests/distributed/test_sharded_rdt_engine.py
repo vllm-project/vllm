@@ -257,8 +257,8 @@ def _tp(monkeypatch, rank, size):
 
 @pytest.mark.parametrize("buffer_bytes", [24, 64, 1 << 20])
 def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
-    """Transpose (strided), tied alias (not pulled), cast and step slice
-    (fallbacks), embedding; `router.bias` only on producer 1. At 24 B pieces
+    """Transpose (strided), tied alias (not pulled), cast (direct), step slice
+    (fallback), embedding; `router.bias` only on producer 1. At 24 B pieces
     go in row segments, a fallback's joined in its staging."""
     fleet = _toy_fleet(
         monkeypatch, owners={"router.bias": [1]}, buffer_bytes=buffer_bytes
@@ -268,7 +268,8 @@ def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
     assert "lm_head.weight" not in {
         n for b in fleet.loopback.pulls for n, _ in b.pieces
     }
-    assert {b.producer for b in buckets if "router.bias" in _staged(b)} == {1}
+    owners = {b.producer for b in buckets for n, _ in b.pieces if n == "router.bias"}
+    assert owners == {1}
     (b, i) = next(
         (b, i)
         for b in buckets
@@ -436,7 +437,7 @@ def test_init_and_receive_refusals(monkeypatch):
     with pytest.raises(ValueError, match="2 names, 1 dtypes"):
         fleet.engine.init_transfer_engine(bad)
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    with pytest.raises(RuntimeError, match="sharded_rdt.*VLLM_RELOAD_MODE=direct"):
+    with pytest.raises(RuntimeError, match="sharded_rdt.*requires direct reload"):
         _toy_fleet(monkeypatch)
 
 

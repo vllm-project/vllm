@@ -212,7 +212,7 @@ class ShardedRDTWeightTransferEngine(
     ]
 ):
     """Pull-based RDT/NIXL backend that moves only the boxes each worker's
-    load plan needs. Requires `VLLM_RELOAD_MODE=direct`,
+    load plan needs. Requires direct reload (`VLLM_RELOAD_MODE` auto or direct),
     `distributed_executor_backend="ray"` and `nixl`.
 
     Every inference deployment must call `start_weight_update` before any
@@ -266,7 +266,7 @@ class ShardedRDTWeightTransferEngine(
         Raises:
             ValueError: invalid settings or metadata.
             RuntimeError: the model cannot be planned (`check_plannable`:
-                e.g. `VLLM_RELOAD_MODE` is not `direct`), or a producer
+                e.g. the model does not reload directly), or a producer
                 cannot be found.
 
         """

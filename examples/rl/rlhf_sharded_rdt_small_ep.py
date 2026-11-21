@@ -46,7 +46,7 @@ What it checks (a smoke test, not a numerical equivalence check):
 Run:
     python examples/rl/rlhf_sharded_rdt_small_ep.py
 
-The server runs with `VLLM_RELOAD_MODE=direct`, which sharded RDT requires.
+The server runs with `VLLM_RELOAD_MODE=direct`; sharded RDT requires direct reload.
 
 Needs 4 GPUs on one node, each big enough for the whole model, since every rank
 builds it before `fully_shard` splits it: the default is ~29 GiB in bf16, so
