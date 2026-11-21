@@ -163,6 +163,7 @@ class FlashAttnMLASparseMetadataBuilder(
 
 class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
     group_conversion_decode_only: ClassVar[bool] = True
+    supports_shardq: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -227,11 +228,12 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         block_size: int,
         is_decode: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if not isinstance(q, tuple):
-            raise NotImplementedError(
-                "FlashAttnMLASparseImpl expects split (q_nope, q_rope) input."
-            )
-        q_nope, q_rope = q
+        if isinstance(q, tuple):
+            q_nope, q_rope = q
+        else:
+            # ShardQ exchanges the absorbed query and RoPE columns together.
+            q_nope = q[..., : self.kv_lora_rank]
+            q_rope = q[..., self.kv_lora_rank :]
         kv_rows, _ = flat_kv_row_view(kv_cache, block_size)
 
         cu_seqlens_q = self.cu_seqlens_q_buffer[: q_rope.shape[0] + 1]
