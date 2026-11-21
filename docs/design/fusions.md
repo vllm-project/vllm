@@ -250,7 +250,8 @@ Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusio
 Supported quantization scheme/hardware combinations:
 
 - FP8 static per-tensor: CUDA & HIP kernel
-- FP8 dynamic per-group (128/64): CUDA kernel (sm89+, not active when DeepGemm is used on sm100+)
+- FP8 dynamic per-group (128/64): CUDA kernel (sm89+, not active when DeepGemm is used on sm100+),
+  HIP kernel on RDNA4 (gfx1200/gfx1201)
 - NVFP4 dynamic: CUDA sm100+ only with FlashInfer
 - FP8 per-token-group (128): ROCm AITER only
 
