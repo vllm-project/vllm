@@ -181,7 +181,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 
                 weight = weight.to(self.colbert_linear.weight.device)
                 self.colbert_linear.weight.data.copy_(weight)
-                loaded.add("pooler.head.projector.weight")
+                loaded.update({"colbert_linear.weight", "pooler.head.projector.weight"})
 
         return other_weights, loaded
 
@@ -199,10 +199,10 @@ class ColBERTModel(ColBERTMixin, BertEmbeddingModel):
     interaction).  MaxSim scoring is computed externally.
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         config = vllm_config.model_config.hf_config
 
-        # Must run before super().__init__ because _build_pooler reads these.
+        # The parent has initialized nn.Module and has not built the pooler yet.
         colbert_dim = self.get_colbert_dim_from_config(config)
         self._init_colbert_components(
             hidden_size=config.hidden_size,
@@ -210,9 +210,6 @@ class ColBERTModel(ColBERTMixin, BertEmbeddingModel):
             head_dtype=vllm_config.model_config.head_dtype,
         )
 
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-    def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         return BertModel(vllm_config=vllm_config, prefix=prefix)
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:

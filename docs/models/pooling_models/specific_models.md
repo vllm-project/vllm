@@ -19,6 +19,10 @@ vLLM supports ColBERT models with multiple encoder backbones:
 vllm serve answerdotai/answerai-colbert-small-v1
 ```
 
+For BERT checkpoints, the projection width can be declared in `config.json` as
+`colbert_dim`, `dim`, or `projection_dim` (in that order of precedence), or
+inferred from the saved ColBERT projection weight when none is specified.
+
 For **non-BERT backbones**, use `--hf-overrides` to set the correct architecture:
 
 ```shell
