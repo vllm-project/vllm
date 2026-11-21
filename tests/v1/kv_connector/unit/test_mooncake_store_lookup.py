@@ -350,6 +350,37 @@ def test_reset_gives_up_when_saves_do_not_drain(
     assert client.lookup("after", 128, []).hit_length == 8
 
 
+def test_reset_gives_up_on_a_stuck_lookup(
+    lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
+) -> None:
+    server, client, store_worker = lookup_server
+    store_worker.lookup.return_value = MooncakeLookupResult(8)
+    # Stands in for a lookup stuck in a store call.
+    with server._store_lock.shared():
+        assert not server._reset_store(deadline=time.monotonic() + 0.1)
+        # Lookups are not held off behind the abandoned reset.
+        assert client.lookup("after", 128, []).hit_length == 8
+    store_worker.store.remove_all.assert_not_called()
+
+
+def test_reset_error_reaches_the_client_before_it_gives_up(
+    lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, client, store_worker = lookup_server
+    monkeypatch.setattr(worker, "RESET_TIMEOUT_S", 0.5)
+    store_worker.kv_send_thread = MagicMock()
+    store_worker.kv_send_thread.request_queue.unfinished_tasks = 1
+    errors = []
+    monkeypatch.setattr(
+        worker.logger, "error", lambda msg, *args: errors.append(msg % args)
+    )
+    assert client.reset() is False
+    # The client heard the server's NACK rather than timing out.
+    assert not any("timed out" in error for error in errors)
+    store_worker.store.remove_all.assert_not_called()
+
+
 def test_server_close_waits_for_running_lookups(
     lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
 ) -> None:

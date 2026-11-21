@@ -2758,11 +2758,20 @@ class MooncakeStoreWorker:
         lookup_server = getattr(self, "lookup_server", None)
         if lookup_server is not None:
             self.lookup_server = None
-            lookup_server.close()
+            lookup_server_idle = lookup_server.close()
+        else:
+            lookup_server_idle = True
         store = getattr(self, "store", None)
         if store is None:
             return
         self.store = None
+        if not lookup_server_idle:
+            # Closing the store under a lookup still inside one of its calls
+            # can crash the process; leave it to process exit instead.
+            logger.warning(
+                "Mooncake lookups still running at close; not closing the store."
+            )
+            return
         deadline = time.monotonic() + 5.0
         for thread in (self.kv_send_thread, *self.kv_recv_threads):
             if thread is None:
@@ -2991,14 +3000,21 @@ class _SharedExclusiveLock:
                     self._cond.notify_all()
 
     @contextlib.contextmanager
-    def exclusive(self) -> Iterator[None]:
+    def exclusive(self, deadline: float = math.inf) -> Iterator[None]:
+        """Raises TimeoutError if shared holders remain at `deadline`."""
         with self._cond:
             self._exclusive_waiting += 1
-            while self._exclusive or self._shared:
-                self._cond.wait()
-            self._exclusive_waiting -= 1
-            if self._closed:
+            try:
+                while self._exclusive or self._shared:
+                    timeout_s = deadline - time.monotonic()
+                    if timeout_s <= 0:
+                        raise TimeoutError("Mooncake lookups still running")
+                    self._cond.wait(None if timeout_s == math.inf else timeout_s)
+            finally:
+                self._exclusive_waiting -= 1
+                # New shared holders may be waiting on this one.
                 self._cond.notify_all()
+            if self._closed:
                 raise RuntimeError("Mooncake lookup server is closed")
             self._exclusive = True
         try:
@@ -3047,6 +3063,7 @@ class LookupKeyServer:
         self.store_worker = store_worker
         self._store_lock = _SharedExclusiveLock()
         self._closed = False
+        self._idle = True
         self._lookup_tasks = _TaskQueue(num_threads, "MooncakeLookupServer")
         # A reset blocks while it drains pending saves; keep it off the
         # lookup workers.
@@ -3080,10 +3097,10 @@ class LookupKeyServer:
         budget_s = int.from_bytes(budget, "big") / 1000
         now = time.monotonic()
         reply = functools.partial(self._reply, identity, request_id)
+        # Give up a little before the client does, so that it hears why
+        # (RESP_EXPIRED or RESP_ERR) rather than timing out.
+        deadline = now + budget_s - min(_EXPIRY_MARGIN_S, budget_s / 4)
         if msg_type == LOOKUP_MSG:
-            # Expire a little before the client gives up, so that it gets
-            # RESP_EXPIRED rather than timing out.
-            deadline = now + budget_s - min(_EXPIRY_MARGIN_S, budget_s / 10)
             self._lookup_tasks.submit(
                 functools.partial(self._handle_lookup, reply, deadline, frames[4:]),
                 deadline,
@@ -3091,7 +3108,7 @@ class LookupKeyServer:
             )
         elif msg_type == RESET_MSG:
             self._admin_tasks.submit(
-                functools.partial(self._handle_reset, reply, now + budget_s)
+                functools.partial(self._handle_reset, reply, deadline)
             )
         else:
             logger.warning("LookupKeyServer received unknown msg_type: %r", msg_type)
@@ -3136,7 +3153,7 @@ class LookupKeyServer:
 
     def _reset_store(self, deadline: float = math.inf) -> bool:
         try:
-            with self._store_lock.exclusive():
+            with self._store_lock.exclusive(deadline):
                 # Drain in-flight puts before wiping the master;
                 # otherwise stale puts can repopulate it post-reset.
                 # Safe across HMA: store.remove_all wipes the underlying
@@ -3155,26 +3172,31 @@ class LookupKeyServer:
                         return False
                     time.sleep(0.01)
                 self.store_worker.store.remove_all(force=True)
+        except TimeoutError:
+            # A lookup stuck in a store call must not hold off the others
+            # for good.
+            logger.error("Mooncake store reset gave up waiting for running lookups")
+            return False
         except Exception as e:
             logger.error("Mooncake remove_all failed: %s", e)
             return False
         logger.info("Mooncake store reset via remove_all succeeded.")
         return True
 
-    def close(self) -> None:
-        """Stop serving, and wait briefly for running lookups and resets so
-        the caller can close the store after."""
+    def close(self) -> bool:
+        """Stop serving, and wait briefly for running lookups and resets.
+        Returns whether they all finished, i.e. the store can be closed."""
         if self._closed:
-            return
+            return self._idle
         self._closed = True
         self._lookup_tasks.close()
         self._admin_tasks.close()
         if self._loop.close():
             self.ctx.term()
-        if not self._store_lock.close(timeout_s=5.0):
-            logger.warning("Mooncake lookups still running at close")
+        self._idle = self._store_lock.close(timeout_s=5.0)
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
+        return self._idle
 
 
 # ============================================================
@@ -3188,9 +3210,11 @@ LOOKUP_BREAKER_COOLDOWN_S = 30.0
 # Reset drains pending saves on the server before replying, so allow longer.
 RESET_TIMEOUT_S = 60.0
 _MAX_BUDGET_MS = 2**32 - 1
-# Rank 0 expires a queued lookup this long (capped at a tenth of its budget)
-# before the client stops waiting, so the client hears why.
-_EXPIRY_MARGIN_S = 0.05
+# Rank 0 gives up on a request this long (capped at a quarter of its budget)
+# before the client stops waiting, so the client hears why. The budget is
+# measured from when rank 0 dispatches the request, so the margin also covers
+# the trip there, which can wait on the GIL behind busy lookup threads.
+_EXPIRY_MARGIN_S = 0.25
 
 
 @dataclasses.dataclass(slots=True)
