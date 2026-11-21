@@ -145,6 +145,25 @@ class TestGlm47ExtractToolCalls:
         assert r.tools_called
         assert r.tool_calls[0].function.name == "get_current_date"
 
+    def test_unknown_tool_name(self, glm47_tool_parser, mock_request):
+        out = (
+            "<tool_call>unknown_tool<arg_key>city</arg_key>"
+            "<arg_value>Tokyo</arg_value></tool_call>"
+        )
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert r.tool_calls[0].function.name == "unknown_tool"
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Tokyo"}
+        assert r.content is None
+
+    def test_unknown_tool_name_zero_args(self, glm47_tool_parser, mock_request):
+        out = "<tool_call>unknown_zero_arg_tool</tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert r.tool_calls[0].function.name == "unknown_zero_arg_tool"
+        assert json.loads(r.tool_calls[0].function.arguments) == {}
+        assert r.content is None
+
     def test_args_same_line(self, glm47_tool_parser, mock_request):
         out = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Beijing</arg_value></tool_call>"
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
@@ -198,6 +217,92 @@ def _reset(parser):
 
 
 class TestGlm47Streaming:
+    def _stream(self, parser, mock_request, chunks):
+        _reset(parser)
+        current_text = ""
+        deltas = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
+            )
+            if delta:
+                deltas.append(delta)
+        return deltas
+
+    def test_unknown_tool_name_streaming(self, glm47_tool_parser, mock_request):
+        chunks = [
+            "<tool_call>",
+            "unknown_tool\n",
+            "<arg_key>city</arg_key>",
+            "<arg_value>",
+            "Tokyo",
+            "</arg_value>",
+            "</tool_call>",
+        ]
+        deltas = self._stream(glm47_tool_parser, mock_request, chunks)
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        names = [
+            tool_call.function.name
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.name
+        ]
+        arguments = [
+            tool_call.function.arguments
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.arguments
+        ]
+        assert names == ["unknown_tool"]
+        assert json.loads("".join(arguments)) == {"city": "Tokyo"}
+
+    def test_unknown_then_known_tool_name_streaming(
+        self, glm47_tool_parser, mock_request
+    ):
+        chunks = [
+            "<tool_call>",
+            "unknown_tool\n",
+            "<arg_key>city</arg_key>",
+            "<arg_value>",
+            "Tokyo",
+            "</arg_value>",
+            "</tool_call>",
+            "<tool_call>",
+            "get_weather\n",
+            "<arg_key>city</arg_key>",
+            "<arg_value>",
+            "Kyoto",
+            "</arg_value>",
+            "</tool_call>",
+        ]
+        deltas = self._stream(glm47_tool_parser, mock_request, chunks)
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        named_calls = [
+            tool_call
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.name
+        ]
+        assert [call.index for call in named_calls] == [0, 1]
+        assert [call.function.name for call in named_calls] == [
+            "unknown_tool",
+            "get_weather",
+        ]
+        arguments = {0: "", 1: ""}
+        for call in tool_calls:
+            if call.function and call.function.arguments:
+                arguments[call.index] += call.function.arguments
+        assert json.loads(arguments[0]) == {"city": "Tokyo"}
+        assert json.loads(arguments[1]) == {"city": "Kyoto"}
+
     def test_no_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
         chunks = ["<tool_call>", "get_current_date", "</tool_call>"]
