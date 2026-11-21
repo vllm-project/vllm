@@ -1585,6 +1585,11 @@ class KimiLinearForCausalLM(
         return hidden_states
 
     @classmethod
+    def get_mamba_state_alignment_from_config(cls, vllm_config: "VllmConfig") -> int:
+        # KDA's kernels don't align the Mamba states in a cache page.
+        return 1
+
+    @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
@@ -2073,6 +2078,10 @@ class KimiK3ForConditionalGeneration(
         return self.language_model.mamba_cache.get_seqlen_agnostic_capture_inputs(
             batch_size
         )
+
+    @classmethod
+    def get_mamba_state_alignment_from_config(cls, vllm_config: VllmConfig) -> int:
+        return KimiLinearForCausalLM.get_mamba_state_alignment_from_config(vllm_config)
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):

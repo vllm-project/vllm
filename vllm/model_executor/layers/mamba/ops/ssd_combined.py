@@ -212,7 +212,7 @@ def mamba_chunk_scan_combined_varlen(
     assert seq_idx is not None
     assert final_states_out is None or not return_intermediate_states
 
-    varlen_states = _mamba_chunk_scan_combined_fwd(
+    return _mamba_chunk_scan_combined_fwd(
         x,
         dt,
         A,
@@ -235,18 +235,3 @@ def mamba_chunk_scan_combined_varlen(
         final_states_out=final_states_out,
         final_state_indices=final_state_indices,
     )
-    if final_states_out is not None:
-        if varlen_states is not None:
-            # Implementations without the fused write (CPU) return the states.
-            final_states_out[final_state_indices] = varlen_states
-        return None
-
-    return varlen_states
-
-
-from vllm.platforms import current_platform  # noqa: E402
-
-if current_platform.is_cpu():
-    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_mamba_ssm
-
-    _mamba_chunk_scan_combined_fwd = cpu_mamba_ssm._mamba_chunk_scan_combined_fwd_cpu  # type: ignore

@@ -8,6 +8,13 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.linear_attention.mamba.decode.base import (
+    MambaSSUKernel,
+    SSUBuffers,
+)
+from vllm.model_executor.layers.linear_attention.mamba.decode.selector import (
+    select_mamba_ssu_kernel,
+)
 from vllm.model_executor.layers.mamba.abstract import (
     get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
@@ -19,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     compute_causal_conv1d_metadata,
@@ -193,6 +201,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.decode_replayssm_state_indices_d = torch.empty(
                 (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
+        # The decode kernel's persistent buffers, which it slices each step.
+        self.ssu_kernel: type[MambaSSUKernel] | None = None
+        self.ssu_buffers: SSUBuffers | None = None
+        if kv_cache_spec.mamba_type in (
+            MambaAttentionBackendEnum.MAMBA1,
+            MambaAttentionBackendEnum.MAMBA2,
+        ):
+            self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, kv_cache_spec)
+            self.ssu_buffers = self.ssu_kernel.allocate_buffers(
+                vllm_config, kv_cache_spec, self.decode_cudagraph_max_bs, device
+            )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
@@ -344,11 +363,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
         return num_computed_tokens_p_cpu, query_start_loc_p_cpu
 
+    @staticmethod
     def _build_chunk_metadata_tensors(
-        self,
         chunk_size: int,
-        common: M,
-        common_attn_metadata: CommonAttentionMetadata,
+        num_computed_tokens_p_cpu: torch.Tensor,
+        query_start_loc_p_cpu: torch.Tensor,
+        device: torch.device,
         checkpoint_offsets_p: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute chunk metadata and return as device tensors.
@@ -357,26 +377,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         it has one entry per prefill row, holding the logical chunk that ends
         on the checkpoint, and 0 for rows that decline.
         """
-        num_prefills = common.num_prefills
-
-        num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
-            common_attn_metadata,
-            common.num_reqs,
-            num_prefills,
-            common.num_decode_tokens,
-        )
-
         cu_chunk_seqlen, seq_idx, last_chunk_indices, ckpt_idxs = (
-            self._compute_chunk_metadata(
+            BaseMambaAttentionMetadataBuilder._compute_chunk_metadata(
                 chunk_size,
-                num_prefills,
+                query_start_loc_p_cpu.numel() - 1,
                 num_computed_tokens_p_cpu,
                 query_start_loc_p_cpu,
                 checkpoint_offsets_p,
             )
         )
 
-        device = common_attn_metadata.query_start_loc.device
         # Build on pinned CPU and upload non-blocking to avoid the synchronous
         # H2D copy that `torch.as_tensor(list, device=cuda)` would force.
         cu_chunk_seqlen_p = async_tensor_h2d(
@@ -595,12 +605,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         bc_pre_scratch = metadata.bc_pre_scratch
         replayssm_scratch = metadata.replayssm_scratch
         replayssm_state_indices_d = None
-        if (
+        num_decode_rows = metadata.num_decodes
+        padded = (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            padded_bs = metadata.num_reqs
+        )
+        if padded:
+            padded_bs = num_decode_rows = metadata.num_reqs
             self.state_indices_tensor_d[: metadata.num_decodes].copy_(
                 state_indices_tensor_d, non_blocking=True
             )
@@ -649,7 +661,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         ):
             replayssm_state_indices_d = state_indices_tensor_d[:, 0].contiguous()
 
-        return replace(
+        metadata = replace(
             metadata,
             state_indices_tensor_d=state_indices_tensor_d,
             query_start_loc_d=query_start_loc_d,
@@ -660,6 +672,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             replayssm_scratch=replayssm_scratch,
             replayssm_state_indices_d=replayssm_state_indices_d,
         )
+        if self.ssu_kernel is not None and num_decode_rows > 0:
+            metadata = self.ssu_kernel.prepare_metadata(
+                self.ssu_buffers, metadata, num_decode_rows, padded
+            )
+        return metadata
 
     def update_block_table(
         self,
