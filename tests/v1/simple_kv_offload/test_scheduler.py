@@ -22,7 +22,6 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.config.cache import MambaCacheMode
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
@@ -286,7 +285,7 @@ def test_lookahead_mamba_partial_tail_survives_finish(
     config = _make_lookahead_config(num_lookahead)
     config.scheduler_config.async_scheduling = False
     config.cache_config.prefix_match_unit = 4
-    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_cache_retention_interval = 0
     assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config = {"num_cpu_blocks": 32}
@@ -297,7 +296,7 @@ def test_lookahead_mamba_partial_tail_survives_finish(
             ["mamba"],
             mamba,
             manager_config=MambaManager.config(
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
                 num_speculative_blocks=1,
                 num_prefill_checkpoint_blocks=1,
             ),
@@ -2787,7 +2786,7 @@ def _make_hybrid_attention_mamba_scheduler(
     hash_block_size: int | None = None,
     dcp_world_size: int = 4,
     lazy: bool = False,
-    mamba_cache_mode: MambaCacheMode = "align",
+    enable_prefix_caching: bool = True,
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
@@ -2811,7 +2810,7 @@ def _make_hybrid_attention_mamba_scheduler(
         hash_block_size=hash_block_size or block_size,
         dcp_world_size=dcp_world_size,
         lazy=lazy,
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         enable_kv_cache_events=enable_kv_cache_events,
     )
 
@@ -2826,7 +2825,7 @@ def _make_two_group_scheduler(
     hash_block_size: int,
     dcp_world_size: int,
     lazy: bool = False,
-    mamba_cache_mode: MambaCacheMode = "align",
+    enable_prefix_caching: bool = True,
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one named second group."""
@@ -2837,7 +2836,7 @@ def _make_two_group_scheduler(
             [second_name],
             second_spec,
             MambaManager,
-            MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+            MambaManager.config(enable_prefix_caching=enable_prefix_caching),
         )
         if isinstance(second_spec, MambaSpec)
         else make_kv_cache_group([second_name], second_spec),
@@ -2858,7 +2857,7 @@ def _make_two_group_scheduler(
     )
     vllm_config = _make_cp_vllm_config(dcp_world_size=dcp_world_size)
     vllm_config.cache_config.prefix_cache_retention_interval = 0
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     if enable_kv_cache_events:
         vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
     # _derive_cpu_config() scales the requested capacity against
