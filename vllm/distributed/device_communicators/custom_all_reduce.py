@@ -369,6 +369,8 @@ class CustomAllreduce:
     def _init_mnnvl_buffer(self, stage_size: int) -> None:
         if torch_symm_mem is None or not current_platform.is_cuda():
             return
+        if not _all_ranks_true(self.group, _has_local_multicast_support(self.device)):
+            return
         try:
             buffer_size = stage_size * 6
             buffer = torch_symm_mem.empty(
