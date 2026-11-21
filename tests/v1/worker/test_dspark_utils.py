@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from tests.v1.core.utils import full_layer
-from vllm.config import ParallelConfig
+from vllm.config import EPLBConfig, ParallelConfig
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.gpu import model_runner
@@ -106,6 +106,77 @@ def test_dspark_parallel_config_can_disable_draft_eplb():
     assert target_config.eplb_config.num_redundant_experts == 32
 
 
+@pytest.mark.parametrize("draft_enable_eplb", [True, False])
+def test_dspark_parallel_config_preserves_pcp_eplb_topology(
+    monkeypatch, draft_enable_eplb
+):
+    monkeypatch.setattr(current_platform, "supports_eplb", lambda: True)
+    target_config = ParallelConfig(
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=16,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(num_redundant_experts=16),
+        distributed_executor_backend="mp",
+    )
+    draft_model_config = _FakeModelConfig(
+        hf_config=_FakeHFConfig(model_type="deepseek_v41")
+    )
+
+    draft_config = _get_dspark_parallel_config(
+        target_config,
+        tensor_parallel_size=1,
+        draft_model_config=draft_model_config,
+        draft_enable_eplb=draft_enable_eplb,
+    )
+
+    assert draft_config.prefill_context_parallel_size == 16
+    assert draft_config.enable_eplb is draft_enable_eplb
+    assert draft_config.eplb_config.num_redundant_experts == (
+        16 if draft_enable_eplb else 0
+    )
+    assert target_config.prefill_context_parallel_size == 16
+    assert target_config.enable_eplb
+    assert target_config.eplb_config.num_redundant_experts == 16
+
+
+def test_dspark_speculator_uses_valid_intermediate_eplb_config(monkeypatch):
+    monkeypatch.setattr(current_platform, "supports_eplb", lambda: True)
+    target_parallel = ParallelConfig(
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=16,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(num_redundant_experts=16),
+        distributed_executor_backend="mp",
+    )
+    target_config = SimpleNamespace(
+        parallel_config=target_parallel,
+        speculative_config=SimpleNamespace(
+            draft_decode_context_parallel_size=1,
+            use_dspark=lambda: True,
+        ),
+    )
+
+    class CapturedConfig(Exception):
+        pass
+
+    def capture_init(self, config, device):
+        raise CapturedConfig(config)
+
+    monkeypatch.setattr(DraftModelSpeculator, "__init__", capture_init)
+    with pytest.raises(CapturedConfig) as captured:
+        DFlashSpeculator(target_config, device=None)
+
+    draft_parallel = captured.value.args[0].parallel_config
+    assert draft_parallel.prefill_context_parallel_size == 1
+    assert not draft_parallel.enable_eplb
+    assert draft_parallel.eplb_config.num_redundant_experts in (None, 0)
+    assert target_parallel.prefill_context_parallel_size == 16
+    assert target_parallel.enable_eplb
+    assert target_parallel.eplb_config.num_redundant_experts == 16
+
+
 @pytest.mark.parametrize("pcp_size", [1, 4])
 @pytest.mark.parametrize("dcp_size", [1, 4])
 @pytest.mark.parametrize("use_mla", [False, True])
@@ -122,7 +193,8 @@ def test_draft_context_parallelism_without_changing_target(
     target_config = SimpleNamespace(
         parallel_config=target_parallel,
         speculative_config=SimpleNamespace(
-            draft_decode_context_parallel_size=dcp_size if use_mla else 1
+            draft_decode_context_parallel_size=dcp_size if use_mla else 1,
+            use_dspark=lambda: False,
         ),
     )
 
