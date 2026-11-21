@@ -660,7 +660,11 @@ class FlexibleArgumentParser(ArgumentParser):
                 if value:
                     processed_args.append("--" + key)
                     for item in value:
-                        processed_args.append(str(item))
+                        processed_args.append(
+                            json.dumps(item)
+                            if isinstance(item, (dict, list))
+                            else str(item)
+                        )
             elif isinstance(value, dict):
                 # Convert nested dicts to JSON strings so they can be parsed
                 # by the existing JSON argument parsing machinery.
