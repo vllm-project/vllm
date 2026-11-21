@@ -1186,7 +1186,9 @@ class FlashAttentionImpl(AttentionImpl):
         # With weight updates on, a 1.0 scale may change, so FA4 keeps its descale.
         vllm_config = get_current_vllm_config_or_none()
         self._kv_scales_can_change = (
-            vllm_config is not None and vllm_config.weight_transfer_config is not None
+            is_quantized_kv_cache(kv_cache_dtype)
+            and vllm_config is not None
+            and vllm_config.weight_transfer_config is not None
         )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
