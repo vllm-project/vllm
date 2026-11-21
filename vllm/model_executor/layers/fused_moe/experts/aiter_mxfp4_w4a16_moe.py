@@ -218,6 +218,9 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     w1_data = w1.storage.data
     w2_data = w2.storage.data
+    # STRIP16 record layout (gfx942), packed at weight load by the mxfp4 oracle
+    w1_layout = getattr(w1.storage, "w_layout", None)
+    w2_layout = getattr(w2.storage, "w_layout", None)
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         weight_mx_scale,
     )
@@ -302,6 +305,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
         backend=a16w4_backend,
         expert_map=expert_map,
         gate_valid=gate_valid,
+        **({"w_layout": w1_layout} if w1_layout else {}),
     )
 
     out = moe_gemm_a16w4(
@@ -321,6 +325,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
         backend=a16w4_backend,
         expert_map=expert_map,
         gate_valid=gate_valid,
+        **({"w_layout": w2_layout} if w2_layout else {}),
     )
 
     return out
