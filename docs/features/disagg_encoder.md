@@ -42,6 +42,23 @@ The following scripts demonstrate the workflow with **ExampleConnector**:
 1 Encoder instance + 1 Prefill instance + 1 Decode instance:
 `examples/disaggregated/disaggregated_encoder/disagg_1e1p1d_example.sh`
 
+#### Size an E+PD deployment
+
+For a fixed GPU budget with one GPU per worker, the sizing example estimates
+how many GPUs to assign to the encoder and combined prefill/decode pools. The
+example can measure saturation rates from worker metrics during a replay or
+predict rates from a frozen model and a sample of completed requests. For
+example, use the measurement files from an encoder and PD calibration pass:
+
+```bash
+python examples/disaggregated/disaggregated_encoder/size_epd.py \
+    --num-gpus 4 --measured-rates encoder-rates.json pd-rates.json
+```
+
+It reports the recommended split, estimated capacity, and limiting pool. See the
+[Disaggregated Encoder example](../examples/disaggregated/disaggregated_encoder.md)
+for the stage measurement and replay procedure.
+
 ### ECMooncakeConnector
 
 **ECMooncakeConnector** transfers encoder outputs using the Mooncake TransferEngine.
