@@ -16,7 +16,9 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     mamba_layer,
 )
 from tests.v1.kv_connector.unit.test_mooncake_store_worker import (
-    _make_store_sending_thread,
+    _make_store_sending_thread as _make_store_sending_thread,
+)
+from tests.v1.kv_connector.unit.test_mooncake_store_worker import (
     _run_store_req,
 )
 from vllm.config import (
@@ -2216,7 +2218,9 @@ def _scheduled_save_case() -> tuple[
     return scheduler, pool, blocks, scheduler.build_connector_meta(output)
 
 
-def test_failed_save_releases_hbm_only_after_every_worker_finishes():
+def test_failed_save_releases_hbm_only_after_every_worker_finishes(
+    _make_store_sending_thread,
+):
     scheduler, pool, blocks, meta = _scheduled_save_case()
     request = meta.requests[0]
     pool.free_blocks(blocks)

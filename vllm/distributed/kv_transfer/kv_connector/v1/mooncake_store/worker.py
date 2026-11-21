@@ -89,6 +89,7 @@ from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
+from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -100,8 +101,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
     group_kernel_blocks,
 )
 
@@ -140,6 +143,61 @@ def _store_spec_family(spec: KVCacheSpec) -> Literal["attention", "mamba"] | Non
 
 def _group_layer_specs(group: KVCacheGroup) -> tuple[KVCacheSpec, ...]:
     return tuple(group.kv_cache_specs[name] for name in group.layer_names)
+
+
+def _view_padded_manager_blocks(
+    cache: torch.Tensor,
+    num_blocks: int,
+    spec: KVCacheSpec,
+    allocation: KVCacheTensor,
+    layer_index: int,
+) -> torch.Tensor:
+    """Coalesce kernel-page padding only for complete allocator-owned views."""
+    page_size = getattr(spec, "page_size_padded", None)
+    if (
+        page_size is None
+        or allocation.block_stride != page_size
+        or not spec.has_layer_views
+        or getattr(spec, "dtype", None) != cache.dtype
+        or cache.ndim != 4
+        or num_blocks <= 0
+    ):
+        return cache
+    ratio, remainder = divmod(cache.shape[0], num_blocks)
+    if ratio <= 1 or remainder or spec.block_size % ratio or page_size % ratio:
+        return cache
+
+    itemsize = cache.element_size()
+    shape_bytes = compute_layer_kv_cache_shape_bytes(
+        spec, num_blocks, spec.block_size // ratio
+    )
+    kernel_stride = page_size // ratio
+    kernel_bytes = math.prod(shape_bytes[1:])
+    if (
+        (*cache.shape[:-1], cache.shape[-1] * itemsize) != shape_bytes
+        or cache.stride(0) * itemsize != kernel_stride
+        or cache.stride(-1) != 1
+        or kernel_bytes >= kernel_stride
+        or not is_non_overlapping_and_dense(cache[0])
+    ):
+        return cache
+
+    # Match the allocator's complete layer placement, not an offset component.
+    offset = allocation.offset + layer_index * allocation.layer_stride
+    span = (ratio - 1) * kernel_stride + kernel_bytes
+    if (
+        cache.storage_offset() * itemsize != offset
+        or (
+            len(allocation.layers) > 1
+            and allocation.layer_stride < num_blocks * page_size
+        )
+        or offset + (num_blocks - 1) * page_size + span > allocation.size
+        or allocation.size > cache.untyped_storage().nbytes()
+    ):
+        return cache
+
+    # Include internal padding, but stop at the last kernel page's live bytes.
+    return cache.view(torch.uint8).as_strided((num_blocks, span), (page_size, 1))
 
 
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
@@ -2120,6 +2178,11 @@ class MooncakeStoreWorker:
                 "MooncakeConnector already registered the device buffers."
             )
         registered_buffers: set[int] = set()
+        placements = {
+            (layer_name, allocation.host_resident): (allocation, layer_index)
+            for allocation in self._kv_cache_config.kv_cache_tensors
+            for layer_index, layer_name in enumerate(allocation.layers)
+        }
 
         for group, db in zip(self._kv_cache_groups, self.token_dbs, strict=True):
             missing_layers = [
@@ -2139,6 +2202,9 @@ class MooncakeStoreWorker:
             assert num_blocks is not None
             cache_tensors: list[torch.Tensor] = []
             layout_tensors: list[torch.Tensor] = []
+            padded_views: dict[
+                tuple[int, torch.Size, tuple[int, ...], torch.dtype], torch.Tensor
+            ] = {}
             for layer_name in group.layer_names:
                 value = kv_caches[layer_name]
                 components = [value] if isinstance(value, torch.Tensor) else value
@@ -2148,11 +2214,44 @@ class MooncakeStoreWorker:
                     raise TypeError(f"Unsupported KV cache components for {layer_name}")
                 layer_tensors = [cache for cache in components if cache.numel()]
                 cache_tensors.extend(layer_tensors)
+                placement = placements.get((layer_name, group.host_resident))
+                if (
+                    isinstance(db.store_layout, RankLocalStoreLayout)
+                    and len(layer_tensors) == 1
+                    and placement is not None
+                ):
+                    allocation, layer_index = placement
+                    cache = layer_tensors[0]
+                    padded = _view_padded_manager_blocks(
+                        cache,
+                        num_blocks,
+                        group.kv_cache_specs[layer_name],
+                        allocation,
+                        layer_index,
+                    )
+                    if padded is not cache:
+                        key = (
+                            cache.data_ptr(),
+                            cache.shape,
+                            cache.stride(),
+                            cache.dtype,
+                        )
+                        padded_views[key] = padded
                 layout_tensors.extend(
                     layer_tensors[:1]
                     if self.store_tp_size is not None
                     else layer_tensors
                 )
+            # Normalize identical KV-sharing views together, even if an alias
+            # appears before its allocated target in layer order.
+            if padded_views:
+                layout_tensors = [
+                    padded_views.get(
+                        (cache.data_ptr(), cache.shape, cache.stride(), cache.dtype),
+                        cache,
+                    )
+                    for cache in layout_tensors
+                ]
             # Rank-local layouts group kernel blocks while describing each
             # component's regions. Other layouts expect manager-block views.
             if not isinstance(db.store_layout, RankLocalStoreLayout):

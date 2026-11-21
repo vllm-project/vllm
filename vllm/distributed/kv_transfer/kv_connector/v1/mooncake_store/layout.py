@@ -175,9 +175,7 @@ class RankLocalStoreLayout(StoreLayout):
         self._key_prefix = PoolKey.build_prefix(metadata)
         self.kv_caches_base_addr: list[int] = []
         self.block_stride: list[int] = []
-        # Bytes at the start of each block that are stored: up to the last
-        # byte of the group's data, skipping e.g. the padding of a Mamba state
-        # up to the attention page size.
+        # Bytes transferred per region per manager block, independent of block stride.
         self.block_len: list[int] = []
 
     @property
@@ -202,13 +200,6 @@ class RankLocalStoreLayout(StoreLayout):
             )
             for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
         )
-
-    def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
-        self.kv_caches_base_addr = base_addrs
-
-    def set_block_len(self, block_lens: list[int]) -> None:
-        self.block_stride = block_lens
-        self.block_len = list(block_lens)
 
     def register_kv_caches(
         self, kv_caches: Sequence[torch.Tensor], num_blocks: int
@@ -246,23 +237,8 @@ class RankLocalStoreLayout(StoreLayout):
                 raise ValueError("KV cache block count must divide into manager blocks")
             append_regions(group_kernel_blocks(cache, num_blocks))
 
-        # Sort an auxiliary index so enclosing intervals precede covered aliases.
-        # Stable sorting retains the first identical alias. Emit in input order.
-        ordered = sorted(
-            range(len(regions)),
-            key=lambda i: (regions[i].stride, regions[i].base, -regions[i].length),
-        )
-        keep = [False] * len(regions)
-        previous_stride: int | None = None
-        covered_end = 0
-        for index in ordered:
-            region = regions[index]
-            end = region.base + region.length
-            if region.stride != previous_stride or end > covered_end:
-                keep[index] = True
-                previous_stride = region.stride
-                covered_end = end
-        unique = [region for index, region in enumerate(regions) if keep[index]]
+        # KV-sharing layers reuse their target's tensor: drop identical regions.
+        unique = list(dict.fromkeys(regions))
         if not unique:
             raise ValueError("KV cache group has no non-empty components")
 
@@ -312,8 +288,7 @@ class RankLocalStoreLayout(StoreLayout):
         assert np.all(starts % self.block_size == 0), (
             "Store chunks must start at a manager block boundary"
         )
-        block_counts = (spans + self.block_size - 1) // self.block_size
-        assert np.all(block_counts == 1), (
+        assert np.all((spans > 0) & (spans <= self.block_size)), (
             "Store chunks must be non-empty and stay within one manager block"
         )
         bids = np.fromiter(
@@ -326,7 +301,7 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
         )
         addrs = base[None, :] + bids[:, None] * strides[None, :]
-        sizes = blen[None, :] * block_counts[:, None]
+        sizes = np.broadcast_to(blen, addrs.shape)
         return addrs.tolist(), sizes.tolist(), bids.tolist()
 
 

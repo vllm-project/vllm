@@ -9,9 +9,6 @@ import random
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
-    ChunkedTokenDatabase,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     AttentionStoreLayout,
     HeadMajorStoreLayout,
@@ -239,38 +236,19 @@ def test_gdn_store_shard_segments_preserve_projection_boundaries(
     assert [addr - cache.data_ptr() for addr in shard1_addrs] == shard1_offsets
 
 
-def _rank_local_layout(num_regions: int, num_block_lens: int) -> RankLocalStoreLayout:
-    metadata = KeyMetadata("test-model", 1, 0, 0, 0)
-    layout = RankLocalStoreLayout(metadata, BLOCK_SIZE, BLOCK_SIZE)
-    layout.set_kv_caches_base_addr(
-        [0x7F00_0000_0000 + i * (1 << 30) for i in range(num_regions)]
+@pytest.mark.parametrize("num_regions", [1, 3])
+def test_rank_local_descriptors_match_reference(num_regions: int):
+    num_blocks = 8
+    views = [
+        torch.zeros((num_blocks, 16 + 8 * i), dtype=torch.uint8)[:, 4:-4]
+        for i in range(num_regions)
+    ]
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 1, 0, 0, 0), BLOCK_SIZE, BLOCK_SIZE // 2
     )
-    layout.set_block_len([30_208 + 512 * i for i in range(num_block_lens)])
-    return layout
-
-
-def _rank_local_reference(
-    layout: RankLocalStoreLayout, start: int, end: int, block_ids: list[int]
-) -> tuple[list[int], list[int], int]:
-    block_id = block_ids[start // layout.block_size]
-    length = len(layout.block_stride)
-    addrs = [
-        base_addr + block_id * layout.block_stride[index % length]
-        for index, base_addr in enumerate(layout.kv_caches_base_addr)
-    ]
-    sizes = [
-        layout.block_len[index % length]
-        for index in range(len(layout.kv_caches_base_addr))
-    ]
-    return addrs, sizes, block_id
-
-
-@pytest.mark.parametrize("num_regions,num_block_lens", [(96, 96), (96, 2), (1, 1)])
-def test_rank_local_descriptors_match_reference(num_regions: int, num_block_lens: int):
-    layout = _rank_local_layout(num_regions, num_block_lens)
-    layout.hash_block_size = BLOCK_SIZE // 2
+    layout.register_kv_caches(views, num_blocks)
     rng = random.Random(0)
-    block_ids = [rng.randrange(0, 1 << 20) for _ in range(300)]
+    block_ids = [rng.randrange(num_blocks) for _ in range(300)]
     chunks = []
     block = 0
     while block < len(block_ids):
@@ -285,19 +263,23 @@ def test_rank_local_descriptors_match_reference(num_regions: int, num_block_lens
     for chunk, chunk_addrs, chunk_sizes, block_id in zip(
         chunks, addrs, sizes, selected_blocks, strict=True
     ):
-        assert (chunk_addrs, chunk_sizes, block_id) == _rank_local_reference(
-            layout, *chunk, block_ids
-        )
+        expected_block = block_ids[chunk[0] // BLOCK_SIZE]
+        assert block_id == expected_block
+        assert chunk_addrs == [view[expected_block].data_ptr() for view in views]
+        assert chunk_sizes == [view[expected_block].nbytes for view in views]
         assert all(type(addr) is int for addr in chunk_addrs)
         assert type(block_id) is int
 
 
 def test_rank_local_descriptors_handle_empty_and_invalid_chunks():
-    layout = _rank_local_layout(4, 4)
-    layout.hash_block_size = BLOCK_SIZE // 2
+    cache = torch.zeros((4, 16), dtype=torch.uint8)
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0), BLOCK_SIZE, BLOCK_SIZE // 2
+    )
+    layout.register_kv_caches([cache], 4)
     assert layout.prepare_values([], [1, 2, 3], []) == ([], [], [])
     for chunk in (
-        (0, BLOCK_SIZE + 1),
+        (0, BLOCK_SIZE // 2 + 1),
         (0, 2 * BLOCK_SIZE),
         (BLOCK_SIZE // 2, 3 * BLOCK_SIZE // 2),
         (0, 0),
@@ -348,39 +330,14 @@ def test_component_layout_round_trip_preserves_neighboring_blocks(
     assert torch.equal(destination, expected)
 
 
-def test_component_layout_deduplicates_full_page_aliases_and_skips_empty_views():
+def test_component_layout_deduplicates_shared_views_in_input_order():
     raw = torch.zeros(4, 32, dtype=torch.uint8)
+    first, second = raw[:, 16:24], raw[:, :8]
     layout = RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 16, 16)
-    layout.register_kv_caches([raw[:, :16], raw[:, 16:], raw, raw[:, :0]], 4)
+    layout.register_kv_caches([first, second, first, raw[:, :0], second], 4)
     assert layout.prepare_values([(0, 16)], [3], [0]) == (
-        [[raw.data_ptr() + 96]],
-        [[32]],
-        [3],
-    )
-
-
-def test_component_layout_deduplicates_aliases_in_input_order():
-    raw = torch.arange(512).to(torch.uint8)
-    regions = [
-        (64, 8, 128),  # Keep the first of two identical aliases.
-        (8, 8, 128),  # Covered by a later, larger region.
-        (0, 16, 128),  # Same start as the larger region.
-        (0, 32, 128),
-        (64, 8, 128),
-        (16, 24, 128),  # Partial overlap must survive.
-        (8, 8, 64),  # Different stride must survive.
-        (4, 28, 128),  # Same end as the larger region.
-    ]
-    views = [
-        raw.as_strided((4, length), (stride, 1), offset)
-        for offset, length, stride in regions
-    ]
-    layout = RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 16, 16)
-    layout.register_kv_caches(views, 4)
-    survivors = [views[i] for i in (0, 3, 5, 6)]
-    assert layout.prepare_values([(0, 16)], [3], [0]) == (
-        [[view[3].data_ptr() for view in survivors]],
-        [[view.shape[1] for view in survivors]],
+        [[first[3].data_ptr(), second[3].data_ptr()]],
+        [[8, 8]],
         [3],
     )
 
@@ -511,23 +468,6 @@ def test_rank_local_layout_skips_block_padding():
     addrs, sizes, _ = layout.prepare_values([(0, BLOCK_SIZE)], [1], [0])
     assert addrs == [[view.data_ptr() + page for view in views]]
     assert sizes == [[state] * num_layers]
-
-
-def test_rank_local_database_api_rejects_tp_shared_layout():
-    metadata = KeyMetadata("test-model", 0, 0, 0, 0)
-    layout = HeadMajorStoreLayout(
-        metadata,
-        block_size=16,
-        hash_block_size=16,
-        local_tp_size=2,
-        store_tp_size=4,
-        tp_rank=0,
-        layer_specs=_attention_specs(1, 16, 4),
-    )
-    database = ChunkedTokenDatabase(metadata, 16, store_layout=layout)
-
-    with pytest.raises(RuntimeError, match="rank-local"):
-        database.set_block_len([256])
 
 
 _SHARED_LAYOUTS = [
