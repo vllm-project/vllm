@@ -673,6 +673,7 @@ class EngineCore:
                 num_generation_tokens=details.num_generation_tokens,
                 num_encoder_inputs=details.num_encoder_inputs,
                 num_encoder_output_tokens=details.num_encoder_output_tokens,
+                scheduled_workload=details.scheduled_workload,
             )
         self._iteration_index = iteration_index + 1
         return iteration_details

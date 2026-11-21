@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.logger import init_logger
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration_workload import QueuedWorkload, ScheduledWorkload
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -208,6 +209,8 @@ class SchedulerIterationDetails:
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
+    # Only with --enable-logging-iteration-details; None for dummy iterations.
+    scheduled_workload: ScheduledWorkload | None = None
 
 
 KV_FETCH_WAITING_TO_START = "waiting_to_start"
@@ -242,6 +245,10 @@ class SchedulerStats:
     # Iterations to report: timed on the GPU by the output worker, or untimed
     # from EngineCore.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
+    # The waiting requests when these stats were made, which is later than the
+    # iterations in iteration_records ran. Only with
+    # --enable-logging-iteration-details.
+    queued_workload: QueuedWorkload | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None

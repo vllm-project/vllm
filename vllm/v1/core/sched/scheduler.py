@@ -72,6 +72,10 @@ from vllm.v1.kv_cache_interface import (
     get_reusable_prefix_length,
     is_mamba_prefill_checkpoint_valid,
 )
+from vllm.v1.metrics.iteration_workload import (
+    QueuedWorkloadTally,
+    make_scheduled_workload,
+)
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     KV_FETCH_COMPLETED_WAITING,
@@ -236,15 +240,20 @@ class Scheduler(SchedulerInterface):
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
+        # Running summary of the waiting requests, read by make_stats().
+        self.queued_workload_tally: QueuedWorkloadTally | None = None
+        if log_stats and self.observability_config.enable_logging_iteration_details:
+            self.queued_workload_tally = QueuedWorkloadTally()
+        tally = self.queued_workload_tally
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting = create_request_queue(self.policy, tally)
         # Waiting requests that hold KV blocks are always drained before
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
-        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting = create_request_queue(self.policy, tally)
         # With either async-load limit, keep requests that may load KV async
         # separate so throttling their loads doesn't block local requests.
-        self.async_kv_waiting = create_request_queue(self.policy)
+        self.async_kv_waiting = create_request_queue(self.policy, tally)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
@@ -1716,6 +1725,10 @@ class Scheduler(SchedulerInterface):
             iteration_details.num_encoder_output_tokens = (
                 self.max_num_encoder_input_tokens - encoder_compute_budget
             )
+            if self.observability_config.enable_logging_iteration_details:
+                iteration_details.scheduled_workload = make_scheduled_workload(
+                    scheduled_new_reqs, scheduled_running_reqs, num_scheduled_tokens
+                )
 
         # Mamba boundary states must be handed off with exact block ids;
         # they cannot be reconstructed from a connector's append-only block
@@ -1969,6 +1982,7 @@ class Scheduler(SchedulerInterface):
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
+        self._refresh_queued_workload(session)
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
@@ -2823,6 +2837,12 @@ class Scheduler(SchedulerInterface):
             or request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
 
+    def _refresh_queued_workload(self, request: Request) -> None:
+        """Recount a request whose status or token counts changed while it may
+        be in a waiting queue. The queues count what enters and leaves them."""
+        if self.queued_workload_tally is not None:
+            self.queued_workload_tally.refresh(request)
+
     def _enqueue_waiting_request(self, request: Request) -> None:
         if self._is_blocked_waiting_status(request.status):
             self.deferred_waiting.add(request)
@@ -3474,6 +3494,9 @@ class Scheduler(SchedulerInterface):
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
         num_preempted_reqs, self._num_preempted_reqs = self._num_preempted_reqs, 0
+        queued_workload = None
+        if self.queued_workload_tally is not None:
+            queued_workload = self.queued_workload_tally.summary()
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
@@ -3489,6 +3512,7 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            queued_workload=queued_workload,
         )
 
     def make_spec_decoding_stats(
@@ -3740,6 +3764,7 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.PREEMPTED
             else:
                 request.status = RequestStatus.WAITING
+            self._refresh_queued_workload(request)
 
         elif request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             # Check whether grammar compilation has finished.
@@ -3892,6 +3917,7 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = req_num_computed_tokens
 
                 affected_req_ids.add(request.request_id)
+                self._refresh_queued_workload(request)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
@@ -3907,6 +3933,7 @@ class Scheduler(SchedulerInterface):
                 affected_req_ids.add(req_id)
                 if self.recompute_kv_load_failures:
                     request.num_computed_tokens = 0
+                    self._refresh_queued_workload(request)
                     self.failed_recving_kv_req_ids.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 

@@ -99,6 +99,7 @@ def create_scheduler(
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
     encoder_cache_size: int | None = None,
+    enable_logging_iteration_details: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -229,6 +230,7 @@ def create_scheduler(
         lora_config=lora_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
+            enable_logging_iteration_details=enable_logging_iteration_details,
         ),
     )
     if kv_cache_layer_config is None:

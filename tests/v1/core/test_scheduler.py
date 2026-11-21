@@ -74,6 +74,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration_workload import (
+    QueuedWorkload,
+    ScheduledWorkload,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -307,6 +311,260 @@ def test_iteration_details_count_recomputation_as_prefill():
     assert details is not None
     assert details.num_decode_requests == details.num_decode_tokens == 1
     assert details.num_prefill_requests == details.num_prefill_tokens == 0
+
+
+def test_iteration_workload_of_chunked_prefills():
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_model_len=32,
+        max_num_batched_tokens=4,
+        long_prefill_token_threshold=3,
+        enable_logging_iteration_details=True,
+    )
+    requests = create_requests(num_requests=2, num_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Each step computes 3 tokens of the first request and 1 of the second, so
+    # the prefill lengths are 1.5 and 0.5 tokens, then 4.5 and 1.5.
+    for kv_tokens, variance in [(0, 0.25), (4, 2.25)]:
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None
+        assert (details.num_prefill_requests, details.num_prefill_tokens) == (2, 4)
+        assert details.scheduled_workload == ScheduledWorkload(
+            sum_prefill_kv_tokens=kv_tokens, var_prefill_length=variance
+        )
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id for request in requests],
+                sampled_token_ids=[[], []],
+            ),
+        )
+
+
+def test_iteration_workload_of_decodes_and_waiting_requests():
+    scheduler = create_scheduler(
+        max_num_seqs=2, max_model_len=128, enable_logging_iteration_details=True
+    )
+    short, long, waiting = (
+        create_requests(
+            num_requests=1, num_tokens=num_tokens, max_tokens=100, req_ids=[req_id]
+        )[0]
+        for req_id, num_tokens in (("short", 8), ("long", 12), ("waiting", 20))
+    )
+    for request in (short, long, waiting):
+        scheduler.add_request(request)
+
+    def step():
+        output = scheduler.schedule()
+        outputs = scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[short.request_id, long.request_id],
+                sampled_token_ids=[[0], [0]],
+            ),
+        )
+        assert output.iteration_details is not None
+        return output.iteration_details.scheduled_workload, outputs[0].scheduler_stats
+
+    # Two prefills of 8 and 12 tokens without context: lengths 4 and 6.
+    workload, stats = step()
+    assert workload == ScheduledWorkload(var_prefill_length=1.0)
+    still_waiting = QueuedWorkload(num_prefill_requests=1, sum_prefill_tokens=20)
+    assert stats.queued_workload == still_waiting
+
+    workload, stats = step()
+    assert workload == ScheduledWorkload(
+        sum_decode_kv_tokens=20, var_decode_kv_tokens=4.0
+    )
+    assert stats.queued_workload == still_waiting
+
+    # The queue is summarized when the stats are made, whatever ran before.
+    # Preemption frees a request's KV, so it has no computed tokens left.
+    scheduler.running.remove(long)
+    scheduler._preempt_request(long, 0.0)
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.queued_workload == QueuedWorkload(
+        num_prefill_requests=1, sum_prefill_tokens=20, num_decode_requests=1
+    )
+
+
+def test_iteration_workload_counts_the_cached_context_of_a_new_request():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        max_model_len=128,
+        enable_logging_iteration_details=True,
+    )
+    first, second = create_requests(
+        num_requests=2, num_tokens=40, max_tokens=100, same_prompt=True
+    )
+    scheduler.add_request(first)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[first.request_id], sampled_token_ids=[[0]]),
+    )
+
+    # The second request reuses the two full blocks of the shared prompt.
+    scheduler.add_request(second)
+    details = scheduler.schedule().iteration_details
+
+    assert details is not None
+    assert (details.num_prefill_tokens, details.num_decode_requests) == (8, 1)
+    assert details.scheduled_workload == ScheduledWorkload(
+        sum_prefill_kv_tokens=32, sum_decode_kv_tokens=40
+    )
+
+
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+def test_queued_workload_covers_every_waiting_queue(policy):
+    scheduler = create_scheduler(
+        scheduling_policy=policy, enable_logging_iteration_details=True
+    )
+    states = [
+        (RequestStatus.WAITING, 0),
+        (RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR, 0),
+        (RequestStatus.WAITING, 32),
+        (RequestStatus.PREEMPTED, 70),
+        (RequestStatus.WAITING_FOR_REMOTE_KVS, 80),
+        (RequestStatus.WAITING_FOR_STREAMING_REQ, 96),
+    ]
+    requests = create_requests(num_requests=len(states), num_tokens=100)
+    (parked,) = create_requests(num_requests=1, num_tokens=40, req_ids=["parked"])
+    for request, (status, num_computed_tokens) in zip(requests, states):
+        request.status = status
+        request.num_computed_tokens = num_computed_tokens
+        scheduler.add_request(request)
+    scheduler.async_kv_waiting.add_request(parked)
+    assert scheduler.kv_holding_waiting and len(scheduler.deferred_waiting) == 3
+
+    stats = scheduler.make_stats()
+
+    assert stats is not None
+    assert stats.num_waiting_reqs + stats.num_skipped_waiting_reqs == 7
+    assert stats.queued_workload == QueuedWorkload(
+        num_prefill_requests=5,
+        sum_prefill_tokens=440,
+        var_prefill_length=576.0,
+        num_decode_requests=2,
+        sum_decode_kv_tokens=150,
+        var_decode_kv_tokens=25.0,
+    )
+
+
+def _queued_workload(scheduler: Scheduler) -> QueuedWorkload:
+    stats = scheduler.make_stats()
+    assert stats is not None and stats.queued_workload is not None
+    return stats.queued_workload
+
+
+def _scan_queued_workload(scheduler: Scheduler) -> QueuedWorkload:
+    """What the tally of the waiting queues must equal at any time."""
+    lengths: tuple[list[int], list[int]] = ([], [])
+    for queue in (
+        scheduler.waiting,
+        scheduler.kv_holding_waiting,
+        scheduler.async_kv_waiting,
+    ):
+        for request in queue:
+            if request.status in (
+                RequestStatus.PREEMPTED,
+                RequestStatus.WAITING_FOR_REMOTE_KVS,
+            ):
+                lengths[1].append(request.num_computed_tokens)
+            else:
+                lengths[0].append(request.num_tokens)
+    prefill, decode = lengths
+    return QueuedWorkload(
+        num_prefill_requests=len(prefill),
+        sum_prefill_tokens=sum(prefill),
+        var_prefill_length=float(np.var(prefill)) if prefill else 0.0,
+        num_decode_requests=len(decode),
+        sum_decode_kv_tokens=sum(decode),
+        var_decode_kv_tokens=float(np.var(decode)) if decode else 0.0,
+    )
+
+
+@pytest.mark.parametrize("failure", ["failed_recving", "invalid_block_ids"])
+def test_queued_workload_follows_a_failed_remote_kv_load(failure):
+    """A failed load changes the computed tokens of a waiting request."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=96, is_async=True),
+        enable_logging_iteration_details=True,
+    )
+    scheduler.recompute_kv_load_failures = True
+    (request,) = create_requests(num_requests=1, num_tokens=160)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert _queued_workload(scheduler) == QueuedWorkload(
+        num_decode_requests=1, sum_decode_kv_tokens=96
+    )
+
+    request_ids = {request.request_id}
+    if failure == "failed_recving":
+        events, num_valid_tokens = {"failed_recving": request_ids}, 0
+    else:
+        (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        events, num_valid_tokens = {"invalid_block_ids": {block_ids[2]}}, 32
+    scheduler.update_from_output(
+        output, create_model_runner_output([], finished_recving=request_ids, **events)
+    )
+
+    assert _queued_workload(scheduler) == QueuedWorkload(
+        num_decode_requests=1, sum_decode_kv_tokens=num_valid_tokens
+    )
+
+
+def test_queued_workload_follows_a_received_remote_kv_load():
+    """A received load turns a waiting request back into prefill work."""
+    # r2 waits with the loaded half of its 64 tokens while r1 decodes.
+    scheduler = _setup_remote_kv_resume(
+        64, matched_tokens=32, enable_logging_iteration_details=True
+    )
+    assert _queued_workload(scheduler) == QueuedWorkload(
+        num_decode_requests=1, sum_decode_kv_tokens=32
+    )
+
+    # The throttle keeps the promoted request at the head of its queue.
+    output = scheduler.schedule(throttle_prefills=True)
+
+    assert "r2" not in output.num_scheduled_tokens
+    assert _queued_workload(scheduler) == QueuedWorkload(
+        num_prefill_requests=1, sum_prefill_tokens=64
+    )
+
+
+def test_queued_workload_follows_a_streaming_session_update():
+    """The next input of a waiting streaming session changes its length."""
+    scheduler = create_scheduler(enable_logging_iteration_details=True)
+
+    def session_input(num_tokens: int) -> Request:
+        (request,) = create_requests(
+            num_requests=1, num_tokens=num_tokens, max_tokens=1, req_ids=["session"]
+        )
+        request.resumable = True
+        return request
+
+    scheduler.add_request(session_input(8))
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=["session"], sampled_token_ids=[[0]]),
+    )
+    # The session waits with its 8 prompt tokens and the sampled one.
+    assert _queued_workload(scheduler) == QueuedWorkload(
+        num_prefill_requests=1, sum_prefill_tokens=9
+    )
+
+    # The next input replaces the sampled token.
+    scheduler.add_request(session_input(4))
+
+    assert _queued_workload(scheduler) == QueuedWorkload(
+        num_prefill_requests=1, sum_prefill_tokens=12
+    )
 
 
 def test_add_requests():
@@ -1534,7 +1792,9 @@ def test_cache_aware_admission_requires_fcfs_and_prefix_caching(kwargs: dict):
     assert scheduler.cache_aware_window == 0
 
 
-def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
+def _setup_remote_kv_resume(
+    num_prompt_tokens: int, matched_tokens: int, **scheduler_kwargs
+):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
     eligible. Returns the scheduler. The connector matches `matched_tokens` of
@@ -1547,6 +1807,7 @@ def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
         block_size=BLOCK_SIZE,
+        **scheduler_kwargs,
     )
     # Distinct prompts so r2 gets no local prefix cache hit from r1, only the
     # connector's external async load.
@@ -8395,6 +8656,7 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
         use_kv_connector=mock_kv(matched_tokens=0, is_async=True),
         kv_cache_layer_config=spec,
         num_speculative_tokens=num_spec_tokens,
+        enable_logging_iteration_details=True,
     )
     s.recompute_kv_load_failures = True
     if on_demand:
@@ -8413,6 +8675,10 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
         assert s._parked_reserved_blocks == sum(parked.values())
         if any(r.status != RequestStatus.WAITING_FOR_REMOTE_KVS for r in parked):
             events.add("promoted_load_held")
+        # The queues' tally follows every transition too.
+        assert dataclasses.astuple(_queued_workload(s)) == pytest.approx(
+            dataclasses.astuple(_scan_queued_workload(s))
+        )
 
     s.connector.get_num_new_matched_tokens = match
     group = s.kv_cache_manager.coordinator.single_type_managers[0]
