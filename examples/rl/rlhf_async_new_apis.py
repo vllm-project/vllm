@@ -246,11 +246,9 @@ gen_futures = [
 
 ray.get(llm.pause_after_n_tokens.remote())
 
-ray.get(train_model.broadcast_weights.remote())
-# Label the new weights before resuming generation.
+# Label the new weights while still paused; send_weights resumes generation.
 ray.get(llm.update_weight_version.remote(WEIGHT_VERSION_V2))
-
-ray.get(llm.resume_generation.remote())
+ray.get(train_model.broadcast_weights.remote())
 results = []
 for output in ray.get(gen_futures):
     completion = output.outputs[0]

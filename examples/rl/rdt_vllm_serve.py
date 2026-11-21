@@ -135,14 +135,6 @@ def http_generate(
     return outs
 
 
-def pause_generation(endpoint: str, mode: str = "abort") -> None:
-    requests.post(f"{endpoint}/pause", params={"mode": mode}, timeout=60)
-
-
-def resume_generation(endpoint: str) -> None:
-    requests.post(f"{endpoint}/resume", timeout=60)
-
-
 def shutdown_server(proc: subprocess.Popen) -> None:
     print("[serve] shutting down vllm serve", flush=True)
     proc.terminate()

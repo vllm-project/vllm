@@ -504,6 +504,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
         )
+        engine._apply_pause_config(init_info)
         plan_meta = source.metadata if init_info.use_load_plan else None
         if plan_meta is not None:
             engine._plan_manifest = _manifest(plan_meta)
@@ -557,21 +558,22 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             return
 
         reuse = self.is_sender and meta == self._sent_meta
-        if self.is_sender:
-            if not reuse:
-                # the workers keep this update's metadata even if it fails:
-                # a failed update must not let the next one reuse older ones
-                self._sent_meta = None
-            self.client.start_weight_update()
-        for broadcaster, metas in slices:
-            src = group_ranks.index(broadcaster)
+        with self._pause_for_update():
             if self.is_sender:
-                self._send_update(metas, src, reuse)
-            else:
-                self._broadcast(metas, src)
-        if self.is_sender:
-            self._sent_meta = meta  # what the workers hold, whether finish succeeds
-            self.client.finish_weight_update()
+                if not reuse:
+                    # the workers keep this update's metadata even if it fails:
+                    # a failed update must not let the next one reuse older ones
+                    self._sent_meta = None
+                self.client.start_weight_update()
+            for broadcaster, metas in slices:
+                src = group_ranks.index(broadcaster)
+                if self.is_sender:
+                    self._send_update(metas, src, reuse)
+                else:
+                    self._broadcast(metas, src)
+            if self.is_sender:
+                self._sent_meta = meta  # what the workers hold, even if finish fails
+                self.client.finish_weight_update()
         self._post_send_sync()
 
     def _send_update(self, meta: list[ParamMeta], src: int, reuse: bool) -> None:

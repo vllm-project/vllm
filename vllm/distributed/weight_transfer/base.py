@@ -5,6 +5,7 @@
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import (
@@ -22,9 +23,13 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.engine import PauseMode
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
@@ -389,6 +394,9 @@ class TrainerInitInfo:
     backend: ClassVar[str]
 
     rank: int = field(kw_only=True)
+    pause_mode: "PauseMode" = field(default="keep", kw_only=True)
+    """How `send_weights` pauses generation around the apply."""
+    pause_clear_cache: bool = field(default=True, kw_only=True)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -401,6 +409,14 @@ class TrainerInitInfo:
     @property
     def is_sender(self) -> bool:
         return self.rank == 0
+
+
+def check_pause_mode(init_info: TrainerInitInfo) -> None:
+    if init_info.pause_mode not in ("abort", "wait", "keep"):
+        raise ValueError(
+            "pause_mode must be 'abort', 'wait' or 'keep', "
+            f"got {init_info.pause_mode!r}"
+        )
 
 
 @dataclass
@@ -449,6 +465,9 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     supports_draft_weight_update: bool = True
+
+    supports_staging: ClassVar[bool] = False
+    """Whether `stage_weights` does anything; see its docstring."""
 
     defers_processing: bool = False
     """Whether `update_weights` returns before the weights are on the device.
@@ -597,6 +616,14 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         # next step uses the new weights.
         torch.accelerator.synchronize()
 
+    def stage_weights(self, update_info: TUpdateInfo) -> None:
+        """Fetch the next version without touching live weights. No-op by default.
+
+        Blocking: the worker runs it on a background thread while the engine
+        serves, so it must follow the staging rules in the weight transfer docs.
+        `start_weight_update` waits for it before the apply.
+        """
+
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:
         """Receive weights from the trainer and load them into the model.
@@ -627,19 +654,27 @@ class VLLMWeightSyncClient(Protocol):
     inference side already accepts). Concurrency that some backends need
     (e.g. NCCL must run `update_weights` concurrently with the trainer-side
     broadcast) is the engine's responsibility, not the client's, so the
-    protocol stays a flat four-method surface that any wrapper can implement.
+    protocol stays a flat surface that any wrapper can implement.
 
     The protocol is structural (PEP 544), so user implementations need only
-    define these four methods — no import or subclassing required.
+    define these methods — no import or subclassing required.
     """
 
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None: ...
+
+    def stage_weights(self, update_info: WeightTransferUpdatePayload) -> None: ...
 
     def start_weight_update(self) -> None: ...
 
     def update_weights(self, update_info: WeightTransferUpdatePayload) -> None: ...
 
     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
+
+    def pause_generation(
+        self, mode: "PauseMode" = "keep", clear_cache: bool = True
+    ) -> None: ...
+
+    def resume_generation(self) -> None: ...
 
 
 class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
@@ -669,6 +704,10 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
     RPCs and the transmit on `self.is_sender`, so only the sender touches the
     client.
 
+    Pausing: `send_weights` pauses generation only around the inference-side
+    apply (`start_weight_update` .. `finish_weight_update`), per the init info's
+    `pause_mode`, so trainer-side work before it overlaps with serving.
+
     Subclasses should define:
         init_info_cls: Type of backend-specific trainer init info
     """
@@ -690,6 +729,47 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         # `is_sender`, so non-sender ranks never touch the wire.
         self.client = client
         self.source = source
+        self.pause_mode: PauseMode = "keep"
+        self.pause_clear_cache = True
+
+    def _apply_pause_config(self, init_info: TrainerInitInfo) -> None:
+        """Take the pause settings from the init info.
+
+        The factory applies it; backends call it early in `trainer_init` too.
+        """
+        check_pause_mode(init_info)
+        self.pause_mode = init_info.pause_mode
+        self.pause_clear_cache = init_info.pause_clear_cache
+
+    @contextmanager
+    def _pause_for_update(self) -> Iterator[None]:
+        """Pause generation on the sender around the apply; resume on success.
+
+        After a failure generation stays paused until a retry succeeds or the
+        caller resumes it, so partial weights never serve.
+        """
+        if not self.is_sender:
+            yield
+            return
+        client = self.client
+        try:
+            client.pause_generation(
+                mode=self.pause_mode, clear_cache=self.pause_clear_cache
+            )
+            yield
+        except Exception:
+            logger.error(
+                "Weight update failed; generation may stay paused. Retry "
+                "send_weights or call resume_generation on the client."
+            )
+            raise
+        try:
+            client.resume_generation()
+        except Exception as e:
+            raise RuntimeError(
+                "Weights were installed but resume_generation failed; "
+                "generation is still paused."
+            ) from e
 
     @classmethod
     @abstractmethod
@@ -714,7 +794,8 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         """Push weights to inference workers and drive the full update round
         trip: `start_weight_update`, `update_weights` (run concurrently with the
         trainer-side broadcast when the backend requires it), then
-        `finish_weight_update`. Called on every trainer rank.
+        `finish_weight_update`, inside `_pause_for_update`. Called on every
+        trainer rank.
         """
         raise NotImplementedError
 
