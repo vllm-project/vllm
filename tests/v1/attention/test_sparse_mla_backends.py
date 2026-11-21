@@ -145,7 +145,7 @@ if current_platform.is_rocm():
 
     SPARSE_BACKENDS: list[type[AttentionBackend]] = [ROCMAiterMLASparseBackend]
     SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
-    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
+    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla"]
     SPARSE_BLOCK_SIZES = [64]
 elif current_platform.is_xpu():
     from vllm.v1.attention.backends.mla.xpu_mla_sparse import XPUMLASparseBackend
