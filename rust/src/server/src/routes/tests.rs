@@ -5757,6 +5757,47 @@ async fn chat_generation_config_overrides_reach_engine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_top_p_zero_reaches_engine() {
+    let engine_top_p = Arc::new(std::sync::Mutex::new(None));
+    let (app, engine_task) =
+        test_app_with_backend_and_engine_request_check(Arc::new(FakeChatBackend::new()), {
+            let engine_top_p = Arc::clone(&engine_top_p);
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                *engine_top_p.lock().unwrap() = Some(params.top_p);
+            }
+        })
+        .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "top_p": 0
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    // The engine's `SamplingParams` turns `top_p=0` into `top_k=1`.
+    assert_eq!(*engine_top_p.lock().unwrap(), Some(0.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn skip_special_tokens_defaults_to_generation_config() {
     let model = "Qwen/Qwen1.5-0.5B-Chat";
     let routes = [
