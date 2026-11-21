@@ -24,6 +24,7 @@
 #endif
 
 #include "kernel.h"
+#include "core/utils.hpp"
 
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
@@ -44,6 +45,11 @@ namespace marlin {
 __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
+
+#ifdef VLLM_MARLIN_GROUPED_NVFP4
+MarlinFuncPtr get_grouped_nvfp4_marlin_kernel(bool group_all_mn_tiles = false);
+MarlinFuncPtr get_grouped_nvfp4_marlin_kernel_m32();
+#endif
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
 
@@ -239,7 +245,7 @@ exec_config_t determine_exec_config(
 
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* b_s, void* g_s, void* zp, int prob_m, int prob_n,
-               int prob_k, int lda, void* workspace,
+               int prob_k, int lda, void* workspace, int64_t workspace_size,
                vllm::ScalarType const& a_type, vllm::ScalarType const& b_type,
                vllm::ScalarType const& c_type, vllm::ScalarType const& s_type,
                bool has_bias, bool has_zp, int num_groups, int group_size,
@@ -290,12 +296,40 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                     "Turing only support FP16 activation.");
   }
 
-  int max_par = 16;
+  // Shape-based profiles apply to any matching Marlin call, independently
+  // of Mamba's backend selection.
+  const bool use_sm121_nvfp4_profile =
+      major_capability == 12 && minor_capability == 1 &&
+      !vllm::vllm_is_batch_invariant() && a_type == vllm::kBFloat16 &&
+      b_type == vllm::kFE2M1f && c_type == vllm::kBFloat16 &&
+      s_type == vllm::kFE4M3fn && lda == prob_k && group_blocks == 1 &&
+      !has_zp && !has_bias && !is_zp_float && !use_atomic_add &&
+      use_fp32_reduce;
+
+  const bool bolt_input = prob_n == 18560 && prob_k == 4096;
+  const bool bolt_output = prob_n == 4096 && prob_k == 8192;
+  const bool use_small_input = use_sm121_nvfp4_profile && bolt_input &&
+                               prob_m <= 8 && max_shared_mem >= 22528;
+  bool use_grouped_m32 = false;
+  bool use_grouped_m64 = false;
+  #ifdef VLLM_MARLIN_GROUPED_NVFP4
+  const bool grouped_capacity =
+      use_sm121_nvfp4_profile && workspace_size >= 2 * sms;
+  use_grouped_m32 = grouped_capacity && bolt_input &&
+                    (prob_m == 96 || prob_m == 160) && max_shared_mem >= 69632;
+  use_grouped_m64 =
+      grouped_capacity && !use_grouped_m32 && max_shared_mem >= 87040 &&
+      prob_m <= 8192 &&
+      ((bolt_input && prob_m >= 128) || (bolt_output && prob_m >= 256));
+  #endif
+  const bool use_output_tail =
+      use_sm121_nvfp4_profile && bolt_output && (prob_m == 96 || prob_m == 160);
+  int max_par = use_grouped_m64 ? 128 : 16;
   if (prob_n <= 4096) max_par = 16 * 8;
-  int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
-  int max_thread_m_blocks = 4;
+  int max_thread_m_blocks = (use_grouped_m32 || use_output_tail) ? 2 : 4;
   while (rest_m) {
+    int max_shared_mem_new = max_shared_mem;
     int par_count = rest_m / (max_thread_m_blocks * 16);
     if (par_count > max_par) par_count = max_par;
     int prob_m_split =
@@ -307,10 +341,20 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     int thread_m_blocks = min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
     int m_block_size_8 = prob_m_split <= 8;
 
+    const bool grouped_m32_part =
+        use_grouped_m32 && prob_m_split >= 32 && prob_m_split % 32 == 0;
+    const bool grouped_m64_part =
+        use_grouped_m64 && prob_m_split >= 64 && prob_m_split % 64 == 0;
+    const bool grouped_part = grouped_m32_part || grouped_m64_part;
+    const int part_stages = grouped_m64_part ? 3 : stages;
+
     // Set thread config
     exec_config_t exec_cfg;
     thread_config_t thread_tfg;
-    if (thread_k != -1 && thread_n != -1) {
+    if (grouped_part || use_small_input) {
+      thread_tfg = {64, 128, 128};
+      exec_cfg = {grouped_part ? 2 : 1, thread_tfg};
+    } else if (thread_k != -1 && thread_n != -1) {
       thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
       exec_cfg = exec_config_t{1, thread_tfg};
       STD_TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
@@ -356,7 +400,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     STD_TORCH_CHECK(
         is_valid_config(thread_tfg, thread_m_blocks, prob_m_split, prob_n,
                         prob_k, num_bits, group_size, has_zp, is_zp_float,
-                        stages, max_shared_mem_new),
+                        part_stages, max_shared_mem_new),
         "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
         ", thread_k = ", thread_tfg.thread_k,
         ", thread_n = ", thread_tfg.thread_n,
@@ -364,12 +408,49 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         ", ", prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
         ", prob_m_split = ", prob_m_split, ", group_size = ", group_size,
         ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
-        ", stages = ", stages, ", max_shared_mem_new = ", max_shared_mem_new);
+        ", stages = ", part_stages,
+        ", max_shared_mem_new = ", max_shared_mem_new);
 
-    auto kernel = get_marlin_kernel(
-        a_type, b_type, c_type, s_type, thread_m_blocks, thread_n_blocks,
-        thread_k_blocks, m_block_size_8, has_zp, group_blocks, num_threads,
-        is_zp_float, stages);
+    auto kernel = MarlinDefault;
+  #ifdef VLLM_MARLIN_GROUPED_NVFP4
+    if (grouped_part) {
+      kernel =
+          grouped_m32_part
+              ? get_grouped_nvfp4_marlin_kernel_m32()
+              : get_grouped_nvfp4_marlin_kernel(bolt_input && prob_m == 128);
+      // The generic validator pads M and scale bytes beyond these NVFP4
+      // kernels' actual launch allocations.
+      max_shared_mem_new = grouped_m32_part ? 34816 : 43520;
+      if (grouped_m32_part && prob_m == 96) {
+        // Whole-K tiles per CTA avoid cross-CTA reductions at this shape.
+        int mn_tiles =
+            prob_m_split / (16 * thread_m_blocks) * (prob_n / thread_n);
+        int tiles_per_cta = div_ceil(mn_tiles, blocks);
+        if (mn_tiles % tiles_per_cta == 0) blocks = mn_tiles / tiles_per_cta;
+      }
+    } else
+  #endif
+    {
+      kernel = get_marlin_kernel(
+          a_type, b_type, c_type, s_type, thread_m_blocks, thread_n_blocks,
+          thread_k_blocks, m_block_size_8, has_zp, group_blocks, num_threads,
+          is_zp_float, stages);
+    }
+
+    const bool tuned_output =
+        use_sm121_nvfp4_profile && prob_m <= 8 && prob_m_split == prob_m &&
+        prob_n == 4096 && prob_k == 8192 && thread_m_blocks == 1 &&
+        thread_n_blocks == 8 && thread_k_blocks == 8 && num_threads == 256 &&
+        stages == 4 && m_block_size_8 && max_shared_mem >= 45056;
+    if (use_small_input) {
+      // Each CTA owns a complete K reduction, so locks and temporary storage
+      // are unused even though this grid is larger than the SM count.
+      blocks = prob_n / thread_n;
+      max_shared_mem_new = 22528;
+    } else if (tuned_output) {
+      blocks = prob_n / thread_n;
+      max_shared_mem_new = 45056;
+    }
 
     if (kernel == MarlinDefault) {
       STD_TORCH_CHECK(
@@ -383,7 +464,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     }
 
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         max_shared_mem_new);
+                         (use_small_input || tuned_output)
+                             ? max_shared_mem
+                             : max_shared_mem_new);
 
     bool part_use_atomic_add =
         use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;
@@ -657,8 +740,8 @@ torch::stable::Tensor marlin_gemm(
       c_tmp.mutable_data_ptr(), b_bias.mutable_data_ptr(),
       b_scales.mutable_data_ptr(), global_scale.mutable_data_ptr(),
       b_zeros.mutable_data_ptr(), size_m, size_n, size_k, a.stride(0),
-      workspace.mutable_data_ptr(), a_type, b_type, c_type, s_type, has_bias,
-      has_zp, num_groups, group_size, device_index,
+      workspace.mutable_data_ptr(), workspace.numel(), a_type, b_type, c_type,
+      s_type, has_bias, has_zp, num_groups, group_size, device_index,
       get_current_cuda_stream(device_index), thread_k, thread_n, sms,
       use_atomic_add, use_fp32_reduce, is_zp_float);
 
