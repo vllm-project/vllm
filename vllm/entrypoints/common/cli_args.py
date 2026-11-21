@@ -217,7 +217,8 @@ class BaseFrontendArgs:
     enable_scale_out: bool = envs.VLLM_SERVER_DEV_MODE
     """
     If set to True, register the scale-out endpoints (`/render`, `/derender`,
-    `/inference/v1/generate` and `/inference/v1/abort_requests`) on `vllm serve`.
+    `/v1/completions/hash`, `/inference/v1/generate` and
+    `/inference/v1/abort_requests`) on `vllm serve`.
     Defaults to `VLLM_SERVER_DEV_MODE`.
     Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
     always register their required endpoints regardless of this flag.

@@ -16,6 +16,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
 from vllm.logger import init_logger
 
 from ..token_in_token_out.protocol import GenerateRequest
+from .hash_protocol import HashRequest, HashResponse
 from .serving import ServingRender
 
 logger = init_logger(__name__)
@@ -25,6 +26,26 @@ router = APIRouter()
 
 def render(request: Request) -> ServingRender | None:
     return getattr(request.app.state, "serving_render", None)
+
+
+@router.post(
+    "/v1/completions/hash",
+    dependencies=[Depends(validate_json_request)],
+    response_model=HashResponse,
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+    },
+)
+async def create_hash(request: HashRequest, raw_request: Request):
+    handler = render(raw_request)
+    engine = getattr(raw_request.app.state, "engine_client", None)
+    if handler is None or engine is None:
+        raise NotImplementedError("The hash endpoint requires a running engine")
+    return create_json_response(
+        await handler.hash_request(request, raw_request, engine)
+    )
 
 
 @router.post(

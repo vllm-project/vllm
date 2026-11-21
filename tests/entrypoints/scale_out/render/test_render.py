@@ -4,6 +4,8 @@
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
 import json
+import time
+from dataclasses import asdict
 from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -16,7 +18,10 @@ import pytest_asyncio
 from fastapi.responses import JSONResponse
 from PIL import Image
 
-from tests.utils import RemoteLaunchRenderServer
+from tests.distributed.conftest import MockSubscriber
+from tests.utils import RemoteLaunchRenderServer, RemoteOpenAIServer
+from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
@@ -40,10 +45,203 @@ from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.multimodal.utils import encode_image_url, encode_video_url
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
+from vllm.utils.network_utils import get_open_ports_list
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 DEEPSEEK_V41_MODEL_NAME = "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.fixture(scope="module")
+def hash_publisher_config():
+    pub_port, replay_port = get_open_ports_list(2)
+    return KVEventsConfig(
+        enable_kv_cache_events=True,
+        endpoint=f"tcp://*:{pub_port}",
+        replay_endpoint=f"tcp://*:{replay_port}",
+    )
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        ("sha256", "0"),
+        ("sha256", "1"),
+        ("sha256_cbor", "0"),
+        ("xxhash", "0"),
+    ],
+    ids=["sha256-bytes", "sha256-integers", "sha256-cbor-bytes", "xxhash-bytes"],
+)
+def hash_server(request, hash_publisher_config):
+    hash_algorithm, integer_events = request.param
+    args = [
+        "--enforce-eager",
+        "--enable-scale-out",
+        "--max-model-len",
+        "512",
+        "--max-num-seqs",
+        "2",
+        "--api-key",
+        "test-key",
+        "--chat-template",
+        "{{ messages[0]['content'] }}",
+        "--prefix-caching-hash-algo",
+        hash_algorithm,
+        "--kv-events-config",
+        json.dumps(asdict(hash_publisher_config)),
+    ]
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES": integer_events},
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture
+def hash_events(hash_server, hash_publisher_config):
+    subscriber = MockSubscriber(
+        hash_publisher_config.endpoint.replace("*", "127.0.0.1"),
+        hash_publisher_config.replay_endpoint.replace("*", "127.0.0.1"),
+        decode_type=KVEventBatch,
+    )
+    yield subscriber
+    subscriber.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat", [False, True])
+async def test_hash_endpoint_matches_rendered_tokens_and_engine_kv_events(
+    hash_server, hash_events, chat
+):
+    text = "Hello world " * 200
+    cache_salt = f"tenant-{chat}"
+    payload = {
+        "model": MODEL_NAME,
+        "cache_salt": cache_salt,
+        "max_tokens": 8,
+        "temperature": 0,
+        **(
+            {"messages": [{"role": "user", "content": text}]}
+            if chat
+            else {"prompt": text}
+        ),
+    }
+    kind = "chat/completions" if chat else "completions"
+    async with httpx.AsyncClient(
+        base_url=hash_server.url_for(""), timeout=60
+    ) as client:
+        assert (
+            await client.post("/v1/completions/hash", json=payload)
+        ).status_code == 401
+        client.headers["Authorization"] = "Bearer test-key"
+        response = await client.post("/v1/completions/hash", json=payload)
+        assert response.status_code == 200, response.text
+        hashes = response.json()
+        assert len(hashes["prompts"][0]["block_hashes"]) >= 2
+        assert "token_ids" not in hashes["prompts"][0]
+        rendered = await client.post(f"/v1/{kind}/render", json=payload)
+        assert rendered.status_code == 200, rendered.text
+        prompt = rendered.json() if chat else rendered.json()[0]
+        tokens = {
+            "model": MODEL_NAME,
+            "token_ids": prompt["token_ids"],
+            "cache_salt": cache_salt,
+        }
+        token_hashes = await client.post("/v1/completions/hash", json=tokens)
+        assert token_hashes.status_code == 200, token_hashes.text
+        assert token_hashes.json() == hashes
+        generation = await client.post(f"/v1/{kind}", json=payload)
+        assert generation.status_code == 200, generation.text
+        assert (
+            generation.json()["usage"]["prompt_tokens"]
+            == hashes["prompts"][0]["num_tokens"]
+        )
+        assert (
+            await client.post("/v1/completions/hash", json=payload)
+        ).json() == hashes
+        tokens["cache_salt"] = "tenant-b"
+        assert (await client.post("/v1/completions/hash", json=tokens)).json()[
+            "prompts"
+        ] != hashes["prompts"]
+
+    stored: dict[int | None, BlockStored] = {}
+    next_seq = 0
+    deadline = time.monotonic() + 10
+    while len(stored) < len(hashes["groups"]) and time.monotonic() < deadline:
+        hash_events.request_replay(next_seq)
+        for seq, batch in hash_events.receive_replay():
+            next_seq = seq + 1
+            for event in batch.events:
+                if (
+                    isinstance(event, BlockStored)
+                    and event.parent_block_hash is None
+                    and event.extra_keys
+                    and event.extra_keys[0] == (cache_salt,)
+                ):
+                    stored[event.group_idx] = event
+    for group in hashes["groups"]:
+        assert group["group_idx"] in stored, "No KV store event for the prompt"
+        event = stored[group["group_idx"]]
+        assert event.block_size == group["block_size"]
+        stride = group["block_size"] // hashes["hash_block_size"]
+        expected = hashes["prompts"][0]["block_hashes"][stride - 1 :: stride]
+        if isinstance(event.block_hashes[0], int):
+            assert event.block_hashes == [
+                int(h, 16) & ((1 << 64) - 1) for h in expected
+            ]
+        else:
+            assert event.block_hashes == [bytes.fromhex(h) for h in expected]
+
+
+@pytest.mark.asyncio
+async def test_hash_endpoint_completion_batch_preserves_prompt_order(hash_server):
+    prompts = ["Hello world " * 100, "Hello there " * 100]
+    async with httpx.AsyncClient(
+        base_url=hash_server.url_for(""),
+        timeout=60,
+        headers={"Authorization": "Bearer test-key"},
+    ) as client:
+        response = await client.post(
+            "/v1/completions/hash", json={"model": MODEL_NAME, "prompt": prompts}
+        )
+        assert response.status_code == 200, response.text
+        batch = response.json()["prompts"]
+        assert len(batch) == len(prompts)
+        for prompt, expected in zip(prompts, batch):
+            single = await client.post(
+                "/v1/completions/hash", json={"model": MODEL_NAME, "prompt": prompt}
+            )
+            assert single.status_code == 200, single.text
+            assert single.json()["prompts"] == [expected]
+            assert expected["block_hashes"]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"token_ids": [-1]},
+        {"token_ids": [1], "messages": []},
+        {"token_ids": [1], "cache_salt": ""},
+        {"token_ids": [1], "content_parts": [{"type": "image_url", "url": "x"}]},
+        {
+            "token_ids": [1],
+            "features": {
+                "mm_hashes": {"image": ["image-a"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+            },
+        },
+    ],
+)
+def test_hash_endpoint_rejects_invalid_or_ambiguous_input(payload):
+    from pydantic import TypeAdapter, ValidationError
+
+    from vllm.entrypoints.scale_out.render.hash_protocol import HashRequest
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises((ValidationError, VLLMValidationError)):
+        TypeAdapter(HashRequest).validate_python(payload)
 
 
 @pytest.mark.parametrize("multiple", [False, True])
