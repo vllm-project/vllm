@@ -68,6 +68,13 @@ class TrtLlmBf16ExpertsBase:
             f"but got {moe_config.num_experts}"
         )
 
+    @staticmethod
+    def _supports_bias(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return False
+
     def supports_routing_replay_capture(self) -> bool:
         return True
 
