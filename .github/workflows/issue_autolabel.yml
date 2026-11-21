@@ -272,6 +272,12 @@ jobs:
                   { term: "reward model",            searchIn: "title" },
                 ],
               },
+              dflash: {
+                keywords: [
+                  { term: "dflash", searchIn: "title" },
+                  { term: "dspark", searchIn: "title" },
+                ],
+              },
               "speculative-decoding": {
                 keywords: [
                   { term: "eagle",  searchIn: "title" },
@@ -279,6 +285,7 @@ jobs:
                 substrings: [
                   { term: "speculative decoding", searchIn: "title" },
                   { term: "speculative decode",   searchIn: "title" },
+                  { term: "spec decode",          searchIn: "title" },
                   { term: "draft model",          searchIn: "title" },
                 ],
               },
