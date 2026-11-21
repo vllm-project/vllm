@@ -1016,7 +1016,7 @@ def test_from_request_tracker_caps_save_length_without_changing_load(
 class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
-        self.num_tokens: list[int] = []
+        self.lookup_ranges: list[tuple[int, int]] = []
         self.prefetched: list[tuple[str, int]] = []
         self.discarded: list[str] = []
 
@@ -1033,8 +1033,9 @@ class _StubLookupClient:
         num_tokens: int,
         block_hashes: list[bytes],
         non_block: bool = False,
+        start_tokens: int = 0,
     ) -> MooncakeLookupResult:
-        self.num_tokens.append(num_tokens)
+        self.lookup_ranges.append((start_tokens, num_tokens))
         return MooncakeLookupResult(self._hit_tokens)
 
 
@@ -1121,7 +1122,7 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     assert need_to_allocate == 16
     assert load_async is True
     load_spec = scheduler.load_specs["req-0"]
-    assert scheduler.client.num_tokens == [48]
+    assert scheduler.client.lookup_ranges == [(16, 48)]
     assert load_spec.vllm_cached_tokens == 16
     assert load_spec.kvpool_cached_tokens == 32
     assert load_spec.kvpool_cached_tokens % 16 == 0
@@ -1263,7 +1264,7 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
 
     assert need_to_allocate == 0
     assert load_async is False
-    assert scheduler.client.num_tokens == []
+    assert scheduler.client.lookup_ranges == []
     assert scheduler.load_specs == {}
 
 

@@ -827,9 +827,9 @@ def _gated_recv(gate: threading.Event, value: int):
     return recv
 
 
-def test_admission_lookup_retains_completed_result_until_scheduled():
-    """A lookup started by on_new_request is reused, not consumed or
-    submitted again, by the scheduler's probes."""
+@pytest.mark.parametrize("local_tokens", [0, 16])
+def test_admission_lookup_retains_completed_result_until_scheduled(local_tokens):
+    """Scheduler probes reuse a result while the confirmed local prefix matches."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",
         kv_role="kv_both",
@@ -859,13 +859,20 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         future = sched.client._lookups[request.request_id].future
         assert future.result(timeout=5).hit_length == 32
         assert sched.load_specs == {}
-        assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
-        assert sched.client._lookups[request.request_id].future is future
-        assert mock_make_socket.return_value.send_multipart.call_count == 1
-        assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
-        assert mock_make_socket.return_value.send_multipart.call_count == 1
+        connector.get_num_new_matched_tokens(request, local_tokens)
+        current = sched.client._lookups[request.request_id].future
+        assert (current is future) == (local_tokens == 0)
+        assert current.result(timeout=5).hit_length == 32
+        external_tokens = 32 - local_tokens
+        assert connector.get_num_new_matched_tokens(request, local_tokens) == (
+            external_tokens,
+            True,
+        )
+        assert mock_make_socket.return_value.send_multipart.call_count == (
+            2 if local_tokens else 1
+        )
         # Once allocated, a reschedule (e.g. after a failed load) looks up anew.
-        connector.update_state_after_alloc(request, MagicMock(), 16)
+        connector.update_state_after_alloc(request, MagicMock(), external_tokens)
         assert request.request_id not in sched.client._lookups
     finally:
         connector.shutdown()

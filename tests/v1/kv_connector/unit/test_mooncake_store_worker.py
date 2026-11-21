@@ -6414,6 +6414,19 @@ def test_lookup_records_results_and_failure_status(results):
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
 
 
+@pytest.mark.parametrize("suffix_state, expected_hit", [(1, 32), (0, 0), (-900, None)])
+def test_lookup_checks_only_suffix_and_preserves_store_errors(
+    suffix_state, expected_hit
+):
+    worker = _make_bare_worker()
+    worker.store.batch_is_exist.return_value = [suffix_state]
+    result = worker.lookup(33, [b"a0", b"a1"], start_tokens=16)
+
+    (keys,) = worker.store.batch_is_exist.call_args.args
+    assert len(keys) == 1 and keys[0].endswith(b"a1".hex())
+    assert (None if result is None else result.hit_length) == expected_hit
+
+
 def test_store_worker_close_releases_store():
     worker = _make_bare_worker()
     store = worker.store
