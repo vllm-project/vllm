@@ -279,6 +279,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         if attn_metadata is not None:
             assert isinstance(attn_metadata, Mamba1AttentionMetadata)
             query_start_loc_p = attn_metadata.query_start_loc_p
+            max_query_len_p = attn_metadata.max_query_len_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             conv_state = (
@@ -360,6 +361,7 @@ class MambaMixer(MambaBase, PluggableLayer):
                 query_start_loc=query_start_loc_p,
                 cu_chunk_seqlen=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
+                max_seqlen=max_query_len_p,
             )
             ssm_outputs.append(scan_out_p)
 

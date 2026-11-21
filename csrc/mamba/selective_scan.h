@@ -21,6 +21,7 @@ struct SSMParamsBase {
     using index_t = size_t;
 
     int batch, dim, seqlen, dstate, n_groups;
+    int max_seqlen;
     int dim_ngroups_ratio;
     bool is_variable_B;
     bool is_variable_C;
