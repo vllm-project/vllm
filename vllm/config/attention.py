@@ -77,6 +77,11 @@ class AttentionConfig:
     Fixes the split count so grid dimensions are constant across captures,
     and buffers can be pre-allocated to avoid inflating the memory estimate."""
 
+    tq_prefill_allow_fa3: bool = True
+    """Let TurboQuant use FlashAttention 3 for its own prefill attention on
+    SM90 while the rest of the engine runs FA2. An explicit
+    `flash_attn_version=2` turns this off."""
+
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""

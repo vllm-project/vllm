@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
@@ -46,6 +47,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
+    is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -349,10 +351,22 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         # Detect flash-attn version (FA2/3/4) for prefill paths.
         self.fa_version = get_flash_attn_version(head_size=head_size)
+        # The engine pins FA2 for TurboQuant because FA3 boundary layers assert
+        # FlashAttentionImpl; this impl's own prefill calls have no such limit.
+        vllm_config = get_current_vllm_config()
+        capability = current_platform.get_device_capability()
+        if (
+            self.fa_version == 2
+            and vllm_config.attention_config.tq_prefill_allow_fa3
+            and capability is not None
+            and capability.major == 9
+            and head_size <= 256
+            and is_fa_version_supported(3)
+        ):
+            self.fa_version = 3
 
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).
-        vllm_config = get_current_vllm_config()
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )

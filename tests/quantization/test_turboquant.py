@@ -782,3 +782,29 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(90)
+    ),
+    reason="TurboQuant prefill uses FA3 only on SM90",
+)
+@pytest.mark.parametrize("allow_fa3,expected", [(True, 3), (False, 2)])
+def test_prefill_flash_attn_version_on_sm90(monkeypatch, allow_fa3, expected):
+    from vllm.config import AttentionConfig, VllmConfig, set_current_vllm_config
+    from vllm.v1.attention.backends import turboquant_attn as ta
+    from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+
+    if not is_fa_version_supported(3):
+        pytest.skip("vllm_flash_attn built without FA3")
+    # The engine pins FA2 for TurboQuant; the impl reads its own settings.
+    cfg = TestTurboQuantWorkspaceReservation._fake_vllm_config()
+    cfg.attention_config.tq_prefill_allow_fa3 = allow_fa3
+    monkeypatch.setattr(ta, "get_current_vllm_config", lambda: cfg)
+    engine_config = VllmConfig(attention_config=AttentionConfig(flash_attn_version=2))
+    with set_current_vllm_config(engine_config):
+        impl = ta.TurboQuantAttentionImpl(
+            32, 128, 128**-0.5, 8, kv_cache_dtype="turboquant_k8v4"
+        )
+    assert impl.fa_version == expected
