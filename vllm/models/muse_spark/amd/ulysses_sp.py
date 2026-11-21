@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ulysses attention for Muse Spark prefill on ROCm.
 
-Enabled with `additional_config={"ulysses_prefill": true}`. It runs on eager steps
-whose residual stream is token-sharded across the TP group (`TokenShard` in
-`model.py`) and replaces what that stream does around attention and the MoE input:
+Enabled with `additional_config={"ulysses_prefill": "full"}` (default "off"). It runs
+on eager steps whose residual stream is token-sharded across the TP group
+(`TokenShard` in `model.py`) and replaces what that stream does around attention
+and the MoE input:
 
 * attention: every rank projects its token shard with the full (all-gathered, FP8)
   QKV-gate weight, one all-to-all hands every rank all tokens of its own heads
@@ -18,6 +19,12 @@ On these steps the QKV-gate and O projections run as FP8 W8A8 (per-channel weigh
 per-token activations) from FP8 copies of the BF16/FP16 weights. The copies stay
 resident on every rank; they are built after weight loading, so the KV cache
 sizing accounts for them.
+
+With `"ulysses_prefill": "output_only"` only the output side runs Ulysses: the
+normed rows are all-gathered as per-token FP8 rows and projected by the rank's own
+QKV-gate shard (the TP layout, so no QKV-gate copy is kept), the O-gate is applied
+to the rank's heads, and one all-to-all hands the gated heads to the full O copy on
+the token shard. Only the O weight is copied.
 """
 
 import time
@@ -42,25 +49,38 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _OPTION = "ulysses_prefill"
+_MODES = ("off", "full", "output_only")
 
 
-def _enabled_option(vllm_config: VllmConfig) -> bool:
+def _mode(vllm_config: VllmConfig) -> str:
+    """The validated `additional_config` Ulysses prefill mode ("off" when unset)."""
     extra = vllm_config.additional_config
     if not isinstance(extra, dict):
-        return False
+        return "off"
     for key in extra:
         if key.startswith("ulysses") and key != _OPTION:
             raise ValueError(
                 f"Unknown additional_config key {key!r}; the Muse Spark Ulysses "
                 f"prefill key is {_OPTION!r}."
             )
-    value = extra.get(_OPTION, False)
-    # Exact type: a string such as "false" is truthy.
-    if type(value) is not bool:
+    value = extra.get(_OPTION, "off")
+    # Exact type: no booleans or other aliases.
+    if type(value) is not str or value not in _MODES:
         raise ValueError(
-            f"additional_config {_OPTION!r} must be a JSON boolean, got {value!r}."
+            f"additional_config {_OPTION!r} must be one of "
+            f"{', '.join(map(repr, _MODES))}, got {value!r}."
         )
     return value
+
+
+def _enabled_option(vllm_config: VllmConfig) -> bool:
+    return _mode(vllm_config) != "off"
+
+
+def output_only(vllm_config: VllmConfig) -> bool:
+    """Whether Ulysses runs on the attention output side only
+    (`additional_config={"ulysses_prefill": "output_only"}`)."""
+    return _mode(vllm_config) == "output_only"
 
 
 def _eager_min_tokens(vllm_config: VllmConfig, min_tokens: int) -> int:
@@ -86,7 +106,7 @@ def ulysses_prefill_enabled(
     vllm_config: VllmConfig, token_shard_min_tokens: int
 ) -> bool:
     """Whether the token-sharded eager steps run Ulysses
-    (`additional_config={"ulysses_prefill": true}`).
+    (`additional_config={"ulysses_prefill": "full"}` or `"output_only"`).
 
     `token_shard_min_tokens` is the model's token-sharded stream threshold (0 when
     the stream is never sharded).
@@ -190,6 +210,14 @@ def take_prequant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
     return prequant
 
 
+def gather_rows_fp8(
+    x: torch.Tensor, shard: "TokenShard"
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """All-gather the shard's rows as per-token FP8 rows and their scales."""
+    xq, xs = quant_rows(x)
+    return gather_bytes(xq, shard), shard.gather(xs)
+
+
 def gather_bytes(xs: torch.Tensor, shard: "TokenShard") -> torch.Tensor:
     """All-gather a byte-typed tensor (fp4x2 / e8m0) as bf16 words, so the custom AG
     carries it.
@@ -254,15 +282,17 @@ FP8Weight = tuple[torch.Tensor, torch.Tensor]
 @dataclass(frozen=True)
 class UlyssesWeights:
     """One attention layer's full projection weights (all ranks' heads, rank-major)
-    as per-output-channel FP8 with `[1, N]` scales."""
+    as per-output-channel FP8 with `[1, N]` scales. `qkv` and `gate` are None when
+    only the output side runs Ulysses."""
 
-    qkv: FP8Weight
-    gate: FP8Weight
+    qkv: FP8Weight | None
+    gate: FP8Weight | None
     o: FP8Weight
 
     @property
     def tensors(self) -> tuple[torch.Tensor, ...]:
-        return (*self.qkv, *self.gate, *self.o)
+        parts = (self.qkv, self.gate, self.o)
+        return tuple(t for part in parts if part is not None for t in part)
 
     @property
     def nbytes(self) -> int:
@@ -295,10 +325,18 @@ def _quant_weight(full: torch.Tensor) -> FP8Weight:
 
 
 def build_weights(
-    qkv_proj: torch.nn.Module, o_proj: torch.nn.Module, q: int, kv: int
+    qkv_proj: torch.nn.Module,
+    o_proj: torch.nn.Module,
+    q: int,
+    kv: int,
+    output_only: bool = False,
 ) -> UlyssesWeights:
     """The full FP8 weights of the TP-sharded fused `[q|k|v|o-gate]` (`q`, `kv`:
-    this rank's sizes) and O projections."""
+    this rank's sizes) and O projections; only O with `output_only`."""
+    if output_only:
+        o = torch.cat(_all_gather_weight(o_proj), dim=1)
+        torch.accelerator.empty_cache()
+        return UlyssesWeights(None, None, _quant_weight(o))
     parts = _all_gather_weight(qkv_proj)
     qkv = torch.cat([p[: q + 2 * kv] for p in parts])
     gate = torch.cat([p[q + 2 * kv : 2 * q + 2 * kv] for p in parts])

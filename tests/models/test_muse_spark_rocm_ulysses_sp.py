@@ -28,7 +28,9 @@ from vllm.utils.network_utils import get_open_port
 from ..utils import multi_gpu_test
 from .test_muse_spark_rocm_mono import TINY_TEXT, _checkpoint_config
 
-ON = {"ulysses_prefill": True}
+ON = {"ulysses_prefill": "full"}
+OUTPUT_ONLY = {"ulysses_prefill": "output_only"}
+MODES = [pytest.param(ON, id="qkv-o"), pytest.param(OUTPUT_ONLY, id="output-only")]
 
 
 def _config(additional_config: dict, max_num_batched_tokens: int = 8192) -> VllmConfig:
@@ -59,7 +61,9 @@ def _all_steps_captured() -> VllmConfig:
     "options, match",
     [
         ({"ulysses_prefil": True}, "Unknown additional_config key"),
-        ({"ulysses_prefill": "false"}, "JSON boolean"),
+        ({"ulysses_prefill": True}, "must be one of 'off', 'full', 'output_only'"),
+        ({"ulysses_prefill": "on"}, "must be one of"),
+        ({"ulysses_prefill_output_only": True}, "Unknown additional_config key"),
     ],
 )
 def test_ulysses_prefill_rejects_invalid_options(options: dict, match: str) -> None:
@@ -252,8 +256,9 @@ def _prompt_logprobs(llm) -> torch.Tensor:
     not current_platform.is_rocm(), reason="Muse Spark Ulysses needs ROCm"
 )
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("options", MODES)
 def test_ulysses_prefill_matches_the_token_sharded_stream(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, options: dict
 ) -> None:
     """Prompt logprobs of one Ulysses step stay within the FP8 projection error of
     the stream without Ulysses. A wrong head or rank order moves them by far more.
@@ -263,8 +268,8 @@ def test_ulysses_prefill_matches_the_token_sharded_stream(
     assert llm.built == [0, 0]
     reference = _prompt_logprobs(llm)
     del llm
-    llm = _tiny_llm(tmp_path, monkeypatch, ON)
-    assert llm.built == [LAYERS] * 2
+    llm = _tiny_llm(tmp_path, monkeypatch, options)
+    assert llm.apply_model(_held_copies) == [[_copies(options)] * LAYERS] * 2
     llm.apply_model(_count_ulysses_exchanges)
     ulysses = _prompt_logprobs(llm)
     # Both streams can round alike, so check that the Ulysses exchange ran.
@@ -294,20 +299,39 @@ def _bits(t: torch.Tensor) -> torch.Tensor:
 
 
 def _parts(w: "usp.UlyssesWeights") -> dict[str, list[torch.Tensor]]:
-    return {part: [_bits(t) for t in getattr(w, part)] for part in ("qkv", "gate", "o")}
+    return {
+        part: [_bits(t) for t in getattr(w, part)]
+        for part in ("qkv", "gate", "o")
+        if getattr(w, part) is not None
+    }
+
+
+def _copies(options: dict) -> list[str]:
+    """The Ulysses copies a layer holds with `options`."""
+    if options["ulysses_prefill"] == "output_only":
+        return ["o"]
+    return ["gate", "o", "qkv"]
+
+
+def _held_copies(model: torch.nn.Module) -> list[list[str]]:
+    return [
+        sorted(_parts(m.ulysses_weights))
+        for m in model.modules()
+        if getattr(m, "ulysses_weights", None)
+    ]
 
 
 def _same(a: list[torch.Tensor], b: list[torch.Tensor]) -> bool:
     return all(torch.equal(x, y) for x, y in zip(a, b, strict=True))
 
 
-def _reload_attention(worker, exponent: int) -> dict:
+def _reload_attention(worker, exponent: int, output_only: bool) -> dict:
     """Reload every attention QKV and O weight (kernel format) with its columns
     scaled by 2**exponent and 2**-exponent alternately, which is exact in BF16 and
     changes the per-row FP8 payload, not only its scales. Returns the
     addresses of the Ulysses copies, the copies (qkv, gate, o) that differ from
-    ones freshly built from the reloaded weights, and those the reload left
-    unchanged."""
+    ones freshly built from the reloaded weights in the `output_only` mode, and
+    those the reload left unchanged."""
     model = worker.get_model()
     layers = [m for m in model.modules() if getattr(m, "ulysses_weights", None)]
     before = [
@@ -324,7 +348,18 @@ def _reload_attention(worker, exponent: int) -> dict:
     stale, unchanged = [], []
     for i, (m, old) in enumerate(zip(layers, before, strict=True)):
         held = _parts(m.ulysses_weights)
-        fresh = _parts(usp.build_weights(m.qkv_proj, m.o_proj, m.q_size, m.kv_size))
+        fresh = _parts(
+            usp.build_weights(
+                m.qkv_proj,
+                m.o_proj,
+                m.q_size,
+                m.kv_size,
+                output_only,
+            )
+        )
+        if held.keys() != fresh.keys():
+            stale.append(f"{i}: {sorted(held)} != {sorted(fresh)}")
+            continue
         stale += [f"{i}.{k}" for k in held if not _same(held[k], fresh[k])]
         unchanged += [f"{i}.{k}" for k in held if _same(held[k], old[k])]
     return {
@@ -347,7 +382,7 @@ def test_ulysses_prefill_follows_weight_reloads(tmp_path, monkeypatch) -> None:
     assert llm.built == [LAYERS] * 2
 
     def reload(exponent: int) -> list[int]:
-        result = llm.collective_rpc(_reload_attention, args=(exponent,))
+        result = llm.collective_rpc(_reload_attention, args=(exponent, False))
         assert [r["stale"] for r in result] == [[], []]
         if exponent:
             assert [r["unchanged"] for r in result] == [[], []]
