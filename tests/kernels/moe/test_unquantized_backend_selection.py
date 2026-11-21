@@ -141,7 +141,7 @@ def test_arm_cpu_unquantized_kernel_selection(
     return_value=False,
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe."
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_moe_base."
     "has_flashinfer_trtllm_fused_moe",
     return_value=False,
 )
