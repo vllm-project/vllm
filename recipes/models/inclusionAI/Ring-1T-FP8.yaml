@@ -4,7 +4,7 @@ meta:
   provider: "inclusionAI"
   description: "Ring-1T (BailingMoeV2) FP8 model (~1T total params) for 8xH200 or 8xMI300X deployment"
   date_added: 2025-10-15
-  date_updated: 2026-04-17
+  date_updated: 2026-11-07
   tasks:
     - text
   related_recipes: []
@@ -16,7 +16,7 @@ meta:
 
 model:
   model_id: "inclusionAI/Ring-1T-FP8"
-  min_vllm_version: "0.11.0"
+  min_vllm_version: "0.11.1"
   architecture: moe
   parameter_count: "1T"
   active_parameters: "50B"
@@ -44,7 +44,7 @@ variants:
     description: "FP8 weights on 8x H200 (80 GB) with FP8 KV cache"
     extra_args:
       - "--compilation-config"
-      - '{"use_inductor": false}'
+      - '{"backend": "eager"}'
 
 compatible_strategies:
   - single_node_tp
@@ -66,7 +66,7 @@ guide: |
   ## Prerequisites
 
   - Hardware: 8x H200 or 8x MI300X/MI325X/MI355X
-  - vLLM >= 0.11.0
+  - vLLM >= 0.11.1
 
   ### Install vLLM (CUDA)
 
@@ -92,7 +92,7 @@ guide: |
     --tensor-parallel-size 8 \
     --max-num-seqs 32 \
     --kv-cache-dtype fp8 \
-    --compilation-config '{"use_inductor": false}' \
+    --compilation-config '{"backend": "eager"}' \
     --served-model-name Ring-1T-FP8
   ```
 
