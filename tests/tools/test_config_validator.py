@@ -27,6 +27,50 @@ class _TestConfig3:
     """docstring"""
 '''
 
+_TestConfig4 = '''
+@dataclass
+@config
+class _TestConfig4:
+    a: int = 1
+    """docstring"""
+'''
+
+_TestConfig5 = '''
+@config
+class _TestConfig5:
+    a: Literal[1] | Literal[2] = 1
+    """docstring"""
+'''
+
+_TestConfig6 = '''
+@config
+class _TestConfig6:
+    a: Literal[1] | Literal[2] | None = 1
+    """docstring"""
+'''
+
+_TestConfig7 = '''
+@config
+class _TestConfig7:
+    a: typing.Union[typing.Literal[1], typing.Literal[2]] = 1
+    """docstring"""
+'''
+
+_TestConfig8 = '''
+@vllm.config.config
+class _TestConfig8:
+    a: int
+    """docstring"""
+'''
+
+_TestConfig9 = '''
+@config
+@dataclass
+class _TestConfig9:
+    a: int = 1
+    """docstring"""
+'''
+
 
 @pytest.mark.parametrize(
     ("test_config", "expected_error"),
@@ -34,9 +78,40 @@ class _TestConfig3:
         (_TestConfig1, "must have a default"),
         (_TestConfig2, "must have a docstring"),
         (_TestConfig3, "must use a single Literal"),
+        (_TestConfig4, "should be used alone"),
+        (_TestConfig5, "must use a single Literal"),
+        (_TestConfig6, "must use a single Literal"),
+        (_TestConfig7, "must use a single Literal"),
+        (_TestConfig8, "must have a default"),
+        (_TestConfig9, "should be used alone"),
     ],
 )
 def test_config(test_config, expected_error):
     tree = ast.parse(test_config)
     with pytest.raises(Exception, match=expected_error):
         validate_ast(tree)
+
+
+_ValidConfig1 = '''
+@config(frozen=True)
+class _ValidConfig1:
+    a: typing.ClassVar[int]
+    b: dataclasses.InitVar[int]
+    c: Literal[1, 2] | None = None
+    """docstring"""
+    d: Literal[1] | None = None
+    """docstring"""
+    e: Union[Literal[1], int] = 1
+    """docstring"""
+'''
+
+_ValidConfig2 = """
+@dataclass
+class _NotAConfig:
+    a: int
+"""
+
+
+@pytest.mark.parametrize("test_config", [_ValidConfig1, _ValidConfig2])
+def test_valid_config(test_config):
+    validate_ast(ast.parse(test_config))
