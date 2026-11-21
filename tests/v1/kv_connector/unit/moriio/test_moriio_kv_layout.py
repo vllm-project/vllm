@@ -112,6 +112,7 @@ def _write_task(layer_name: str, transfer_id: str = "xfer") -> Any:
         remote_block_ids_hint=None,
         layer_name=layer_name,
         event=None,
+        num_prompt_tokens=8,
         remote_notify_port=7000,
         remote_ip="127.0.0.1",
     )
@@ -482,7 +483,7 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
     )
 
     wrapper = _wrapper_for_messages()
-    info = RemoteAllocInfo(block_ids=[[], [7], [9]])
+    info = RemoteAllocInfo(block_ids=[[], [7], [9]], num_prompt_tokens=8)
     wrapper.done_remote_allocate_req_dict["xfer"] = info
     wrapper.write_remote_data = Mock(side_effect=["conv-status", "ssm-status"])
     worker = SimpleNamespace(
@@ -490,6 +491,7 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         tp_rank=0,
         get_engine_name_with_dp=lambda name, rank: name,
         _get_built_session=lambda name: (["conv-session", "ssm-session"], None),
+        _has_mamba=True,
         _is_mamba_layer=lambda name: True,
         _hybrid_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],
