@@ -208,6 +208,15 @@ def split_tensor_along_last_dim(
     return tensor_list
 
 
+def get_default_pp_partition(num_hidden_layers: int, pp_size: int) -> list[int]:
+    """Layers per PP stage when `VLLM_PP_LAYER_PARTITION` is unset, as
+    distributed by `get_pp_indices`."""
+    partitions = [num_hidden_layers // pp_size] * pp_size
+    for i in range(2, num_hidden_layers % pp_size + 2):
+        partitions[-i] += 1
+    return partitions
+
+
 def get_pp_indices(
     num_hidden_layers: int, pp_rank: int, pp_size: int
 ) -> tuple[int, int]:
@@ -241,12 +250,8 @@ def get_pp_indices(
         if any(p < 0 for p in partitions):
             raise ValueError(f"Negative layer count in {partition_list_str=}.")
     else:
-        layers_per_partition = num_hidden_layers // pp_size
-        partitions = [layers_per_partition for _ in range(pp_size)]
-
-        if remaining_layers := num_hidden_layers % pp_size:
-            for i in range(2, remaining_layers + 2):
-                partitions[-i] += 1
+        partitions = get_default_pp_partition(num_hidden_layers, pp_size)
+        if num_hidden_layers % pp_size:
             logger.info(
                 "Hidden layers were unevenly partitioned: [%s]. "
                 "This can be manually overridden using the "
