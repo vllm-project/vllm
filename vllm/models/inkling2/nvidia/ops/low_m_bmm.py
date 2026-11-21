@@ -88,6 +88,75 @@ def _low_m_bmm_kernel(
     tl.extra.cuda.gdc_launch_dependents()
 
 
+@triton.jit
+def _segment_input(b, XQ, XK, XV, SXQ, SXK, SXV):
+    if b == 0:
+        x, stride = XQ, SXQ
+    elif b == 1:
+        x, stride = XK, SXK
+    else:
+        x, stride = XV, SXV
+    return x, stride
+
+
+@triton.jit(do_not_specialize=["M"])
+def _low_m_grouped_kernel(
+    XQ,
+    XK,
+    XV,
+    W,
+    Y,
+    M,
+    N,
+    K,
+    S1,
+    S2,
+    SXQ,
+    SXK,
+    SXV,
+    SWN,
+    SYM,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    MP: tl.constexpr,
+):
+    """Columns `[0, S1)` of `Y` are `XQ @ W.T`, `[S1, S2)` `XK` and `[S2, N)`
+    `XV`. A tile spanning a boundary runs both inputs' dots and picks per
+    column (the second input's loads hit L2)."""
+    tl.extra.cuda.gdc_wait()
+    n0 = tl.program_id(0) * BN
+    n1 = tl.minimum(n0 + BN, N) - 1
+    b_lo = (n0 >= S1).to(tl.int32) + (n0 >= S2).to(tl.int32)
+    b_hi = (n1 >= S1).to(tl.int32) + (n1 >= S2).to(tl.int32)
+    x_lo, sx_lo = _segment_input(b_lo, XQ, XK, XV, SXQ, SXK, SXV)
+    x_hi, sx_hi = _segment_input(b_hi, XQ, XK, XV, SXQ, SXK, SXV)
+    rows = tl.arange(0, MP)
+    cols = n0 + tl.arange(0, BN)
+    ks = tl.arange(0, BK)
+    x_lo += rows[:, None] * sx_lo + ks[None, :]
+    x_hi += rows[:, None] * sx_hi + ks[None, :]
+    w_ptrs = W + (cols[None, :] * SWN + ks[:, None])
+    acc_lo = tl.zeros((MP, BN), tl.float32)
+    acc_hi = tl.zeros((MP, BN), tl.float32)
+    for _ in range(0, K, BK):
+        x_mask = (rows[:, None] < M) & (ks[None, :] < K)
+        w = tl.load(w_ptrs, (cols[None, :] < N) & (ks[:, None] < K), other=0)
+        acc_lo += tl.dot(tl.load(x_lo, x_mask, other=0), w)
+        acc_hi += tl.dot(tl.load(x_hi, x_mask, other=0), w)
+        x_lo += BK
+        x_hi += BK
+        w_ptrs += BK
+        ks += BK
+    segment = (cols >= S1).to(tl.int32) + (cols >= S2).to(tl.int32)
+    acc = tl.where((segment == b_lo)[None, :], acc_lo, acc_hi)
+    tl.store(
+        Y + (rows[:, None] * SYM + cols[None, :]),
+        acc.to(Y.dtype.element_ty),
+        (rows[:, None] < M) & (cols[None, :] < N),
+    )
+    tl.extra.cuda.gdc_launch_dependents()
+
+
 class _Config(NamedTuple):
     bn: int
     bk: int
@@ -178,6 +247,53 @@ def low_m_bmm(
         MP=_MP,
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
+        launch_pdl=True,
+    )
+    return out
+
+
+def low_m_grouped_linear(
+    xs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    w: torch.Tensor,
+    starts: tuple[int, int],
+) -> torch.Tensor:
+    """One launch of three linears on consecutive row ranges of `w` `[N, K]`:
+    output columns `[0, starts[0])` from `xs[0]`, `[starts[0], starts[1])`
+    from `xs[1]` and the rest from `xs[2]`, each `[M, K]` with M <= 16.
+    Returns `[M, N]` with fp32 accumulation."""
+    x_q, x_k, x_v = xs
+    m, k = x_q.shape
+    n = w.shape[0]
+    s1, s2 = starts
+    bn = 32
+    assert 0 < m <= MAX_M and w.shape == (n, k)
+    assert all(x.shape == (m, k) and x.stride(1) == 1 for x in xs)
+    assert w.stride(1) == 1 and s1 > 0 and s1 + bn <= s2 <= n  # one boundary per tile
+    assert max(n * w.stride(0), *(m * x.stride(0) for x in xs)) < 2**31
+    out = torch.empty((m, n), dtype=x_q.dtype, device=x_q.device)
+    # About 1.6 waves of 32-column tiles at Inkling's 8608 columns; wider
+    # tiles or split-K measured no faster.
+    _low_m_grouped_kernel[(triton.cdiv(n, bn),)](
+        x_q,
+        x_k,
+        x_v,
+        w,
+        out,
+        m,
+        n,
+        k,
+        s1,
+        s2,
+        x_q.stride(0),
+        x_k.stride(0),
+        x_v.stride(0),
+        w.stride(0),
+        out.stride(0),
+        BN=bn,
+        BK=128,
+        MP=_MP,
+        num_warps=4,
+        num_stages=4,
         launch_pdl=True,
     )
     return out

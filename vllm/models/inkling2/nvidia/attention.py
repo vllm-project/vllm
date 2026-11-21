@@ -60,6 +60,7 @@ from .ops.attention import (
 )
 from .ops.attention_sm90 import MODE_OUT_LSE, rel_attention
 from .ops.linear import linear
+from .ops.low_m_bmm import low_m_grouped_linear, use_low_m_bmm
 from .ops.sconv import attention_prologue, shift_rel_proj
 from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
 
@@ -339,6 +340,14 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             return list(projected.split(self.split_sizes, dim=-1)[:6])
         q_side, kv_size = sum(self.split_sizes[:4]), self.split_sizes[4]
         k_end = q_side + kv_size
+        if all(use_low_m_bmm(x, weight) for x in (x_q, x_k, x_v)):
+            # All of q/k/v in one launch, each column tile reading its input.
+            projected = low_m_grouped_linear((x_q, x_k, x_v), weight, (q_side, k_end))
+            splits = projected.split(self.split_sizes, dim=-1)
+            add_linear_lora(self.qkvr, projected, x_q, range(4))
+            add_linear_lora(self.qkvr, splits[4], x_k, [4])
+            add_linear_lora(self.qkvr, splits[5], x_v, [5])
+            return list(splits[:6])
         projected = linear(x_q, weight[: sum(self.q_side_splits)])
         k = linear(x_k, weight[q_side:k_end])
         v = linear(x_v, weight[k_end : k_end + kv_size])
