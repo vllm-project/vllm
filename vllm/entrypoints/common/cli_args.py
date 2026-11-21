@@ -394,6 +394,9 @@ class FrontendArgs(BaseFrontendArgs):
     When disabled, the setting is also propagated to the engine's
     `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
     path instead of the fused Triton kernel."""
+    enable_decisions_api: bool = False
+    """If set to True, register the Decisions API endpoints (`/v1/decisions`
+    and `/v1/systemone`)."""
 
     @classmethod
     def _customize_cli_kwargs(

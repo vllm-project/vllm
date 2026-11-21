@@ -1028,8 +1028,6 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/messages"),
         ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions/batch"),
-        ("POST", "/v1/decisions"),
-        ("POST", "/v1/systemone"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
     ] {
@@ -1390,6 +1388,31 @@ async fn scale_out_generate_and_abort_routes_are_disabled_by_default() {
                 .expect("error message")
                 .contains("--enable-scale-out")
         );
+    }
+}
+
+/// The Rust frontend refuses `--enable-decisions-api`, so these routes are
+/// never served, like the Python frontend without the flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn decisions_api_routes_are_not_served() {
+    let (app, _engine_task) = test_app().await;
+
+    for uri in ["/v1/decisions", "/v1/systemone"] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
     }
 }
 

@@ -33,15 +33,17 @@ used for classification and routing.
 
 ## Online Serving
 
+The `/v1/systemone` and `/v1/decisions` endpoints are disabled by default. Start
+the server with `--enable-decisions-api` to serve them.
+
 ### TypeSafe System One Endpoint
 
 The `/v1/systemone` endpoint answers a set of typed questions about a state and
 returns a probability for every allowed answer.
 
-The endpoint is available by default on generation models. Models without a
-supported read strategy return 501. Supported architectures require
-`--logprobs-mode raw_logprobs` or `processed_logprobs`, since `label_mass` needs
-log probabilities.
+Models without a supported read strategy return 501. Supported architectures
+require `--logprobs-mode raw_logprobs` or `processed_logprobs`, since
+`label_mass` needs log probabilities.
 
 #### How it works
 
@@ -220,7 +222,7 @@ vLLM provides a text-only implementation of OpenAI's
 API. Start a supported model:
 
 ```bash
-vllm serve Qwen/Qwen3-0.6B
+vllm serve Qwen/Qwen3-0.6B --enable-decisions-api
 ```
 
 ```python
@@ -281,8 +283,7 @@ to OpenAI's models. Thinking is disabled for these reads.
 
 Image inputs, other message roles, tools, streaming, and per-question refusal
 scoring are outside this MVP. Unsupported request fields and input types are
-rejected. The `/v1/systemone` endpoint retains its existing request format and
-is available by default.
+rejected. The `/v1/systemone` endpoint retains its existing request format.
 
 ## Examples
 
@@ -293,7 +294,7 @@ backbone and a joint schema head to score all questions in one forward pass.
 vLLM detects the head and serves the checkpoint as a pooling model.
 
 ```bash
-vllm serve Cloudflare/clef-flash --max-model-len 16384
+vllm serve Cloudflare/clef-flash --max-model-len 16384 --enable-decisions-api
 ```
 
 Send requests to `/v1/systemone` using `state` and `questions`, as in the
@@ -317,7 +318,7 @@ a joint schema head on the Qwen3-Omni thinker scores every option of every
 question in one forward pass. vLLM serves it as a pooling model.
 
 ```bash
-vllm serve Cloudflare/clef-omni
+vllm serve Cloudflare/clef-omni --enable-decisions-api
 ```
 
 - A request is one read. The prompt is the one the checkpoint's
@@ -350,7 +351,7 @@ serves it as a classification model. All six sizes take the same command:
 [`vllm-sr/d3-edge`](https://huggingface.co/vllm-sr/d3-edge) (0.6B).
 
 ```bash
-vllm serve vllm-sr/d3
+vllm serve vllm-sr/d3 --enable-decisions-api
 ```
 
 - Each question is one read of the prompt the checkpoint's `d3_format.py`
@@ -379,7 +380,7 @@ post-trained to answer decisions as the first token of its reply. vLLM serves
 it as a generative model.
 
 ```bash
-vllm serve LiquidAI/d1-3B
+vllm serve LiquidAI/d1-3B --enable-decisions-api
 ```
 
 - The server writes the prompt and reads the label tokens the way the
@@ -402,7 +403,7 @@ and [`baselabs/elephant-1`](https://huggingface.co/baselabs/elephant-1) are
 Qwen3.5 checkpoints whose `modeling_overrides` select `Qwen3_5ForSlotDecision`.
 
 ```bash
-vllm serve baselabs/mammoth-1
+vllm serve baselabs/mammoth-1 --enable-decisions-api
 ```
 
 - The full attention layers read the shared prefix and the question as two

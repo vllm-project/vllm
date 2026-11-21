@@ -382,6 +382,16 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_server_load_tracking: Option<Noop>,
 
+    /// If set to True, register the Decisions API endpoints (`/v1/decisions`
+    /// and `/v1/systemone`).
+    #[arg(
+        long,
+        visible_alias = "no-enable-decisions-api",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_decisions_api: Option<Unsupported>,
+
     /// Log level for uvicorn.
     ///
     /// Accepted as a no-op: the Rust frontend does not run uvicorn.
