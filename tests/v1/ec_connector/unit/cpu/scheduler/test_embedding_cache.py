@@ -52,10 +52,14 @@ def test_alloc_asserts_duplicate_key():
         cache.alloc("a", 2)
 
 
-def test_alloc_asserts_n_blocks_exceeds_capacity():
+def test_oversized_alloc_preserves_cache_and_allows_later_requests():
     cache = _cache(num_blocks=4)
-    with pytest.raises(AssertionError, match="capacity"):
-        cache.alloc("a", 5)
+    entry = cache.alloc("existing", 2)
+    cache.mark_ready("existing")
+    assert cache.alloc("oversized", 5) is None
+    assert cache.get("existing") is entry
+    assert cache.get("oversized") is None
+    assert cache.alloc("later", 2) is not None
 
 
 def test_alloc_zero_blocks():
