@@ -38,6 +38,44 @@ def test_gptq_gemm_opcheck():
     opcheck(torch.ops._C.gptq_gemm, (a, weight, zeros, scales, use_exllama, False, bit))
 
 
+def gptq_gemm_peak_bytes(size_m, use_exllama, bit):
+    a = torch.rand((size_m, 4096), device="cuda", dtype=torch.float16)
+    weight = torch.randint(
+        -2000000,
+        2000000,
+        (4096 * bit // 32, 4096),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    zeros = torch.zeros((32, 4096 * bit // 32), device="cuda", dtype=torch.int32)
+    scales = torch.rand((32, 4096), device="cuda", dtype=torch.float16)
+    args = (a, weight, zeros, scales, use_exllama, False, bit)
+
+    torch.ops._C.gptq_gemm(*args)
+    torch.accelerator.synchronize()
+    before = torch.accelerator.memory_allocated()
+    torch.accelerator.reset_peak_memory_stats()
+    output = torch.ops._C.gptq_gemm(*args)
+    torch.accelerator.synchronize()
+    assert output.shape == (size_m, 4096)
+    return torch.accelerator.max_memory_allocated() - before
+
+
+@pytest.mark.parametrize(
+    "use_exllama,bit,fused_m,reconstruct_m",
+    [(True, 4, 1, 64), (True, 8, 24, 25), (False, 4, 8, 9)],
+)
+def test_gptq_gemm_allocates_temp_dq_only_for_reconstruct(
+    use_exllama, bit, fused_m, reconstruct_m
+):
+    temp_dq_bytes = 4096 * 4096 * 2
+    fused_peak = gptq_gemm_peak_bytes(fused_m, use_exllama, bit)
+    reconstruct_peak = gptq_gemm_peak_bytes(reconstruct_m, use_exllama, bit)
+
+    assert fused_peak < temp_dq_bytes
+    assert reconstruct_peak >= temp_dq_bytes
+
+
 @pytest.mark.parametrize("quant_type", [scalar_types.uint4b8, scalar_types.uint8b128])
 @pytest.mark.parametrize("group_size", [-1, 32, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
