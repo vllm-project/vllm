@@ -85,6 +85,7 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
 
     core_attn_out, last_recurrent_state = fused_sigmoid_gating_delta_rule_update(
         beta_scale=beta_scale,
+        use_unfused_math=beta_scale != 1.0,
         A_log=A_log,
         a=a,
         b=b,
@@ -184,6 +185,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
 
     core_attn_out, last_recurrent_state = fused_sigmoid_gating_delta_rule_update(
         beta_scale=beta_scale,
+        use_unfused_math=beta_scale != 1.0,
         A_log=A_log,
         a=a,
         b=b,

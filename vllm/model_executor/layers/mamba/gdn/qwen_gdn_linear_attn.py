@@ -698,6 +698,8 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    use_unfused_math = False
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -1676,6 +1678,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             apply_l2norm=True,
             output_g_exp=False,
             beta_scale=self.beta_scale,
+            use_unfused_math=self.use_unfused_math,
         )
         q = q.unsqueeze(0)
         k = k.unsqueeze(0)
@@ -2092,6 +2095,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 apply_l2norm=True,
                 output_g_exp=self.gdn_prefill_backend == "flashinfer",
                 beta_scale=self.beta_scale,
+                use_unfused_math=self.use_unfused_math,
             )
             query_non_spec = query_non_spec.unsqueeze(0)
             key_non_spec = key_non_spec.unsqueeze(0)
@@ -2128,6 +2132,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                     beta_scale=self.beta_scale,
+                    use_unfused_math=self.use_unfused_math,
                 )
             )
         else:
@@ -2154,6 +2159,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ssm_state_indices=non_spec_state_indices_tensor,
                 use_qk_l2norm_in_kernel=True,
                 beta_scale=self.beta_scale,
+                use_unfused_math=self.use_unfused_math,
             )
         else:
             core_attn_out_decode = None
@@ -2256,6 +2262,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
                     beta_scale=self.beta_scale,
+                    use_unfused_math=self.use_unfused_math,
                 )
             )
         else:

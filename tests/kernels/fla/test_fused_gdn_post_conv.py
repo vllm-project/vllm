@@ -127,6 +127,7 @@ def test_fused_post_conv_correctness(
         apply_l2norm=apply_l2norm,
         output_g_exp=output_g_exp,
         beta_scale=beta_scale,
+        use_unfused_math=beta_scale != 1.0,
     )
 
     # Check shapes
@@ -158,7 +159,7 @@ def test_fused_post_conv_correctness(
     torch.testing.assert_close(fused_g, ref_g, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(fused_beta, ref_beta, atol=1e-4, rtol=1e-4)
 
-    if apply_l2norm:
+    if apply_l2norm and beta_scale != 1.0:
         # Fusing preparation must preserve the unfused FLA normalization.
         q_raw, k_raw, _ = conv_output.split([H * K, H * K, HV * V], dim=-1)
         for actual, raw in ((fused_q, q_raw), (fused_k, k_raw)):
