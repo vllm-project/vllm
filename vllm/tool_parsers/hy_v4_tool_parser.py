@@ -564,6 +564,7 @@ class HYV4ToolExtractor:
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
+        self._scanned_args_len: int = 0  # end offset of last closed kv pair
 
         self.tool_calls_start_token: str = f"<tool_calls{token_suffix}>"
         self.tool_calls_end_token: str = f"</tool_calls{token_suffix}>"
@@ -765,6 +766,7 @@ class HYV4ToolExtractor:
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
+        self._scanned_args_len = 0
 
     def extract_tool_calls_streaming(
         self,
@@ -882,9 +884,12 @@ class HYV4ToolExtractor:
                     self._buffer += delta_text
             elif self.tool_calls_start_token in delta_text:
                 text_parts = delta_text.split(self.tool_calls_start_token)
-                self._buffer += text_parts[-1]
-                if text_parts[0]:
-                    content_delta = text_parts[0]
+                if self.tool_calls_start_token_id not in previous_token_ids:
+                    self._buffer += self.tool_calls_start_token.join(text_parts[1:])
+                    if text_parts[0]:
+                        content_delta = text_parts[0]
+                else:
+                    self._buffer += delta_text
             else:
                 self._buffer += delta_text
 
@@ -1043,9 +1048,10 @@ class HYV4ToolExtractor:
             self._completed_args[key] = parsed_value
 
         # --- detect partial (unclosed) kv at the tail ---
-        last_closed_end = 0
-        for m in self.func_args_regex.finditer(args_text):
+        last_closed_end = self._scanned_args_len
+        for m in self.func_args_regex.finditer(args_text, last_closed_end):
             last_closed_end = m.end()
+        self._scanned_args_len = last_closed_end
         tail = args_text[last_closed_end:]
 
         partial_key: str | None = None
