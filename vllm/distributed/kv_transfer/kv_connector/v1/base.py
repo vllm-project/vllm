@@ -53,7 +53,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, KVLoadFailureReport
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -483,6 +483,24 @@ class KVConnectorBase_V1(ABC):
 
         """
         return set()
+
+    def get_load_failure_reports(self) -> list[KVLoadFailureReport]:
+        """Get structured reports for KV regions that failed to load.
+
+        Reports are the connector-side input of the hole-repair policy
+        (`kv_load_failure_policy="repair"`): each report names one failed
+        region with its rollback boundary and restoration target. The
+        timing contract matches get_block_ids_with_load_errors(): sync
+        loading failures are reported in the forward pass in which they
+        are detected, and a report implies no in-flight reads remain for
+        the region.
+
+        Returns:
+            List of failure reports. Empty for connectors that do not
+            support hole repair.
+
+        """
+        return []
 
     def shutdown(self):
         """Shutdown the connector. This is called when the worker process

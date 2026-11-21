@@ -32,7 +32,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, KVLoadFailureReport
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
@@ -451,6 +451,29 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
+
+    def get_load_failure_reports(self) -> list[KVLoadFailureReport]:
+        """Aggregate the children's structured load-failure reports.
+
+        Only the chosen child reports for a request it is actually
+        loading, but an unselected or misbehaving child's report is
+        preserved rather than filtered here: attribution and identity
+        are the scheduler's judgment, not the wrapper's. A child whose
+        getter raises is logged and skipped: its reports are lost for
+        the step, never fabricated, and the scheduler's fail-safe
+        consumption of the channel treats the absence conservatively.
+        """
+        evidence: list[KVLoadFailureReport] = []
+        for c in self._connectors:
+            try:
+                evidence.extend(c.get_load_failure_reports())
+            except Exception:
+                logger.exception(
+                    "Child connector %s raised in get_load_failure_reports(); "
+                    "its load-failure reports are excluded for this step.",
+                    type(c).__name__,
+                )
+        return evidence
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set xPU-specific copy ops for all sub-connectors."""

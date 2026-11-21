@@ -416,6 +416,7 @@ steps:
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'cpu_test' v1/executor
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
