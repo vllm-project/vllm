@@ -111,20 +111,19 @@ def server(
         *base,
         *extra_args,
     ]
-    proc = subprocess.Popen(
-        cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-    )
+    # Let the server inherit the test's stdout/stderr, as RemoteOpenAIServer
+    # does, so its logs land in the CI log when a request hangs. A stderr pipe
+    # that nothing drains would also block the server once it filled.
+    proc = subprocess.Popen(cmd, env=env)
     url = f"http://localhost:{port}"
     try:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if proc.poll() is not None:
-                err = (
-                    proc.stderr.read(4000).decode(errors="replace")
-                    if proc.stderr
-                    else ""
+                raise RuntimeError(
+                    f"vllm server exited during startup with code "
+                    f"{proc.returncode}; see its output above"
                 )
-                raise RuntimeError(f"vllm server exited during startup:\n{err}")
             with contextlib.suppress(Exception):
                 if requests.get(f"{url}/health", timeout=3).status_code == 200:
                     break

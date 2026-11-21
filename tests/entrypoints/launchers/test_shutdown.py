@@ -93,6 +93,7 @@ async def _concurrent_request_loop(
     state: ShutdownState,
     sigterm_sent: asyncio.Event | None = None,
     concurrency: int = 10,
+    max_tokens: int = 200,
 ):
     """Run multiple concurrent requests to keep the server busy."""
 
@@ -103,7 +104,7 @@ async def _concurrent_request_loop(
                 response = await client.completions.create(
                     model=MODEL_NAME,
                     prompt="Write a story: ",
-                    max_tokens=200,
+                    max_tokens=max_tokens,
                 )
                 if sigterm_sent is not None and sigterm_sent.is_set():
                     state.requests_after_sigterm += 1
@@ -281,8 +282,12 @@ async def test_wait_timeout_completes_requests():
         state = ShutdownState()
         sigterm_sent = asyncio.Event()
 
+        # Keep requests short enough that a slow (shared, MIG-sliced) engine
+        # still finishes them well inside the drain window.
         request_task = asyncio.create_task(
-            _concurrent_request_loop(client, state, sigterm_sent, concurrency=10)
+            _concurrent_request_loop(
+                client, state, sigterm_sent, concurrency=10, max_tokens=32
+            )
         )
 
         try:
@@ -294,9 +299,17 @@ async def test_wait_timeout_completes_requests():
             proc.send_signal(signal.SIGTERM)
             sigterm_sent.set()
 
-            await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
-        except TimeoutError:
-            pass
+            # The server may take up to shutdown_timeout to drain, so poll for
+            # the observable outcomes (an in-flight request completed and new
+            # work was refused) instead of a fixed detection window that a
+            # slow engine can miss.
+            deadline = time.monotonic() + shutdown_timeout + 15
+            while time.monotonic() < deadline and not request_task.done():
+                if state.requests_after_sigterm > 0 and (
+                    state.got_503 or state.got_500 or state.connection_errors > 0
+                ):
+                    break
+                await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
         finally:
             state.stop_requesting = True
             if not request_task.done():
