@@ -255,3 +255,46 @@ def test_quant_x_matches_host(rows: int):
     xbn, xsn = H.quant_rows_natural(x)
     for got, want in zip(bufs, (xb, xs, xbn, xsn), strict=True):
         assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize(
+    "rows,prefills,decodes,decode_tokens,takes",
+    [
+        (48, 0, 8, 48, True),  # a decode-only verify step
+        (256, 0, 42, 252, True),  # the largest step, CUDA graph padded to 256
+        (42, 0, 7, 42, False),  # the mono decode layer's steps
+        (257, 0, 43, 257, False),  # above the block's limit
+        (96, 1, 0, 0, False),  # a prefill chunk of 96 tokens
+        (96, 1, 8, 48, False),  # a mixed batch
+    ],
+)
+def test_takes_decode_only_steps(rows, prefills, decodes, decode_tokens, takes):
+    """`LargeStepHook.takes` takes decode-only steps of 43 to 256 rows and
+    nothing else, by the same attention-metadata check as the mono decode layer
+    (`MonoDecodeLayer._decode_step`). Needs no GPU: the hook's block is not
+    built and the forward context carries only the layer's SWA metadata."""
+    import types
+
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepHook
+
+    swa = types.SimpleNamespace(
+        num_prefills=prefills, num_decodes=decodes, num_decode_tokens=decode_tokens
+    )
+    attn = types.SimpleNamespace(
+        swa_cache_layer=types.SimpleNamespace(prefix="l.swa"),
+        compressed_cache_prefix=None,
+    )
+    layer = types.SimpleNamespace(attn=attn)
+    hook = LargeStepHook.__new__(LargeStepHook)
+    hook._layer = lambda: layer
+    fc = ForwardContext.__new__(ForwardContext)
+    fc.attn_metadata = {"l.swa": swa}  # type: ignore[dict-item]
+    fc.cudagraph_runtime_mode = CUDAGraphMode.FULL
+    x = torch.empty(rows, 8)
+    with override_forward_context(fc):
+        assert hook.takes(x) is takes
+    # No forward context (a profile or dummy run): the original path.
+    with override_forward_context(None):
+        assert hook.takes(x) is False

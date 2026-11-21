@@ -9,10 +9,12 @@ Launches, all graph-capturable: pick sort (`moe_sort`), x to MXFP8
 are the mono decode layer's gfx942 copies (`mono942`).
 """
 
+import weakref
+
 import torch
 
 from vllm.models.deepseek_v41.amd.mono.stages.dims import MOE_INTER
-from vllm.models.deepseek_v41.amd.mono_decode import MAX_ROWS_GFX942
+from vllm.models.deepseek_v41.amd.mono_decode import MAX_ROWS_GFX942, MonoDecodeLayer
 
 from .moe_down import build_moe_down
 from .moe_small import build_combine, build_quant_h
@@ -137,12 +139,20 @@ MIN_ROWS = MAX_ROWS_GFX942 + 1
 class LargeStepHook:
     """`DeepseekV4MoE.largestep`: decides per call and runs the block.
 
-    The router stays vLLM's (`gate` + `fused_topk_bias`, the same top-6 and
-    weights the server's path computes). The block's output is this rank's
-    unreduced routed + shared sum; the TP all-reduce is vLLM's, as the
-    original path does it inside the fused MoE."""
+    It takes decode-only steps of MIN_ROWS to MAX_ROWS rows, the same check
+    as the mono decode layer (`MonoDecodeLayer._decode_step`). Prefill chunks
+    and mixed batches of that size take the original path.
 
-    def __init__(self, moe_layer, tp: int, device: torch.device):
+    The router is the layer's own (`experts.router.select_experts`), so the
+    top-6 and weights are those of the original path, including the image
+    token bias (`bias_vl`). The block's output is this rank's unreduced
+    routed + shared sum; the TP all-reduce is vLLM's, as the original path
+    does it inside the fused MoE."""
+
+    def __init__(self, layer, moe_layer, tp: int, device: torch.device):
+        # The decoder layer, whose attention metadata says whether a step is
+        # decode-only. A weak reference: the layer owns this hook.
+        self._layer = weakref.ref(layer)
         # Calls that took the block, for tests. A CUDA graph replay does not
         # count, so it counts eager and capture calls only.
         self.steps = 0
@@ -150,27 +160,21 @@ class LargeStepHook:
             moe_layer.experts.routed_experts, moe_layer.shared_experts, tp, device
         )
 
-    @staticmethod
-    def takes(x: torch.Tensor) -> bool:
-        return x.dim() == 2 and MIN_ROWS <= x.shape[0] <= MAX_ROWS
+    def takes(self, x: torch.Tensor) -> bool:
+        if x.dim() != 2 or not MIN_ROWS <= x.shape[0] <= MAX_ROWS:
+            return False
+        layer = self._layer()
+        if layer is None:
+            return False
+        why, _, _ = MonoDecodeLayer._decode_step(layer, x.shape[0], MAX_ROWS)
+        return why is None
 
     def forward(self, moe_layer, x: torch.Tensor, input_ids) -> torch.Tensor:
         from vllm.distributed import tensor_model_parallel_all_reduce
-        from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-            fused_topk_bias,
-        )
 
         logits, _ = moe_layer.gate(x)
-        topk_w, topk_ids = fused_topk_bias(
-            hidden_states=x,
-            gating_output=logits,
-            scoring_func=moe_layer.scoring_func,
-            e_score_correction_bias=moe_layer.gate.e_score_correction_bias,
-            topk=moe_layer.n_activated_experts,
-            renormalize=moe_layer.renormalize,
-            input_tokens=input_ids,
-            hash_indices_table=moe_layer.gate.tid2eid,
-            routed_scaling_factor=moe_layer.routed_scaling_factor,
+        topk_w, topk_ids = moe_layer.experts.router.select_experts(
+            x, logits, input_ids=input_ids
         )
         self.steps += 1
         return tensor_model_parallel_all_reduce(self.block(x, topk_ids, topk_w))

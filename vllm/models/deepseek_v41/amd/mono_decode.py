@@ -676,10 +676,15 @@ class MonoDecodeLayer:
         return None
 
     @staticmethod
-    def _decode_step(layer: "DeepseekV4DecoderLayer", rows: int):
+    def _decode_step(
+        layer: "DeepseekV4DecoderLayer", rows: int, max_rows: int | None = None
+    ):
         """(why this step takes the original path -- None for a decode-only step
-        the kernels take -- the layer's SWA metadata, its compressed cache's)."""
-        if not 1 <= rows <= _max_rows():
+        the kernels take -- the layer's SWA metadata, its compressed cache's).
+        `max_rows` defaults to the mono decode layer's limit. The gfx942
+        large-step MoE (`largestep.moe`) passes its own limit, so it takes the
+        same decode-only steps above the mono limit."""
+        if not 1 <= rows <= (max_rows or _max_rows()):
             return f"{rows} rows", None, None
         if not is_forward_context_available():
             return "no forward context", None, None

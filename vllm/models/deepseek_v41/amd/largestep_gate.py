@@ -39,7 +39,7 @@ def build(layer):
         return None
     if getattr(ffn.shared_experts.gate_up_proj, "mono942", None) is None:
         return None
-    hook = lsmoe.LargeStepHook(ffn, tp, layer.attn_norm.weight.device)
+    hook = lsmoe.LargeStepHook(layer, ffn, tp, layer.attn_norm.weight.device)
     logger.info_once(
         "DSv4.1 gfx942 large-step MoE on (decode steps of %d to %d rows)",
         lsmoe.MIN_ROWS,
