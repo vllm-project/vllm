@@ -91,6 +91,16 @@ mod tests {
     }
 
     #[test]
+    fn hermes_keeps_trailing_tool_call_marker_as_text() {
+        let mut parser = HermesToolParser::new(&test_tools());
+        let text = "Intro<tool_call> \n";
+        let output = parser.parse_complete(text).unwrap();
+
+        assert_eq!(output.normal_text(), text);
+        assert!(output.calls().is_empty());
+    }
+
+    #[test]
     fn hermes_parse_complete_extracts_raw_json_arguments() {
         let mut parser = HermesToolParser::new(&test_tools());
         let arguments = r#"{ "location": "Tokyo", "days": "3" }"#;

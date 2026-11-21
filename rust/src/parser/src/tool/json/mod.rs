@@ -28,7 +28,8 @@ use winnow::stream::{Partial, Stream};
 use winnow::token::literal;
 
 use super::utils::{
-    JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, safe_text_len_mul,
+    Attributed, AttributedExt, JsonObjectScanState, Marker, MarkerStream, Scan, incomplete,
+    json_str, parse_buffered_event, parse_buffered_event_attributed, scan_markers,
     take_json_object,
 };
 use super::{Result, ToolCallDelta, ToolParserError, ToolParserOutput};
@@ -81,7 +82,9 @@ pub(crate) enum JsonToolCallEvent {
 #[derive(Debug)]
 struct JsonToolCallParser {
     config: JsonToolCallConfig,
-    buffer: String,
+    start_markers: Vec<Marker>,
+    trailing_id: bool,
+    buffer: DecodedText,
     mode: JsonToolCallMode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -90,9 +93,22 @@ struct JsonToolCallParser {
 impl JsonToolCallParser {
     /// Create a marker-wrapped JSON tool-call parser.
     fn new(config: JsonToolCallConfig) -> Self {
+        let start_markers = config
+            .framed_start_marker
+            .into_iter()
+            .chain([config.start_marker])
+            .map(|marker| match config.marker_whitespace {
+                JsonToolCallWhitespace::Optional => Marker::text(marker),
+                JsonToolCallWhitespace::Exact(whitespace) => {
+                    Marker::text(marker).then_text(whitespace)
+                }
+            })
+            .collect();
         Self {
             config,
-            buffer: String::new(),
+            start_markers,
+            trailing_id: false,
+            buffer: DecodedText::default(),
             mode: JsonToolCallMode::Text,
             active_tool_index: None,
             emitted_tool_count: 0,
@@ -100,14 +116,25 @@ impl JsonToolCallParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
-        let config = self.config;
+        self.buffer.append(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_json_tool_call_event(input, &mut self.mode, config)
-        })? {
+        while let Some((event, consumed_len)) = match &mut self.mode {
+            JsonToolCallMode::Text => {
+                parse_buffered_event_attributed(&self.buffer, &self.start_markers, |input| {
+                    parse_text_event(input, self.config.marker_whitespace)
+                })
+            }
+            JsonToolCallMode::Header => parse_buffered_event(&self.buffer.text, |input| {
+                tool_call_header_event(input, self.config)
+            }),
+            JsonToolCallMode::Arguments { json_scan } => {
+                parse_buffered_event(&self.buffer.text, |input| {
+                    parse_arguments_event(input, json_scan, self.config, self.trailing_id)
+                })
+            }
+        }? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -116,7 +143,7 @@ impl JsonToolCallParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            JsonToolCallMode::Text => output.push_text(&self.buffer),
+            JsonToolCallMode::Text => output.push_text(&self.buffer.text),
             JsonToolCallMode::Header | JsonToolCallMode::Arguments { .. } => {
                 return Err(ToolParserError::IncompleteToolCall {
                     parser: self.config.parser_name,
@@ -135,7 +162,7 @@ impl JsonToolCallParser {
     ) -> Result<()> {
         match event {
             JsonToolCallEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(&self.buffer.text[..consumed_len]);
             }
             JsonToolCallEvent::ToolCallStart => self.mode = JsonToolCallMode::Header,
             JsonToolCallEvent::ToolCallHeader { function_name } => {
@@ -161,7 +188,7 @@ impl JsonToolCallParser {
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
-                    arguments: self.buffer[..consumed_len].to_string(),
+                    arguments: self.buffer.text[..consumed_len].to_string(),
                 });
             }
             JsonToolCallEvent::ToolCallDelimiter => {
@@ -180,51 +207,33 @@ impl JsonToolCallParser {
         self.mode = JsonToolCallMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
-    }
-}
-
-/// Parse a JSON tool-call event for the current parser mode.
-fn parse_next_json_tool_call_event(
-    input: &mut JsonToolInput<'_>,
-    mode: &mut JsonToolCallMode,
-    config: JsonToolCallConfig,
-) -> ModalResult<JsonToolCallEvent> {
-    match mode {
-        JsonToolCallMode::Text => parse_text_event(input, config),
-        JsonToolCallMode::Header => tool_call_header_event(input, config),
-        JsonToolCallMode::Arguments { json_scan } => {
-            parse_arguments_event(input, json_scan, config)
-        }
+        self.buffer.take().text
     }
 }
 
 /// Parse a text-mode JSON tool-call event.
 fn parse_text_event(
-    input: &mut JsonToolInput<'_>,
-    config: JsonToolCallConfig,
+    input: &mut Attributed<'_, Vec<Marker>>,
+    whitespace: JsonToolCallWhitespace,
 ) -> ModalResult<JsonToolCallEvent> {
-    alt((
-        |input: &mut JsonToolInput<'_>| tool_call_start_event(input, config),
-        |input: &mut JsonToolInput<'_>| safe_text_event(input, config),
-    ))
-    .parse_next(input)
-}
-
-/// Parse a marker-wrapped JSON tool-call start marker.
-fn tool_call_start_event(
-    input: &mut JsonToolInput<'_>,
-    config: JsonToolCallConfig,
-) -> ModalResult<JsonToolCallEvent> {
-    seq!(
-        _: |input: &mut JsonToolInput<'_>| match config.framed_start_marker {
-            Some(marker) => alt((literal(marker), literal(config.start_marker))).void().parse_next(input),
-            None => literal(config.start_marker).void().parse_next(input),
-        },
-        _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
-    )
-    .value(JsonToolCallEvent::ToolCallStart)
-    .parse_next(input)
+    let start = input.offset();
+    let markers = input.markers();
+    let end = match scan_markers(input, markers, start)? {
+        Scan::Found { at, index } if at == start => {
+            input.next_slice(markers[index].as_str().len());
+            if matches!(whitespace, JsonToolCallWhitespace::Optional) {
+                ws0.parse_next(input)?;
+            }
+            return Ok(JsonToolCallEvent::ToolCallStart);
+        }
+        Scan::Found { at, .. } | Scan::Pending(at) | Scan::Clear(at) => at,
+    };
+    let len = end - start;
+    if len == 0 {
+        return incomplete();
+    }
+    input.next_slice(len);
+    Ok(JsonToolCallEvent::Text { len })
 }
 
 /// Parse a marker-wrapped JSON tool-call header before the raw arguments
@@ -305,9 +314,10 @@ fn parse_arguments_event(
     input: &mut JsonToolInput<'_>,
     json_scan: &mut JsonObjectScanState,
     config: JsonToolCallConfig,
+    trailing_id: bool,
 ) -> ModalResult<JsonToolCallEvent> {
     if json_scan.complete() {
-        tool_call_close_event(input, config)
+        tool_call_close_event(input, config, trailing_id)
     } else {
         argument_delta_event(input, json_scan)
     }
@@ -325,8 +335,25 @@ fn argument_delta_event(
 fn tool_call_close_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
+    trailing_id: bool,
 ) -> ModalResult<JsonToolCallEvent> {
-    seq!(_: ws0, _: literal("}")).parse_next(input)?;
+    ws0.parse_next(input)?;
+    if trailing_id {
+        // The legacy Mistral template may append an ID after the arguments.
+        // The Python frontend assigns its own response ID in this format.
+        winnow::combinator::opt(seq!(
+            _: literal(","),
+            _: ws0,
+            _: |input: &mut JsonToolInput<'_>| json_key(input, "id"),
+            _: ws0,
+            _: literal(":"),
+            _: ws0,
+            _: json_str,
+            _: ws0,
+        ))
+        .parse_next(input)?;
+    }
+    literal("}").parse_next(input)?;
 
     match config.delimiter {
         Some(delimiter) => alt((
@@ -371,25 +398,6 @@ fn marker_whitespace(input: &mut JsonToolInput<'_>, config: JsonToolCallConfig) 
         JsonToolCallWhitespace::Optional => ws0.void().parse_next(input),
         JsonToolCallWhitespace::Exact(whitespace) => literal(whitespace).void().parse_next(input),
     }
-}
-
-/// Parse a safe text run before the next marker-wrapped JSON tool call.
-fn safe_text_event(
-    input: &mut JsonToolInput<'_>,
-    config: JsonToolCallConfig,
-) -> ModalResult<JsonToolCallEvent> {
-    // Stop only where a tool call can start: with exact whitespace, a bare
-    // start marker without it is text.
-    let with_whitespace = |marker: &str| match config.marker_whitespace {
-        JsonToolCallWhitespace::Optional => marker.to_string(),
-        JsonToolCallWhitespace::Exact(whitespace) => format!("{marker}{whitespace}"),
-    };
-    let start_marker = with_whitespace(config.start_marker);
-    match config.framed_start_marker {
-        Some(marker) => safe_text_len_mul(input, &[with_whitespace(marker), start_marker]),
-        None => safe_text_len(input, start_marker),
-    }
-    .map(|len| JsonToolCallEvent::Text { len })
 }
 
 #[cfg(test)]

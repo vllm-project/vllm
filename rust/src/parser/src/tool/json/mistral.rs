@@ -4,7 +4,11 @@
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
+use crate::tool::utils::{Marker, SpecialToken};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
+
+const TOOL_CALLS: &str = "[TOOL_CALLS]";
+const ARGS: &str = "[ARGS]";
 
 const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Mistral",
@@ -29,23 +33,47 @@ const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
 /// argument deltas without schema conversion or JSON normalization.
 pub struct MistralToolParser {
     inner: JsonToolCallParser,
+    preserve_special_tokens: bool,
 }
 
 impl MistralToolParser {
     /// Create a Mistral tool parser.
     fn new(_tools: &[Tool]) -> Self {
+        let mut inner = JsonToolCallParser::new(MISTRAL_CONFIG);
+        inner.trailing_id = true;
         Self {
-            inner: JsonToolCallParser::new(MISTRAL_CONFIG),
+            inner,
+            preserve_special_tokens: false,
         }
     }
 }
 
 impl ToolParser for MistralToolParser {
-    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
-        Ok(Box::new(Self::new(tools)))
+        let mut parser = Self::new(tools);
+        // V11+ uses [ARGS] instead of a JSON array after [TOOL_CALLS].
+        if tokenizer.token_to_id(ARGS).is_none()
+            && let Some(id) =
+                tokenizer.token_to_id(TOOL_CALLS).filter(|&id| tokenizer.is_special_id(id))
+        {
+            let token = SpecialToken {
+                text: TOOL_CALLS.to_string(),
+                id,
+            };
+            parser.inner.start_markers = vec![
+                Marker::special(&token).then_text(" ["),
+                Marker::special(&token).then_text("["),
+            ];
+            parser.preserve_special_tokens = true;
+        }
+        Ok(Box::new(parser))
+    }
+
+    fn preserve_special_tokens(&self) -> bool {
+        self.preserve_special_tokens
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
@@ -63,8 +91,12 @@ impl ToolParser for MistralToolParser {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use expect_test::expect;
     use thiserror_ext::AsReport;
+    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::{TestTokenizer, decode_ids};
 
     use super::MistralToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
@@ -85,6 +117,52 @@ mod tests {
 
         assert_eq!(output.normal_text(), "Hello, world!");
         assert!(output.calls().is_empty());
+    }
+
+    #[test]
+    fn mistral_v11_does_not_enable_legacy_special_token_preservation() {
+        let tokenizer = Arc::new(
+            TestTokenizer::new()
+                .with_special_token("[TOOL_CALLS]", 256)
+                .with_special_token("[ARGS]", 257),
+        );
+        let parser = MistralToolParser::create(&test_tools(), tokenizer).unwrap();
+
+        assert!(!parser.preserve_special_tokens());
+    }
+
+    #[test]
+    fn mistral_keeps_literal_tool_call_marker_as_text() {
+        let tokenizer = Arc::new(TestTokenizer::new().with_special_token("[TOOL_CALLS]", 256));
+        let mut parser = MistralToolParser::create(&test_tools(), tokenizer.clone()).unwrap();
+        let text = r#"Example: [TOOL_CALLS] [{"name":"get_weather","arguments":{"city":"Tokyo"}}]"#;
+        let tokens = tokenizer.encode_ordinary(text).unwrap();
+        let mut output = ToolParserOutput::default();
+
+        parser.parse_into(decode_ids(tokenizer.as_ref(), &tokens), &mut output).unwrap();
+        output.append(parser.finish().unwrap());
+
+        assert_eq!(output.normal_text(), text);
+        assert!(output.calls().is_empty());
+    }
+
+    #[test]
+    fn mistral_accepts_a_tool_array_immediately_after_the_special_token() {
+        let tokenizer = Arc::new(TestTokenizer::new().with_special_token("[TOOL_CALLS]", 256));
+        let mut parser = MistralToolParser::create(&test_tools(), tokenizer.clone()).unwrap();
+        let input = r#"[TOOL_CALLS][{"name":"get_weather","arguments":{"city":"Tokyo"}}]"#;
+        let tokens = tokenizer.encode(input, false).unwrap();
+        let mut output = ToolParserOutput::default();
+
+        parser.parse_into(decode_ids(tokenizer.as_ref(), &tokens), &mut output).unwrap();
+        output.append(parser.finish().unwrap());
+
+        let output = output.coalesce();
+        let calls = output.calls();
+        assert!(output.normal_text().is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(calls[0].arguments, r#"{"city":"Tokyo"}"#);
     }
 
     #[test]

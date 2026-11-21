@@ -251,6 +251,9 @@ Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
 * Additional Mistral function-calling models are compatible as well.
 
+The Rust frontend's `mistral` parser recognizes the pre-v11 `[TOOL_CALLS]`
+marker for JSON-array tool calls, as used by Mistral-7B-Instruct-v0.3.
+
 Known issues:
 
 1. Mistral 7B struggles to generate parallel tool calls correctly.
