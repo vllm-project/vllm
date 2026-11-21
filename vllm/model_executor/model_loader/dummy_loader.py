@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
 import torch.nn as nn
 
 from vllm.config import ModelConfig
@@ -45,7 +46,15 @@ class DummyModelLoader(BaseModelLoader):
                 # Exclude nonpersistent buffers, matching state_dict().
                 for name, tensor in get_layer_tensors(layer).items():
                     if name not in layer._non_persistent_buffers_set:
-                        initialize_single_dummy_weight(tensor, name=name)
+                        if (
+                            tensor.dtype == torch.float8_e4m3fn
+                            and hasattr(tensor, "engram_vocab_start")
+                            and getattr(tensor, "dummy_weight_value", None) is None
+                        ):
+                            # Avoid a full-size FP16 temporary for frozen tables.
+                            tensor.view(torch.uint8).zero_()
+                        else:
+                            initialize_single_dummy_weight(tensor, name=name)
 
     def _process_online_quant_layer(
         self,
