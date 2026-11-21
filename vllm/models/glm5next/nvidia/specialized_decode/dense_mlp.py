@@ -325,17 +325,35 @@ class DenseMlp:
         second = (self.w2, self.s2, act, out)
         st = stream(x.device)
         if m not in self.compiled:
+            # GLM-5.3 has 6144 hidden channels; its gate/up would exceed the
+            # 1024-thread block limit with Flash's three tiles per CTA.
+            def shape(
+                rows: int, k: int, preferred: tuple[int, int, int]
+            ) -> tuple[int, int, int]:
+                tiles, registers, occupancy = preferred
+                while 32 * (k // SLICE) * tiles > 1024 or rows % (16 * tiles):
+                    tiles -= 1
+                return tiles, registers, occupancy
+
             kernels = (
                 _MmaGemv(
                     self.n1,
                     self.k,
                     m,
-                    *GATE_UP_SHAPE,
+                    *shape(self.n1, self.k, GATE_UP_SHAPE),
                     True,
                     self.limit,
                     self.ue8m0,
                 ),
-                _MmaGemv(self.n2, self.inter, m, *DOWN_SHAPE, False, 0.0, self.ue8m0),
+                _MmaGemv(
+                    self.n2,
+                    self.inter,
+                    m,
+                    *shape(self.n2, self.inter, DOWN_SHAPE),
+                    False,
+                    0.0,
+                    self.ue8m0,
+                ),
             )
             self.compiled[m] = tuple(
                 cute.compile(kernel, *(to_cute(t, 16) for t in args), st)
