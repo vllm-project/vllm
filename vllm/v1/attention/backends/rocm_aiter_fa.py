@@ -41,7 +41,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
-from vllm.v1.attention.ops import rocm_gqa_verify
+from vllm.v1.attention.ops import rocm_fp8_extend, rocm_gqa_verify
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -922,7 +922,7 @@ class AiterFlashAttentionMetadataBuilder(
             seq_lens_for_extend = seq_lens[num_extends_slice]
             computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
             swa_metadata = None
-            if self.aot_sliding_window is not None:
+            if self.aot_sliding_window is not None and not self.fp8_extend_query:
                 swa_seqlen_for_extend = torch.minimum(
                     seq_lens_for_extend,
                     query_lens_for_extend + self.aot_sliding_window[0] + 1,
@@ -1230,35 +1230,61 @@ class AiterFlashAttentionImpl(AttentionImpl):
             sinks,
             self.logits_soft_cap,
         )
-        # Prefill over the paged FP8 cache as one FP8 x FP8 unified_attention
-        # call instead of CK on the new tokens plus, for extends, the per-chunk
-        # gather/dequantize -> CK -> merge loop. Sliding-window layers keep the
-        # BF16 path: the window bounds their KV read.
+        # One FP8 x FP8 call over the paged cache: the FlyDSL kernel on layers it
+        # supports, AITER unified_attention on other full-attention layers.
         vllm_config = get_current_vllm_config_or_none()
         use_prefill_query_quantization = (
             vllm_config is not None
             and vllm_config.attention_config.use_prefill_query_quantization
         )
-        self.use_fp8_extend_query = (
+        fp8_query_supported = (
             use_prefill_query_quantization
             and kv_cache_dtype in ("fp8", "fp8_e4m3")
-            and self.sliding_window[0] == -1
             and alibi_slopes is None
             and sinks is None
             and not logits_soft_cap
             and get_cdna_version() in (3, 4)
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
+        exp_free = (
+            vllm_config is not None
+            and vllm_config.attention_config.use_prefill_exp_free_softmax
+        )
+        self._flydsl_extend = fp8_query_supported and rocm_fp8_extend.supports_layer(
+            num_heads,
+            num_kv_heads,
+            head_size,
+            self.sliding_window[0] + 1,
+            exp_free,
+        )
+        self.use_fp8_extend_query = fp8_query_supported and (
+            self._flydsl_extend or self.sliding_window[0] == -1
+        )
+        self._prefill_exp_free = exp_free and self._flydsl_extend
         if self.use_fp8_extend_query:
             logger.info_once(
-                "AITER FA: FP8 query for prefill attention on full-attention "
-                "layers (attention_config.use_prefill_query_quantization)."
+                "AITER FA: FP8 query for prefill attention "
+                "(attention_config.use_prefill_query_quantization), %s.",
+                "FlyDSL kernel, exp-free softmax"
+                if self._prefill_exp_free
+                else "FlyDSL kernel"
+                if self._flydsl_extend
+                else "unified_attention",
             )
         elif use_prefill_query_quantization:
             logger.info_once(
                 "AITER FA: use_prefill_query_quantization is not used for "
-                "layers with a sliding window, ALiBi, sinks or soft cap; it "
-                "needs gfx942 or gfx950 and an FP8 KV cache in the default layout."
+                "layers with ALiBi, sinks or soft cap, or for sliding-window "
+                "layers other than gfx950 ones with head size 64 and 8 query heads "
+                "per KV head; it needs gfx942 or gfx950 and an FP8 KV cache in the "
+                "default layout."
+            )
+        if exp_free and not self._prefill_exp_free:
+            logger.info_once(
+                "AITER FA: attention_config.use_prefill_exp_free_softmax applies "
+                "with use_prefill_query_quantization to layers on the FlyDSL "
+                "prefill kernel (gfx950, FP8 e4m3 KV cache, head size 64, 8 "
+                "query heads per KV head); other layers use exp2."
             )
 
         if attn_type != AttentionType.DECODER:
@@ -1365,6 +1391,25 @@ class AiterFlashAttentionImpl(AttentionImpl):
         v_scale: torch.Tensor,
         q_scale: torch.Tensor,
     ):
+        if self._flydsl_extend and q_scale.numel() == 1:
+            # The new tokens' K/V are already in the cache, so one causal call
+            # covers the cached prefix and the new tokens.
+            rocm_fp8_extend.extend(
+                query,
+                key_cache,
+                value_cache,
+                output,
+                cu_seqlens_q,
+                seq_lens,
+                block_table,
+                q_scale,
+                k_scale,
+                v_scale,
+                self.scale,
+                self.sliding_window[0] + 1,
+                self._prefill_exp_free,
+            )
+            return
         if self.sliding_window[0] != -1:
             self.extend_for_sliding_window(
                 attn_metadata,
