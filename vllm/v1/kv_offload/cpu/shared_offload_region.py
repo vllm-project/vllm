@@ -6,10 +6,11 @@ import errno
 import functools
 import mmap
 import os
+import platform
 import shutil
 import time
 from collections.abc import Callable, Iterator
-from ctypes import c_int, c_long, c_size_t, c_void_p
+from ctypes import c_int, c_long, c_size_t, c_uint, c_void_p
 
 import numpy as np
 import torch
@@ -59,6 +60,61 @@ def _libc_mmap() -> Callable[..., int | None]:
     mmap_fn.argtypes = [c_void_p, c_size_t, c_int, c_int, c_int, c_long]
     mmap_fn.restype = c_void_p
     return mmap_fn
+
+
+def _create_memfd(name: str, flags: int = getattr(os, "MFD_CLOEXEC", 1)) -> int | None:
+    """Create an anonymous in-memory file descriptor.
+
+    Falls back across Python's os.memfd_create, libc's memfd_create, and
+    libc.syscall when Python is built against older glibc headers (e.g.
+    uv-managed python-build-standalone). Returns None if memfd_create is
+    unavailable on this system.
+    """
+    if hasattr(os, "memfd_create"):
+        try:
+            return os.memfd_create(name, flags)
+        except OSError:
+            pass
+
+    # Try libc memfd_create symbol via ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if hasattr(libc, "memfd_create"):
+            memfd_fn = libc.memfd_create
+            if hasattr(memfd_fn, "argtypes"):
+                memfd_fn.argtypes = [ctypes.c_char_p, c_uint]
+                memfd_fn.restype = c_int
+            fd = memfd_fn(name.encode("utf-8"), flags)
+            if fd >= 0:
+                return fd
+    except Exception:
+        pass
+
+    # Try direct Linux syscall via libc.syscall
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if hasattr(libc, "syscall"):
+            machine = platform.machine()
+            sys_num = {
+                "x86_64": 319,
+                "aarch64": 279,
+                "arm64": 279,
+                "riscv64": 279,
+                "s390x": 350,
+                "ppc64le": 360,
+            }.get(machine)
+            if sys_num is not None:
+                syscall_fn = libc.syscall
+                if hasattr(syscall_fn, "argtypes"):
+                    syscall_fn.argtypes = [c_long, ctypes.c_char_p, c_uint]
+                    syscall_fn.restype = c_int
+                fd = syscall_fn(sys_num, name.encode("utf-8"), flags)
+                if fd >= 0:
+                    return fd
+    except Exception:
+        pass
+
+    return None
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
@@ -251,17 +307,25 @@ class SharedOffloadRegion:
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
             else:
-                reservation = os.memfd_create("vllm_offload_reservation")
-                try:
-                    os.ftruncate(reservation, self.total_size_bytes)
+                reservation = _create_memfd("vllm_offload_reservation")
+                if reservation is not None and reservation >= 0:
+                    try:
+                        os.ftruncate(reservation, self.total_size_bytes)
+                        self.mmap_obj = mmap.mmap(
+                            reservation,
+                            self.total_size_bytes,
+                            flags=mmap.MAP_SHARED,
+                            prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                        )
+                    finally:
+                        os.close(reservation)
+                else:
                     self.mmap_obj = mmap.mmap(
-                        reservation,
+                        -1,
                         self.total_size_bytes,
                         flags=mmap.MAP_SHARED,
                         prot=mmap.PROT_READ | mmap.PROT_WRITE,
                     )
-                finally:
-                    os.close(reservation)
                 self._map_segments()
             exclude_from_core_dump(self.mmap_obj)
             if private and self._creator:

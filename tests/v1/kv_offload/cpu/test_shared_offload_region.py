@@ -15,9 +15,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
+from vllm.utils.system_utils import get_mp_context
 
 from tests.utils import core_dumped_bytes
-from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import host_register as host_register_module
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
@@ -814,6 +814,78 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
         for region in regions:
             region.cleanup()
     assert not any(os.path.exists(path) for path, _, _ in segments)
+
+
+def test_create_memfd_fallback_when_os_missing(monkeypatch):
+    """When os.memfd_create is missing (e.g. uv-managed Python builds),
+    _create_memfd falls back to libc/syscall or None without raising AttributeError."""
+    monkeypatch.delattr(os, "memfd_create", raising=False)
+    fd = region_module._create_memfd("test_vllm_memfd_fallback")
+    if fd is not None:
+        try:
+            assert fd >= 0
+        finally:
+            os.close(fd)
+
+
+@pytest.mark.parametrize("drop_os_memfd", [False, True])
+def test_create_memfd_is_not_inheritable(monkeypatch, drop_os_memfd):
+    """The reservation memfd keeps MFD_CLOEXEC like os.memfd_create's default,
+    on every fallback path."""
+    if drop_os_memfd:
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+    fd = region_module._create_memfd("test_vllm_memfd_cloexec")
+    if fd is None:
+        pytest.skip("memfd_create unavailable")
+    try:
+        assert not os.get_inheritable(fd)
+    finally:
+        os.close(fd)
+
+
+def test_segmented_region_initializes_without_os_memfd_create(iid, monkeypatch):
+    """Segmented region initialization succeeds even when os.memfd_create is absent."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    monkeypatch.delattr(os, "memfd_create", raising=False)
+
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=5,
+        rank=0,
+        kv_bytes_per_chunk=2 * PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=3,
+    )
+    try:
+        assert len(region._segments) > 1
+        view = region.create_next_worker_view(PAGE_SIZE)
+        view.fill_(42)
+        assert (region.base_tensor.view(5, 2, PAGE_SIZE)[:, 0] == 42).all()
+    finally:
+        region.cleanup()
+
+
+def test_segmented_region_fallback_to_anonymous_mmap(iid, monkeypatch):
+    """When memfd_create is completely unavailable, segmented region falls back
+    to anonymous shared mmap without failure."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    monkeypatch.setattr(region_module, "_create_memfd", lambda *args, **kwargs: None)
+
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=5,
+        rank=0,
+        kv_bytes_per_chunk=2 * PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=3,
+    )
+    try:
+        assert len(region._segments) > 1
+        view = region.create_next_worker_view(PAGE_SIZE)
+        view.fill_(99)
+        assert (region.base_tensor.view(5, 2, PAGE_SIZE)[:, 0] == 99).all()
+    finally:
+        region.cleanup()
 
 
 @pytest.mark.parametrize("num_segments", [1, 3])
