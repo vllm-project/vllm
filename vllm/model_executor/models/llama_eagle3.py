@@ -319,6 +319,12 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         # Store target layer count in draft config for
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
+        if (window := speculative_config.draft_context_window) is not None:
+            # llama.py turns these into a per-layer sliding window.
+            self.config.sliding_window = window
+            self.config.layer_types = ["sliding_attention"] * (
+                self.config.num_hidden_layers
+            )
         self.model = LlamaModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
