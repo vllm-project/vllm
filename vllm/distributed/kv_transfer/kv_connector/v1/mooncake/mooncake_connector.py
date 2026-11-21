@@ -866,7 +866,6 @@ def _validate_layerwise_config(
             "CUDA graphs. Use PIECEWISE or eager mode on kv_producer."
         )
     _get_layerwise_transfer_interval(transfer)
-    assert transfer.engine_id is not None
     parallel = vllm_config.parallel_config
     if role == KVConnectorRole.WORKER and parallel.prefill_context_parallel_size > 1:
         transfer.engine_id = get_pcp_group().broadcast_object(transfer.engine_id, src=0)
@@ -1114,13 +1113,6 @@ class MooncakeLayerwiseRequestHandler:
     ) -> None:
         """Register D-ready and release the listener worker immediately."""
         worker = self._worker
-        if meta.protocol_version != 1:
-            raise ValueError("Mooncake peers require the same layerwise protocol")
-        if (
-            meta.remote_pcp_size < 1
-            or not 0 <= meta.remote_pcp_rank < meta.remote_pcp_size
-        ):
-            raise ValueError("Layerwise PCP requires complete cache replicas")
         if (
             meta.logical_block_size != worker.logical_block_size
             or meta.kernel_block_size != worker.block_size
@@ -1155,7 +1147,7 @@ class MooncakeLayerwiseRequestHandler:
             for name, group in zip(
                 meta.registered_layer_names, meta.registered_group_indices
             ):
-                if group < 0 or remote_groups.setdefault(name, group) != group:
+                if remote_groups.setdefault(name, group) != group:
                     raise ValueError(f"Ambiguous remote group for {name}")
             remote_kv_cache_names: dict[int, list[str]] = {}
             for name in regions_by_layer:
@@ -4371,7 +4363,6 @@ class MooncakeConnectorWorker:
         return finished or None, None
 
     def _start_layerwise_step(self, metadata: MooncakeConnectorMetadata) -> None:
-        assert isinstance(metadata, MooncakeConnectorMetadata)
         # wait_for_save must drain device readers before replacing block tables.
         assert not self._pending_sends
         self._saved_layer_indices.clear()
