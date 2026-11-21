@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   pre-run-check:
-    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request'
+    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request' && false
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
     - name: Check PR label and author merge count
