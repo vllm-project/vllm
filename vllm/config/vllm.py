@@ -890,6 +890,13 @@ class VllmConfig:
             or not current_platform.is_cuda()
         ):
             return False
+        from vllm.utils.flashinfer import use_flashinfer_batch_invariant_gemm
+
+        if use_flashinfer_batch_invariant_gemm():
+            # FlashInfer's batch-invariant GEMM serves these layers; it picks
+            # its configuration at run time inside a custom op, so compiled
+            # forwards and full CUDA graphs keep that choice.
+            return False
         family = bi._get_tuned_matmul_arch_family(
             current_platform.get_device_capability()
         )

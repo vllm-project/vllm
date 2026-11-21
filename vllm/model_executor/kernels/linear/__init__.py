@@ -163,6 +163,7 @@ from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferB12xNvFp4LinearKernel,
+    FlashInferBatchInvariantNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -273,6 +274,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import PlatformEnum, current_platform
+from vllm.utils.flashinfer import use_flashinfer_batch_invariant_gemm
 
 logger = init_logger(__name__)
 
@@ -1345,6 +1347,12 @@ def init_nvfp4_linear_kernel(
     if envs.VLLM_BATCH_INVARIANT:
         if use_a16:
             force_kernel, bi_backend = HummingNvFp4LinearKernel, "humming"
+        elif (
+            use_flashinfer_batch_invariant_gemm()
+            and FlashInferBatchInvariantNvFp4LinearKernel.is_supported()[0]
+        ):
+            force_kernel = FlashInferBatchInvariantNvFp4LinearKernel
+            bi_backend = "flashinfer-batch-invariant"
         else:
             cutlass_supported, reason = CutlassNvFp4LinearKernel.is_supported()
             if cutlass_supported:
@@ -1565,6 +1573,7 @@ __all__ = [
     "FlashInferCuteDslNvFp4W4A16LinearKernel",
     "FlashInferB12xNvFp4LinearKernel",
     "FlashInferCutlassNvFp4LinearKernel",
+    "FlashInferBatchInvariantNvFp4LinearKernel",
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",

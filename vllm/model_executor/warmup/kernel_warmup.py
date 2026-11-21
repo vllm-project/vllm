@@ -169,6 +169,70 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_flashinfer_batch_invariant_gemm(
+    models: list[torch.nn.Module], m_values: list[int]
+) -> None:
+    """Under VLLM_BATCH_INVARIANT=1 with FlashInfer's batch-invariant GEMM:
+    compile its kernels for the models' linear shapes at the CUDA graph sizes
+    before capture (the class compiles one kernel per configuration on first
+    use, and the configuration follows the batch), and log the fingerprint of
+    each shape, which a trainer running the same release can compare."""
+    if not envs.VLLM_BATCH_INVARIANT or not m_values:
+        return
+    from vllm.model_executor.determinism import batch_invariant as bi
+
+    if not bi.flashinfer_gemm_enabled():
+        return
+    from flashinfer.batch_invariant import fingerprint
+
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    layers: dict[tuple[int, int, bool], tuple[torch.Tensor, torch.Tensor | None]] = {}
+    for model in models:
+        for module in model.modules():
+            if not (
+                isinstance(module, ParallelLMHead)
+                or isinstance(
+                    getattr(module, "quant_method", None), UnquantizedLinearMethod
+                )
+            ):
+                continue
+            weight = getattr(module, "weight", None)
+            bias = getattr(module, "bias", None)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 2:
+                continue
+            bias = bias if isinstance(bias, torch.Tensor) else None
+            if not bi._fits_flashinfer_gemm(weight[:1], weight, bias):
+                continue
+            n, k = weight.shape
+            layers.setdefault((n, k, bias is not None), (weight, bias))
+    if not layers:
+        return
+
+    start = time.perf_counter()
+    with torch.inference_mode():
+        for weight, bias in layers.values():
+            x = weight.new_zeros((max(m_values), weight.shape[1]))
+            for m in m_values:
+                bi.linear_batch_invariant(x[:m], weight, bias)
+    torch.accelerator.synchronize()
+    fingerprints = {
+        f"{n}x{k}" + ("+bias" if has_bias else ""): fingerprint(
+            "mm_bf16", N=n, K=k, **({"bias": True} if has_bias else {})
+        )
+        for n, k, has_bias in layers
+    }
+    logger.info(
+        "FlashInfer batch-invariant GEMM: compiled %d linear shapes at %d batch "
+        "sizes in %.1fs; fingerprints: %s",
+        len(layers),
+        len(m_values),
+        time.perf_counter() - start,
+        fingerprints,
+    )
+
+
 def _warmup_skinny_gemm(model: torch.nn.Module) -> None:
     from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
         SkinnyGemmConfig,
@@ -344,6 +408,11 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         # https://github.com/vllm-project/vllm/pull/47451
         _warmup_skinny_gemm(worker.get_model())
         cutedsl_warmup()
+
+    _warmup_flashinfer_batch_invariant_gemm(
+        [m for m in (worker.get_model(), worker.get_draft_model()) if m is not None],
+        sorted(set(cudagraph_capture_sizes)),
+    )
 
     if process_local_only:
         return

@@ -23,6 +23,7 @@ from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
     has_flashinfer_b12x_gemm,
+    has_flashinfer_batch_invariant_gemm,
     has_flashinfer_bf16_fp4,
 )
 
@@ -226,6 +227,47 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.alpha,
             qa.orig_dtype,
             backend="cutlass",
+        )
+
+        out = slice_nvfp4_output(out, output_size)
+
+        if bias is not None:
+            out = out + bias
+        return out.view(*qa.orig_shape[:-1], output_size)
+
+
+class FlashInferBatchInvariantNvFp4LinearKernel(FlashInferCutlassNvFp4LinearKernel):
+    """NVFP4 GEMM via FlashInfer's batch-invariant fp4 class
+    (`mm_fp4(..., batch_invariant=True)`, FlashInfer >= 0.7.4, SM100 / SM103 /
+    SM107), selected under VLLM_BATCH_INVARIANT=1. Same weight layout and
+    activation quantization as the CUTLASS kernels."""
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not has_flashinfer_batch_invariant_gemm():
+            return False, "FlashInfer >= 0.7.4 on SM100 / SM103 / SM107 required"
+        return super().is_supported(compute_capability)
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | QuantizedActivation,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output_size = layer.output_size_per_partition
+        qa = self.prepare_input(layer, x)
+
+        out = flashinfer_scaled_fp4_mm(
+            qa.data,
+            layer.weight,
+            qa.scale,
+            layer.weight_scale,
+            layer.alpha,
+            qa.orig_dtype,
+            backend="auto",
+            batch_invariant=True,
         )
 
         out = slice_nvfp4_output(out, output_size)

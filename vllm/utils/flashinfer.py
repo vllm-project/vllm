@@ -172,6 +172,37 @@ def has_flashinfer_bf16_gemm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_batch_invariant_gemm() -> bool:
+    """Return whether FlashInfer's batch-invariant BF16 GEMM
+    (`mm_bf16(..., batch_invariant=True)`, FlashInfer >= 0.7.4) can run on
+    this device: CUDA on SM100, SM103 or SM107."""
+    if not current_platform.is_cuda() or not has_flashinfer():
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.to_int() not in (100, 103, 107):
+        return False
+    version = _installed_version("flashinfer-python")
+    return version is not None and Version(version) >= Version("0.7.4")
+
+
+def use_flashinfer_batch_invariant_gemm() -> bool:
+    """Return whether VLLM_BATCH_INVARIANT=1 runs the unquantized bf16 linear
+    layers and LM head on FlashInfer's batch-invariant GEMM, per
+    VLLM_BATCH_INVARIANT_GEMM_BACKEND."""
+    backend = envs.VLLM_BATCH_INVARIANT_GEMM_BACKEND
+    if backend == "triton":
+        return False
+    if has_flashinfer_batch_invariant_gemm():
+        return True
+    if backend == "flashinfer":
+        raise RuntimeError(
+            "VLLM_BATCH_INVARIANT_GEMM_BACKEND=flashinfer needs FlashInfer >= 0.7.4 "
+            "on an SM100, SM103 or SM107 GPU."
+        )
+    return False
+
+
+@functools.cache
 def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
     """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
     if not has_flashinfer():
@@ -1063,9 +1094,11 @@ if has_flashinfer():
         backend: str,
         block_size: int = 16,
         use_nvfp4: bool = True,
+        batch_invariant: bool = False,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
+        kwargs = {"batch_invariant": True} if batch_invariant else {}
         return flashinfer_mm_fp4_(
             A,
             B,
@@ -1077,6 +1110,7 @@ if has_flashinfer():
             use_8x4_sf_layout=use_8x4_sf_layout,
             use_nvfp4=use_nvfp4,
             backend=backend,
+            **kwargs,
         )
 
     def flashinfer_mm_fp4_fake(
@@ -1090,6 +1124,7 @@ if has_flashinfer():
         backend: str,
         block_size: int = 16,
         use_nvfp4: bool = True,
+        batch_invariant: bool = False,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
 
@@ -1314,7 +1349,10 @@ def flashinfer_scaled_fp4_mm(
     backend: str,
     block_size: int = 16,
     use_nvfp4: bool = True,
+    batch_invariant: bool = False,
 ) -> torch.Tensor:
+    """`batch_invariant=True` runs FlashInfer's batch-invariant fp4 class (it
+    takes `backend="auto"` and the swizzled 128x4 scale layout)."""
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
@@ -1323,7 +1361,9 @@ def flashinfer_scaled_fp4_mm(
     if alpha is None:
         alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
-    if backend in ("cutlass", "cudnn"):
+    if batch_invariant:
+        backend = "auto"
+    if backend in ("cutlass", "cudnn", "auto"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
@@ -1340,6 +1380,7 @@ def flashinfer_scaled_fp4_mm(
         backend=backend,
         block_size=block_size,
         use_nvfp4=use_nvfp4,
+        batch_invariant=batch_invariant,
     )
 
 
