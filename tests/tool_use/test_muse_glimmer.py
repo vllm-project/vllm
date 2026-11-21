@@ -366,6 +366,13 @@ def test_doubled_bare_name_collapses():
     )
 
 
+def test_bare_name_with_any_suffix_collapses():
+    out = MuseGlimmerToolParser.extract_tool_calls(
+        T, _call("Bash.command"), _req("Bash")
+    )
+    assert out.tool_calls[0].function.name == "Bash"
+
+
 def test_namespaced_name_preserved():
     out = MuseGlimmerToolParser.extract_tool_calls(
         T, _call("weather.get"), _req("weather.get")

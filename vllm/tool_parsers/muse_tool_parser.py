@@ -334,9 +334,13 @@ class MuseToolParser(ToolParser):
 
         When a client registers a BARE name (e.g. `get_weather`) the shipped
         chat template renders the valid recipient as `"get_weather.*"`, and
-        the model duly emits `get_weather.get_weather`. Collapsing that
-        doubled form is safe: head and tail are identical and the collapsed
-        name is registered.
+        the model fills in the `*`: with the name again
+        (`get_weather.get_weather`), but also with a parameter, a verb or
+        nothing (`get_weather.city`, `get_weather.fetch`, `get_weather.`).
+        The doubled form always collapses to the registered head. Any other
+        suffix collapses only when no registered name lives under `head.`:
+        with `get_weather.temperature` also registered, `get_weather.fetch`
+        may mean a missing sibling, not the bare tool.
 
         Anything else is passed through unchanged. Matching on the trailing
         segment alone is NOT safe -- an emitted `weather.get` against a
@@ -346,7 +350,15 @@ class MuseToolParser(ToolParser):
         if not registered or emitted in registered:
             return emitted
         head, sep, tail = emitted.partition(".")
-        if sep and head == tail and head in registered:
+        if (
+            sep
+            and head in registered
+            and (
+                head == tail
+                or not any(name.startswith(f"{head}.") for name in registered)
+            )
+        ):
+            logger.debug("Muse: mapped emitted tool name %r to %r.", emitted, head)
             return head
         logger.warning(
             "Muse: emitted tool name %r does not match any registered tool; "
