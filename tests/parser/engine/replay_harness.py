@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class Sample:
     """One test sample loaded from a JSONL file."""
 
@@ -37,7 +37,7 @@ class Sample:
     content_lstrip: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ParseOutput:
     """Accumulated parse output from replaying a token stream."""
 

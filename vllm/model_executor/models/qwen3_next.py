@@ -97,7 +97,6 @@ def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
     return (
         parallel_config.use_sequence_parallel_moe
-        and parallel_config.pipeline_parallel_size == 1
         and getattr(config, "num_experts", 0) > 0
         and not getattr(config, "mlp_only_layers", [])
         and getattr(config, "decoder_sparse_step", 1) == 1
@@ -196,9 +195,18 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
+        # INC/AutoRound decides per layer whether the routed gate is quantized
+        # (Intel/Qwen3-Coder-Next-int4-AutoRound stores it as int4); other
+        # formats keep the historical unquantized gate.
+        gate_quant_config = (
+            quant_config
+            if quant_config is not None and quant_config.get_name() == "inc"
+            else None
+        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
+            quant_config=gate_quant_config,
             prefix=f"{prefix}.gate",
         )
 
@@ -383,12 +391,14 @@ class Qwen3NextAttention(nn.Module):
             torch.float16,
             torch.bfloat16,
         )
-        self.use_fused_qk_norm_rope_gate = (
+        self.supports_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
-            and (current_platform.is_cuda() or current_platform.is_xpu())
             and supports_dtype
             and (text_only or supports_mrope)
+        )
+        self.use_fused_qk_norm_rope_gate = self.supports_fused_qk_norm_rope_gate and (
+            current_platform.is_cuda() or current_platform.is_xpu()
         )
 
         # Off by default; Qwen3.5 enables the fused sigmoid-gate-mul Triton
@@ -731,7 +741,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         full_num_tokens = positions.shape[-1]
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
-            assert residual is None
+            if residual is not None:
+                residual = sequence_parallel_chunk(residual)
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
@@ -748,6 +759,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            if self.use_sequence_parallel:
+                # PP transport expects full-token tensors replicated across TP ranks.
+                packed = torch.cat([hidden_states, residual], dim=-1)
+                packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
+                hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )

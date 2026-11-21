@@ -60,7 +60,7 @@ def _destination_placements(shard_dim: int) -> Placements:
     return cast(Placements, tuple(placements))
 
 
-@dataclass
+@dataclass(slots=True)
 class M2NDestination:
     """Where one checkpoint parameter lands on this worker."""
 
