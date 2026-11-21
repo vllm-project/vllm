@@ -1443,6 +1443,19 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         )
         return output
 
+    def prepare_mqa_query(
+        self, q: tuple[torch.Tensor, torch.Tensor], layer: AttentionLayer
+    ) -> torch.Tensor:
+        # Fuse the FP8 query quant into the early concat, as forward_mqa does,
+        # so it leaves the critical path too.
+        if self.kv_cache_dtype.startswith("fp8") and self.kv_cache_dtype != (
+            "fp8_ds_mla"
+        ):
+            return layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
+                *q, layer._q_scale
+            )
+        return super().prepare_mqa_query(q, layer)
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
