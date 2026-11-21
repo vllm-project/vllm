@@ -484,9 +484,9 @@ def _numerics(
     "heads_per_rank",
     [
         16,  # 128 gathered heads -- a NATIVE cprr kernel, no padding
-        12,  # 96 gathered heads  -- K3's DSpark target, must pad up to 128
+        12,  # 96 gathered heads  -- K3's DSpark target, native or padded to 128
     ],
-    ids=["native-128", "padded-96-to-128"],
+    ids=["native-128", "k3-96"],
 )
 @torch.inference_mode()
 def test_cprr_shards_match_reference_and_merge_to_full_context(
