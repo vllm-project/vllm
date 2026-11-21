@@ -8,6 +8,7 @@
 import contextlib
 import os
 import signal
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -594,12 +595,15 @@ class TestHF3FSRecomputeDoesNotReload:
             Hf3fsMetadataServer,
         )
 
-        url = "http://127.0.0.1:18000"
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
         server = uvicorn.Server(
             uvicorn.Config(
                 Hf3fsMetadataServer().app,
                 host="127.0.0.1",
-                port=18000,
+                port=port,
                 log_level="error",
             )
         )
@@ -758,6 +762,9 @@ class TestHF3FSRecomputeDoesNotReload:
                 hashes
             )
 
+            again, again_async = connector.get_num_new_matched_tokens(request, 0)
+            assert (again, again_async) == (0, False)
+
             if policy == "fail":
                 assert failed_ids == {request.request_id}
                 assert request.num_computed_tokens == 0
@@ -768,10 +775,10 @@ class TestHF3FSRecomputeDoesNotReload:
             assert request.request_id in scheduler.failed_recving_kv_req_ids
             Scheduler._update_waiting_for_remote_kv(scheduler, request)
             assert blocks.freed
+            assert request.num_computed_tokens == 0
             request.status = RequestStatus.WAITING
-            request.num_computed_tokens = 0
-            again, again_async = connector.get_num_new_matched_tokens(request, 0)
-            assert (again, again_async) == (0, False)
+            resumed, resumed_async = connector.get_num_new_matched_tokens(request, 0)
+            assert (resumed, resumed_async) == (0, False)
             assert request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
         finally:
             for manager in managers:
