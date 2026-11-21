@@ -714,7 +714,13 @@ class EncoderCudaGraphManager:
             clone=not all_eager,
             batch_mm_kwargs=batch_mm_kwargs,
         )
-        return [outputs_by_orig_idx[i] for i in range(num_items)]
+        outputs = [outputs_by_orig_idx[i] for i in range(num_items)]
+        if all_eager:
+            # Cache entries must release their storage independently on eviction.
+            cached_outputs = [torch.empty_like(output) for output in outputs]
+            torch._foreach_copy_(cached_outputs, outputs)
+            return cached_outputs
+        return outputs
 
     def _dp_shard(
         self,

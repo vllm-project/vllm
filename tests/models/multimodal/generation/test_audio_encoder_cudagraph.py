@@ -19,6 +19,8 @@ PROMPT = (
 def _check_audio_fallback_outputs(worker):
     import torch
 
+    from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+
     runner = worker.model_runner
     manager = runner.model_state.encoder_runner.cudagraph_manager
     assert manager is not None and manager.is_captured()
@@ -45,8 +47,16 @@ def _check_audio_fallback_outputs(worker):
             expected = model.embed_multimodal(**kwargs)
             assert manager.graph_misses == misses + len(lengths)
             assert len(outputs) == len(expected)
-            assert len({out.untyped_storage().data_ptr() for out in outputs}) == 1
-            retained.extend(zip(outputs, expected))
+            for out, ref in zip(outputs, expected):
+                torch.testing.assert_close(out, ref, rtol=0, atol=0)
+            cache = EncoderCache()
+            cache.encoder_outputs.update({str(i): out for i, out in enumerate(outputs)})
+            del outputs, out
+            for i in range(1, len(lengths)):
+                cache.free_encoder_cache(str(i))
+            out = cache.encoder_outputs["0"]
+            assert out.untyped_storage().nbytes() == out.numel() * out.element_size()
+            retained.append((out, expected[0]))
         for out, ref in retained:
             torch.testing.assert_close(out, ref, rtol=0, atol=0)
 
