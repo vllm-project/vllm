@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
 # Below this many gathered rows the bf16 gather is latency-bound, and AITER's
 # tuned small-M kernels take bf16 input (quantizing in-kernel), so
@@ -174,4 +175,4 @@ class MoEPrepareAndFinalizeTPSequenceParallel(mk.FusedMoEPrepareAndFinalizeModul
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-        output.copy_(get_tp_group().reduce_scatter(out, dim=0))
+        output.copy_(sp_reduce_scatter(out))

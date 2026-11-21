@@ -481,8 +481,39 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
         ca_comm = self.ca_comm
         if ca_comm is None:
-            return None
+            return self._rocm_reduce_scatter(input_.contiguous())
         return ca_comm.custom_reduce_scatter(input_.contiguous())
+
+    def _rocm_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        """Dim-0 reduce-scatter on the ROCm all-reduce backends, else None.
+
+        QuickReduce runs a full all-reduce and keeps the local rows: its
+        quantized wire format moves fewer bytes than a bf16 reduce-scatter
+        (TP2, 8192 x 2560 bf16 on MI355X: 219 us vs 410 us on RCCL), and the
+        sum matches what the TP all-reduce would produce.
+        """
+        if input_.shape[0] % self.world_size != 0:
+            return None
+        chunk = input_.shape[0] // self.world_size
+        qr_comm = self.qr_comm
+        if (
+            qr_comm is not None
+            and not qr_comm.disabled
+            and qr_comm.should_quick_allreduce(input_)
+        ):
+            out = qr_comm.quick_all_reduce(input_)
+            return out[self.rank_in_group * chunk : (self.rank_in_group + 1) * chunk]
+        aiter_comm = self.aiter_ar_comm
+        if (
+            aiter_comm is not None
+            and not aiter_comm.disabled
+            and aiter_comm.should_custom_rs(input_, dim=0)
+        ):
+            out = input_.new_empty((chunk, *input_.shape[1:]))
+            # Writes `out` and returns None.
+            aiter_comm.custom_reduce_scatter(input_, out, dim=0)
+            return out
+        return None
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
