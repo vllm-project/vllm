@@ -2331,6 +2331,16 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
+    def _add_queued_outputs(self, outputs: dict[int, list[EngineCoreOutput]]) -> None:
+        """Add outputs queued outside model execution ahead of this step's."""
+        return
+
+    def _get_stale_output_req_ids(
+        self, scheduler_output: SchedulerOutput
+    ) -> set[str] | None:
+        """Requests whose output in this step must be dropped unread."""
+        return None
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -2365,6 +2375,7 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         # Updates dropped on arrival precede outputs of any later update.
         self._emit_dropped_streaming_updates(outputs)
+        self._add_queued_outputs(outputs)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2394,11 +2405,14 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         # Stopped resumable requests to re-enqueue, in output order.
         continuing_reqs: list[Request] = []
+        stale_req_ids = self._get_stale_output_req_ids(scheduler_output)
         # The worker's output order follows its batch, not num_scheduled_tokens.
         req_indices = {
             req_id: i for i, req_id in enumerate(model_runner_output.req_ids)
         }
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+            if stale_req_ids and req_id in stale_req_ids:
+                continue
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             output_is_stale = False
@@ -2810,8 +2824,7 @@ class Scheduler(SchedulerInterface):
             RequestStatus.WAITING_FOR_STREAMING_REQ,
         )
 
-    @staticmethod
-    def _holds_kv_blocks(request: Request) -> bool:
+    def _holds_kv_blocks(self, request: Request) -> bool:
         # Whether a request currently has kv blocks allocated.
         # While always the case when status is WAITING_FOR_REMOTE_KVS
         # or WAITING_FOR_STREAMING_REQ, there are such cases where it's
